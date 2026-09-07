@@ -1,0 +1,72 @@
+# 实施路径与 Issue 登记草稿
+
+状态：2026-09-07 规划草稿，未创建 Azure work item。以下 INIT/I01 等是本文稳定编号，不是远端 Issue ID。
+
+## 是否可以一个 Issue 完成
+
+本次 INIT（独立仓、Git 配置、协作规则、PRD、来源与实施计划）可以一个 Issue/交付项完成。整个 Access 使用一个 Epic 统筹，不能一个实现 Issue/PR 包含全部产品和 T3：协议、认证持久化、OIDC、跨产品信任及生产装配各有不同失败边界，且 T3 明确要求独立 Issue、独立 PR、独立必要性评估。
+
+建议初始登记一个 Epic、八个一级实施 Issue（I01–I08）、一个二级闭环 Issue（I09）、三个独立 Access T3，以及一个由 MDM 拥有的接入 Issue。共 13 个子项；INIT 另作本次初始化记录。按实际复杂度可再拆，不能按数量目标合并安全边界。
+
+Epic：`[ACCESS-R1/R2] 本地认证、租户 OIDC 与产品会话接入闭环`。
+退出条件：I01–I09 及适用 T3、真实 MDM 接入有行为证据；版本和未支持矩阵明确。范围批准或文档合并不等于 Epic 完成。
+
+## 一级主链
+
+```text
+I01 范围/协议 ADR
+  → I02 工程、发布依赖与事务接缝
+    → I03 本地 authority → I04 会话
+    → I05 租户 OIDC/JIT（会话闭环依赖 I04）
+I04 + I05 → I06 下游交接
+I03 + I04 + I05 + I06 → I07 最小 UI/管理闭环
+I03–I07 → I08 装配与候选 artifact
+I08 → T31 / T32 / T33（分别按必要依赖执行）
+I06 + Access 候选 artifact → M01 MDM 接入与业务授权
+I08 → I09 二级商用认证/恢复闭环
+```
+
+I05 的配置与协议部分可在 I02 后推进，最终验收等待 I04。每项包含自己的 domain、schema、adapter、HTTP 和必要 T1/T2，不按“先写完所有 domain 再写所有 adapter”形成大批未验证中间层。
+
+## 可直接登记的实施项
+
+| ID / 标题 | 依赖与范围 | 验收 / 排除 |
+| --- | --- | --- |
+| INIT：建立独立仓与需求基线 | 本次；参考 MDM 组织文档和 Git 配置 | origin/develop、local exclude、来源、PRD/计划；不声称代码/CI 已存在 |
+| I01：冻结身份、租户与产品会话协议 | ACC-01/08；MDM WMD-A01/02/03 对接；输出 ADR、wire 草案、威胁与失败路径 | 明确 BFF/中央 authority、租户成员、client 信任、cookie 域、撤销窗口、UI owner；登记 MDM 范围对齐，不导入 MDM domain |
+| I02：建立 Rust 工程、CI 和 RSS 版本消费 | I01；独立 workspace/lock、必要 crate、依赖许可证、真实 PG/OIDC 测试入口、RSS 事务接缝验证 | registry-only RSS 精确候选可消费；业务写与 Outbox 同事务最小 T2；没有已发布包则回报对应 RSS 发布 owner；不恢复旧内部包 |
+| I03：本地 authority、账户安全与原子事件 | I02；ACC-02/03/09；初始化、管理账户、密码/禁用/恢复；PG schema 与安全事件 | 并发初始化、账号状态/epoch 竞态、限流、KDF 有界、失败回滚、CommitUnknown 不发凭据；含必要 T1/T2，不含 T3 |
+| I04：服务端会话、刷新与撤销 | I03；ACC-04/09；cookie/CSRF、期限、旋转、当前/全部撤销、会话查询 | 会话固定攻击、并发刷新、重放、存储不可用、密码/禁用导致失效、事件原子性；明确不等于上游 IdP 全局退出 |
+| I05：租户 IdP 与 OIDC/JIT 闭环 | I02；完成依赖 I04；ACC-05/06/07/09 | 配置管理与连接测试；Code/PKCE/state/nonce；配置变化/失效事务；邮箱与 subject linking；真实 IdP T2；无校验降级、无自动邮箱合并 |
+| I06：下游登录交接与验证 client | I04/I05；ACC-01/08；按 I01 冻结协议输出最小公共面 | 单次交接、client/audience/tenant 错配拒绝、认证服务端消费、撤销/缓存/故障；模拟 consumer 是 T2，真实 MDM 验收归 M01 |
+| I07：登录与身份管理交互闭环 | I03/I04/I05/I06；ACC-10 | 最小登录/回调错误/退出/会话列表、账户恢复、IdP 测试与管理页面；UI 和管理 API 权限负向验证；不建全套通用管理门户 |
+| I08：生产装配、迁移、发布与生命周期 | I03–I07；ACC-11 | config/secret/provider、迁移顺序、listener、readiness/drain、镜像与版本、运维手册、候选 artifact；装配验证不夹带 T3 |
+| I09：管理员 assurance 与生产恢复闭环（二级） | I08；ACC-12 | 选定 IdP MFA/step-up、本地应急账户、密钥轮转/备份恢复/容量与冻结 SLO；组件风险 T1/T2，新增产品 join hazard 另立 T3 Issue/PR，不能塞回此实现项 |
+
+I03–I05 必须在各自实现时闭合安全事件，不能最后另加一个“补 Outbox”任务改变已验收的原子性。I02 只证明通用事务接缝，不能替代这些业务负向证明。
+
+## 三个独立 Access T3
+
+| ID / 标题 | 必要性（装配后独有） | 依赖、验收及不重复项 |
+| --- | --- | --- |
+| T31：ACCESS-LIFECYCLE | binary + config + PG + 选定 IdP + messaging + listener 在启停/重启中的 join | I08；真实候选启动、部分启动失败、readiness、drain、重启与迁移版本匹配；不重跑完整 Outbox 故障矩阵 |
+| T32：ACCESS-LOCAL-AUTH | 浏览器/cookie/路由 + 本地 authority + 持久化 + 产品交接 + 事件连通 | I03/04/06/07/08；真实登录→会话→消费→刷新→退出/禁用→拒绝→安全事件；不重复哈希算法或 PG repository conformance |
+| T33：ACCESS-FEDERATED-SSO | tenant route + 外部 IdP + 浏览器事务 + callback + linking + session + downstream | I05/06/07/08；真实租户选择和 SSO、错误浏览器/租户/重放拒绝、产品接入与撤销；不重跑 JWT 算法矩阵 |
+
+每个 T3 登记时须单独保留必要性、固定 artifact、provider/config 矩阵、实际输入输出、故障和排除项。可复用已发布测试设施，不能共享实现 PR 混交付。T31–T33 不自动证明 I09 后新增的 MFA/恢复行为。
+
+## M01：由 rss-mdm 拥有的独立接入项
+
+标题：`[MDM-ACCESS] 对齐 WMD-A01/A02 并消费 Access 身份，保留资源授权 owner`。
+
+依赖 I01/I06 与可部署 Access 候选。在 MDM PRD 明确 AuthN/session 交由 Access，保留 WMD-A03 的业务角色、危险动作、组映射授权与授权失效责任。首期单租户接入不自动批准 MSP。
+
+验收真实 MDM API 对可信身份、错误 tenant/audience、账户禁用/撤销、无权限设备动作的行为；按 MDM 规则判定是否需要独立产品 T3。禁止仅把 Access client DTO 构造成功当作身份验证，不在 MDM 重跑整套 IdP 登录。
+
+本次未修改 MDM PRD：该仓已有并行需求工作；通过 M01 对齐唯一 owner，避免两个仓各自宣称拥有账户 authority。
+
+## 登记约定
+
+每项 body 包含：问题/消费者、关联 ACC 与 WMD ID、范围及不含项、blocked-by、来源 revision/path、T1/T2 或独立 T3 必要性、验收、依赖版本、退出条件。Epic 是 Parent；执行阻塞另建依赖关系，不能只靠子项显示顺序。
+
+Azure work item 创建后把真实 ID/链接回填本文；本次只提供可登记草稿，未向看板创建条目，也未改变状态或标签。建议先登记 Epic、I01/I02 和 M01，冻结协议后登记余下实施项；三个 T3 先登记必要性，执行等待候选 artifact。
