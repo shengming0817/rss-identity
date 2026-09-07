@@ -28,6 +28,6 @@ RSS 仅通过已发布版本化 crate 消费，不使用跨仓 path、submodule 
 
 遵循 [验证规则](docs/rules/verification-scope.md)。当前文档变更检查链接、来源、diff、忽略范围；没有代码和 CI，不执行父仓 `make ci` 代替产品证明。建立实现时同步登记真实 CI 入口。
 
-产品 T3 必须独立 Issue、独立 PR、独立必要性评估，不混入实现 PR。Issue 草稿在 [实施计划](docs/architecture/implementation-plan.md)；本地编号不等于 Azure work item ID。
+产品 T3 必须独立 Issue、独立 PR、独立必要性评估，不混入实现 PR。已登记 Issue 索引在 [实施计划](docs/architecture/implementation-plan.md)；本地编号映射到真实 Azure work item ID，实时状态以看板为准。
 
 文档维护遵循 [文档规则](docs/rules/documentation.md)。

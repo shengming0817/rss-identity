@@ -1,4 +1,4 @@
 # 架构文档
 
-- [实施路径与 Issue 草稿](implementation-plan.md)
+- [实施路径与已登记 Issue](implementation-plan.md)
 - [ADR 目录](adr/README.md)

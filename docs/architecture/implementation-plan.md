@@ -1,12 +1,33 @@
-# 实施路径与 Issue 登记草稿
+# 实施路径与已登记 Issue
 
-状态：2026-09-07 规划草稿，未创建 Azure work item。以下 INIT/I01 等是本文稳定编号，不是远端 Issue ID。
+状态：2026-09-07 已登记 1 个 Epic 和 13 个子项，并回读验证正文、类型、标签、父子关系与 Predecessor 依赖。INIT/I01 等保留为需求映射编号；实施状态以 Azure Boards 为准，本文不复制看板状态。
+
+## Azure 工作项索引
+
+| 本地编号 | 工作项 | Owner 仓库 | 前置工作项 |
+| --- | --- | --- | --- |
+| EPIC | [#2330 [ACCESS-R1/R2] 本地认证、租户 OIDC 与产品会话接入闭环](https://dev.azure.com/shengming0923/rss/_workitems/edit/2330) | rss-access | — |
+| I01 | [#2331 [ACCESS-I01] 冻结身份、租户与产品会话协议](https://dev.azure.com/shengming0923/rss/_workitems/edit/2331) | rss-access | — |
+| I02 | [#2332 [ACCESS-I02] 建立 Rust 工程、CI 和 RSS 版本消费](https://dev.azure.com/shengming0923/rss/_workitems/edit/2332) | rss-access | [#2331](https://dev.azure.com/shengming0923/rss/_workitems/edit/2331) |
+| I03 | [#2333 [ACCESS-I03] 本地 authority、账户安全与原子事件](https://dev.azure.com/shengming0923/rss/_workitems/edit/2333) | rss-access | [#2332](https://dev.azure.com/shengming0923/rss/_workitems/edit/2332) |
+| I04 | [#2334 [ACCESS-I04] 服务端会话、刷新与撤销](https://dev.azure.com/shengming0923/rss/_workitems/edit/2334) | rss-access | [#2333](https://dev.azure.com/shengming0923/rss/_workitems/edit/2333) |
+| I05 | [#2335 [ACCESS-I05] 租户 IdP 与 OIDC/JIT 闭环](https://dev.azure.com/shengming0923/rss/_workitems/edit/2335) | rss-access | [#2332](https://dev.azure.com/shengming0923/rss/_workitems/edit/2332), [#2334](https://dev.azure.com/shengming0923/rss/_workitems/edit/2334) |
+| I06 | [#2336 [ACCESS-I06] 下游登录交接与验证 client](https://dev.azure.com/shengming0923/rss/_workitems/edit/2336) | rss-access | [#2334](https://dev.azure.com/shengming0923/rss/_workitems/edit/2334), [#2335](https://dev.azure.com/shengming0923/rss/_workitems/edit/2335) |
+| I07 | [#2337 [ACCESS-I07] 登录与身份管理交互闭环](https://dev.azure.com/shengming0923/rss/_workitems/edit/2337) | rss-access | [#2333](https://dev.azure.com/shengming0923/rss/_workitems/edit/2333), [#2334](https://dev.azure.com/shengming0923/rss/_workitems/edit/2334), [#2335](https://dev.azure.com/shengming0923/rss/_workitems/edit/2335), [#2336](https://dev.azure.com/shengming0923/rss/_workitems/edit/2336) |
+| I08 | [#2338 [ACCESS-I08] 生产装配、迁移、发布与生命周期](https://dev.azure.com/shengming0923/rss/_workitems/edit/2338) | rss-access | [#2333](https://dev.azure.com/shengming0923/rss/_workitems/edit/2333), [#2334](https://dev.azure.com/shengming0923/rss/_workitems/edit/2334), [#2335](https://dev.azure.com/shengming0923/rss/_workitems/edit/2335), [#2336](https://dev.azure.com/shengming0923/rss/_workitems/edit/2336), [#2337](https://dev.azure.com/shengming0923/rss/_workitems/edit/2337) |
+| I09 | [#2339 [ACCESS-I09] 管理员 assurance 与生产恢复闭环（二级）](https://dev.azure.com/shengming0923/rss/_workitems/edit/2339) | rss-access | [#2338](https://dev.azure.com/shengming0923/rss/_workitems/edit/2338) |
+| T31 | [#2340 [ACCESS-T31] ACCESS-LIFECYCLE](https://dev.azure.com/shengming0923/rss/_workitems/edit/2340) | rss-access | [#2338](https://dev.azure.com/shengming0923/rss/_workitems/edit/2338) |
+| T32 | [#2341 [ACCESS-T32] ACCESS-LOCAL-AUTH](https://dev.azure.com/shengming0923/rss/_workitems/edit/2341) | rss-access | [#2333](https://dev.azure.com/shengming0923/rss/_workitems/edit/2333), [#2334](https://dev.azure.com/shengming0923/rss/_workitems/edit/2334), [#2336](https://dev.azure.com/shengming0923/rss/_workitems/edit/2336), [#2337](https://dev.azure.com/shengming0923/rss/_workitems/edit/2337), [#2338](https://dev.azure.com/shengming0923/rss/_workitems/edit/2338) |
+| T33 | [#2342 [ACCESS-T33] ACCESS-FEDERATED-SSO](https://dev.azure.com/shengming0923/rss/_workitems/edit/2342) | rss-access | [#2335](https://dev.azure.com/shengming0923/rss/_workitems/edit/2335), [#2336](https://dev.azure.com/shengming0923/rss/_workitems/edit/2336), [#2337](https://dev.azure.com/shengming0923/rss/_workitems/edit/2337), [#2338](https://dev.azure.com/shengming0923/rss/_workitems/edit/2338) |
+| M01 | [#2343 [MDM-ACCESS] 对齐 WMD-A01/A02 并消费 Access 身份，保留资源授权 owner](https://dev.azure.com/shengming0923/rss/_workitems/edit/2343) | rss-mdm | [#2331](https://dev.azure.com/shengming0923/rss/_workitems/edit/2331), [#2336](https://dev.azure.com/shengming0923/rss/_workitems/edit/2336), [#2338](https://dev.azure.com/shengming0923/rss/_workitems/edit/2338) |
+
+Azure Boards 工作项属于 rss 项目，通过 `repo-rss-access` / `repo-rss-mdm` 标签与正文标明仓库 owner。13 个子项原生 Parent 均为 Epic #2330；Parent 表达目标归属，Predecessor 表达执行依赖。INIT 已由提交 b082a7e 完成，不重复登记为待办。
 
 ## 是否可以一个 Issue 完成
 
 本次 INIT（独立仓、Git 配置、协作规则、PRD、来源与实施计划）可以一个 Issue/交付项完成。整个 Access 使用一个 Epic 统筹，不能一个实现 Issue/PR 包含全部产品和 T3：协议、认证持久化、OIDC、跨产品信任及生产装配各有不同失败边界，且 T3 明确要求独立 Issue、独立 PR、独立必要性评估。
 
-建议初始登记一个 Epic、八个一级实施 Issue（I01–I08）、一个二级闭环 Issue（I09）、三个独立 Access T3，以及一个由 MDM 拥有的接入 Issue。共 13 个子项；INIT 另作本次初始化记录。按实际复杂度可再拆，不能按数量目标合并安全边界。
+已登记一个 Epic、八个一级实施 Issue（I01–I08）、一个二级闭环 Issue（I09）、三个独立 Access T3，以及一个由 MDM 拥有的接入 Issue。共 13 个子项；INIT 另作本次初始化记录。按实际复杂度可再拆，不能按数量目标合并安全边界。
 
 Epic：`[ACCESS-R1/R2] 本地认证、租户 OIDC 与产品会话接入闭环`。
 退出条件：I01–I09 及适用 T3、真实 MDM 接入有行为证据；版本和未支持矩阵明确。范围批准或文档合并不等于 Epic 完成。
@@ -28,7 +49,7 @@ I08 → I09 二级商用认证/恢复闭环
 
 I05 的配置与协议部分可在 I02 后推进，最终验收等待 I04。每项包含自己的 domain、schema、adapter、HTTP 和必要 T1/T2，不按“先写完所有 domain 再写所有 adapter”形成大批未验证中间层。
 
-## 可直接登记的实施项
+## 实施项范围
 
 | ID / 标题 | 依赖与范围 | 验收 / 排除 |
 | --- | --- | --- |
@@ -69,4 +90,4 @@ I03–I05 必须在各自实现时闭合安全事件，不能最后另加一个�
 
 每项 body 包含：问题/消费者、关联 ACC 与 WMD ID、范围及不含项、blocked-by、来源 revision/path、T1/T2 或独立 T3 必要性、验收、依赖版本、退出条件。Epic 是 Parent；执行阻塞另建依赖关系，不能只靠子项显示顺序。
 
-Azure work item 创建后把真实 ID/链接回填本文；本次只提供可登记草稿，未向看板创建条目，也未改变状态或标签。建议先登记 Epic、I01/I02 和 M01，冻结协议后登记余下实施项；三个 T3 先登记必要性，执行等待候选 artifact。
+全部工作项已登记，正文包含验收与来源，依赖通过原生 Predecessor 表达。I01 是首个无前置实施项；后续按依赖推进。I05 的 I04 依赖约束完整交付，配置准备可先行；二级 I09 与 T3 不因登记而自动宣称就绪或完成。
