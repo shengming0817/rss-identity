@@ -1,5 +1,7 @@
 # 开发与消费指南
 
-- [开发与验证](development.md)：I02 工程、固定 Git 消费及真实 provider 接缝。
+- [开发与验证](development.md)：工程、固定 Git 消费、单命令维护与真实 provider 接缝。
+
+- [本机维护 runbook](local-maintenance.md)：开发库安装、身份配置与不确定提交的只读核实。
 
 完整产品启动与 I06 consumer 指南由后续工作项提供。

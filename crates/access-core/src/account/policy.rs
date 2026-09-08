@@ -46,8 +46,6 @@ pub enum AccountRuleError {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityAction {
-    InitializationAuthorized,
-    RecoveryAuthorized,
     Initialized,
     AccountCreated,
     AccountEnabled,
@@ -62,8 +60,6 @@ pub enum SecurityAction {
 impl SecurityAction {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::InitializationAuthorized => "initialization_authorized",
-            Self::RecoveryAuthorized => "recovery_authorized",
             Self::Initialized => "initialized",
             Self::AccountCreated => "account_created",
             Self::AccountEnabled => "account_enabled",
@@ -221,7 +217,7 @@ impl AccountState {
         }
         Ok((next, action))
     }
-    /// Authorization must be independently verified by the application before persisting this result.
+    /// The adapter must verify maintenance authority before persisting this result.
     pub fn recover(self) -> Result<(Self, SecurityAction), AccountRuleError> {
         if !self.administrator {
             return Err(AccountRuleError::Rejected);

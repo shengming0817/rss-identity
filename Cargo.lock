@@ -55,9 +55,7 @@ version = "0.1.0"
 dependencies = [
  "access-core",
  "anyhow",
- "constant_time_eq",
  "futures",
- "rand_core 0.6.4",
  "rss-contract",
  "rss-request-context",
  "rss-transactional-messaging",
@@ -69,7 +67,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "uuid",
- "zeroize",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 //! Tenant-local account authority. SQL and event envelopes are private implementation details.
 mod attempts;
-mod authorizations;
+mod maintenance;
 mod operations;
 mod storage;
 mod transaction;
@@ -39,14 +39,29 @@ impl Authority {
         };
         let label = match profile {
             AuthorityProfile::Runtime => "runtime",
-            AuthorityProfile::Issuer => "issuer",
+            AuthorityProfile::Maintenance => "maintenance",
         };
         let valid = authority
             .read(tenant, deadline, move |tx| {
                 Box::pin(async move {
                     tx.with_connection(move |c| {
                         Box::pin(async move {
-                            sqlx::query_scalar::<_, Option<bool>>(include_str!("probe.sql"))
+                            // The version table must be resolvable before PostgreSQL can plan
+                            // the contract query. Missing objects elsewhere use nullable OIDs.
+                            let inventory: String = sqlx::query_scalar(
+                                "SELECT CASE WHEN a.attnum IS NULL THEN 'schema-contract'
+                                 WHEN has_schema_privilege(current_user,n.oid,'USAGE') IS NOT TRUE
+                                   OR has_table_privilege(current_user,t.oid,'SELECT') IS NOT TRUE THEN 'privileges'
+                                 ELSE 'ok' END
+                                 FROM (VALUES (1)) AS required(dummy)
+                                 LEFT JOIN pg_namespace n ON n.nspname='access_authority'
+                                 LEFT JOIN pg_class t ON t.relnamespace=n.oid AND t.relname='schema_version' AND t.relkind='r'
+                                 LEFT JOIN pg_attribute a ON a.attrelid=t.oid AND a.attname='version' AND a.atttypid='int4'::regtype AND a.attnum>0 AND NOT a.attisdropped",
+                            ).fetch_one(&mut *c).await?;
+                            if inventory != "ok" {
+                                return Ok(Some(inventory));
+                            }
+                            sqlx::query_scalar::<_, Option<String>>(include_str!("probe.sql"))
                                 .bind(label)
                                 .fetch_one(c)
                                 .await
@@ -60,6 +75,13 @@ impl Authority {
         Ok(authority)
     }
 
+    fn require_maintenance(&self) -> Result<(), AuthorityError> {
+        if self.profile != AuthorityProfile::Maintenance {
+            return Err(AuthorityError::Rejected);
+        }
+        Ok(())
+    }
+
     fn require_runtime(&self) -> Result<(), AuthorityError> {
         if self.profile != AuthorityProfile::Runtime {
             return Err(AuthorityError::Rejected);
@@ -68,12 +90,15 @@ impl Authority {
     }
 }
 
-fn check_probe(result: Result<Option<bool>, AuthorityError>) -> Result<(), AuthorityError> {
-    match result {
-        Ok(Some(true)) => Ok(()),
-        Ok(_) => Err(AuthorityError::StorageIncompatible),
-        Err(error) => Err(error),
-    }
+fn check_probe(result: Result<Option<String>, AuthorityError>) -> Result<(), AuthorityError> {
+    let reason = match result?.as_deref() {
+        Some("ok") => return Ok(()),
+        Some("schema-version") => StorageMismatch::SchemaVersion,
+        Some("role") => StorageMismatch::Role,
+        Some("privileges") => StorageMismatch::Privileges,
+        _ => StorageMismatch::SchemaContract,
+    };
+    Err(AuthorityError::StorageIncompatible(reason))
 }
 #[cfg(test)]
 mod tests {
@@ -99,14 +124,26 @@ mod tests {
             check_probe(Err(AuthorityError::Fenced)),
             Err(AuthorityError::Fenced)
         );
-        assert_eq!(
-            check_probe(Ok(Some(false))),
-            Err(AuthorityError::StorageIncompatible)
-        );
+        for (code, reason) in [
+            ("schema-version", StorageMismatch::SchemaVersion),
+            ("role", StorageMismatch::Role),
+            ("privileges", StorageMismatch::Privileges),
+            ("schema-contract", StorageMismatch::SchemaContract),
+            (
+                "private unexpected provider value",
+                StorageMismatch::SchemaContract,
+            ),
+        ] {
+            let error = check_probe(Ok(Some(code.into()))).unwrap_err();
+            assert_eq!(error, AuthorityError::StorageIncompatible(reason));
+            assert!(!error.to_string().contains("private unexpected"));
+        }
         assert_eq!(
             check_probe(Ok(None)),
-            Err(AuthorityError::StorageIncompatible)
+            Err(AuthorityError::StorageIncompatible(
+                StorageMismatch::SchemaContract
+            ))
         );
-        assert_eq!(check_probe(Ok(Some(true))), Ok(()));
+        assert_eq!(check_probe(Ok(Some("ok".into()))), Ok(()));
     }
 }

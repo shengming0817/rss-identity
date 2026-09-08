@@ -26,6 +26,21 @@ pub(crate) struct Stored {
 pub(crate) async fn load(c: &mut PgConnection, key: AccountKey) -> Result<Stored, PgError> {
     let r=sqlx::query("SELECT a.enabled,a.administrator,a.emergency,a.auth_epoch,a.credential_version,a.password_hash,m.active,m.epoch FROM access_authority.accounts a JOIN access_authority.memberships m USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid FOR UPDATE OF a,m")
         .bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).fetch_optional(c).await?.ok_or_else(reject)?;
+    decode(key, &r)
+}
+
+/// Caller must hold the tenant guard. All business writers serialize on that guard;
+/// maintenance does not need UPDATE privileges on membership rows merely to read them.
+pub(crate) async fn load_for_maintenance(
+    c: &mut PgConnection,
+    key: AccountKey,
+) -> Result<Stored, PgError> {
+    let row = sqlx::query("SELECT a.enabled,a.administrator,a.emergency,a.auth_epoch,a.credential_version,a.password_hash,m.active,m.epoch FROM access_authority.accounts a JOIN access_authority.memberships m USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid")
+        .bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).fetch_optional(c).await?.ok_or_else(reject)?;
+    decode(key, &row)
+}
+
+fn decode(key: AccountKey, r: &sqlx::postgres::PgRow) -> Result<Stored, PgError> {
     Ok(Stored {
         state: AccountState::restore(
             key,

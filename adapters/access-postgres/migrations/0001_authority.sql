@@ -1,19 +1,18 @@
 -- Access owns this migration identity; RSS message schema is installed separately.
 CREATE SCHEMA access_authority;
-CREATE TABLE access_authority.schema_version(version integer PRIMARY KEY CHECK(version=1));
-INSERT INTO access_authority.schema_version VALUES(1);
+CREATE TABLE access_authority.schema_version(version integer PRIMARY KEY CHECK(version=2));
+INSERT INTO access_authority.schema_version VALUES(2);
 CREATE ROLE access_account_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
-CREATE ROLE access_authorization_issuer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+CREATE ROLE access_account_maintenance NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE TABLE access_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL DEFAULT gen_random_uuid(),
- bootstrap_tenant uuid,
- initialized boolean NOT NULL DEFAULT false
+ bootstrap_tenant uuid
 );
 INSERT INTO access_authority.deployment DEFAULT VALUES;
 CREATE FUNCTION access_authority.protect_deployment() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
- IF NEW.authority_id <> OLD.authority_id OR (OLD.initialized AND NOT NEW.initialized)
+ IF NEW.authority_id <> OLD.authority_id
  OR (OLD.bootstrap_tenant IS NOT NULL AND NEW.bootstrap_tenant IS DISTINCT FROM OLD.bootstrap_tenant) THEN
  RAISE EXCEPTION 'immutable authority state'; END IF;
  RETURN NEW;
@@ -38,15 +37,6 @@ CREATE TABLE access_authority.memberships (
  PRIMARY KEY(tenant_id,principal_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES access_authority.accounts
 );
-CREATE TABLE access_authority.authorizations (
- tenant_id uuid NOT NULL, principal_id uuid NOT NULL,
- purpose text NOT NULL CHECK(purpose IN ('initialize','recover')),
- authorization_id uuid NOT NULL UNIQUE,
- digest bytea NOT NULL CHECK(octet_length(digest)=32),
- account_epoch bigint NOT NULL CHECK(account_epoch>=0),
- expires_at timestamptz NOT NULL, consumed boolean NOT NULL DEFAULT false,
- PRIMARY KEY(tenant_id,principal_id,purpose)
-);
 CREATE TABLE access_authority.attempts (
  tenant_id uuid NOT NULL, key text NOT NULL CHECK(octet_length(key) BETWEEN 1 AND 300),
  count integer NOT NULL CHECK(count>0), expires_at timestamptz NOT NULL,
@@ -54,7 +44,7 @@ CREATE TABLE access_authority.attempts (
 );
 CREATE INDEX attempts_expiry ON access_authority.attempts(tenant_id,expires_at);
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['guard','accounts','memberships','authorizations','attempts'] LOOP
+ FOREACH t IN ARRAY ARRAY['guard','accounts','memberships','attempts'] LOOP
  EXECUTE format('ALTER TABLE access_authority.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE access_authority.%I FORCE ROW LEVEL SECURITY',t);
  EXECUTE format('CREATE POLICY tenant ON access_authority.%I USING (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',t);
@@ -63,13 +53,11 @@ END $$;
 REVOKE ALL ON SCHEMA access_authority FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA access_authority FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA access_authority FROM PUBLIC;
-GRANT USAGE ON SCHEMA access_authority TO access_account_runtime,access_authorization_issuer;
-GRANT SELECT ON access_authority.schema_version,access_authority.deployment TO access_account_runtime,access_authorization_issuer;
-GRANT UPDATE(initialized) ON access_authority.deployment TO access_account_runtime;
-GRANT UPDATE(bootstrap_tenant) ON access_authority.deployment TO access_authorization_issuer;
-GRANT SELECT,INSERT,UPDATE ON access_authority.guard TO access_account_runtime,access_authorization_issuer;
+GRANT USAGE ON SCHEMA access_authority TO access_account_runtime,access_account_maintenance;
+GRANT SELECT ON access_authority.schema_version,access_authority.deployment TO access_account_runtime,access_account_maintenance;
+GRANT UPDATE(bootstrap_tenant) ON access_authority.deployment TO access_account_maintenance;
+GRANT SELECT,INSERT,UPDATE ON access_authority.guard TO access_account_runtime,access_account_maintenance;
 GRANT SELECT,INSERT,UPDATE ON access_authority.accounts,access_authority.memberships TO access_account_runtime;
-GRANT SELECT(tenant_id,principal_id,administrator,auth_epoch) ON access_authority.accounts TO access_authorization_issuer;
+GRANT SELECT,INSERT ON access_authority.accounts,access_authority.memberships TO access_account_maintenance;
+GRANT UPDATE(password_hash,auth_epoch,credential_version) ON access_authority.accounts TO access_account_maintenance;
 GRANT SELECT,INSERT,UPDATE,DELETE ON access_authority.attempts TO access_account_runtime;
-GRANT SELECT,UPDATE(consumed) ON access_authority.authorizations TO access_account_runtime;
-GRANT SELECT,INSERT,UPDATE,DELETE ON access_authority.authorizations TO access_authorization_issuer;

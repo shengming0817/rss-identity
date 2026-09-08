@@ -15,28 +15,26 @@ use support::*;
 #[ignore = "requires make test-pg"]
 async fn initialization_and_recovery() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
-    assert!(
+    assert_eq!(
         f.store
-            .issue_authorization(f.key, AuthorizationPurpose::Initialize, deadline())
+            .initialize(f.key, login("admin"), password(), deadline())
             .await
-            .is_err()
+            .unwrap_err(),
+        AuthorityError::Rejected
     );
-    let first = f
-        .issuer
-        .issue_authorization(f.key, AuthorizationPurpose::Initialize, deadline())
-        .await?;
-    assert_event(&f, "initialization_authorized", f.key, None, 0, None).await?;
-    let grant = f
-        .issuer
-        .issue_authorization(f.key, AuthorizationPurpose::Initialize, deadline())
-        .await?;
-    assert!(
+    assert_eq!(
         f.store
-            .initialize(
-                f.key,
+            .recover_administrator(f.key, password(), deadline())
+            .await
+            .unwrap_err(),
+        AuthorityError::Rejected
+    );
+    assert!(
+        f.maintenance
+            .verify_password(
+                f.key.tenant,
                 login("admin"),
                 password(),
-                first.into_secret(),
                 source(),
                 deadline()
             )
@@ -45,36 +43,87 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     );
     let mut jobs = Vec::new();
     for _ in 0..4 {
-        let s = f.store.clone();
+        let maintenance = f.maintenance.clone();
         let key = f.key;
-        let secret = token(grant.secret());
         jobs.push(tokio::spawn(async move {
-            s.initialize(
-                key,
-                login("admin"),
-                password(),
-                secret,
-                source(),
-                deadline(),
-            )
-            .await
+            maintenance
+                .initialize(key, login("admin"), password(), deadline())
+                .await
         }));
     }
     let mut successes = 0;
-    for j in jobs {
-        if j.await?.is_ok() {
-            successes += 1;
-        }
+    for job in jobs {
+        successes += usize::from(job.await?.is_ok());
     }
     assert_eq!(successes, 1);
-    assert_eq!(f.events().await?, 3); // two issuance events + one initialization
+    assert_eq!(f.events().await?, 1);
+    assert_event(
+        &f,
+        "initialized",
+        f.key,
+        None,
+        1,
+        Some(AccountState::new_local(f.key, true, false)?),
+    )
+    .await?;
+    let bootstrap: String =
+        sqlx::query_scalar("SELECT bootstrap_tenant::text FROM access_authority.deployment")
+            .fetch_one(&f.owner)
+            .await?;
+    assert_eq!(bootstrap, A);
+    for reset in [
+        "UPDATE access_authority.deployment SET bootstrap_tenant=NULL",
+        "UPDATE access_authority.deployment SET bootstrap_tenant='22222222-2222-4222-8222-222222222222'",
+        "UPDATE access_authority.deployment SET authority_id=gen_random_uuid()",
+    ] {
+        assert!(sqlx::raw_sql(reset).execute(&f.owner).await.is_err());
+    }
+    let foreign = AccountKey {
+        tenant: TenantId::parse(B)?,
+        principal: f.key.principal,
+    };
     assert!(
-        f.issuer
-            .issue_authorization(f.key, AuthorizationPurpose::Initialize, deadline())
+        f.maintenance
+            .initialize(foreign, login("admin"), password(), deadline())
             .await
             .is_err()
     );
-    f.reset_attempts().await?;
+    assert_eq!(
+        f.maintenance
+            .recover_administrator(foreign, password(), deadline())
+            .await
+            .unwrap_err(),
+        AuthorityError::Rejected
+    );
+    let absent = AccountKey {
+        tenant: f.key.tenant,
+        principal: PrincipalId::generate(),
+    };
+    assert_eq!(
+        f.maintenance
+            .recover_administrator(absent, password(), deadline())
+            .await
+            .unwrap_err(),
+        AuthorityError::Rejected
+    );
+    let member = f
+        .store
+        .create_account(
+            f.actor().await?,
+            login("member"),
+            password(),
+            false,
+            false,
+            deadline(),
+        )
+        .await?;
+    assert_eq!(
+        f.maintenance
+            .recover_administrator(member.key(), password(), deadline())
+            .await
+            .unwrap_err(),
+        AuthorityError::Rejected
+    );
     let emergency = f
         .store
         .create_account(
@@ -86,17 +135,7 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
             deadline(),
         )
         .await?;
-    assert_event(
-        &f,
-        "account_created",
-        emergency.key(),
-        Some(f.key),
-        1,
-        Some(emergency),
-    )
-    .await?;
-    let disabled = f
-        .store
+    f.store
         .change_account(
             f.actor().await?,
             emergency.key(),
@@ -104,49 +143,32 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
             deadline(),
         )
         .await?;
-    assert_event(
-        &f,
-        "account_disabled",
-        emergency.key(),
-        Some(f.key),
-        2,
-        Some(disabled),
-    )
-    .await?;
-    let g = f
-        .issuer
-        .issue_authorization(emergency.key(), AuthorizationPurpose::Recover, deadline())
-        .await?;
-    assert_event(&f, "recovery_authorized", emergency.key(), None, 2, None).await?;
-    let stale = token(g.secret());
-    let recovered = f
+    let inactive = f
         .store
-        .recover_administrator(
+        .change_account(
+            f.actor().await?,
             emergency.key(),
-            password(),
-            g.into_secret(),
-            source(),
+            AccountChange::Membership(false),
             deadline(),
         )
         .await?;
+    let recovered = f
+        .maintenance
+        .recover_administrator(emergency.key(), password(), deadline())
+        .await?;
+    assert_eq!(recovered, inactive.recover()?.0);
+    assert!(!recovered.enabled());
+    assert!(!recovered.member_active());
+    assert!(recovered.administrator() && recovered.emergency());
     assert_event(
         &f,
         "administrator_recovered",
         emergency.key(),
         None,
-        3,
+        recovered.epoch(),
         Some(recovered),
     )
     .await?;
-    assert!(!recovered.enabled());
-    assert!(recovered.administrator());
-    assert_eq!(recovered.epoch(), 3);
-    assert!(
-        f.store
-            .recover_administrator(emergency.key(), password(), stale, source(), deadline())
-            .await
-            .is_err()
-    );
     assert!(
         f.store
             .verify_password(
@@ -159,24 +181,60 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
             .await
             .is_err()
     );
-    let g = f
-        .issuer
-        .issue_authorization(f.key, AuthorizationPurpose::Recover, deadline())
-        .await?;
-    let changed = f
-        .store
-        .change_account(
-            f.actor().await?,
+    f.reset_attempts().await?;
+    let old = f.actor().await?;
+    let first_password = "first maintenance password";
+    let second_password = "second maintenance password";
+    let (first, second) = tokio::join!(
+        f.maintenance.recover_administrator(
             f.key,
-            AccountChange::Password(password()),
-            deadline(),
+            Password::new(first_password.into())?,
+            deadline()
+        ),
+        f.maintenance.recover_administrator(
+            f.key,
+            Password::new(second_password.into())?,
+            deadline()
         )
-        .await?;
-    assert_event(&f, "password_changed", f.key, Some(f.key), 2, Some(changed)).await?;
-    assert_eq!(changed.epoch(), 2);
+    );
+    let first = first?;
+    let second = second?;
+    assert_eq!(first.epoch().min(second.epoch()), 2);
+    assert_eq!(first.epoch().max(second.epoch()), 3);
+    let (winning, losing, state) = if first.epoch() > second.epoch() {
+        (first_password, second_password, first)
+    } else {
+        (second_password, first_password, second)
+    };
+    assert_event(&f, "administrator_recovered", f.key, None, 3, Some(state)).await?;
+    assert_eq!(
+        f.store
+            .change_account(old, f.key, AccountChange::Password(password()), deadline())
+            .await
+            .unwrap_err(),
+        AuthorityError::Rejected
+    );
     assert!(
         f.store
-            .recover_administrator(f.key, password(), g.into_secret(), source(), deadline())
+            .verify_password(
+                f.key.tenant,
+                login("admin"),
+                Password::new(winning.into())?,
+                source(),
+                deadline()
+            )
+            .await
+            .is_ok()
+    );
+    assert!(
+        f.store
+            .verify_password(
+                f.key.tenant,
+                login("admin"),
+                Password::new(losing.into())?,
+                source(),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -233,23 +291,12 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
             )
             .await?;
         let actor = f.actor().await?;
-        let issued = if *mode == "recovery" {
-            Some(
-                f.issuer
-                    .issue_authorization(victim.key(), AuthorizationPurpose::Recover, deadline())
-                    .await?,
-            )
-        } else {
-            None
-        };
         let change = async {
-            if let Some(g) = issued {
-                f.store
+            if *mode == "recovery" {
+                f.maintenance
                     .recover_administrator(
                         victim.key(),
                         Password::new("a newly recovered password".into())?,
-                        g.into_secret(),
-                        source(),
                         deadline(),
                     )
                     .await
@@ -370,6 +417,12 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
     assert_eq!(before, 1);
     let result=f.runtime.local_tx(f.key.tenant,deadline(),|tx|Box::pin(async move {tx.with_connection(|c|Box::pin(async move {sqlx::query("UPDATE access_authority.accounts SET auth_epoch=99 WHERE tenant_id='22222222-2222-4222-8222-222222222222'").execute(c).await.map(|r|r.rows_affected())})).await})).await.fold(Ok,Err,Err,Err,Err,Err)?;
     assert_eq!(result, 0);
+    f.maintenance
+        .recover_administrator(f.key, password(), deadline())
+        .await?;
+    let other_epoch: i64 = sqlx::query_scalar("SELECT auth_epoch FROM access_authority.accounts WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
+        .bind(B).bind(f.key.principal.as_uuid().to_string()).fetch_one(&f.owner).await?;
+    assert_eq!(other_epoch, 1);
     f.close().await;
     Ok(())
 }
@@ -433,14 +486,6 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
 #[ignore = "requires make test-pg"]
 async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
-    f.issuer_runtime
-        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
-    assert!(matches!(
-        f.issuer
-            .issue_authorization(f.key, AuthorizationPurpose::Initialize, deadline())
-            .await,
-        Err(AuthorityError::CommitUnknown(_))
-    ));
     f.bootstrap().await?;
     let before = f.events().await?;
     let actor = f.actor().await?;
@@ -556,20 +601,9 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
         tenant: TenantId::parse(B)?,
         principal: PrincipalId::generate(),
     };
-    let g = f
-        .issuer
-        .issue_authorization(f.key, AuthorizationPurpose::Recover, deadline())
-        .await?;
     assert!(
-        f.store
-            .recover_administrator(foreign, password(), token(g.secret()), source(), deadline())
-            .await
-            .is_err()
-    );
-    sqlx::query("UPDATE access_authority.authorizations SET expires_at=clock_timestamp()-interval '1 second'").execute(&f.owner).await?;
-    assert!(
-        f.store
-            .recover_administrator(f.key, password(), g.into_secret(), source(), deadline())
+        f.maintenance
+            .recover_administrator(foreign, password(), deadline())
             .await
             .is_err()
     );
@@ -582,39 +616,45 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
 async fn storage_contract_is_checked() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     assert!(matches!(
-        f.probe(AuthorityProfile::Issuer).await,
-        Err(AuthorityError::StorageIncompatible)
+        f.probe(AuthorityProfile::Maintenance).await,
+        Err(AuthorityError::StorageIncompatible(StorageMismatch::Role))
     ));
-    for (break_sql, repair_sql) in [
+    for (break_sql, repair_sql, expected) in [
         (
             "GRANT TRUNCATE ON access_authority.accounts TO access_runtime",
             "REVOKE TRUNCATE ON access_authority.accounts FROM access_runtime",
+            StorageMismatch::Privileges,
         ),
         (
             "ALTER TABLE access_authority.accounts DISABLE ROW LEVEL SECURITY",
             "ALTER TABLE access_authority.accounts ENABLE ROW LEVEL SECURITY",
+            StorageMismatch::SchemaContract,
         ),
         (
             "ALTER POLICY tenant ON access_authority.accounts USING(true)",
             "ALTER POLICY tenant ON access_authority.accounts USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid)",
+            StorageMismatch::SchemaContract,
         ),
         (
-            "GRANT INSERT ON access_authority.authorizations TO access_runtime",
-            "REVOKE INSERT ON access_authority.authorizations FROM access_runtime",
+            "GRANT UPDATE(bootstrap_tenant) ON access_authority.deployment TO access_runtime",
+            "REVOKE UPDATE(bootstrap_tenant) ON access_authority.deployment FROM access_runtime",
+            StorageMismatch::Privileges,
         ),
         (
-            "GRANT access_authorization_issuer TO access_runtime",
-            "REVOKE access_authorization_issuer FROM access_runtime",
+            "GRANT access_account_maintenance TO access_runtime",
+            "REVOKE access_account_maintenance FROM access_runtime",
+            StorageMismatch::Role,
         ),
         (
             "ALTER TABLE access_authority.accounts DROP CONSTRAINT accounts_tenant_id_login_key_key",
             "ALTER TABLE access_authority.accounts ADD UNIQUE(tenant_id,login_key)",
+            StorageMismatch::SchemaContract,
         ),
     ] {
         sqlx::raw_sql(break_sql).execute(&f.owner).await?;
         assert!(matches!(
             f.probe(AuthorityProfile::Runtime).await,
-            Err(AuthorityError::StorageIncompatible)
+            Err(AuthorityError::StorageIncompatible(reason)) if reason == expected
         ));
         sqlx::raw_sql(repair_sql).execute(&f.owner).await?;
         assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
@@ -626,9 +666,9 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             f.runtime.clone(),
         ),
         (
-            AuthorityProfile::Issuer,
-            "access_issuer",
-            f.issuer_runtime.clone(),
+            AuthorityProfile::Maintenance,
+            "access_maintenance",
+            f.maintenance_runtime.clone(),
         ),
     ] {
         for (table, privilege) in [
@@ -636,20 +676,20 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             ("memberships", "REFERENCES"),
             ("guard", "TRIGGER"),
             ("attempts", "TRUNCATE"),
-            ("authorizations", "REFERENCES"),
             ("deployment", "TRIGGER"),
             ("schema_version", "UPDATE"),
         ]
         .into_iter()
-        .chain(if profile == AuthorityProfile::Issuer {
+        .chain(if profile == AuthorityProfile::Maintenance {
             vec![
                 ("accounts", "UPDATE(administrator)"),
-                ("accounts", "INSERT(tenant_id)"),
-                ("memberships", "SELECT(tenant_id)"),
+                ("accounts", "UPDATE(enabled)"),
+                ("memberships", "UPDATE(active)"),
+                ("attempts", "SELECT"),
             ]
         } else {
             vec![
-                ("authorizations", "UPDATE(account_epoch)"),
+                ("deployment", "UPDATE(bootstrap_tenant)"),
                 ("deployment", "UPDATE(authority_id)"),
             ]
         }) {
@@ -672,7 +712,7 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             )
             .await;
             assert!(
-                matches!(result, Err(AuthorityError::StorageIncompatible)),
+                matches!(result, Err(AuthorityError::StorageIncompatible(_))),
                 "accepted {profile:?} {table} {privilege}"
             );
             sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
@@ -726,7 +766,7 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
-async fn source_and_authorization_budgets() -> anyhow::Result<()> {
+async fn source_budgets_are_shared() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     f.reset_attempts().await?;
@@ -776,65 +816,6 @@ async fn source_and_authorization_budgets() -> anyhow::Result<()> {
             .fetch_one(&f.owner)
             .await?;
     assert_eq!(count, 30);
-    for purpose in [
-        AuthorizationPurpose::Initialize,
-        AuthorizationPurpose::Recover,
-    ] {
-        f.reset_attempts().await?;
-        for i in 0..6 {
-            let store = if i % 2 == 0 { &f.store } else { &other };
-            let secret = AuthorizationSecret::parse("0".repeat(64))?;
-            let result = if purpose == AuthorizationPurpose::Initialize {
-                store
-                    .initialize(
-                        f.key,
-                        login("admin"),
-                        password(),
-                        secret,
-                        source(),
-                        deadline(),
-                    )
-                    .await
-            } else {
-                store
-                    .recover_administrator(f.key, password(), secret, source(), deadline())
-                    .await
-            };
-            assert_eq!(
-                result.unwrap_err(),
-                if i < 5 {
-                    AuthorityError::Rejected
-                } else {
-                    AuthorityError::RateLimited
-                }
-            );
-        }
-    }
-    // Invalid authorization targets still share the trusted source budget.
-    f.reset_attempts().await?;
-    for i in 0..31 {
-        let key = AccountKey {
-            tenant: f.key.tenant,
-            principal: PrincipalId::generate(),
-        };
-        let result = other
-            .recover_administrator(
-                key,
-                password(),
-                AuthorizationSecret::parse("0".repeat(64))?,
-                source(),
-                deadline(),
-            )
-            .await;
-        assert_eq!(
-            result.unwrap_err(),
-            if i < 30 {
-                AuthorityError::Rejected
-            } else {
-                AuthorityError::RateLimited
-            }
-        );
-    }
     other_runtime.close().await;
     f.close().await;
     Ok(())
@@ -911,13 +892,24 @@ async fn assert_event(
     epoch: i64,
     state: Option<AccountState>,
 ) -> anyhow::Result<()> {
-    use sha2::{Digest, Sha256};
     let raw: String = sqlx::query_scalar(
         "SELECT envelope::text FROM rss_transactional_messaging.outbox ORDER BY seq DESC LIMIT 1",
     )
     .fetch_one(&f.owner)
     .await?;
-    let envelope: serde_json::Value = serde_json::from_str(&raw)?;
+    assert_envelope(&raw, action, key, actor, epoch, state)
+}
+
+fn assert_envelope(
+    raw: &str,
+    action: &str,
+    key: AccountKey,
+    actor: Option<AccountKey>,
+    epoch: i64,
+    state: Option<AccountState>,
+) -> anyhow::Result<()> {
+    use sha2::{Digest, Sha256};
+    let envelope: serde_json::Value = serde_json::from_str(raw)?;
     let bytes: Vec<u8> = serde_json::from_value(envelope["payload"].clone())?;
     let payload: serde_json::Value = serde_json::from_slice(&bytes)?;
     let expected_state = state.map(|s| serde_json::json!({"enabled":s.enabled(),"administrator":s.administrator(),"emergency":s.emergency(),"member_active":s.member_active(),"credential_version":s.credential_version(),"membership_epoch":s.membership_epoch()}));
@@ -1147,6 +1139,493 @@ async fn account_transition_matrix_and_events() -> anyhow::Result<()> {
         Some(enabled),
     )
     .await?;
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn maintenance_races_preserve_current_state() -> anyhow::Result<()> {
+    // ref: postgres REL_17_STABLE src/test/isolation/README: explicit permutations
+    // and observed pg_locks waits, never executor timing or sleeps for ordering.
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    for maintenance_first in [false, true] {
+        for (i, change) in [
+            AccountChange::Enabled(false),
+            AccountChange::Membership(false),
+            AccountChange::Administrator(false),
+            AccountChange::Password(Password::new("daily replacement password".into())?),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            f.reset_attempts().await?;
+            let name = format!("race-{maintenance_first}-{i}");
+            let target = f
+                .store
+                .create_account(
+                    f.actor().await?,
+                    login(&name),
+                    password(),
+                    true,
+                    true,
+                    deadline(),
+                )
+                .await?;
+            let actor = f.actor().await?;
+            let before_seq: i64 =
+                sqlx::query_scalar("SELECT max(seq) FROM rss_transactional_messaging.outbox")
+                    .fetch_one(&f.owner)
+                    .await?;
+            let first_role = if maintenance_first {
+                "access_maintenance"
+            } else {
+                "access_runtime"
+            };
+            let second_role = if maintenance_first {
+                "access_runtime"
+            } else {
+                "access_maintenance"
+            };
+            // Pause the first writer after it reads state, inside its account UPDATE.
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "CREATE FUNCTION public.pause_first_writer() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+                 IF current_user='{first_role}' THEN PERFORM pg_advisory_xact_lock(2358,1); END IF;
+                 RETURN NEW; END $$;
+                 CREATE TRIGGER pause_first_writer BEFORE UPDATE ON access_authority.accounts
+                 FOR EACH ROW EXECUTE FUNCTION public.pause_first_writer();"
+            ))).execute(&f.owner).await?;
+            let mut controller = f.owner.acquire().await?;
+            sqlx::query("SELECT pg_advisory_lock(2358,1)")
+                .execute(&mut *controller)
+                .await?;
+            let store = f.store.clone();
+            let maintenance = f.maintenance.clone();
+            let key = target.key();
+            let runtime_write =
+                async move { store.change_account(actor, key, change, deadline()).await };
+            let maintenance_write = async move {
+                maintenance
+                    .recover_administrator(
+                        key,
+                        Password::new("maintenance replacement password".into()).unwrap(),
+                        deadline(),
+                    )
+                    .await
+            };
+            let (first, second_work): (
+                _,
+                futures::future::BoxFuture<'static, Result<AccountState, AuthorityError>>,
+            ) = if maintenance_first {
+                (tokio::spawn(maintenance_write), Box::pin(runtime_write))
+            } else {
+                (tokio::spawn(runtime_write), Box::pin(maintenance_write))
+            };
+            let first_wait = wait_for_writer_lock(&f.owner, first_role, None).await;
+            let second = first_wait.as_ref().ok().map(|_| tokio::spawn(second_work));
+            let overlap = match first_wait {
+                Ok(first_pid) => wait_for_writer_lock(&f.owner, second_role, Some(first_pid))
+                    .await
+                    .map(|_| ()),
+                Err(error) => Err(error),
+            };
+            // Release and join even when a mutant fails the synchronization assertion.
+            sqlx::query("SELECT pg_advisory_unlock(2358,1)")
+                .execute(&mut *controller)
+                .await?;
+            let first_result = first.await?;
+            let second_result = match second {
+                Some(job) => Some(job.await?),
+                None => None,
+            };
+            drop(controller);
+            sqlx::raw_sql("DROP TRIGGER pause_first_writer ON access_authority.accounts; DROP FUNCTION public.pause_first_writer();").execute(&f.owner).await?;
+            overlap?;
+            let second_result = second_result.expect("overlap requires the second writer");
+            let (changed, recovered) = if maintenance_first {
+                (second_result, first_result)
+            } else {
+                (first_result, second_result)
+            };
+            let changed = changed?;
+            let recovery_succeeds = i != 2 || maintenance_first;
+            if recovery_succeeds {
+                assert!(recovered.is_ok());
+            } else {
+                assert_eq!(recovered.as_ref().unwrap_err(), &AuthorityError::Rejected);
+            }
+            let row: (bool,bool,bool,bool,i64,i64,i64) = sqlx::query_as("SELECT a.enabled,a.administrator,a.emergency,m.active,a.auth_epoch,a.credential_version,m.epoch FROM access_authority.accounts a JOIN access_authority.memberships m USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid")
+                .bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).fetch_one(&f.owner).await?;
+            assert_eq!(
+                (row.0, row.1, row.2, row.3),
+                (i != 0, i != 2, i != 2, i != 1)
+            );
+            assert_eq!(
+                (row.4, row.5, row.6),
+                (
+                    2 + i64::from(recovery_succeeds),
+                    1 + i64::from(i == 3) + i64::from(recovery_succeeds),
+                    1 + i64::from(i == 1)
+                )
+            );
+            let expected_password = if i == 3 && maintenance_first {
+                "daily replacement password"
+            } else if recovery_succeeds {
+                "maintenance replacement password"
+            } else {
+                PASSWORD
+            };
+            let hash: String = sqlx::query_scalar("SELECT password_hash FROM access_authority.accounts WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
+                .bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).fetch_one(&f.owner).await?;
+            assert!(
+                PasswordKdf::new()
+                    .verify(
+                        Password::new(expected_password.into())?,
+                        access_core::account::PasswordEncoding::from_storage(hash)?
+                    )
+                    .await?
+            );
+            let action = [
+                "account_disabled",
+                "membership_disabled",
+                "administrator_revoked",
+                "password_changed",
+            ][i];
+            let mut expected = vec![(action, Some(f.key), changed)];
+            if let Ok(recovered) = recovered {
+                if maintenance_first {
+                    expected.insert(0, ("administrator_recovered", None, recovered));
+                } else {
+                    expected.push(("administrator_recovered", None, recovered));
+                }
+            }
+            let events: Vec<String> = sqlx::query_scalar("SELECT envelope::text FROM rss_transactional_messaging.outbox WHERE seq>$1 ORDER BY seq").bind(before_seq).fetch_all(&f.owner).await?;
+            assert_eq!(events.len(), expected.len());
+            for (index, (raw, (action, actor, state))) in events.iter().zip(expected).enumerate() {
+                assert_eq!(state.epoch(), 2 + index as i64);
+                assert_envelope(raw, action, key, actor, state.epoch(), Some(state))?;
+            }
+        }
+    }
+    f.close().await;
+    Ok(())
+}
+
+async fn wait_for_writer_lock(
+    owner: &sqlx::PgPool,
+    role: &str,
+    blocker: Option<i32>,
+) -> anyhow::Result<i32> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let wait: Option<(i32,String)> = sqlx::query_as("SELECT a.pid,a.query FROM pg_stat_activity a WHERE a.datname=current_database() AND a.usename=$1 AND a.wait_event_type='Lock' AND ($2::int IS NULL OR $2=ANY(pg_blocking_pids(a.pid)))")
+            .bind(role).bind(blocker).fetch_optional(owner).await?;
+        if let Some((pid, query)) = wait {
+            if blocker.is_some() {
+                anyhow::ensure!(
+                    query.contains("access_authority.guard"),
+                    "second writer bypassed the tenant guard"
+                );
+                return Ok(pid);
+            }
+            let at_gate: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted AND classid=2358 AND objid=1)").bind(pid).fetch_one(owner).await?;
+            if at_gate {
+                return Ok(pid);
+            }
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "writer did not reach its expected database lock"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    for query in [
+        "UPDATE access_authority.accounts SET enabled=true",
+        "UPDATE access_authority.accounts SET administrator=true",
+        "UPDATE access_authority.memberships SET active=true",
+        "SELECT * FROM access_authority.attempts",
+    ] {
+        let result = f
+            .maintenance_runtime
+            .local_tx(f.key.tenant, deadline(), move |tx| {
+                Box::pin(async move {
+                    tx.with_connection(move |c| {
+                        Box::pin(async move { sqlx::query(query).execute(c).await.map(|_| ()) })
+                    })
+                    .await
+                })
+            })
+            .await
+            .fold(Ok, Err, Err, Err, Err, Err);
+        assert!(result.is_err(), "maintenance accepted forbidden operation");
+    }
+    let result = f
+        .runtime
+        .local_tx(f.key.tenant, deadline(), |tx| {
+            Box::pin(async move {
+                tx.with_connection(|c| {
+                    Box::pin(async move {
+                        sqlx::query("UPDATE access_authority.deployment SET bootstrap_tenant=NULL")
+                            .execute(c)
+                            .await
+                            .map(|_| ())
+                    })
+                })
+                .await
+            })
+        })
+        .await
+        .fold(Ok, Err, Err, Err, Err, Err);
+    assert!(result.is_err());
+    sqlx::raw_sql("ALTER TABLE access_authority.schema_version DROP CONSTRAINT schema_version_version_check; UPDATE access_authority.schema_version SET version=1").execute(&f.owner).await?;
+    assert!(matches!(
+        f.probe(AuthorityProfile::Runtime).await,
+        Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::SchemaVersion
+        ))
+    ));
+    sqlx::raw_sql("UPDATE access_authority.schema_version SET version=2; ALTER TABLE access_authority.schema_version ADD CHECK(version=2)").execute(&f.owner).await?;
+    assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
+    for (remove, restore, expected) in [
+        (
+            "ALTER ROLE access_account_maintenance RENAME TO temporarily_absent_maintenance",
+            "ALTER ROLE temporarily_absent_maintenance RENAME TO access_account_maintenance",
+            StorageMismatch::Role,
+        ),
+        (
+            "ALTER TABLE access_authority.attempts RENAME TO temporarily_absent_attempts",
+            "ALTER TABLE access_authority.temporarily_absent_attempts RENAME TO attempts",
+            StorageMismatch::SchemaContract,
+        ),
+        (
+            "ALTER TABLE access_authority.schema_version RENAME TO temporarily_absent_version",
+            "ALTER TABLE access_authority.temporarily_absent_version RENAME TO schema_version",
+            StorageMismatch::SchemaContract,
+        ),
+    ] {
+        sqlx::raw_sql(remove).execute(&f.owner).await?;
+        assert!(
+            matches!(f.probe(AuthorityProfile::Runtime).await, Err(AuthorityError::StorageIncompatible(reason)) if reason == expected)
+        );
+        sqlx::raw_sql(restore).execute(&f.owner).await?;
+        assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
+    }
+    for (remove, restore) in [
+        (
+            "REVOKE USAGE ON SCHEMA access_authority FROM access_account_runtime",
+            "GRANT USAGE ON SCHEMA access_authority TO access_account_runtime",
+        ),
+        (
+            "REVOKE SELECT ON access_authority.schema_version FROM access_account_runtime",
+            "GRANT SELECT ON access_authority.schema_version TO access_account_runtime",
+        ),
+    ] {
+        sqlx::raw_sql(remove).execute(&f.owner).await?;
+        assert!(matches!(
+            f.probe(AuthorityProfile::Runtime).await,
+            Err(AuthorityError::StorageIncompatible(
+                StorageMismatch::Privileges
+            ))
+        ));
+        sqlx::raw_sql(restore).execute(&f.owner).await?;
+        assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
+    }
+    // Effective inherited and PUBLIC privileges must also be rejected.
+    for (grant, revoke) in [
+        (
+            "GRANT UPDATE ON access_authority.deployment TO PUBLIC",
+            "REVOKE UPDATE ON access_authority.deployment FROM PUBLIC",
+        ),
+        (
+            "GRANT SELECT ON access_authority.accounts TO access_runtime WITH GRANT OPTION",
+            "REVOKE GRANT OPTION FOR SELECT ON access_authority.accounts FROM access_runtime",
+        ),
+    ] {
+        sqlx::raw_sql(grant).execute(&f.owner).await?;
+        assert!(matches!(
+            f.probe(AuthorityProfile::Runtime).await,
+            Err(AuthorityError::StorageIncompatible(_))
+        ));
+        sqlx::raw_sql(revoke).execute(&f.owner).await?;
+        assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
+    }
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
+    use rss_transactional_messaging::policy::OperationDeadline;
+    let f = Fixture::new().await?;
+    assert!(
+        f.maintenance
+            .initialize(
+                f.key,
+                login("admin"),
+                password(),
+                OperationDeadline::from_remaining(Duration::ZERO)
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(f.events().await?, 0);
+    f.bootstrap().await?;
+    assert!(
+        f.maintenance
+            .recover_administrator(
+                f.key,
+                password(),
+                OperationDeadline::from_remaining(Duration::ZERO)
+            )
+            .await
+            .is_err()
+    );
+    for column in ["auth_epoch", "credential_version"] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "UPDATE access_authority.accounts SET {column}=9223372036854775807"
+        )))
+        .execute(&f.owner)
+        .await?;
+        assert_eq!(
+            f.maintenance
+                .recover_administrator(f.key, password(), deadline())
+                .await
+                .unwrap_err(),
+            AuthorityError::RuleRejected(AccountRuleError::EpochExhausted)
+        );
+        assert_eq!(f.events().await?, 1);
+        sqlx::raw_sql("UPDATE access_authority.accounts SET auth_epoch=1,credential_version=1")
+            .execute(&f.owner)
+            .await?;
+    }
+    sqlx::raw_sql("UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2")
+        .execute(&f.owner)
+        .await?;
+    assert_eq!(
+        f.maintenance
+            .recover_administrator(f.key, password(), deadline())
+            .await
+            .unwrap_err(),
+        AuthorityError::Fenced
+    );
+    assert_eq!(
+        f.maintenance
+            .initialize(f.key, login("admin"), password(), deadline())
+            .await
+            .unwrap_err(),
+        AuthorityError::Fenced
+    );
+    assert_eq!(f.events().await?, 1);
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn maintenance_runbook_respects_forced_rls() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    f.maintenance
+        .recover_administrator(f.key, password(), deadline())
+        .await?;
+    let authority: String =
+        sqlx::query_scalar("SELECT authority_id::text FROM access_authority.deployment")
+            .fetch_one(&f.owner)
+            .await?;
+    sqlx::query("INSERT INTO access_authority.accounts SELECT $1::uuid,principal_id,login_key,password_hash,enabled,administrator,emergency,auth_epoch,credential_version FROM access_authority.accounts WHERE tenant_id=$2::uuid")
+        .bind(B).bind(A).execute(&f.owner).await?;
+    sqlx::query("INSERT INTO access_authority.memberships SELECT $1::uuid,principal_id,active,epoch FROM access_authority.memberships WHERE tenant_id=$2::uuid")
+        .bind(B).bind(A).execute(&f.owner).await?;
+    // A table owner with FORCE RLS is deliberately neither superuser nor BYPASSRLS.
+    sqlx::raw_sql("CREATE ROLE access_verification_owner NOLOGIN NOSUPERUSER NOBYPASSRLS;
+        GRANT USAGE ON SCHEMA access_authority,rss_transactional_messaging TO access_verification_owner;
+        GRANT SELECT ON access_authority.deployment,rss_transactional_messaging.storage_lineage TO access_verification_owner;
+        ALTER TABLE access_authority.accounts OWNER TO access_verification_owner;
+        ALTER TABLE access_authority.memberships OWNER TO access_verification_owner;
+        ALTER TABLE rss_transactional_messaging.outbox OWNER TO access_verification_owner;").execute(&f.owner).await?;
+    let doc = include_str!("../../../docs/guides/local-maintenance.md");
+    let start = doc
+        .find("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;")
+        .unwrap();
+    let end = start + doc[start..].find("COMMIT;").unwrap() + "COMMIT;".len();
+    let sql = doc[start..end]
+        .replace(":'tenant'", &format!("'{A}'"))
+        .replace(":'principal'", &format!("'{}'", f.key.principal.as_uuid()))
+        .replace(":'authority'", &format!("'{authority}'"))
+        .replace(":'target_hex'", &format!("'{}'", "01".repeat(16)))
+        .replace(":'lineage_hex'", &format!("'{}'", "02".repeat(16)))
+        .replace(":'operation'", "'recover'");
+    let asserted = sql.replace(
+        "COMMIT;",
+        "DO $$ BEGIN
+        IF (SELECT count(*) FROM access_authority.accounts)<>1
+        OR (SELECT count(*) FROM access_authority.memberships)<>1
+        OR (SELECT count(*) FROM rss_transactional_messaging.outbox)<>2 THEN
+          RAISE EXCEPTION 'runbook lost tenant evidence under FORCE RLS';
+        END IF;
+        END $$; COMMIT;",
+    );
+    let mut connection = f.owner.acquire().await?;
+    sqlx::raw_sql("SET ROLE access_verification_owner; RESET rss.tenant_id;")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(asserted))
+        .execute(&mut *connection)
+        .await?;
+    for broken in [
+        sql.replace(&authority, &uuid::Uuid::new_v4().to_string()),
+        sql.replace(&"02".repeat(16), &"03".repeat(16)),
+    ] {
+        let error = sqlx::raw_sql(sqlx::AssertSqlSafe(broken))
+            .execute(&mut *connection)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("database identity mismatch"));
+        sqlx::raw_sql("ROLLBACK").execute(&mut *connection).await?;
+    }
+    for (break_sql, repair_sql, expected) in [
+        (
+            "DELETE FROM access_authority.memberships WHERE tenant_id='11111111-1111-4111-8111-111111111111'",
+            "INSERT INTO access_authority.memberships SELECT tenant_id,principal_id,true,1 FROM access_authority.accounts WHERE tenant_id='11111111-1111-4111-8111-111111111111'",
+            "inconsistent deployment/account/membership",
+        ),
+        (
+            "UPDATE access_authority.accounts SET auth_epoch=1 WHERE tenant_id='11111111-1111-4111-8111-111111111111'",
+            "UPDATE access_authority.accounts SET auth_epoch=2 WHERE tenant_id='11111111-1111-4111-8111-111111111111'",
+            "account and event evidence disagree",
+        ),
+        (
+            "UPDATE access_authority.accounts SET enabled=false WHERE tenant_id='11111111-1111-4111-8111-111111111111'",
+            "UPDATE access_authority.accounts SET enabled=true WHERE tenant_id='11111111-1111-4111-8111-111111111111'",
+            "account and event evidence disagree",
+        ),
+    ] {
+        sqlx::raw_sql(break_sql).execute(&f.owner).await?;
+        let error = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.clone()))
+            .execute(&mut *connection)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(expected));
+        sqlx::raw_sql("ROLLBACK").execute(&mut *connection).await?;
+        sqlx::raw_sql(repair_sql).execute(&f.owner).await?;
+    }
+    sqlx::raw_sql(
+        "RESET ROLE; ALTER TABLE access_authority.accounts OWNER TO postgres;
+        ALTER TABLE access_authority.memberships OWNER TO postgres;
+        ALTER TABLE rss_transactional_messaging.outbox OWNER TO postgres;
+        DROP OWNED BY access_verification_owner; DROP ROLE access_verification_owner;",
+    )
+    .execute(&mut *connection)
+    .await?;
+    drop(connection);
     f.close().await;
     Ok(())
 }

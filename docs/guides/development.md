@@ -21,7 +21,7 @@ make ci
 
 真实 PG 测试覆盖正常提交、SQL 失败回滚、CommitUnknownAfterAck、重复事件、跨租户 RLS 与 outbox 绑定。真实 Keycloak/Hydra 测试覆盖发现、code exchange、S256、重放、错误 state/nonce/verifier/redirect 及 provider 不可用。补充签名 token 的 azp/issuer/audience/expiry 负例、外源 discovery/JWKS、禁止跳转、响应上限和容器清理失败测试。Hydra 的 login/consent 接受逻辑是测试夹具，不是 Access authority 实现。
 
-固定容器版本与摘要的单源为 `hack/providers.py`：PostgreSQL 17.6、Keycloak 26.7.3、Hydra v26.2.0。首次执行会拉取镜像。此测试不证明生产 TLS、持久化 Hydra、Keycloak 升级、JIT、账户恢复、完整撤销或 MDM 接入；这些由 #2333–#2343 各自验收。会话验证 HTTP wire 文档是 I01 契约，尚无可启动产品 binary。
+固定容器版本与摘要的单源为 `hack/providers.py`：PostgreSQL 17.6、Keycloak 26.7.3、Hydra v26.2.0。首次执行会拉取镜像。此测试不证明生产 TLS、持久化 Hydra、Keycloak 升级、JIT、生产恢复流程、完整撤销或 MDM 接入；这些由 #2333–#2343 各自验收。会话验证 HTTP wire 文档是 I01 契约，尚无可启动产品 binary。
 
 ## 独立消费复核
 
@@ -48,30 +48,57 @@ owner shengming。仅 access-oidc 0.1.0 → openidconnect 4.0.1 → rsa 0.9.10 �
 [openidconnect DiscoveryError](https://github.com/ramosbugs/openidconnect-rs/blob/4.0.1/src/discovery/mod.rs)、
 [oauth2 semantic types](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/types.rs)。
 
-## I03 本机账户管理
+## 本机账户管理与维护
 
-I03 使用 `access-admin`，不启动 HTTP；账户管理 API 的网络接入随 I04/I07 真实 session 交付。构建 `cargo build --locked -p access-admin`。
+构建 `cargo build --locked -p access-admin`，离线参数说明用 `access-admin --help`。工具不启动 HTTP，不自动迁移或清空数据库。
 
-配置 JSON 必填：`host`、`port`、`database`、`user`、`password_file`、`ca_file`、`tenant_id`、`storage_target`、`storage_lineage`、`storage_tenant_epoch`。两个 storage identity 字段是非零 16 字节数组；epoch 是 RSS 存储 fencing 值，不是账户 epoch。拒绝未知字段，生产连接始终 VerifyFull。不得用测试明文 profile 连接生产。RSS schema/lineage/tenant binding 及 Access MIGRATION_SQL 由部署 owner 先配置；本工具不自动迁移或重置数据库。
+配置 JSON 必填：`host`、`port`、`database`、`user`、`password_file`、`ca_file`、`tenant_id`、`storage_target`、`storage_lineage`、`storage_tenant_epoch`。后两个 identity 为非零 16 字节数组，epoch 为 RSS 存储 fencing 值。拒绝未知配置字段；生产连接始终 VerifyFull。RSS schema、lineage、tenant binding 和 Access 安装 SQL 由部署 owner 先配置。
 
-独立签发身份加入 `access_authorization_issuer`，普通运行身份加入 `access_account_runtime`，勿给普通身份继承签发角色。配置中的数据库密码、新口令、当前口令及授权 secret 均从普通 `0600` 文件读取，拒绝符号链接和 group/other 权限。文件按原字节读取：使用 `printf`，不要用会额外添加换行的 `echo`。secret 不放参数、环境变量、stdout 或日志。下列命令中的配置与 secret 参数均为文件路径：
+配置/CA 只接受有界普通文件（16 KiB / 1 MiB）；数据库密码、当前口令和新口令从私有普通文件读取，拒绝末端 symlink、FIFO、group/other 权限和超长输入。密码按原字节读取，不自动去掉换行；不得将秘密放入命令参数、环境变量或日志。PG 关闭最多等 5 秒，关闭超时不改变已确认操作结果。
+
+### 日常操作
+
+日常身份属于 `access_account_runtime`，仍须验证操作者账户口令。以下参数中的密码均为文件路径：
 
 ```text
-access-admin OPERATOR_CONFIG authorize-initialize PRINCIPAL_UUID OUTPUT_SECRET_FILE
-access-admin RUNTIME_CONFIG initialize PRINCIPAL_UUID LOGIN PASSWORD_FILE AUTH_SECRET_FILE
 access-admin RUNTIME_CONFIG create ACTOR_LOGIN ACTOR_PASSWORD_FILE LOGIN NEW_PASSWORD_FILE member|admin|emergency
-access-admin RUNTIME_CONFIG enable|disable|grant-admin|revoke-admin|enable-membership|disable-membership ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID
 access-admin RUNTIME_CONFIG password ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID NEW_PASSWORD_FILE
-access-admin OPERATOR_CONFIG authorize-recovery PRINCIPAL_UUID OUTPUT_SECRET_FILE
-access-admin RUNTIME_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE AUTH_SECRET_FILE
+access-admin RUNTIME_CONFIG enable|disable|grant-admin|revoke-admin|enable-membership|disable-membership ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID
 ```
 
-初始化的 Principal UUID 由部署 owner 随机生成并用于授权/消费的同一目标；初始化后不能重新夺取部署 authority。命令成功仅输出主体/epoch 或交付状态。授权输出文件必须不存在；交付失败时使用新输出路径重新签发，旧 secret 自动失效。提交未知不得重复消费或宣称成功；先由授权操作者重签。密码恢复保留禁用/成员/角色状态，不能借恢复升级权限。
+日常改密：用户持当前口令对自己执行 password，或同租户管理员协助重置。普通用户忘记密码：联系可用管理员；自助邮件找回尚未实现。管理员无法登录：走独立维护身份的管理员密码恢复。密码恢复不自动启用账户或成员；停用状态仍由正常管理规则处置，不允许恢复命令扩大权限。
 
-真实 PG 验证按命名场景运行初始化/恢复、账户竞态/租户隔离、共享限流和 settlement 故障，保留确切 runner 用例集合；`cargo test` 默认跳过 provider 测试，必须另跑 `make test-pg`。I03 证明账户与事件/epoch，不证明 session、Hydra 或产品 T3 已实现。详见 I03 ADR。
+### 初始化与管理员密码恢复
 
-I03 内审补充：Access 安装 SQL 必须整批事务执行。两个 NOLOGIN 权限角色必须由本次安装新建；发现同名角色立即失败，不接纳其历史权限或成员。此版本要求该角色命名空间归单一 Access 部署，不能在同集群另一数据库静默复用。`Authority::connect` 在公开对象前检查 schema 版本、关键约束、RLS 谓词和 runtime/issuer 的必需及禁止权限（包括可达高权角色）。角色/存储漂移返回安全的不兼容分类。
+独立身份属于 `access_account_maintenance`，只注入受控维护任务；日常服务不得读取其凭据。每次仅需维护配置和新口令文件，无签发步骤或输出授权文件。
 
-配置/CA 只接受有界普通文件（16 KiB / 1 MiB），拒绝末端 symlink/FIFO。PG 关闭最多等待 5 秒，超时提示不改变已确认业务结果，不据此重试业务命令。I03 provider runner 使用隔离 loopback PG 证明 adapter 与文件交付 T2。真实生产 binary/config/TLS 装配证明归 #2341/T32 的独立 PR；本 PR 不含该 T3。
+```text
+access-admin MAINTENANCE_CONFIG initialize PRINCIPAL_UUID LOGIN PASSWORD_FILE
+access-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
+```
 
-`access-admin --help` 可离线查看参数。错误只显示类别：unknown command、wrong arity、JSON、tenant_id、CA、storage identity/epoch 或账户字段；不回显配置值、秘密或 provider 原文。最后管理员保护与 generation 耗尽仅在确认回滚后报告具体领域原因。
+配置显式指定 tenant，命令显式指定 principal，不按登录名猜测管理员。初始化 UUID 由部署 owner 随机生成，成功后永久记录该 tenant；重复或跨租户再次初始化被拒绝。恢复只针对已有管理员，保留 enabled、administrator、emergency 和 membership，推进认证 epoch 与凭据版本。并发恢复按事务顺序执行，最后提交的密码生效。
+
+成功仅输出主体/epoch。NotStarted 或确认回滚不表示提交成功；CommitUnknown/RollbackFailed 必须当作结果不确定，不自动重试或交付凭据。运维按 [只读核实与判定表](local-maintenance.md#不确定提交只读核实) 核实非秘密安全事件/状态与账户可用性，再决定是否执行新的恢复；不能根据失败退出码推断密码没变。输入密码文件由操作者管理，工具不创建或自动删除它。
+
+维护身份隔离不等于双人审批，也不抵御 runtime 数据库凭据直接改库、维护凭据泄漏或宿主机失陷；远程执行授权与人工审计由运维入口承担。MFA、外部 IdP、身份关联、密钥和备份恢复不属于本命令。
+
+### 开发库重建与兼容性
+
+#2358 经确认只有可丢弃开发库，初始安装 SQL 直接改为 schema version 2。旧库/旧角色/旧参数不兼容，不提供增量迁移、旧命令别名或运行时兼容开关。
+
+具体 owner 连接、删除顺序、RSS 前置角色、固定八个 RSS 迁移、Access 初始安装、lineage/epoch、登录身份及 GRANT 和验收命令见 [开发库重建与安装](local-maintenance.md#重建与安装)。安装 SQL 全批单事务执行；CLI 不自动清库，遇到未知角色依赖停止，不使用 CASCADE。
+
+安装遇到同名全局角色即失败，不静默复用。`Authority::connect` 检查当前六张表、四张 tenant RLS 表及精确有效权限；运行角色无 deployment 写权限，维护角色无 attempts 和成员更新权限。权限漂移、旧 schema 和高权身份均拒绝连接。错误提供 schema 版本、角色不匹配、权限漂移和 schema/RLS 契约漂移四类安全诊断，底层 provider 故障仍保留 settlement。
+
+### 简化结果与验证范围
+
+| 每次初始化/恢复 | #2333 旧流程 | #2358 当前流程 |
+| --- | --- | --- |
+| 命令数 | 2 | 1 |
+| 使用配置 | issuer + runtime | maintenance |
+| 授权临时文件 | 1 | 0 |
+| 部署身份数 | 2 | 2 |
+| 文件交付失败 | 重签、重新交付 | 无授权文件交付环节 |
+
+日常管理 API/UI 尚未交付，CLI 仍是当前必要入口，不建立第二份业务规则。`make test-pg` 执行维护初始化/恢复、权限隔离、并发和 settlement 故障及密码文件接缝；runner 核对完整测试名与执行计数。`cargo test` 默认忽略真实 provider 测试，不能代替该证据。真实 binary/config/TLS PG 装配仍归 #2341/T32 的独立 PR。

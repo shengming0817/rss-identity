@@ -33,9 +33,6 @@ pub fn source() -> AttemptSource {
 pub fn deadline() -> OperationDeadline {
     OperationDeadline::from_remaining(Duration::from_secs(30))
 }
-pub fn token(s: &AuthorizationSecret) -> AuthorizationSecret {
-    AuthorizationSecret::parse(s.expose().into()).unwrap()
-}
 struct Timer;
 impl Clock for Timer {
     fn now(&self) -> Instant {
@@ -53,9 +50,9 @@ pub struct Fixture {
     pub database: String,
     pub port: u16,
     pub runtime: Arc<PgRuntime>,
-    pub issuer_runtime: Arc<PgRuntime>,
+    pub maintenance_runtime: Arc<PgRuntime>,
     pub store: Authority,
-    pub issuer: Authority,
+    pub maintenance: Authority,
     pub key: AccountKey,
 }
 impl Fixture {
@@ -78,14 +75,14 @@ impl Fixture {
             .max_connections(4)
             .connect_with(options.database(&db))
             .await?;
-        sqlx::raw_sql("DO $$ BEGIN IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='rss_tmsg_relay') THEN CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE access_runtime LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE ROLE access_issuer LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; END IF; END $$;").execute(&owner).await?;
+        sqlx::raw_sql("DO $$ BEGIN IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='rss_tmsg_relay') THEN CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE access_runtime LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE ROLE access_maintenance LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; END IF; END $$;").execute(&owner).await?;
         sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
             .execute(&owner)
             .await?;
         sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
-        sqlx::raw_sql("GRANT access_account_runtime TO access_runtime; GRANT access_authorization_issuer TO access_issuer;").execute(&owner).await?;
+        sqlx::raw_sql("GRANT access_account_runtime TO access_runtime; GRANT access_account_maintenance TO access_maintenance;").execute(&owner).await?;
         sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO access_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO access_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO access_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO access_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO access_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),rss_transactional_messaging.check_execution() TO access_runtime;").execute(&owner).await?;
-        sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO access_issuer; GRANT SELECT ON rss_transactional_messaging.policy TO access_issuer; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO access_issuer; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO access_issuer; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO access_issuer; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),rss_transactional_messaging.check_execution() TO access_issuer;").execute(&owner).await?;
+        sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO access_maintenance; GRANT SELECT ON rss_transactional_messaging.policy TO access_maintenance; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO access_maintenance; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO access_maintenance; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO access_maintenance; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),rss_transactional_messaging.check_execution() TO access_maintenance;").execute(&owner).await?;
         sqlx::query("INSERT INTO rss_transactional_messaging.storage_lineage VALUES(true,$1,$2)")
             .bind([1_u8; 16].as_slice())
             .bind([2_u8; 16].as_slice())
@@ -118,13 +115,13 @@ impl Fixture {
             )
             .await?,
         );
-        let issuer_runtime = Arc::new(
+        let maintenance_runtime = Arc::new(
             PgRuntime::connect(
                 PgConfig::new_for_test_plaintext(
                     "127.0.0.1",
                     port,
                     &db,
-                    "access_issuer",
+                    "access_maintenance",
                     PgPassword::new("fixture-only"),
                 ),
                 Timer,
@@ -146,11 +143,11 @@ impl Fixture {
             deadline(),
         )
         .await?;
-        let issuer = Authority::connect(
-            issuer_runtime.clone(),
+        let maintenance = Authority::connect(
+            maintenance_runtime.clone(),
             budget,
             TenantId::parse(A)?,
-            AuthorityProfile::Issuer,
+            AuthorityProfile::Maintenance,
             deadline(),
         )
         .await?;
@@ -160,9 +157,9 @@ impl Fixture {
             database: db,
             port,
             runtime,
-            issuer_runtime,
+            maintenance_runtime,
             store,
-            issuer,
+            maintenance,
             key: AccountKey {
                 tenant: TenantId::parse(A)?,
                 principal: PrincipalId::generate(),
@@ -210,19 +207,8 @@ impl Fixture {
         .await
     }
     pub async fn bootstrap(&self) -> anyhow::Result<()> {
-        let g = self
-            .issuer
-            .issue_authorization(self.key, AuthorizationPurpose::Initialize, deadline())
-            .await?;
-        self.store
-            .initialize(
-                self.key,
-                login("Admin"),
-                password(),
-                g.into_secret(),
-                source(),
-                deadline(),
-            )
+        self.maintenance
+            .initialize(self.key, login("Admin"), password(), deadline())
             .await?;
         Ok(())
     }
@@ -253,7 +239,7 @@ impl Fixture {
     }
     pub async fn close(self) {
         self.runtime.close().await;
-        self.issuer_runtime.close().await;
+        self.maintenance_runtime.close().await;
         self.owner.close().await;
         // Generated UUID database identity; no caller input enters SQL identifiers.
         sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -263,7 +249,7 @@ impl Fixture {
         .execute(&self.admin)
         .await
         .unwrap();
-        sqlx::raw_sql("DROP ROLE access_account_runtime; DROP ROLE access_authorization_issuer;")
+        sqlx::raw_sql("DROP ROLE access_account_runtime; DROP ROLE access_account_maintenance;")
             .execute(&self.admin)
             .await
             .unwrap();

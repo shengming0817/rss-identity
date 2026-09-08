@@ -22,24 +22,7 @@ pub(crate) struct SecurityEvent {
     pub principal: Uuid,
     pub actor: Option<Uuid>,
     pub epoch: i64,
-    pub state: Option<EventState>,
-}
-impl SecurityEvent {
-    pub fn new(
-        action: SecurityAction,
-        key: AccountKey,
-        actor: Option<AccountKey>,
-        epoch: i64,
-    ) -> Self {
-        Self {
-            action: action.as_str(),
-            tenant: key.tenant.to_string(),
-            principal: key.principal.as_uuid(),
-            actor: actor.map(|a| a.principal.as_uuid()),
-            epoch,
-            state: None,
-        }
-    }
+    pub state: EventState,
 }
 #[derive(Serialize)]
 pub(crate) struct EventState {
@@ -52,16 +35,21 @@ pub(crate) struct EventState {
 }
 impl SecurityEvent {
     pub fn account(action: SecurityAction, state: AccountState, actor: Option<AccountKey>) -> Self {
-        let mut event = Self::new(action, state.key(), actor, state.epoch());
-        event.state = Some(EventState {
-            enabled: state.enabled(),
-            administrator: state.administrator(),
-            emergency: state.emergency(),
-            member_active: state.member_active(),
-            credential_version: state.credential_version(),
-            membership_epoch: state.membership_epoch(),
-        });
-        event
+        Self {
+            action: action.as_str(),
+            tenant: state.key().tenant.to_string(),
+            principal: state.key().principal.as_uuid(),
+            actor: actor.map(|a| a.principal.as_uuid()),
+            epoch: state.epoch(),
+            state: EventState {
+                enabled: state.enabled(),
+                administrator: state.administrator(),
+                emergency: state.emergency(),
+                member_active: state.member_active(),
+                credential_version: state.credential_version(),
+                membership_epoch: state.membership_epoch(),
+            },
+        }
     }
 }
 #[derive(Debug, thiserror::Error)]

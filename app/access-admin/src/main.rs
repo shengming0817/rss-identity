@@ -1,4 +1,4 @@
-use access_admin::{AdminError, deliver_authorization, read_public_file, read_secret};
+use access_admin::{AdminError, read_public_file, read_secret};
 use access_core::account::{AccountChange, AccountKey};
 use access_core::{
     PrincipalId,
@@ -71,13 +71,13 @@ async fn main() {
 async fn run() -> Result<(), AdminError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args == ["--help"] || args == ["-h"] {
-        println!("{USAGE}");
+        println!("{}", usage());
         return Ok(());
     }
     if args.len() < 2 {
         return Err(AdminError::Arguments);
     }
-    validate_command(&args[1..])?;
+    let command = parse_command(&args[1..])?;
     let raw =
         read_public_file(Path::new(&args[0]), 16384).map_err(|_| AdminError::Configuration)?;
     let config: Config = serde_json::from_slice(&raw).map_err(|_| AdminError::Json)?;
@@ -118,19 +118,12 @@ async fn run() -> Result<(), AdminError> {
         )
         .map_err(|_| AdminError::Budget)?,
         tenant,
-        if matches!(
-            args[1].as_str(),
-            "authorize-initialize" | "authorize-recovery"
-        ) {
-            AuthorityProfile::Issuer
-        } else {
-            AuthorityProfile::Runtime
-        },
+        command.profile(),
         budget(),
     )
     .await;
     let result = match authority {
-        Ok(authority) => execute(&authority, tenant, &args[1..]).await,
+        Ok(authority) => execute(&authority, tenant, command).await,
         Err(error) => Err(error.into()),
     };
     if tokio::time::timeout(Duration::from_secs(5), runtime.close())
@@ -141,51 +134,29 @@ async fn run() -> Result<(), AdminError> {
     }
     result
 }
-async fn execute(a: &Authority, tenant: TenantId, args: &[String]) -> Result<(), AdminError> {
-    let strings: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = match strings.as_slice() {
-        ["authorize-initialize", principal, output] | ["authorize-recovery", principal, output] => {
-            let purpose = if strings[0] == "authorize-initialize" {
-                AuthorizationPurpose::Initialize
-            } else {
-                AuthorizationPurpose::Recover
-            };
-            deliver_authorization(
-                Path::new(output),
-                a.issue_authorization(key(tenant, principal)?, purpose, budget())
-                    .await,
-            )?;
-            println!("authorization delivered");
-            return Ok(());
-        }
-        ["initialize", principal, name, pw, secret] => {
+async fn execute(a: &Authority, tenant: TenantId, command: Command<'_>) -> Result<(), AdminError> {
+    let result = match command {
+        Command::Initialize(principal, name, pw) => {
             a.initialize(
                 key(tenant, principal)?,
                 login(name)?,
                 password(pw)?,
-                AuthorizationSecret::parse(read_secret(Path::new(secret))?.to_string())?,
-                source(),
                 budget(),
             )
             .await
         }
-        ["recover", principal, pw, secret] => {
-            a.recover_administrator(
-                key(tenant, principal)?,
-                password(pw)?,
-                AuthorizationSecret::parse(read_secret(Path::new(secret))?.to_string())?,
-                source(),
-                budget(),
-            )
-            .await
+        Command::Recover(principal, pw) => {
+            a.recover_administrator(key(tenant, principal)?, password(pw)?, budget())
+                .await
         }
-        ["create", actor, actor_pw, name, pw, role] => {
-            let (admin, emergency) = match *role {
-                "member" => (false, false),
-                "admin" => (true, false),
-                "emergency" => (true, true),
-                _ => return Err(AdminError::Role),
-            };
+        Command::Create {
+            actor,
+            actor_pw,
+            name,
+            pw,
+            admin,
+            emergency,
+        } => {
             let actor = a
                 .verify_password(
                     tenant,
@@ -205,7 +176,7 @@ async fn execute(a: &Authority, tenant: TenantId, args: &[String]) -> Result<(),
             )
             .await
         }
-        ["password", actor, actor_pw, target, pw] => {
+        Command::Password(actor, actor_pw, target, pw) => {
             let actor = a
                 .verify_password(
                     tenant,
@@ -223,16 +194,12 @@ async fn execute(a: &Authority, tenant: TenantId, args: &[String]) -> Result<(),
             )
             .await
         }
-        [command, actor, actor_pw, target] => {
-            let change = match *command {
-                "enable" => AccountChange::Enabled(true),
-                "disable" => AccountChange::Enabled(false),
-                "grant-admin" => AccountChange::Administrator(true),
-                "revoke-admin" => AccountChange::Administrator(false),
-                "enable-membership" => AccountChange::Membership(true),
-                "disable-membership" => AccountChange::Membership(false),
-                _ => return Err(AdminError::UnknownCommand),
-            };
+        Command::Change {
+            actor,
+            actor_pw,
+            target,
+            change,
+        } => {
             let actor = a
                 .verify_password(
                     tenant,
@@ -245,7 +212,6 @@ async fn execute(a: &Authority, tenant: TenantId, args: &[String]) -> Result<(),
             a.change_account(actor, key(tenant, target)?, change, budget())
                 .await
         }
-        _ => return Err(AdminError::UnknownCommand),
     }?;
     println!(
         "principal={} epoch={}",
@@ -255,45 +221,230 @@ async fn execute(a: &Authority, tenant: TenantId, args: &[String]) -> Result<(),
     Ok(())
 }
 
-const USAGE: &str = "Usage: access-admin <config.json> <command> <arguments>
-  authorize-initialize|authorize-recovery <principal> <output-secret-file>
-  initialize <principal> <login> <password-file> <authorization-file>
-  recover <principal> <password-file> <authorization-file>
-  create <actor-login> <actor-password-file> <login> <password-file> <member|admin|emergency>
-  password <actor-login> <actor-password-file> <target-principal> <new-password-file>
-  enable|disable|grant-admin|revoke-admin|enable-membership|disable-membership <actor-login> <actor-password-file> <target-principal>
-  --help | -h
-Secrets are read from private files. Authorization commands require the issuer database role.";
-
-fn validate_command(args: &[String]) -> Result<(), AdminError> {
-    let command = args.first().ok_or(AdminError::Arguments)?.as_str();
-    let length = match command {
-        "authorize-initialize" | "authorize-recovery" => 3,
-        "initialize" | "password" => 5,
-        "recover" | "enable" | "disable" | "grant-admin" | "revoke-admin" | "enable-membership"
-        | "disable-membership" => 4,
-        "create" => 6,
-        _ => return Err(AdminError::UnknownCommand),
-    };
-    if args.len() != length {
+#[derive(Debug)]
+enum Command<'a> {
+    Initialize(&'a str, &'a str, &'a str),
+    Recover(&'a str, &'a str),
+    Create {
+        actor: &'a str,
+        actor_pw: &'a str,
+        name: &'a str,
+        pw: &'a str,
+        admin: bool,
+        emergency: bool,
+    },
+    Password(&'a str, &'a str, &'a str, &'a str),
+    Change {
+        actor: &'a str,
+        actor_pw: &'a str,
+        target: &'a str,
+        change: AccountChange,
+    },
+}
+impl Command<'_> {
+    fn profile(&self) -> AuthorityProfile {
+        match self {
+            Self::Initialize(..) | Self::Recover(..) => AuthorityProfile::Maintenance,
+            Self::Create { .. } | Self::Password(..) | Self::Change { .. } => {
+                AuthorityProfile::Runtime
+            }
+        }
+    }
+}
+// Help renders structural value names; it never defines parser arity.
+// ref: clap v4.5.20 clap_builder/src/builder/arg.rs (val_names / num_args).
+struct CommandSpec {
+    name: &'static str,
+    arguments: &'static [&'static str],
+    parse: for<'a> fn(&'a [String]) -> Result<Command<'a>, AdminError>,
+}
+const CHANGE_ARGUMENTS: &[&str] = &[
+    "<actor-login>",
+    "<actor-password-file>",
+    "<target-principal>",
+];
+const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "initialize",
+        arguments: &["<principal>", "<login>", "<password-file>"],
+        parse: |a| match a {
+            [principal, login, password] => Ok(Command::Initialize(principal, login, password)),
+            _ => Err(AdminError::Arguments),
+        },
+    },
+    CommandSpec {
+        name: "recover",
+        arguments: &["<principal>", "<password-file>"],
+        parse: |a| match a {
+            [principal, password] => Ok(Command::Recover(principal, password)),
+            _ => Err(AdminError::Arguments),
+        },
+    },
+    CommandSpec {
+        name: "create",
+        arguments: &[
+            "<actor-login>",
+            "<actor-password-file>",
+            "<login>",
+            "<password-file>",
+            "<member|admin|emergency>",
+        ],
+        parse: |a| {
+            let [actor, actor_pw, name, pw, role] = a else {
+                return Err(AdminError::Arguments);
+            };
+            let (admin, emergency) = match role.as_str() {
+                "member" => (false, false),
+                "admin" => (true, false),
+                "emergency" => (true, true),
+                _ => return Err(AdminError::Role),
+            };
+            Ok(Command::Create {
+                actor,
+                actor_pw,
+                name,
+                pw,
+                admin,
+                emergency,
+            })
+        },
+    },
+    CommandSpec {
+        name: "password",
+        arguments: &[
+            "<actor-login>",
+            "<actor-password-file>",
+            "<target-principal>",
+            "<new-password-file>",
+        ],
+        parse: |a| match a {
+            [actor, actor_pw, target, password] => {
+                Ok(Command::Password(actor, actor_pw, target, password))
+            }
+            _ => Err(AdminError::Arguments),
+        },
+    },
+    CommandSpec {
+        name: "enable",
+        arguments: CHANGE_ARGUMENTS,
+        parse: |a| change_command(a, AccountChange::Enabled(true)),
+    },
+    CommandSpec {
+        name: "disable",
+        arguments: CHANGE_ARGUMENTS,
+        parse: |a| change_command(a, AccountChange::Enabled(false)),
+    },
+    CommandSpec {
+        name: "grant-admin",
+        arguments: CHANGE_ARGUMENTS,
+        parse: |a| change_command(a, AccountChange::Administrator(true)),
+    },
+    CommandSpec {
+        name: "revoke-admin",
+        arguments: CHANGE_ARGUMENTS,
+        parse: |a| change_command(a, AccountChange::Administrator(false)),
+    },
+    CommandSpec {
+        name: "enable-membership",
+        arguments: CHANGE_ARGUMENTS,
+        parse: |a| change_command(a, AccountChange::Membership(true)),
+    },
+    CommandSpec {
+        name: "disable-membership",
+        arguments: CHANGE_ARGUMENTS,
+        parse: |a| change_command(a, AccountChange::Membership(false)),
+    },
+];
+fn change_command(args: &[String], change: AccountChange) -> Result<Command<'_>, AdminError> {
+    match args {
+        [actor, actor_pw, target] => Ok(Command::Change {
+            actor,
+            actor_pw,
+            target,
+            change,
+        }),
+        _ => Err(AdminError::Arguments),
+    }
+}
+fn usage() -> String {
+    let mut text = String::from("Usage: access-admin <config.json> <command> <arguments>\n");
+    for spec in COMMANDS {
+        text.push_str(&format!("  {} {}\n", spec.name, spec.arguments.join(" ")));
+    }
+    text.push_str("  --help | -h\nSecrets are read from private files. Initialization and recovery require the maintenance database role.");
+    text
+}
+fn parse_command(args: &[String]) -> Result<Command<'_>, AdminError> {
+    let name = args.first().ok_or(AdminError::Arguments)?;
+    let spec = COMMANDS
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or(AdminError::UnknownCommand)?;
+    let arguments = &args[1..];
+    if arguments.len() != spec.arguments.len() {
         return Err(AdminError::Arguments);
     }
-    if command == "create" && !matches!(args[5].as_str(), "member" | "admin" | "emergency") {
-        return Err(AdminError::Role);
-    }
-    Ok(())
+    (spec.parse)(arguments)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
+    fn command_parsers_reject_any_wrong_shape_without_panicking() {
+        for spec in COMMANDS {
+            for count in 0..=spec.arguments.len() + 1 {
+                let args = vec![String::from("member"); count];
+                let result = (spec.parse)(&args);
+                if count != spec.arguments.len() {
+                    assert!(
+                        matches!(result, Err(AdminError::Arguments)),
+                        "{} accepted wrong shape",
+                        spec.name
+                    );
+                } else {
+                    assert!(result.is_ok(), "{} rejected its declared shape", spec.name);
+                }
+            }
+        }
+    }
+    #[test]
+    fn maintenance_commands_are_single_step() {
+        for args in [
+            vec!["initialize", "principal", "login", "password-file"],
+            vec!["recover", "principal", "password-file"],
+        ] {
+            parse_command(&args.into_iter().map(String::from).collect::<Vec<_>>()).unwrap();
+        }
+        for command in ["authorize-initialize", "authorize-recovery"] {
+            assert!(matches!(
+                parse_command(&[command, "principal", "file"].map(String::from)),
+                Err(AdminError::UnknownCommand)
+            ));
+        }
+        assert!(
+            parse_command(
+                &[
+                    "initialize",
+                    "principal",
+                    "login",
+                    "password",
+                    "authorization"
+                ]
+                .map(String::from)
+            )
+            .is_err()
+        );
+        assert!(
+            parse_command(&["recover", "principal", "password", "authorization"].map(String::from))
+                .is_err()
+        );
+    }
+    #[test]
     fn commands_fail_before_opening_configuration_or_provider() {
         for (command, count) in [
-            ("authorize-initialize", 3),
-            ("authorize-recovery", 3),
-            ("initialize", 5),
-            ("recover", 4),
+            ("initialize", 4),
+            ("recover", 3),
             ("create", 6),
             ("password", 5),
             ("enable", 4),
@@ -308,20 +459,30 @@ mod tests {
             if command == "create" {
                 args[5] = "member".into();
             }
-            validate_command(&args).unwrap();
+            let parsed = parse_command(&args).unwrap();
+            assert_eq!(
+                parsed.profile(),
+                if matches!(command, "initialize" | "recover") {
+                    AuthorityProfile::Maintenance
+                } else {
+                    AuthorityProfile::Runtime
+                }
+            );
+            assert!(
+                usage()
+                    .lines()
+                    .any(|line| line.starts_with(&format!("  {command} ")))
+            );
             args.pop();
-            assert!(matches!(
-                validate_command(&args),
-                Err(AdminError::Arguments)
-            ));
-            assert!(USAGE.contains(command));
+            assert!(matches!(parse_command(&args), Err(AdminError::Arguments)));
+            assert!(usage().contains(command));
         }
         assert!(matches!(
-            validate_command(&["private-value".into()]),
+            parse_command(&["private-value".into()]),
             Err(AdminError::UnknownCommand)
         ));
         let error =
-            validate_command(&["create", "a", "b", "c", "d", "private-value"].map(String::from))
+            parse_command(&["create", "a", "b", "c", "d", "private-value"].map(String::from))
                 .unwrap_err();
         assert!(matches!(error, AdminError::Role));
         assert!(!error.to_string().contains("private-value"));

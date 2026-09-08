@@ -86,8 +86,8 @@ def wait(url):
     raise RuntimeError(f'provider readiness timed out: {last}')
 
 def cargo(package, test, env, features=()):
-    expected = {('access-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_and_authorization_budgets', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
-                ('access-admin', 'operator'): {'delivery_failure_can_be_resigned'},
+    expected = {('access-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
+                ('access-admin', 'operator'): {'maintenance_file_and_settlement'},
                 ('access-oidc', 'provider'): {'real_provider_flows'}}[(package, test)]
     command = ['cargo', 'test', '--locked', '-p', package, '--test', test, *features, '--', '--ignored', '--test-threads=1']
     environment = {**os.environ, **env, 'CARGO_TARGET_DIR': str(ROOT / 'target')}

@@ -4,4 +4,4 @@ I01 固定首期产品会话路径、协议 owner、租户模型与撤销承诺�
 
 - [#2331 身份与产品会话协议](202609080001-2331-access-identity-protocol.md)
 
-- [#2333 本地账户 authority](202609080509-2333-local-authority.md)
+- [#2333 / #2358 本地账户 authority 与维护边界](202609080509-2333-local-authority.md)

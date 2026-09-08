@@ -97,3 +97,7 @@ I03–I05 必须在各自实现时闭合安全事件，不能最后另加一个�
 #2331 与 #2332 在同一个 PR 内按协议→core→PG→OIDC→CI 顺序实施，保留原有逻辑 Predecessor。当前基准为 RSS `bf5dd1350997d01aa834094a3347fce30247814e`，未来升级必须显式修改 rev/lock 并重新验证。未发布 registry 包不再构成阻塞。
 
 [协议 ADR](adr/202609080001-2331-access-identity-protocol.md) 与 [wire 草案](access-wire-v1.md) 为新设计入口；I03 自有账户和事件，I04 自有会话及撤销，I05 openidconnect/Keycloak 上游，I06 Hydra 下游和单一验证接缝，I07 自有登录/管理 UI，I08 包含 Hydra 装配。I09/T31–T33/M01 分别证明恢复、生产 join 和 MDM 权限，不能用本次接缝测试替代。
+
+## I03 后续简化
+
+[#2358](https://dev.azure.com/shengming0923/rss/_workitems/edit/2358) 收敛初始化/管理员恢复为独立维护身份的单条命令，删除授权票据与文件交付。日常 CLI 继续复用 I03 业务规则，#2337 接入 API/UI；#2338/#2339 分别持有生产注入与恢复治理，#2341 仍独立证明 T3。schema 2 仅按已确认的可丢弃开发库重建，实际测试与交付状态以 PR/看板为准。
