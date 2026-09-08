@@ -71,3 +71,7 @@ Rust 优先复用成熟 openidconnect/oauth2、密码学、SQLx、Axum 等上游
 ## 7. 设计阶段必须闭合的决定
 
 I01 冻结首个 MDM 部署域名与会话路径、内部交接/标准协议选择、client 认证方式、撤销策略和延迟、租户与 principal 模型、初期 UI owner、首个 IdP 及本地应急策略。冻结决定见 [I01 ADR](../architecture/adr/202609080001-2331-access-identity-protocol.md)；冻结不代表已验证运行，不建设通用授权服务器。
+
+## I03 实施边界
+
+账户 authority、PG 原子事件与本机初始化/恢复按 [I03 ADR](../architecture/adr/202609080509-2333-local-authority.md) 实施。I03 提供账户 Rust API 与 access-admin；登录/session HTTP 归 #2334，账户管理 HTTP/UI 归 #2337。范围决定不代表测试或生产验收已通过。

@@ -1,6 +1,6 @@
 # RSS Access 协作说明
 
-rss-access 是本地认证、租户联合身份接入与服务端会话产品仓。产品需求由 [PRD](docs/product/rss-access-prd.md) 持有；当前建立 I01/I02 协议与工程接缝；完整账户、会话和产品服务仍由后续实施项交付。
+rss-access 是本地认证、租户联合身份接入与服务端会话产品仓。产品需求由 [PRD](docs/product/rss-access-prd.md) 持有；当前具有 I01/I02 协议与工程接缝及 I03 本地账户/本机管理机制；会话、HTTP/UI 和产品服务仍由后续实施项交付。
 
 ## 工作方式
 

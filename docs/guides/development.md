@@ -16,7 +16,7 @@ make ci
 ## 实际实现与证明范围
 
 - `access-core` 持有租户/issuer/client/audience 绑定及会话快照有效性检查。issuer/client/audience、principal/session、epoch/UnixTime 分别由私有字段 newtype 表达，参数互换有 compile-fail 验证。它不认证 HTTP 请求，也不把普通输入转换为 VerifiedContext。
-- `access-postgres` 注入 RSS PgRuntime，业务 SQL 与安全事件 Outbox 在同一事务内提交。明确返回回滚、回滚失败、提交不确定及 fencing；重复事件拒绝并回滚本次业务写入。
+- `access-postgres` 注入 RSS PgRuntime，具体账户操作与关闭的安全事件在同一事务提交；不再开放 I02 的任意 SQL/字节事件探针。明确保留回滚、回滚失败、提交不确定及 fencing。
 - `access-oidc` 通过 openidconnect 完成 discovery、Authorization Code + PKCE、state/nonce/ID token 校验，返回上游 subject，尚不执行 Access JIT 或建立产品会话。出站限制为配置 issuer 同源、禁止重定向、5 秒超时和 1 MiB 响应上限。生产配置必须 HTTPS，`test-support` 仅开放显式 loopback fixture 构造器。
 
 真实 PG 测试覆盖正常提交、SQL 失败回滚、CommitUnknownAfterAck、重复事件、跨租户 RLS 与 outbox 绑定。真实 Keycloak/Hydra 测试覆盖发现、code exchange、S256、重放、错误 state/nonce/verifier/redirect 及 provider 不可用。补充签名 token 的 azp/issuer/audience/expiry 负例、外源 discovery/JWKS、禁止跳转、响应上限和容器清理失败测试。Hydra 的 login/consent 接受逻辑是测试夹具，不是 Access authority 实现。
@@ -47,3 +47,31 @@ owner shengming。仅 access-oidc 0.1.0 → openidconnect 4.0.1 → rsa 0.9.10 �
 [RustSec 公告](https://rustsec.org/advisories/RUSTSEC-2023-0071.html)、
 [openidconnect DiscoveryError](https://github.com/ramosbugs/openidconnect-rs/blob/4.0.1/src/discovery/mod.rs)、
 [oauth2 semantic types](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/types.rs)。
+
+## I03 本机账户管理
+
+I03 使用 `access-admin`，不启动 HTTP；账户管理 API 的网络接入随 I04/I07 真实 session 交付。构建 `cargo build --locked -p access-admin`。
+
+配置 JSON 必填：`host`、`port`、`database`、`user`、`password_file`、`ca_file`、`tenant_id`、`storage_target`、`storage_lineage`、`storage_tenant_epoch`。两个 storage identity 字段是非零 16 字节数组；epoch 是 RSS 存储 fencing 值，不是账户 epoch。拒绝未知字段，生产连接始终 VerifyFull。不得用测试明文 profile 连接生产。RSS schema/lineage/tenant binding 及 Access MIGRATION_SQL 由部署 owner 先配置；本工具不自动迁移或重置数据库。
+
+独立签发身份加入 `access_authorization_issuer`，普通运行身份加入 `access_account_runtime`，勿给普通身份继承签发角色。配置中的数据库密码、新口令、当前口令及授权 secret 均从普通 `0600` 文件读取，拒绝符号链接和 group/other 权限。文件按原字节读取：使用 `printf`，不要用会额外添加换行的 `echo`。secret 不放参数、环境变量、stdout 或日志。下列命令中的配置与 secret 参数均为文件路径：
+
+```text
+access-admin OPERATOR_CONFIG authorize-initialize PRINCIPAL_UUID OUTPUT_SECRET_FILE
+access-admin RUNTIME_CONFIG initialize PRINCIPAL_UUID LOGIN PASSWORD_FILE AUTH_SECRET_FILE
+access-admin RUNTIME_CONFIG create ACTOR_LOGIN ACTOR_PASSWORD_FILE LOGIN NEW_PASSWORD_FILE member|admin|emergency
+access-admin RUNTIME_CONFIG enable|disable|grant-admin|revoke-admin|enable-membership|disable-membership ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID
+access-admin RUNTIME_CONFIG password ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID NEW_PASSWORD_FILE
+access-admin OPERATOR_CONFIG authorize-recovery PRINCIPAL_UUID OUTPUT_SECRET_FILE
+access-admin RUNTIME_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE AUTH_SECRET_FILE
+```
+
+初始化的 Principal UUID 由部署 owner 随机生成并用于授权/消费的同一目标；初始化后不能重新夺取部署 authority。命令成功仅输出主体/epoch 或交付状态。授权输出文件必须不存在；交付失败时使用新输出路径重新签发，旧 secret 自动失效。提交未知不得重复消费或宣称成功；先由授权操作者重签。密码恢复保留禁用/成员/角色状态，不能借恢复升级权限。
+
+真实 PG 验证按命名场景运行初始化/恢复、账户竞态/租户隔离、共享限流和 settlement 故障，保留确切 runner 用例集合；`cargo test` 默认跳过 provider 测试，必须另跑 `make test-pg`。I03 证明账户与事件/epoch，不证明 session、Hydra 或产品 T3 已实现。详见 I03 ADR。
+
+I03 内审补充：Access 安装 SQL 必须整批事务执行。两个 NOLOGIN 权限角色必须由本次安装新建；发现同名角色立即失败，不接纳其历史权限或成员。此版本要求该角色命名空间归单一 Access 部署，不能在同集群另一数据库静默复用。`Authority::connect` 在公开对象前检查 schema 版本、关键约束、RLS 谓词和 runtime/issuer 的必需及禁止权限（包括可达高权角色）。角色/存储漂移返回安全的不兼容分类。
+
+配置/CA 只接受有界普通文件（16 KiB / 1 MiB），拒绝末端 symlink/FIFO。PG 关闭最多等待 5 秒，超时提示不改变已确认业务结果，不据此重试业务命令。I03 provider runner 使用隔离 loopback PG 证明 adapter 与文件交付 T2。真实生产 binary/config/TLS 装配证明归 #2341/T32 的独立 PR；本 PR 不含该 T3。
+
+`access-admin --help` 可离线查看参数。错误只显示类别：unknown command、wrong arity、JSON、tenant_id、CA、storage identity/epoch 或账户字段；不回显配置值、秘密或 provider 原文。最后管理员保护与 generation 耗尽仅在确认回滚后报告具体领域原因。

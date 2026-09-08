@@ -2,6 +2,7 @@
 //!
 //! Passing these checks does not authenticate a caller. The future I06 authority must first
 //! authenticate the protocol credential and load the authoritative session from storage.
+pub mod account;
 use rss_request_context::TenantId;
 use uuid::Uuid;
 
@@ -9,6 +10,12 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrincipalId(Uuid);
 impl PrincipalId {
+    pub fn generate() -> Self {
+        Self(Uuid::new_v4())
+    }
+    pub fn as_uuid(self) -> Uuid {
+        self.0
+    }
     /// Parse a non-nil UUID from the authoritative source.
     pub fn parse(value: &str) -> Result<Self, ValidationError> {
         let id = Uuid::parse_str(value).map_err(|_| ValidationError::InvalidValue)?;

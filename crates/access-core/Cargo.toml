@@ -8,5 +8,9 @@ publish.workspace = true
 rss-request-context.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+argon2.workspace = true
+rand_core.workspace = true
+zeroize.workspace = true
 [lints]
 workspace = true

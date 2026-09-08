@@ -1,0 +1,124 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "tenant",
+    "principal",
+    "actor",
+    "epoch",
+    "state"
+  ],
+  "properties": {
+    "action": {
+      "enum": [
+        "initialization_authorized",
+        "recovery_authorized",
+        "initialized",
+        "account_created",
+        "account_enabled",
+        "account_disabled",
+        "administrator_granted",
+        "administrator_revoked",
+        "membership_enabled",
+        "membership_disabled",
+        "password_changed",
+        "administrator_recovered"
+      ]
+    },
+    "tenant": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "principal": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "actor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "state": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "administrator",
+            "emergency",
+            "member_active",
+            "credential_version",
+            "membership_epoch"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "administrator": {
+              "type": "boolean"
+            },
+            "emergency": {
+              "type": "boolean"
+            },
+            "member_active": {
+              "type": "boolean"
+            },
+            "credential_version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "membership_epoch": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "enum": [
+              "initialization_authorized",
+              "recovery_authorized"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "state": {
+            "type": "null"
+          },
+          "actor": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "state": {
+            "type": "object"
+          },
+          "epoch": {
+            "minimum": 1
+          }
+        }
+      }
+    }
+  ]
+}

@@ -47,7 +47,7 @@ I06 + Access 候选 artifact → M01 MDM 接入与业务授权
 I08 → I09 二级商用认证/恢复闭环
 ```
 
-I05 的配置与协议部分可在 I02 后推进，最终验收等待 I04。每项包含自己的 domain、schema、adapter、HTTP 和必要 T1/T2，不按“先写完所有 domain 再写所有 adapter”形成大批未验证中间层。
+I05 的配置与协议部分可在 I02 后推进，最终验收等待 I04。每项交付前置已闭合的 domain、schema、adapter、应用 API 与必要 T1/T2。I03 提供真实账户 Rust API 和本机管理工具；I04 首次建立登录/session HTTP 与认证提取；I07 复用真实 session 增加账户管理 HTTP/UI。不为提前挂载路由建立临时认证协议或占位认证器。
 
 ## 实施项范围
 

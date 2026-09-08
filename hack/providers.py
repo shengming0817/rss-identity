@@ -86,9 +86,10 @@ def wait(url):
     raise RuntimeError(f'provider readiness timed out: {last}')
 
 def cargo(package, test, env, features=()):
-    expected = {('access-postgres', 'atomic'): {'business_and_security_event_are_atomic'},
+    expected = {('access-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_and_authorization_budgets', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
+                ('access-admin', 'operator'): {'delivery_failure_can_be_resigned'},
                 ('access-oidc', 'provider'): {'real_provider_flows'}}[(package, test)]
-    command = ['cargo', 'test', '--locked', '-p', package, '--test', test, *features, '--', '--ignored']
+    command = ['cargo', 'test', '--locked', '-p', package, '--test', test, *features, '--', '--ignored', '--test-threads=1']
     environment = {**os.environ, **env, 'CARGO_TARGET_DIR': str(ROOT / 'target')}
     listing = subprocess.run([*command, '--list'], cwd=ROOT, env=environment, check=True, text=True, stdout=subprocess.PIPE).stdout
     names = re.findall(r'^(.+): test$', listing, re.M)
@@ -108,7 +109,9 @@ def pg():
             if p.returncode == 0: break
             time.sleep(0.5)
         else: raise RuntimeError(f"PostgreSQL readiness timed out: pg_isready exit={p.returncode}")
-        cargo("access-postgres", "atomic", {"ACCESS_TEST_PG_PORT": str(ports[5432])})
+        env = {"ACCESS_TEST_PG_PORT": str(ports[5432])}
+        cargo("access-postgres", "atomic", env)
+        cargo("access-admin", "operator", env)
 
 
 def free_port():
