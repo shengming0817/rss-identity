@@ -1,0 +1,266 @@
+use super::*;
+use openidconnect::core::{
+    CoreHmacKey, CoreIdToken, CoreIdTokenClaims, CoreIdTokenVerifier, CoreJsonWebKeySet,
+    CoreJwsSigningAlgorithm,
+};
+use serde_json::json;
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+};
+
+#[test]
+fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
+    let client = ClientId::new("client".into());
+    let issuer = IssuerUrl::new("https://issuer.test".into()).unwrap();
+    let verifier = CoreIdTokenVerifier::new_confidential_client(
+        client.clone(),
+        ClientSecret::new("fixture-secret".into()),
+        issuer,
+        CoreJsonWebKeySet::new(vec![]),
+    )
+    .set_allowed_algs(vec![CoreJwsSigningAlgorithm::HmacSha256]);
+    for (field, value, valid) in [
+        ("azp", json!(null), true),
+        ("azp", json!("client"), true),
+        ("azp", json!("other-client"), false),
+        ("iss", json!("https://other.test"), false),
+        ("aud", json!(["other-client"]), false),
+        ("exp", json!(1), false),
+    ] {
+        let mut value_claims = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce"});
+        if !value.is_null() {
+            value_claims[field] = value;
+        }
+        let claims: CoreIdTokenClaims = serde_json::from_value(value_claims).unwrap();
+        let token = CoreIdToken::new(
+            claims,
+            &CoreHmacKey::new("fixture-secret"),
+            CoreJwsSigningAlgorithm::HmacSha256,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_subject(&token, &verifier, &Nonce::new("nonce".into()), &client).is_ok(),
+            valid,
+            "{field}"
+        );
+    }
+}
+
+fn server(status: &str, extra: &str, body: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
+        body.len()
+    );
+    let handle = std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let start = std::time::Instant::now();
+        loop {
+            match listener.accept() {
+                Ok((mut socket, _)) => {
+                    socket.set_nonblocking(false).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    socket
+                        .set_write_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut request = [0; 8192];
+                    assert!(socket.read(&mut request).unwrap() > 0);
+                    let _ = socket
+                        .write_all(header.as_bytes())
+                        .and_then(|_| socket.write_all(&body));
+                    return;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        start.elapsed() < Duration::from_secs(5),
+                        "fixture request timed out"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+    (url, handle)
+}
+fn transport(origin: &str) -> Transport {
+    Transport::new(origin.into()).unwrap()
+}
+async fn get(t: &Transport, url: &str) -> Result<HttpResponse, OidcError> {
+    t.call(
+        openidconnect::http::Request::builder()
+            .uri(url)
+            .body(vec![])
+            .unwrap(),
+    )
+    .await
+}
+#[tokio::test]
+async fn outbound_origin_redirect_and_size_are_enforced() {
+    let (url, handle) = server("200 OK", "", b"ok".to_vec());
+    assert_eq!(get(&transport(&url), &url).await.unwrap().body(), b"ok");
+    handle.join().unwrap();
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    target.set_nonblocking(true).unwrap();
+    let target_url = format!("http://{}", target.local_addr().unwrap());
+    assert!(matches!(
+        get(&transport("https://issuer.test"), &target_url).await,
+        Err(OidcError::Configuration)
+    ));
+    let (url, handle) = server("302 Found", &format!("Location: {target_url}\r\n"), vec![]);
+    assert_eq!(get(&transport(&url), &url).await.unwrap().status(), 302);
+    handle.join().unwrap();
+    assert_eq!(
+        target.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    let (url, handle) = server("200 OK", "", vec![b'x'; 1024 * 1024 + 1]);
+    assert!(matches!(
+        get(&transport(&url), &url).await,
+        Err(OidcError::Unavailable)
+    ));
+    handle.join().unwrap();
+}
+
+#[tokio::test]
+async fn discovery_rejects_external_authorization_and_jwks() {
+    for external_jwks in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let forbidden = TcpListener::bind("127.0.0.1:0").unwrap();
+        forbidden.set_nonblocking(true).unwrap();
+        let external = format!("http://{}", forbidden.local_addr().unwrap());
+        let metadata = json!({
+            "issuer": issuer,
+            "authorization_endpoint": if external_jwks { issuer.clone() } else { external.clone() },
+            "token_endpoint": issuer,
+            "jwks_uri": if external_jwks { external } else { issuer.clone() },
+            "response_types_supported": ["code"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"]
+        });
+        let handle = std::thread::spawn(move || {
+            let responses = if external_jwks {
+                vec![metadata]
+            } else {
+                vec![metadata, json!({"keys":[]})]
+            };
+            for body in responses {
+                let start = std::time::Instant::now();
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(start.elapsed() < Duration::from_secs(5));
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                assert!(socket.read(&mut [0; 8192]).unwrap() > 0);
+                let body = body.to_string();
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let result = Provider::discover(
+            ProviderConfig::parse(
+                &issuer,
+                "client",
+                "secret",
+                "http://127.0.0.1/callback",
+                true,
+            )
+            .unwrap(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(OidcError::Discovery | OidcError::Configuration)
+        ));
+        handle.join().unwrap();
+        assert_eq!(
+            forbidden.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+}
+
+#[tokio::test]
+async fn discovery_preserves_unavailable_and_protocol_failure() {
+    for (status, body, unavailable) in [
+        ("503 Service Unavailable", b"private error".to_vec(), true),
+        ("200 OK", b"invalid json".to_vec(), false),
+    ] {
+        let (issuer, handle) = server(status, "", body);
+        let config = ProviderConfig::parse(
+            &issuer,
+            "client",
+            "secret",
+            "http://127.0.0.1/callback",
+            true,
+        )
+        .unwrap();
+        let error = Provider::discover(config).await.err().unwrap();
+        assert_eq!(matches!(error, OidcError::Unavailable), unavailable);
+        if !unavailable {
+            assert!(matches!(error, OidcError::Discovery));
+        }
+        handle.join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn exchange_preserves_unavailable_and_protocol_failure() {
+    for (status, body, unavailable) in [
+        ("503 Service Unavailable", b"private error".to_vec(), true),
+        (
+            "400 Bad Request",
+            br#"{"error":"invalid_grant"}"#.to_vec(),
+            false,
+        ),
+    ] {
+        let (issuer, handle) = server(status, "Content-Type: application/json\r\n", body);
+        let metadata: CoreProviderMetadata = serde_json::from_value(json!({
+            "issuer":issuer,"authorization_endpoint":issuer,"token_endpoint":issuer,"jwks_uri":issuer,
+            "response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]
+        })).unwrap();
+        let p = Provider {
+            config: ProviderConfig::parse(
+                &issuer,
+                "client",
+                "secret",
+                "http://127.0.0.1/callback",
+                true,
+            )
+            .unwrap(),
+            metadata,
+            transport: transport(&issuer),
+        };
+        let (_, attempt) = p.begin();
+        let state = attempt.state.secret().clone();
+        let error = p
+            .finish(attempt, &state, "code".into())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(matches!(error, OidcError::Unavailable), unavailable);
+        if !unavailable {
+            assert!(matches!(error, OidcError::Exchange));
+        }
+        handle.join().unwrap();
+    }
+}

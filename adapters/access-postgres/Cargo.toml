@@ -1,0 +1,20 @@
+[package]
+name = "access-postgres"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+[dependencies]
+rss-request-context.workspace = true
+rss-transactional-messaging.workspace = true
+rss-transactional-messaging-postgres.workspace = true
+futures = "0.3"
+thiserror.workspace = true
+[dev-dependencies]
+anyhow.workspace = true
+rss-contract.workspace = true
+rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
+sqlx.workspace = true
+tokio.workspace = true
+[lints]
+workspace = true

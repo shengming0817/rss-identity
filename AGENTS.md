@@ -1,6 +1,6 @@
 # RSS Access 协作说明
 
-rss-access 是本地认证、租户联合身份接入与服务端会话产品仓。产品需求由 [PRD](docs/product/rss-access-prd.md) 持有；当前只有需求与设计文档，尚无产品实现。
+rss-access 是本地认证、租户联合身份接入与服务端会话产品仓。产品需求由 [PRD](docs/product/rss-access-prd.md) 持有；当前建立 I01/I02 协议与工程接缝；完整账户、会话和产品服务仍由后续实施项交付。
 
 ## 工作方式
 
@@ -15,7 +15,7 @@ rss-access 是本地认证、租户联合身份接入与服务端会话产品仓
 
 遵循 [范围规则](docs/rules/project-scope.md)。Access 拥有 AuthN、联合身份关联、登录会话和自身管理权限；产品资源 ABAC、设备证书、posture、attestation 属于 MDM/ZT。
 
-RSS 仅通过已发布版本化 crate 消费，不使用跨仓 path、submodule 或旧内部包。编译期消费者仅依赖稳定 contracts/client 或采用标准 wire 协议。不得恢复全局 diport、vocab、generated 或 provider 汇总 adapter。
+RSS 通过同一仓库 URL 与固定完整 Git commit 消费，提交独立 Cargo.lock；不使用浮动 branch/tag、消费方跨仓 path、submodule 或旧内部包。RSS 固定 checkout 内的包间 path 依赖属于同一源码闭包。编译期消费者仅依赖稳定 contracts/client 或采用标准 wire 协议。不得恢复全局 diport、vocab、generated 或 provider 汇总 adapter。
 
 ## 历史与上游参考
 
@@ -26,7 +26,7 @@ RSS 仅通过已发布版本化 crate 消费，不使用跨仓 path、submodule 
 
 ## 验证与交付
 
-遵循 [验证规则](docs/rules/verification-scope.md)。当前文档变更检查链接、来源、diff、忽略范围；没有代码和 CI，不执行父仓 `make ci` 代替产品证明。建立实现时同步登记真实 CI 入口。
+遵循 [验证规则](docs/rules/verification-scope.md)。文档变更检查链接、来源、diff、忽略范围；工程验证运行本仓 `make ci`，不执行父仓检查代替产品证明。
 
 产品 T3 必须独立 Issue、独立 PR、独立必要性评估，不混入实现 PR。已登记 Issue 索引在 [实施计划](docs/architecture/implementation-plan.md)；本地编号映射到真实 Azure work item ID，实时状态以看板为准。
 

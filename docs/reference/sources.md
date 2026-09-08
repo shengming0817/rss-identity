@@ -1,6 +1,6 @@
 # 需求证据索引
 
-读取日期：2026-09-07。仅做源码和文档分析，未运行 WinMDM、历史 RSS 或 Plane。本仓当前实现状态为“未实现”。引用上游行为用于补全需求，不证明本产品支持同一能力。
+读取日期：2026-09-07。仅做源码和文档分析，未运行 WinMDM、历史 RSS 或 Plane。此段记录历史需求分析；当前 I01/I02 实现与测试见开发指南。引用上游行为用于补全需求，不证明本产品支持同一能力。
 
 ## 消费者与 RSS 当前状态
 
@@ -65,3 +65,10 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - [Keycloak 官方 identity broker 文档](https://www.keycloak.org/docs/latest/server_admin/index.html#_identity_broker)：成熟上游可承担身份代理。用于 I01 的 build/buy 比较，不承诺本产品复制其 IAM 平台范围；动态文档须在实施时固定具体版本。
 
 安全需求并非由单个参考项目自动批准；PRD 的目标、I01 的协议决定、实现与测试证据各自保有 owner。
+
+## I01/I02 当前引用（2026-09-08）
+
+- RSS Git `bf5dd1350997d01aa834094a3347fce30247814e`：`crates/transactional-messaging-postgres/src/transaction.rs`、`tests/postgres-integration/tests/lifecycle/mod.rs`；公共 local_tx/with_connection/Outbox 事务组合。历史 `5b63e10...` 仍只作历史语义参考。
+- [openidconnect 4.0.1 src/lib.rs](https://github.com/ramosbugs/openidconnect-rs/blob/4.0.1/src/lib.rs)：客户端 discovery、PKCE、nonce 和 token 校验。
+- [Hydra v26.2.0 oauth2/handler.go](https://github.com/ory/hydra/blob/v26.2.0/oauth2/handler.go)：标准授权/token 端点，Apache-2.0；只通过协议组合，不复制 Go 实现。
+- 2026-09-08 crates.io 复核：contract/request-context/redact/transactional-messaging/transactional-messaging-postgres 索引 404；diag-context 0.1.0 artifact SHA-256 `31262d0e465e713c8d86b1f0907f03866ce66069d5ddbb4dac6de0c9e00c7d48` 与索引相符。该历史事实不再是 Git 消费的阻塞，也不证明完整闭包已发布。

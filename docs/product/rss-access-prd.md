@@ -1,6 +1,6 @@
 # RSS Access 产品需求
 
-版本：v0.1 需求草案；日期：2026-09-07。用户已确定独立 Access 产品方向；本文件的具体协议和验收目标尚待实施设计冻结。当前没有产品实现或验证结果。
+版本：v0.1 需求草案；日期：2026-09-07。用户已确定独立 Access 产品方向；本文件的具体协议和验收目标尚待实施设计冻结。I01/I02 建立协议和工程接缝，完整认证产品尚未实现；实际验证结果由实施 PR 持有。
 
 ## 1. 定位与消费者
 
@@ -24,7 +24,7 @@ Access 自身从第一版显式携带 TenantId，拒绝跨租户身份串用；�
 
 规范化主体包含 PrincipalId、TenantId、认证方式、认证时间、认证强度和 SessionId；groups/claims 标识来源与映射版本。设备信息只能说明客户端元数据，不能冒充已验证 DeviceContext。
 
-Access 中央登录会话与产品浏览器会话分开。建议首期由产品后端接收短时、单次、绑定目标 client/redirect 的登录交接，并通过受认证服务端接口兑换身份，建立产品 host-only cookie 会话；具体使用标准协议还是限定内部交接，必须在 I01 形成 ADR 后实施。禁止自制通用 OAuth 授权服务器。
+Access 中央登录会话与产品浏览器会话分开。首期使用 Hydra 提供标准 OIDC Authorization Code + PKCE S256；产品后端兑换凭据并建立 host-only cookie 会话。Access 自有身份状态与协议凭据分离，产品每次通过 Access 单一入口复核身份。禁止自制通用 OAuth 授权服务器。
 
 不依赖跨产品宽域 cookie，不把浏览器可构造的 JSON 直接反序列化为可信上下文。产品后端校验或查询成功才形成 VerifiedAccessContext。浏览器默认不接收上游 IdP token；若选 token-mediating 方案，必须显式修订浏览器 token 暴露范围。Access 不自动代理所有 MDM/ZT API。
 
@@ -66,8 +66,8 @@ Rust 优先复用成熟 openidconnect/oauth2、密码学、SQLx、Axum 等上游
 
 初始建议 `crates/access-core`、必要的 `crates/access-contracts`，`adapters/access-postgres`、`adapters/access-oidc`、`adapters/access-http-axum`，`app/access-server`。contracts/client/testkit 仅在真实跨 crate 消费出现时建立；先用包内模块组织 domain/application。具体目录与 package 数在 I02 按闭包冻结。
 
-产品有独立 lock/CI/发布。RSS 候选尚未发布是工程 I02 的依赖，不重新复制 RSS runtime 或 messaging。T3 在独立 Issue/PR 中证明装配独有风险，详见 [实施计划](../architecture/implementation-plan.md)。
+产品有独立 lock/CI/发布。RSS 使用固定完整 Git commit 与独立 lock 消费，发布不是 I02 前置；不复制 RSS runtime 或 messaging。T3 在独立 Issue/PR 中证明装配独有风险，详见 [实施计划](../architecture/implementation-plan.md)。
 
 ## 7. 设计阶段必须闭合的决定
 
-I01 冻结首个 MDM 部署域名与会话路径、内部交接/标准协议选择、client 认证方式、撤销策略和延迟、租户与 principal 模型、初期 UI owner、首个 IdP 及本地应急策略。当前建议不是已验证结论，不在问题未闭合时编码一个通用授权服务器。
+I01 冻结首个 MDM 部署域名与会话路径、内部交接/标准协议选择、client 认证方式、撤销策略和延迟、租户与 principal 模型、初期 UI owner、首个 IdP 及本地应急策略。冻结决定见 [I01 ADR](../architecture/adr/202609080001-2331-access-identity-protocol.md)；冻结不代表已验证运行，不建设通用授权服务器。

@@ -1,0 +1,18 @@
+trigger:
+  branches:
+    include: [develop]
+pr: none # Azure Repos PR validation is configured by branch build policy.
+pool:
+  vmImage: ubuntu-24.04
+steps:
+  - checkout: self
+    clean: true
+  - bash: |
+      set -euo pipefail
+      rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+      cargo +1.96.0 install cargo-deny --version 0.19.9 --locked
+    displayName: Install pinned Rust tooling
+  - bash: python3 hack/ci.py
+    displayName: Access T1 and real provider T2
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)

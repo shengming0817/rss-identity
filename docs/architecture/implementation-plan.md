@@ -36,7 +36,7 @@ Epic：`[ACCESS-R1/R2] 本地认证、租户 OIDC 与产品会话接入闭环`�
 
 ```text
 I01 范围/协议 ADR
-  → I02 工程、发布依赖与事务接缝
+  → I02 工程、固定 Git 消费与事务接缝
     → I03 本地 authority → I04 会话
     → I05 租户 OIDC/JIT（会话闭环依赖 I04）
 I04 + I05 → I06 下游交接
@@ -55,14 +55,14 @@ I05 的配置与协议部分可在 I02 后推进，最终验收等待 I04。每�
 | --- | --- | --- |
 | INIT：建立独立仓与需求基线 | 本次；参考 MDM 组织文档和 Git 配置 | origin/develop、local exclude、来源、PRD/计划；不声称代码/CI 已存在 |
 | I01：冻结身份、租户与产品会话协议 | ACC-01/08；MDM WMD-A01/02/03 对接；输出 ADR、wire 草案、威胁与失败路径 | 明确 BFF/中央 authority、租户成员、client 信任、cookie 域、撤销窗口、UI owner；登记 MDM 范围对齐，不导入 MDM domain |
-| I02：建立 Rust 工程、CI 和 RSS 版本消费 | I01；独立 workspace/lock、必要 crate、依赖许可证、真实 PG/OIDC 测试入口、RSS 事务接缝验证 | registry-only RSS 精确候选可消费；业务写与 Outbox 同事务最小 T2；没有已发布包则回报对应 RSS 发布 owner；不恢复旧内部包 |
-| I03：本地 authority、账户安全与原子事件 | I02；ACC-02/03/09；初始化、管理账户、密码/禁用/恢复；PG schema 与安全事件 | 并发初始化、账号状态/epoch 竞态、限流、KDF 有界、失败回滚、CommitUnknown 不发凭据；含必要 T1/T2，不含 T3 |
+| I02：建立 Rust 工程、CI 和 RSS 版本消费 | I01；独立 workspace/lock、必要 crate、依赖许可证、真实 PG/OIDC 测试入口、RSS 事务接缝验证 | 固定完整 Git commit、独立 lock 的 RSS 公共包可消费；业务写与 Outbox 同事务最小 T2；无浮动引用、双来源或旧内部包 |
+| I03：本地 authority、账户安全与原子事件 | I02；ACC-02/03/09；初始化、管理账户、密码/禁用/恢复、预建本地应急管理员与受控启用基础机制；PG schema 与安全事件 | 并发初始化、账号状态/epoch 竞态、限流、KDF 有界、失败回滚、CommitUnknown 不发凭据；含必要 T1/T2，不含 T3 |
 | I04：服务端会话、刷新与撤销 | I03；ACC-04/09；cookie/CSRF、期限、旋转、当前/全部撤销、会话查询 | 会话固定攻击、并发刷新、重放、存储不可用、密码/禁用导致失效、事件原子性；明确不等于上游 IdP 全局退出 |
 | I05：租户 IdP 与 OIDC/JIT 闭环 | I02；完成依赖 I04；ACC-05/06/07/09 | 配置管理与连接测试；Code/PKCE/state/nonce；配置变化/失效事务；邮箱与 subject linking；真实 IdP T2；无校验降级、无自动邮箱合并 |
 | I06：下游登录交接与验证 client | I04/I05；ACC-01/08；按 I01 冻结协议输出最小公共面 | 单次交接、client/audience/tenant 错配拒绝、认证服务端消费、撤销/缓存/故障；模拟 consumer 是 T2，真实 MDM 验收归 M01 |
 | I07：登录与身份管理交互闭环 | I03/I04/I05/I06；ACC-10 | 最小登录/回调错误/退出/会话列表、账户恢复、IdP 测试与管理页面；UI 和管理 API 权限负向验证；不建全套通用管理门户 |
 | I08：生产装配、迁移、发布与生命周期 | I03–I07；ACC-11 | config/secret/provider、迁移顺序、listener、readiness/drain、镜像与版本、运维手册、候选 artifact；装配验证不夹带 T3 |
-| I09：管理员 assurance 与生产恢复闭环（二级） | I08；ACC-12 | 选定 IdP MFA/step-up、本地应急账户、密钥轮转/备份恢复/容量与冻结 SLO；组件风险 T1/T2，新增产品 join hazard 另立 T3 Issue/PR，不能塞回此实现项 |
+| I09：管理员 assurance 与生产恢复闭环（二级） | I08；ACC-12 | 选定 IdP MFA/step-up、I03 本地应急账户的保管/使用后轮换与恢复演练、密钥轮转/备份恢复/容量与冻结 SLO；组件风险 T1/T2，新增产品 join hazard 另立 T3 Issue/PR，不能塞回此实现项 |
 
 I03–I05 必须在各自实现时闭合安全事件，不能最后另加一个“补 Outbox”任务改变已验收的原子性。I02 只证明通用事务接缝，不能替代这些业务负向证明。
 
@@ -91,3 +91,9 @@ I03–I05 必须在各自实现时闭合安全事件，不能最后另加一个�
 每项 body 包含：问题/消费者、关联 ACC 与 WMD ID、范围及不含项、blocked-by、来源 revision/path、T1/T2 或独立 T3 必要性、验收、依赖版本、退出条件。Epic 是 Parent；执行阻塞另建依赖关系，不能只靠子项显示顺序。
 
 全部工作项已登记，正文包含验收与来源，依赖通过原生 Predecessor 表达。I01 是首个无前置实施项；后续按依赖推进。I05 的 I04 依赖约束完整交付，配置准备可先行；二级 I09 与 T3 不因登记而自动宣称就绪或完成。
+
+## I01/I02 合并交付决定（2026-09-08）
+
+#2331 与 #2332 在同一个 PR 内按协议→core→PG→OIDC→CI 顺序实施，保留原有逻辑 Predecessor。当前基准为 RSS `bf5dd1350997d01aa834094a3347fce30247814e`，未来升级必须显式修改 rev/lock 并重新验证。未发布 registry 包不再构成阻塞。
+
+[协议 ADR](adr/202609080001-2331-access-identity-protocol.md) 与 [wire 草案](access-wire-v1.md) 为新设计入口；I03 自有账户和事件，I04 自有会话及撤销，I05 openidconnect/Keycloak 上游，I06 Hydra 下游和单一验证接缝，I07 自有登录/管理 UI，I08 包含 Hydra 装配。I09/T31–T33/M01 分别证明恢复、生产 join 和 MDM 权限，不能用本次接缝测试替代。

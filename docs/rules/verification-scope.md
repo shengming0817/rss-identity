@@ -5,8 +5,10 @@
 - T2：真实 PG 事务、登录事务原子消费、OIDC provider 交互、token 校验、Outbox 和产品 adapter 接缝。按风险附在所属实现 Issue 中。
 - T3：真实产品 binary/image/config/provider 的装配闭环；每项独立 Issue、独立 PR、独立必要性评估。只验证低层看不到的 join hazard。
 
-当前没有产品代码或 CI。建立工程时提供本仓实际检查入口，并同步 AGENTS.md；不得使用 RSS CI 或历史测试记录代替 Access 测试。
+本仓检查入口为 `make ci`：locked 构建、fmt、clippy、T1、真实 PG/OIDC T2、依赖来源、生产/测试 feature 精确集合、许可证与安全公告检查。缺少 Docker/provider 时失败，不静默跳过。不得使用 RSS CI 或历史测试记录代替 Access 测试。
 
 生产验收绑定版本、artifact、配置身份、provider 版本、实际行为、故障和未覆盖项。预发布冻结会话期限、撤销最大延迟、登录限流、容量、RPO/RTO、支持 IdP 矩阵，不凭经验数字宣称 SLO。
 
 MDM 接入证明自己的身份消费和资源授权，不重复 Access 全套 SSO T3。模拟消费者可以证明 Access 端行为，不能替代真实 MDM 接入证据。
+
+固定 Git 消费证明绑定仓库 URL、完整 SHA、package 版本、Cargo.lock 和实际 features。干净环境从 Git 获取源码，排除祖先 Cargo 配置；RSS Git checkout 内部 path 依赖允许，消费方本机跨仓 path 禁止。产品镜像/二进制以摘要绑定该构建身份；不伪称已发布 registry artifact。
