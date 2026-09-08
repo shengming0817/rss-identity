@@ -24,7 +24,7 @@ def docker(*args):
 
 @contextlib.contextmanager
 def container(image, ports, env=(), args=(), mounts=()):
-    name = "access-t2-" + uuid.uuid4().hex
+    name = "identity-t2-" + uuid.uuid4().hex
     command = ["run", "-d", "--name", name]
     for port in ports:
         host = ports[port] if isinstance(ports, dict) else ""
@@ -86,9 +86,9 @@ def wait(url):
     raise RuntimeError(f'provider readiness timed out: {last}')
 
 def cargo(package, test, env, features=()):
-    expected = {('access-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
-                ('access-admin', 'operator'): {'maintenance_file_and_settlement'},
-                ('access-oidc', 'provider'): {'real_provider_flows'}}[(package, test)]
+    expected = {('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
+                ('rss-identity-admin', 'operator'): {'maintenance_file_and_settlement'},
+                ('rss-identity-oidc', 'provider'): {'real_provider_flows'}}[(package, test)]
     command = ['cargo', 'test', '--locked', '-p', package, '--test', test, *features, '--', '--ignored', '--test-threads=1']
     environment = {**os.environ, **env, 'CARGO_TARGET_DIR': str(ROOT / 'target')}
     listing = subprocess.run([*command, '--list'], cwd=ROOT, env=environment, check=True, text=True, stdout=subprocess.PIPE).stdout
@@ -109,9 +109,9 @@ def pg():
             if p.returncode == 0: break
             time.sleep(0.5)
         else: raise RuntimeError(f"PostgreSQL readiness timed out: pg_isready exit={p.returncode}")
-        env = {"ACCESS_TEST_PG_PORT": str(ports[5432])}
-        cargo("access-postgres", "atomic", env)
-        cargo("access-admin", "operator", env)
+        env = {"IDENTITY_TEST_PG_PORT": str(ports[5432])}
+        cargo("rss-identity-postgres", "atomic", env)
+        cargo("rss-identity-admin", "operator", env)
 
 
 def free_port():
@@ -139,31 +139,31 @@ def hydra():
         yield issuer, ports
 
 def oidc():
-    realm = {"realm": "access", "enabled": True, "sslRequired": "none",
-             "clients": [{"clientId": "access-test", "secret": "fixture-secret", "publicClient": False,
+    realm = {"realm": "identity", "enabled": True, "sslRequired": "none",
+             "clients": [{"clientId": "identity-test", "secret": "fixture-secret", "publicClient": False,
                           "standardFlowEnabled": True, "directAccessGrantsEnabled": False,
                           "redirectUris": ["http://127.0.0.1:19999/auth/callback"],
                           "attributes": {"pkce.code.challenge.method": "S256"}}],
              "users": [{"username": "alice", "enabled": True, "email": "alice@example.test", "emailVerified": True,
                         "firstName": "Alice", "lastName": "Fixture",
                         "credentials": [{"type": "password", "value": "fixture-password", "temporary": False}]}]}
-    with tempfile.TemporaryDirectory(prefix="access-oidc-") as tmp, contextlib.ExitStack() as stack:
-        realm_file = Path(tmp) / "access-realm.json"
+    with tempfile.TemporaryDirectory(prefix="identity-oidc-") as tmp, contextlib.ExitStack() as stack:
+        realm_file = Path(tmp) / "identity-realm.json"
         realm_file.write_text(json.dumps(realm))
-        _, kc_ports = stack.enter_context(container(KEYCLOAK, [8080], args=["start-dev", "--import-realm"], mounts=[f"{realm_file}:/opt/keycloak/data/import/access-realm.json:ro"]))
-        kc = f"http://127.0.0.1:{kc_ports[8080]}/realms/access"
+        _, kc_ports = stack.enter_context(container(KEYCLOAK, [8080], args=["start-dev", "--import-realm"], mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro"]))
+        kc = f"http://127.0.0.1:{kc_ports[8080]}/realms/identity"
         wait(kc + "/.well-known/openid-configuration")
         issuer, hydra_ports = stack.enter_context(hydra())
         admin = f"http://127.0.0.1:{hydra_ports[4445]}"
         wait(issuer + ".well-known/openid-configuration")
-        client = {"client_id": "access-test", "client_secret": "fixture-secret", "grant_types": ["authorization_code"],
+        client = {"client_id": "identity-test", "client_secret": "fixture-secret", "grant_types": ["authorization_code"],
                   "response_types": ["code"], "scope": "openid profile", "token_endpoint_auth_method": "client_secret_basic",
                   "redirect_uris": ["http://127.0.0.1:19999/auth/callback"]}
         req = urllib.request.Request(admin + "/admin/clients", data=json.dumps(client).encode(), headers={"Content-Type":"application/json"})
         with urllib.request.urlopen(req, timeout=10) as response:
             if response.status != 201: raise RuntimeError("Hydra client registration failed")
-        cargo("access-oidc", "provider", {"ACCESS_TEST_KEYCLOAK_ISSUER": kc, "ACCESS_TEST_HYDRA_ISSUER": issuer,
-              "ACCESS_TEST_HYDRA_ADMIN": admin}, ["--features", "test-support"])
+        cargo("rss-identity-oidc", "provider", {"IDENTITY_TEST_KEYCLOAK_ISSUER": kc, "IDENTITY_TEST_HYDRA_ISSUER": issuer,
+              "IDENTITY_TEST_HYDRA_ADMIN": admin}, ["--features", "test-support"])
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["pg"]: pg()

@@ -3,73 +3,6 @@
 version = 4
 
 [[package]]
-name = "access-admin"
-version = "0.1.0"
-dependencies = [
- "access-core",
- "access-postgres",
- "anyhow",
- "libc",
- "rss-request-context",
- "rss-transactional-messaging",
- "rss-transactional-messaging-postgres",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "access-core"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "rand_core 0.6.4",
- "rss-request-context",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "access-oidc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "constant_time_eq",
- "openidconnect",
- "reqwest",
- "scraper",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "access-postgres"
-version = "0.1.0"
-dependencies = [
- "access-core",
- "anyhow",
- "futures",
- "rss-contract",
- "rss-request-context",
- "rss-transactional-messaging",
- "rss-transactional-messaging-postgres",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2106,6 +2039,73 @@ version = "0.1.0"
 source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=bf5dd1350997d01aa834094a3347fce30247814e#bf5dd1350997d01aa834094a3347fce30247814e"
 dependencies = [
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rss-identity-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "rss-identity-core",
+ "rss-identity-postgres",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "rss-identity-core"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "rand_core 0.6.4",
+ "rss-request-context",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "rss-identity-oidc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "constant_time_eq",
+ "openidconnect",
+ "reqwest",
+ "scraper",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rss-identity-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rss-contract",
+ "rss-identity-core",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

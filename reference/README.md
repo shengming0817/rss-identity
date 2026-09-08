@@ -5,9 +5,9 @@
 ## WinMDM
 
 本机来源：`/Users/shengming/Documents/code/rss/rss-mdm/reference/winmdm20260220-develop`。
-Access 可用本地软链接 `reference/winmdm20260220-develop` 查阅同一快照，不复制整个目录。该链接不入 Git，不是 Git submodule，也不是 Cargo 依赖。
+Identity 可用本地软链接 `reference/winmdm20260220-develop` 查阅同一快照，不复制整个目录。该链接不入 Git，不是 Git submodule，也不是 Cargo 依赖。
 
-同级布局下，在 Access 根目录恢复：
+同级布局下，在 Identity 根目录恢复：
 
 ```sh
 printf '\n/reference/winmdm20260220-develop\n' >> .git/info/exclude
@@ -26,10 +26,10 @@ ln -s ../../rss-mdm/reference/winmdm20260220-develop reference/winmdm20260220-de
 /usr/bin/git -C /path/to/rss show 5b63e10a1b396b0ff70b7d1e6e55db296cd7a891:crates/identity/src/application/mod.rs
 ```
 
-RSS 与 WinMDM 内部规则和历史运行配置不成为 Access 规则。历史源码未在本次运行，缺陷分析不等于生产事故结论。
+RSS 与 WinMDM 内部规则和历史运行配置不成为 Identity 规则。历史源码未在本次运行，缺陷分析不等于生产事故结论。
 
 ## 本地 Git 排除
 
-初始化已在父 RSS `.git/info/exclude` 添加 `/rss-access/`；Access 自己的 exclude 持有 `/reference/winmdm20260220-develop`、`/worktrees/`、构建产物、IDE 与本地环境文件规则。exclude 不随 Git 分发，新机器需显式配置；任何密钥均不得提交。
+初始化已在父 RSS `.git/info/exclude` 添加 `/rss-identity/`；Identity 自己的 exclude 持有 `/reference/winmdm20260220-develop`、`/worktrees/`、构建产物、IDE 与本地环境文件规则。exclude 不随 Git 分发，新机器需显式配置；任何密钥均不得提交。
 
 上游与行为来源见 [证据索引](../docs/reference/sources.md)。

@@ -15,11 +15,11 @@ make ci
 
 ## 实际实现与证明范围
 
-- `access-core` 持有租户/issuer/client/audience 绑定及会话快照有效性检查。issuer/client/audience、principal/session、epoch/UnixTime 分别由私有字段 newtype 表达，参数互换有 compile-fail 验证。它不认证 HTTP 请求，也不把普通输入转换为 VerifiedContext。
-- `access-postgres` 注入 RSS PgRuntime，具体账户操作与关闭的安全事件在同一事务提交；不再开放 I02 的任意 SQL/字节事件探针。明确保留回滚、回滚失败、提交不确定及 fencing。
-- `access-oidc` 通过 openidconnect 完成 discovery、Authorization Code + PKCE、state/nonce/ID token 校验，返回上游 subject，尚不执行 Access JIT 或建立产品会话。出站限制为配置 issuer 同源、禁止重定向、5 秒超时和 1 MiB 响应上限。生产配置必须 HTTPS，`test-support` 仅开放显式 loopback fixture 构造器。
+- `rss-identity-core` 持有租户/issuer/client/audience 绑定及会话快照有效性检查。issuer/client/audience、principal/session、epoch/UnixTime 分别由私有字段 newtype 表达，参数互换有 compile-fail 验证。它不认证 HTTP 请求，也不把普通输入转换为 VerifiedContext。
+- `rss-identity-postgres` 注入 RSS PgRuntime，具体账户操作与关闭的安全事件在同一事务提交；不再开放 I02 的任意 SQL/字节事件探针。明确保留回滚、回滚失败、提交不确定及 fencing。
+- `rss-identity-oidc` 通过 openidconnect 完成 discovery、Authorization Code + PKCE、state/nonce/ID token 校验，返回上游 subject，尚不执行 Identity JIT 或建立产品会话。出站限制为配置 issuer 同源、禁止重定向、5 秒超时和 1 MiB 响应上限。生产配置必须 HTTPS，`test-support` 仅开放显式 loopback fixture 构造器。
 
-真实 PG 测试覆盖正常提交、SQL 失败回滚、CommitUnknownAfterAck、重复事件、跨租户 RLS 与 outbox 绑定。真实 Keycloak/Hydra 测试覆盖发现、code exchange、S256、重放、错误 state/nonce/verifier/redirect 及 provider 不可用。补充签名 token 的 azp/issuer/audience/expiry 负例、外源 discovery/JWKS、禁止跳转、响应上限和容器清理失败测试。Hydra 的 login/consent 接受逻辑是测试夹具，不是 Access authority 实现。
+真实 PG 测试覆盖正常提交、SQL 失败回滚、CommitUnknownAfterAck、重复事件、跨租户 RLS 与 outbox 绑定。真实 Keycloak/Hydra 测试覆盖发现、code exchange、S256、重放、错误 state/nonce/verifier/redirect 及 provider 不可用。补充签名 token 的 azp/issuer/audience/expiry 负例、外源 discovery/JWKS、禁止跳转、响应上限和容器清理失败测试。Hydra 的 login/consent 接受逻辑是测试夹具，不是 Identity authority 实现。
 
 固定容器版本与摘要的单源为 `hack/providers.py`：PostgreSQL 17.6、Keycloak 26.7.3、Hydra v26.2.0。首次执行会拉取镜像。此测试不证明生产 TLS、持久化 Hydra、Keycloak 升级、JIT、生产恢复流程、完整撤销或 MDM 接入；这些由 #2333–#2343 各自验收。会话验证 HTTP wire 文档是 I01 契约，尚无可启动产品 binary。
 
@@ -38,7 +38,7 @@ OIDC 的网络/响应读取失败与 HTTP 429/5xx 返回 `Unavailable`，非法 
 `Discovery`/`Exchange`；尝试已被消费，即便暂时不可用也须重新登录。公共入口启用 missing_docs 守卫。
 
 唯一公告例外：[风险记录 #2357](https://dev.azure.com/shengming0923/rss/_workitems/edit/2357)，
-owner shengming。仅 access-oidc 0.1.0 → openidconnect 4.0.1 → rsa 0.9.10 的 registry 路径，
+owner shengming。仅 rss-identity-oidc 0.1.0 → openidconnect 4.0.1 → rsa 0.9.10 的 registry 路径，
 当前只作 RSA 公钥验签，无 RSA 私钥操作。依赖门拒绝版本、source、反向路径漂移和其它 ignore；
 上游修复、私钥用途或 I08 生产接纳前必须重新评估并撤销/更新接受，不能据此宣称漏洞已修复。
 
@@ -50,31 +50,31 @@ owner shengming。仅 access-oidc 0.1.0 → openidconnect 4.0.1 → rsa 0.9.10 �
 
 ## 本机账户管理与维护
 
-构建 `cargo build --locked -p access-admin`，离线参数说明用 `access-admin --help`。工具不启动 HTTP，不自动迁移或清空数据库。
+构建 `cargo build --locked -p rss-identity-admin`，离线参数说明用 `identity-admin --help`。工具不启动 HTTP，不自动迁移或清空数据库。
 
-配置 JSON 必填：`host`、`port`、`database`、`user`、`password_file`、`ca_file`、`tenant_id`、`storage_target`、`storage_lineage`、`storage_tenant_epoch`。后两个 identity 为非零 16 字节数组，epoch 为 RSS 存储 fencing 值。拒绝未知配置字段；生产连接始终 VerifyFull。RSS schema、lineage、tenant binding 和 Access 安装 SQL 由部署 owner 先配置。
+配置 JSON 必填：`host`、`port`、`database`、`user`、`password_file`、`ca_file`、`tenant_id`、`storage_target`、`storage_lineage`、`storage_tenant_epoch`。后两个 identity 为非零 16 字节数组，epoch 为 RSS 存储 fencing 值。拒绝未知配置字段；生产连接始终 VerifyFull。RSS schema、lineage、tenant binding 和 Identity 安装 SQL 由部署 owner 先配置。
 
 配置/CA 只接受有界普通文件（16 KiB / 1 MiB）；数据库密码、当前口令和新口令从私有普通文件读取，拒绝末端 symlink、FIFO、group/other 权限和超长输入。密码按原字节读取，不自动去掉换行；不得将秘密放入命令参数、环境变量或日志。PG 关闭最多等 5 秒，关闭超时不改变已确认操作结果。
 
 ### 日常操作
 
-日常身份属于 `access_account_runtime`，仍须验证操作者账户口令。以下参数中的密码均为文件路径：
+日常身份属于 `identity_account_runtime`，仍须验证操作者账户口令。以下参数中的密码均为文件路径：
 
 ```text
-access-admin RUNTIME_CONFIG create ACTOR_LOGIN ACTOR_PASSWORD_FILE LOGIN NEW_PASSWORD_FILE member|admin|emergency
-access-admin RUNTIME_CONFIG password ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID NEW_PASSWORD_FILE
-access-admin RUNTIME_CONFIG enable|disable|grant-admin|revoke-admin|enable-membership|disable-membership ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID
+identity-admin RUNTIME_CONFIG create ACTOR_LOGIN ACTOR_PASSWORD_FILE LOGIN NEW_PASSWORD_FILE member|admin|emergency
+identity-admin RUNTIME_CONFIG password ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID NEW_PASSWORD_FILE
+identity-admin RUNTIME_CONFIG enable|disable|grant-admin|revoke-admin|enable-membership|disable-membership ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID
 ```
 
 日常改密：用户持当前口令对自己执行 password，或同租户管理员协助重置。普通用户忘记密码：联系可用管理员；自助邮件找回尚未实现。管理员无法登录：走独立维护身份的管理员密码恢复。密码恢复不自动启用账户或成员；停用状态仍由正常管理规则处置，不允许恢复命令扩大权限。
 
 ### 初始化与管理员密码恢复
 
-独立身份属于 `access_account_maintenance`，只注入受控维护任务；日常服务不得读取其凭据。每次仅需维护配置和新口令文件，无签发步骤或输出授权文件。
+独立身份属于 `identity_account_maintenance`，只注入受控维护任务；日常服务不得读取其凭据。每次仅需维护配置和新口令文件，无签发步骤或输出授权文件。
 
 ```text
-access-admin MAINTENANCE_CONFIG initialize PRINCIPAL_UUID LOGIN PASSWORD_FILE
-access-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
+identity-admin MAINTENANCE_CONFIG initialize PRINCIPAL_UUID LOGIN PASSWORD_FILE
+identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 ```
 
 配置显式指定 tenant，命令显式指定 principal，不按登录名猜测管理员。初始化 UUID 由部署 owner 随机生成，成功后永久记录该 tenant；重复或跨租户再次初始化被拒绝。恢复只针对已有管理员，保留 enabled、administrator、emergency 和 membership，推进认证 epoch 与凭据版本。并发恢复按事务顺序执行，最后提交的密码生效。
@@ -87,7 +87,7 @@ access-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 
 #2358 经确认只有可丢弃开发库，初始安装 SQL 直接改为 schema version 2。旧库/旧角色/旧参数不兼容，不提供增量迁移、旧命令别名或运行时兼容开关。
 
-具体 owner 连接、删除顺序、RSS 前置角色、固定八个 RSS 迁移、Access 初始安装、lineage/epoch、登录身份及 GRANT 和验收命令见 [开发库重建与安装](local-maintenance.md#重建与安装)。安装 SQL 全批单事务执行；CLI 不自动清库，遇到未知角色依赖停止，不使用 CASCADE。
+具体 owner 连接、删除顺序、RSS 前置角色、固定八个 RSS 迁移、Identity 初始安装、lineage/epoch、登录身份及 GRANT 和验收命令见 [开发库重建与安装](local-maintenance.md#重建与安装)。安装 SQL 全批单事务执行；CLI 不自动清库，遇到未知角色依赖停止，不使用 CASCADE。
 
 安装遇到同名全局角色即失败，不静默复用。`Authority::connect` 检查当前六张表、四张 tenant RLS 表及精确有效权限；运行角色无 deployment 写权限，维护角色无 attempts 和成员更新权限。权限漂移、旧 schema 和高权身份均拒绝连接。错误提供 schema 版本、角色不匹配、权限漂移和 schema/RLS 契约漂移四类安全诊断，底层 provider 故障仍保留 settlement。
 

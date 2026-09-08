@@ -17,6 +17,19 @@ class Gates(unittest.TestCase):
         cls.metadata = json.loads(subprocess.check_output(['cargo','metadata','--locked','--format-version','1']))
         cls.manifest = tomllib.loads(Path('Cargo.toml').read_text())
 
+    def test_workspace_identity_and_binary(self):
+        members = [p for p in self.metadata['packages'] if p['id'] in self.metadata['workspace_members']]
+        self.assertEqual({p['name'] for p in members}, {'rss-identity-core', 'rss-identity-postgres', 'rss-identity-oidc', 'rss-identity-admin'})
+        binaries = [t['name'] for p in members for t in p['targets'] if 'bin' in t['kind']]
+        self.assertEqual(binaries, ['identity-admin'])
+
+    def test_local_identity_packages_preserve_rss_source_checks(self):
+        deps.check(self.metadata, self.manifest)
+        data = copy.deepcopy(self.metadata)
+        next(p for p in data['packages'] if p['name'] == 'rss-contract')['source'] = None
+        with self.assertRaises(ValueError):
+            deps.check(data, self.manifest)
+
     def test_optimized_interpreter_rejects_source(self):
         script = "import check_dependencies as d,json,tomllib; m=json.load(open('/dev/stdin')); c=tomllib.load(open('Cargo.toml','rb')); c['workspace']['dependencies']['rss-contract']['git']='https://invalid.test'; d.check(m,c)"
         result = subprocess.run([sys.executable,'-O','-c',script], input=json.dumps(self.metadata),text=True,capture_output=True,env={**os.environ,'PYTHONPATH':'hack'})
@@ -41,13 +54,13 @@ class Gates(unittest.TestCase):
 
     def test_provider_zero_tests_rejected(self):
         with patch('providers.subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout='0 tests, 0 benchmarks\n')):
-            with self.assertRaises(RuntimeError): providers.cargo('access-oidc','provider',{})
+            with self.assertRaises(RuntimeError): providers.cargo('rss-identity-oidc','provider',{})
 
     def test_provider_partial_execution_rejected(self):
         listing='real_provider_flows: test\n\n1 test, 0 benchmarks\n'
         result='test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\n'
         with patch('providers.subprocess.run',side_effect=[subprocess.CompletedProcess([],0,stdout=listing),subprocess.CompletedProcess([],0,stdout=result)]):
-            with self.assertRaises(RuntimeError): providers.cargo('access-oidc','provider',{})
+            with self.assertRaises(RuntimeError): providers.cargo('rss-identity-oidc','provider',{})
 
     def test_production_features_do_not_include_test_support(self):
         actual = {k:set(v) for k,v in deps.RSS_FEATURES.items()}

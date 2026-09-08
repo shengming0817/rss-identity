@@ -2,7 +2,7 @@
 
 | 目录 | Owner / 入口 |
 | --- | --- |
-| product | [产品需求](product/rss-access-prd.md) |
+| product | [产品需求](product/rss-identity-prd.md) |
 | architecture | [实施与 Issue 计划](architecture/implementation-plan.md)，后续 ADR |
 | guides | [开发与消费指南](guides/README.md) |
 | deployment | [运行与发布](deployment/README.md) |

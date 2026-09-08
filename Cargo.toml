@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/access-core", "adapters/access-postgres", "adapters/access-oidc", "app/access-admin"]
+members = ["crates/identity-core", "crates/identity-postgres", "crates/identity-oidc", "app/identity-admin"]
 resolver = "3"
 
 [workspace.package]
@@ -9,7 +9,7 @@ version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
-access-core = { path = "crates/access-core" }
+rss-identity-core = { path = "crates/identity-core" }
 rss-contract = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "bf5dd1350997d01aa834094a3347fce30247814e" }
 rss-request-context = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "bf5dd1350997d01aa834094a3347fce30247814e" }
 rss-transactional-messaging = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "bf5dd1350997d01aa834094a3347fce30247814e", default-features = false, features = ["producer"] }

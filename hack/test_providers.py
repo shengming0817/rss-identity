@@ -10,7 +10,7 @@ class CleanupTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
             with providers.container("fixture", []):
                 pass
-        self.assertTrue(run.call_args.args[0][-1].startswith("access-t2-"))
+        self.assertTrue(run.call_args.args[0][-1].startswith("identity-t2-"))
 
     @patch("providers.docker", side_effect=subprocess.TimeoutExpired("docker", 180))
     @patch("providers.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
@@ -18,7 +18,7 @@ class CleanupTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             with providers.container("fixture", []):
                 self.fail("must not yield")
-        self.assertTrue(run.call_args.args[0][-1].startswith("access-t2-"))
+        self.assertTrue(run.call_args.args[0][-1].startswith("identity-t2-"))
 
     @patch("providers.docker", return_value="fixture-id")
     @patch("providers.subprocess.run", side_effect=subprocess.CalledProcessError(1, "docker"))

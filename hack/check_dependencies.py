@@ -27,15 +27,15 @@ def check_features(actual, profile):
 def check_advisory_path(metadata):
     # #2357: owner shengming; public verification only. Any graph drift revokes acceptance.
     packages = {p['id']: p for p in metadata['packages']}
-    expected = {'rsa': '0.9.10', 'openidconnect': '4.0.1', 'access-oidc': '0.1.0'}
+    expected = {'rsa': '0.9.10', 'openidconnect': '4.0.1', 'rss-identity-oidc': '0.1.0'}
     ids = {}
     for name, version in expected.items():
         matches = [p for p in packages.values() if p['name'] == name]
         require(len(matches) == 1 and matches[0]['version'] == version, f'RSA exception version drift: {name}')
         p = matches[0]
-        require(p['source'] == (None if name == 'access-oidc' else 'registry+https://github.com/rust-lang/crates.io-index'), 'RSA exception source drift')
+        require(p['source'] == (None if name == 'rss-identity-oidc' else 'registry+https://github.com/rust-lang/crates.io-index'), 'RSA exception source drift')
         ids[name] = p['id']
-    for child, parent in [('rsa', 'openidconnect'), ('openidconnect', 'access-oidc')]:
+    for child, parent in [('rsa', 'openidconnect'), ('openidconnect', 'rss-identity-oidc')]:
         parents = {n['id'] for n in metadata['resolve']['nodes'] if any(d['pkg'] == ids[child] for d in n['deps'])}
         require(parents == {ids[parent]}, f'RSA exception dependency path drift: {child}')
 
@@ -45,7 +45,9 @@ def check_advisory_policy(policy):
 
 def check(metadata, manifest):
     declarations = manifest["workspace"]["dependencies"]
-    roots = [v for k, v in declarations.items() if k.startswith("rss-")]
+    members = set(metadata["workspace_members"])
+    local_names = {p["name"] for p in metadata["packages"] if p["id"] in members}
+    roots = [v for k, v in declarations.items() if k.startswith("rss-") and k not in local_names]
     require(roots, 'RSS dependency roots missing')
     urls = {d.get("git") for d in roots}
     revs = {d.get("rev") for d in roots}
@@ -57,9 +59,8 @@ def check(metadata, manifest):
     require(not manifest.get('patch') and (not manifest.get('replace')), 'source overrides forbidden')
     expected = f"git+{url}?rev={rev}#{rev}"
     found = {}
-    members = set(metadata["workspace_members"])
     for p in metadata["packages"]:
-        if p["name"].startswith("rss-"):
+        if p["name"].startswith("rss-") and p["id"] not in members:
             require(p['source'] == expected, f"wrong source for {p['name']}")
             require(p['name'] not in found, f"duplicate RSS package {p['name']}")
             found[p["name"]] = p["version"]
@@ -68,7 +69,7 @@ def check(metadata, manifest):
             Path(p["manifest_path"]).resolve().relative_to(Path(metadata["workspace_root"]).resolve())
     require({'rss-contract', 'rss-request-context', 'rss-redact', 'rss-diag-context', 'rss-transactional-messaging', 'rss-transactional-messaging-postgres'} <= found.keys(), 'required RSS closure missing')
     packages = {p['id']: p for p in metadata['packages']}
-    actual = {packages[n['id']]['name']: set(n['features']) for n in metadata['resolve']['nodes'] if packages[n['id']]['name'].startswith('rss-')}
+    actual = {packages[n['id']]['name']: set(n['features']) for n in metadata['resolve']['nodes'] if packages[n['id']]['name'].startswith('rss-') and n['id'] not in members}
     check_features(actual, 'test')
     check_advisory_path(metadata)
     return {"git":url,"revision":rev,"packages":found}
@@ -88,7 +89,7 @@ if __name__ == "__main__":
             continue
         package = packages[message['package_id']]
         name = package['name']
-        if name.startswith('rss-'):
+        if name.startswith('rss-') and package['id'] not in data['workspace_members']:
             values = set(message['features'])
             require(name not in actual or actual[name] == values, 'conflicting production feature sets')
             actual[name] = values

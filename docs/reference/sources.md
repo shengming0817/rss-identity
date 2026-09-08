@@ -6,9 +6,9 @@
 
 | 来源 | 固定基线 / 文件 | 结论与需求影响 |
 | --- | --- | --- |
-| rss-mdm | `e64d760`，`docs/product/rss-mdm-prd.md` §06.13 | WMD-A01/02 为一级真实需求入口，A03 业务授权归 MDM；A04 二级、A05 三级。Access 租户身份模型不提高 MDM 的 MSP 优先级 |
-| rss 当前 | `1b650c166`，`Cargo.toml`、`docs/rules/project-scope.md`、`docs/rules/api-versioning.md` | runtime/messaging/PG/AMQP 已提取；实验性 release surface 不证明已发布。Access 不重复提取；I02 核实实际版本消费 |
-| rss 历史退出 | `3cd2b5573`（PR 902） | Identity/OIDC 产品面已退出主仓；退出不等于迁移到 Access 或旧缺陷已修复 |
+| rss-mdm | `e64d760`，`docs/product/rss-mdm-prd.md` §06.13 | WMD-A01/02 为一级真实需求入口，A03 业务授权归 MDM；A04 二级、A05 三级。Identity 租户身份模型不提高 MDM 的 MSP 优先级 |
+| rss 当前 | `1b650c166`，`Cargo.toml`、`docs/rules/project-scope.md`、`docs/rules/api-versioning.md` | runtime/messaging/PG/AMQP 已提取；实验性 release surface 不证明已发布。Identity 不重复提取；I02 核实实际版本消费 |
+| rss 历史退出 | `3cd2b5573`（PR 902） | Identity/OIDC 产品面已退出主仓；退出不等于迁移到 Identity 或旧缺陷已修复 |
 
 MDM 当前 PRD 的一级 AuthN 与本仓目标存在 owner 对齐工作，见实施计划 M01。本文读取该固定基线，不替代 MDM 后续变更。
 
@@ -51,12 +51,12 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 通过 GitHub API 固定读取 `makeplane/plane` preview revision `1fec307f91003df96351557af32ce87891a3678a`。只借鉴账户流程和验收问题，未复制源码；所读源码声明 AGPL-3.0-only，后续源码复用须按实际许可证处理。
 
 - [email.py](https://github.com/makeplane/plane/blob/1fec307f91003df96351557af32ce87891a3678a/apps/api/plane/authentication/views/app/email.py)：登录入口限流、受控跳转与 session 登录；用于 ACC-03/10。
-- [password_management.py](https://github.com/makeplane/plane/blob/1fec307f91003df96351557af32ce87891a3678a/apps/api/plane/authentication/views/app/password_management.py)：账户恢复与密码重置旅程；Access 首期明确受控管理员恢复，邮件恢复列为可选，不直接增加邮件服务依赖。
+- [password_management.py](https://github.com/makeplane/plane/blob/1fec307f91003df96351557af32ce87891a3678a/apps/api/plane/authentication/views/app/password_management.py)：账户恢复与密码重置旅程；Identity 首期明确受控管理员恢复，邮件恢复列为可选，不直接增加邮件服务依赖。
 - [login.py](https://github.com/makeplane/plane/blob/1fec307f91003df96351557af32ce87891a3678a/apps/api/plane/authentication/utils/login.py)：服务端 session 与管理员 cookie 期限区分；客户端元数据不能当作设备信任证明。
 - [signout.py](https://github.com/makeplane/plane/blob/1fec307f91003df96351557af32ce87891a3678a/apps/api/plane/authentication/views/app/signout.py)：退出交互来源；新产品必须用实际 session 失效证明退出，不只验证重定向。
 - [官方安全公告 GHSA-mqjv-rwgv-4gxq](https://github.com/makeplane/plane/security/advisories/GHSA-mqjv-rwgv-4gxq)：验证码验证入口限流缺口的历史案例。引出“验证路径必须有失败预算，不能只限流发送路径”的验收；不由此推断固定 preview revision 仍存在该问题。
 
-没有取得 Plane 企业 OIDC 实现证据，不宣称其租户联合身份实现已经满足 Access；Plane 不能代替协议规范和 Rust 上游。
+没有取得 Plane 企业 OIDC 实现证据，不宣称其租户联合身份实现已经满足 Identity；Plane 不能代替协议规范和 Rust 上游。
 
 ## 协议与 Rust 上游
 
