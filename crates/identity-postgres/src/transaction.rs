@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use rss_identity_core::account::{AccountRuleError, AccountState, SecurityAction};
 #[derive(Serialize)]
-pub(crate) struct SecurityEvent {
+pub(crate) struct AccountEvent {
     pub action: &'static str,
     pub tenant: String,
     pub principal: Uuid,
@@ -33,7 +33,7 @@ pub(crate) struct EventState {
     credential_version: i64,
     membership_epoch: i64,
 }
-impl SecurityEvent {
+impl AccountEvent {
     pub fn account(action: SecurityAction, state: AccountState, actor: Option<AccountKey>) -> Self {
         Self {
             action: action.as_str(),
@@ -49,6 +49,34 @@ impl SecurityEvent {
                 credential_version: state.credential_version(),
                 membership_epoch: state.membership_epoch(),
             },
+        }
+    }
+}
+/// Closed set of event contracts using the same settlement path.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum SecurityEvent {
+    Account(AccountEvent),
+    Session(crate::sessions::SessionEvent),
+}
+impl SecurityEvent {
+    pub fn account(action: SecurityAction, state: AccountState, actor: Option<AccountKey>) -> Self {
+        Self::Account(AccountEvent::account(action, state, actor))
+    }
+    fn tenant(&self) -> &str {
+        match self {
+            Self::Account(v) => &v.tenant,
+            Self::Session(v) => &v.tenant,
+        }
+    }
+    fn contract(&self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Account(_) => ("account.changed", "identity.account.security", EVENT_SCHEMA),
+            Self::Session(_) => (
+                "session.changed",
+                "identity.session.security",
+                include_str!("session-security-event-v1.json"),
+            ),
         }
     }
 }
@@ -139,7 +167,7 @@ impl Authority {
                             reject()
                         }
                     })?;
-                    if event.tenant != tenant.to_string() {
+                    if event.tenant() != tenant.to_string() {
                         return Err(corrupt());
                     }
                     let now: i64 = tx
@@ -153,6 +181,7 @@ impl Authority {
                             })
                         })
                         .await?;
+                    let (route, contract, schema) = event.contract();
                     let envelope = MessageEnvelope::new(
                         MessageId::parse(&Uuid::new_v4().to_string()).map_err(|_| corrupt())?,
                         MessageMetadata::new(
@@ -161,14 +190,13 @@ impl Authority {
                                 Timepoint::try_from(now).map_err(|_| corrupt())?,
                                 MessagingDomain::parse("identity.security")
                                     .map_err(|_| corrupt())?,
-                                MessageRoute::parse("account.changed").map_err(|_| corrupt())?,
+                                MessageRoute::parse(route).map_err(|_| corrupt())?,
                                 ContractIdentity::new(
-                                    ContractId::parse("identity.account.security")
-                                        .map_err(|_| corrupt())?,
+                                    ContractId::parse(contract).map_err(|_| corrupt())?,
                                     ContractVersion::from_major(1).map_err(|_| corrupt())?,
                                     SchemaDigest::parse(&format!(
                                         "sha256:{:x}",
-                                        Sha256::digest(EVENT_SCHEMA)
+                                        Sha256::digest(schema)
                                     ))
                                     .map_err(|_| corrupt())?,
                                 ),

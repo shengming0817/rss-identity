@@ -8,17 +8,24 @@ use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
+/// Explicit write-side tenant creation; authentication uses lock_guard instead.
 pub(crate) async fn guard(c: &mut PgConnection, tenant: TenantId) -> Result<(), PgError> {
     sqlx::query("INSERT INTO identity_authority.guard VALUES($1::uuid) ON CONFLICT DO NOTHING")
         .bind(tenant.to_string())
         .execute(&mut *c)
         .await?;
+    lock_guard(c, tenant).await
+}
+
+/// Lock a provisioned tenant without attempting INSERT, even on a missing credential.
+pub(crate) async fn lock_guard(c: &mut PgConnection, tenant: TenantId) -> Result<(), PgError> {
     sqlx::query(
         "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
     )
     .bind(tenant.to_string())
-    .fetch_one(c)
-    .await?;
+    .fetch_optional(c)
+    .await?
+    .ok_or_else(reject)?;
     Ok(())
 }
 pub(crate) struct Stored {

@@ -1,7 +1,7 @@
 -- Identity owns this migration identity; RSS message schema is installed separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=2));
-INSERT INTO identity_authority.schema_version VALUES(2);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=3));
+INSERT INTO identity_authority.schema_version VALUES(3);
 CREATE ROLE identity_account_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE ROLE identity_account_maintenance NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE TABLE identity_authority.deployment (
@@ -43,8 +43,26 @@ CREATE TABLE identity_authority.attempts (
  PRIMARY KEY(tenant_id,key)
 );
 CREATE INDEX attempts_expiry ON identity_authority.attempts(tenant_id,expires_at);
+CREATE TABLE identity_authority.sessions (
+ tenant_id uuid NOT NULL, principal_id uuid NOT NULL,
+ session_id uuid NOT NULL CHECK(session_id <> '00000000-0000-0000-0000-000000000000'),
+ token_hash bytea NOT NULL CHECK(octet_length(token_hash)=32),
+ auth_epoch bigint NOT NULL CHECK(auth_epoch>0),
+ membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
+ auth_time bigint NOT NULL CHECK(auth_time>0),
+ idle_expires_at bigint NOT NULL,
+ absolute_expires_at bigint NOT NULL,
+ revoked_at bigint,
+ PRIMARY KEY(tenant_id,session_id),
+ UNIQUE(tenant_id,token_hash),
+ FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts,
+ CONSTRAINT session_lifetime CHECK(auth_time < idle_expires_at AND idle_expires_at <= absolute_expires_at),
+ CONSTRAINT session_duration CHECK(absolute_expires_at::numeric-auth_time::numeric IN (14400,28800)),
+ CONSTRAINT session_revocation CHECK(revoked_at IS NULL OR revoked_at >= auth_time)
+);
+CREATE INDEX sessions_principal ON identity_authority.sessions(tenant_id,principal_id,session_id);
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['guard','accounts','memberships','attempts'] LOOP
+ FOREACH t IN ARRAY ARRAY['guard','accounts','memberships','attempts','sessions'] LOOP
  EXECUTE format('ALTER TABLE identity_authority.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE identity_authority.%I FORCE ROW LEVEL SECURITY',t);
  EXECUTE format('CREATE POLICY tenant ON identity_authority.%I USING (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',t);
@@ -61,3 +79,5 @@ GRANT SELECT,INSERT,UPDATE ON identity_authority.accounts,identity_authority.mem
 GRANT SELECT,INSERT ON identity_authority.accounts,identity_authority.memberships TO identity_account_maintenance;
 GRANT UPDATE(password_hash,auth_epoch,credential_version) ON identity_authority.accounts TO identity_account_maintenance;
 GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.attempts TO identity_account_runtime;
+
+GRANT SELECT,INSERT,UPDATE ON identity_authority.sessions TO identity_account_runtime;

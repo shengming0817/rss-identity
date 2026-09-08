@@ -134,6 +134,18 @@ impl AccountState {
     pub fn membership_epoch(self) -> i64 {
         self.membership_epoch
     }
+    /// Invalidate all authentication, including outstanding password candidates.
+    pub fn revoke_sessions(self) -> Result<Self, AccountRuleError> {
+        if !self.active() {
+            return Err(AccountRuleError::Rejected);
+        }
+        let mut next = self;
+        next.epoch = next
+            .epoch
+            .checked_add(1)
+            .ok_or(AccountRuleError::EpochExhausted)?;
+        Ok(next)
+    }
     pub fn active(self) -> bool {
         self.enabled && self.member_active
     }

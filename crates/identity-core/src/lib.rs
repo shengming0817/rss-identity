@@ -3,6 +3,7 @@
 //! Passing these checks does not authenticate a caller. The future I06 authority must first
 //! authenticate the protocol credential and load the authoritative session from storage.
 pub mod account;
+pub mod session;
 use rss_request_context::TenantId;
 use uuid::Uuid;
 
@@ -26,10 +27,17 @@ impl PrincipalId {
     }
 }
 
-/// Non-nil Identity SessionId; never inferred from browser claims.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Non-nil Identity SessionId; parsing a value never authenticates its holder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
 pub struct SessionId(Uuid);
 impl SessionId {
+    pub fn generate() -> Self {
+        Self(Uuid::new_v4())
+    }
+    pub fn as_uuid(self) -> Uuid {
+        self.0
+    }
     /// Parse a non-nil UUID from the authoritative source.
     pub fn parse(value: &str) -> Result<Self, ValidationError> {
         let id = Uuid::parse_str(value).map_err(|_| ValidationError::InvalidValue)?;
@@ -37,6 +45,18 @@ impl SessionId {
             return Err(ValidationError::InvalidValue);
         }
         Ok(Self(id))
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl<'de> serde::Deserialize<'de> for SessionId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
     }
 }
 

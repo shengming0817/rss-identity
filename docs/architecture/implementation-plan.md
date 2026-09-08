@@ -109,3 +109,7 @@ I03–I05 必须在各自实现时闭合安全事件，不能最后另加一个�
 仅有可重建测试数据且没有外部事件消费者：初始安装使用 `identity_authority`、`identity_account_runtime` / `identity_account_maintenance`，事件使用 `identity.security` / `identity.account.security`。没有旧入口别名、升级迁移、双读或旧事件桥接；已有开发库及 Outbox 须停用后重建，数据库角色属于集群对象，须单独核实依赖再清理。该一次性切换不进入产品启动逻辑。
 
 schema version 2、事件 V1 payload、账户/租户/authority/lineage/epoch 的业务语义不因名称改变；新测试安装自行生成身份，不将重建视为保留旧数据。历史 `ACCESS-*` / `ACC-*` 编号、工作项 ID、ADR 文件名与固定来源继续用于追溯。Hydra 架构不变，#2360 不属于本项。实际验证和本地切换证据由 #2359 PR 持有。
+
+## I04 实施落点
+
+#2334 的当前决定见 [中央会话 ADR](adr/202609080900-2334-central-session.md)：identity-core 会话策略、identity-postgres 单表/统一 auth_epoch 与事务事件、identity-http-axum Router。初始安装更新为 schema version 3，替代上文更名阶段的 v2；不兼容旧开发库。仅 T1/T2，验证结果随实现 PR 记录，I05/I06/I07/I08 与独立 T3 的退出条件保持独立。

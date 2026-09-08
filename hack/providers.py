@@ -87,6 +87,8 @@ def wait(url):
 
 def cargo(package, test, env, features=()):
     expected = {('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
+                ('rss-identity-postgres', 'session_atomic'): {'session_rotation_and_revocation', 'session_isolation_replacement_and_restart', 'session_account_changes_fence_racing_credentials', 'session_settlement_and_event_failure_are_atomic', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations'},
+                ('rss-identity-http-axum', 'session_http'): {'session_http_login_cookie_csrf_and_replacement', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_recovery_current_logout_and_deadline', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_pending_commit_preserves_settlement'},
                 ('rss-identity-admin', 'operator'): {'maintenance_file_and_settlement'},
                 ('rss-identity-oidc', 'provider'): {'real_provider_flows'}}[(package, test)]
     command = ['cargo', 'test', '--locked', '-p', package, '--test', test, *features, '--', '--ignored', '--test-threads=1']
@@ -111,6 +113,8 @@ def pg():
         else: raise RuntimeError(f"PostgreSQL readiness timed out: pg_isready exit={p.returncode}")
         env = {"IDENTITY_TEST_PG_PORT": str(ports[5432])}
         cargo("rss-identity-postgres", "atomic", env)
+        cargo("rss-identity-postgres", "session_atomic", env)
+        cargo("rss-identity-http-axum", "session_http", env)
         cargo("rss-identity-admin", "operator", env)
 
 

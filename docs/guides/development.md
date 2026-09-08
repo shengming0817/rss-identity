@@ -85,11 +85,11 @@ identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 
 ### 开发库重建与兼容性
 
-#2358 经确认只有可丢弃开发库，初始安装 SQL 直接改为 schema version 2。旧库/旧角色/旧参数不兼容，不提供增量迁移、旧命令别名或运行时兼容开关。
+#2334 再次确认只有可丢弃开发库，初始安装 SQL 直接改为 schema version 3。旧库/旧角色/旧参数不兼容，不提供增量迁移、旧命令别名或运行时兼容开关。
 
 具体 owner 连接、删除顺序、RSS 前置角色、固定八个 RSS 迁移、Identity 初始安装、lineage/epoch、登录身份及 GRANT 和验收命令见 [开发库重建与安装](local-maintenance.md#重建与安装)。安装 SQL 全批单事务执行；CLI 不自动清库，遇到未知角色依赖停止，不使用 CASCADE。
 
-安装遇到同名全局角色即失败，不静默复用。`Authority::connect` 检查当前六张表、四张 tenant RLS 表及精确有效权限；运行角色无 deployment 写权限，维护角色无 attempts 和成员更新权限。权限漂移、旧 schema 和高权身份均拒绝连接。错误提供 schema 版本、角色不匹配、权限漂移和 schema/RLS 契约漂移四类安全诊断，底层 provider 故障仍保留 settlement。
+安装遇到同名全局角色即失败，不静默复用。`Authority::connect` 检查当前七张表、五张 tenant RLS 表及精确有效权限；运行角色无 deployment 写权限，维护角色无 attempts/session 和成员更新权限。权限漂移、旧 schema 和高权身份均拒绝连接。错误提供 schema 版本、角色不匹配、权限漂移和 schema/RLS 契约漂移四类安全诊断，底层 provider 故障仍保留 settlement。
 
 ### 简化结果与验证范围
 
@@ -102,3 +102,14 @@ identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 | 文件交付失败 | 重签、重新交付 | 无授权文件交付环节 |
 
 日常管理 API/UI 尚未交付，CLI 仍是当前必要入口，不建立第二份业务规则。`make test-pg` 执行维护初始化/恢复、权限隔离、并发和 settlement 故障及密码文件接缝；runner 核对完整测试名与执行计数。`cargo test` 默认忽略真实 provider 测试，不能代替该证据。真实 binary/config/TLS PG 装配仍归 #2341/T32 的独立 PR。
+
+
+## 中央会话 HTTP 接入
+
+`rss_identity_http_axum::router(authority, HttpConfig::new(origin, timeout)?)?` 返回 Router（构造时拒绝 Maintenance authority）；authority 必须使用 Runtime 数据库身份。origin 是显式 canonical HTTPS origin（无尾斜线、路径、userinfo、query、fragment），timeout 为非零且不超过 60 秒。使用真实连接的 `ConnectInfo<SocketAddr>` 提供登录尝试来源；反向代理的可信客户端地址接缝归装配方，不直接接受 X-Forwarded-For。不能给 Router 添加跨源凭据开放。
+
+[会话 wire](../architecture/identity-wire-v1.md#中央会话-httpi04) 定义 cookie、Origin、CSRF 和分页。日志/反代不能记录 Cookie、Set-Cookie、口令 body 或 CSRF；不把 session 响应缓存为新请求认证。新增 PG+Router 测试由 make test-pg 运行，界面、listener/TLS 与 Hydra/MDM 产品交接仍未由本项交付。
+
+HTTP 外部错误保持模糊；宿主可从 response extensions 读取 `HttpFailure`，区分内部 AuthorityError（含 CommitUnknown/RollbackFailed/Fenced）与 RequestTimeout。该分类不含 SQL/provider 原文，不作为自动重试许可。body 读取受 HTTP timeout 限制；下游操作接收原截止点的剩余预算，由 Authority/RSS 完成有界结算。宿主不应再用同截止点的通用 timeout 包住会话 Router，否则取消写 future 会丢失 CommitUnknown/RollbackFailed 分类；取消本身不证明回滚。
+
+GET/HEAD 会话查询不续期。客户端在有效用户活动期间通过受 Origin+CSRF 保护的 POST refresh 续期，串行处理新 cookie/CSRF；不以无条件后台心跳绕过 idle。会话 ID 和游标在 Rust 中统一使用 core SessionId，JSON/SQL 边界仍为 UUID 字符串且拒绝 nil。

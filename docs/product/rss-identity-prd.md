@@ -83,3 +83,5 @@ I01 冻结首个 MDM 部署域名与会话路径、内部交接/标准协议选�
 普通用户持当前口令改密；忘记密码由同租户可用管理员协助，自助邮件找回仍为 ACC-13。管理员无法登录时使用明确 tenant/principal 的维护恢复，仅替换密码并推进 epoch，不自动启用或扩大权限，也不声称覆盖 MFA/IdP/身份流程恢复。日常 CLI 在 #2337 替代入口实际交付前保留，并与未来 API/UI 共享业务规则。
 
 现有仅可丢弃开发库，#2358 直接重建 schema，无向后兼容要求。操作和重建步骤见 [开发指南](../guides/development.md#本机账户管理与维护)，设计见 [本地 authority ADR](../architecture/adr/202609080509-2333-local-authority.md)。
+
+I04 会话实现决定见 [会话 ADR](../architecture/adr/202609080900-2334-central-session.md)。并发刷新只有一个成功，旧值拒绝但不自动撤销胜出值；全部退出推进统一认证 epoch。该决定不表示 Hydra 交接或产品 T3 已通过。

@@ -1,0 +1,26 @@
+[package]
+name = "rss-identity-http-axum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+[dependencies]
+rss-identity-core.workspace = true
+rss-identity-postgres = { path = "../identity-postgres" }
+rss-request-context.workspace = true
+rss-transactional-messaging.workspace = true
+axum = { version = "=0.8.9", default-features = false, features = ["json", "query", "tokio", "http1"] }
+serde.workspace = true
+serde_json.workspace = true
+url = "2.5"
+thiserror.workspace = true
+tokio.workspace = true
+[dev-dependencies]
+uuid.workspace = true
+futures = "0.3"
+anyhow.workspace = true
+tower = { version = "0.5", features = ["util"] }
+rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
+sqlx.workspace = true
+[lints]
+workspace = true

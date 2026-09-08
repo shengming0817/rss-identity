@@ -72,3 +72,15 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - [openidconnect 4.0.1 src/lib.rs](https://github.com/ramosbugs/openidconnect-rs/blob/4.0.1/src/lib.rs)：客户端 discovery、PKCE、nonce 和 token 校验。
 - [Hydra v26.2.0 oauth2/handler.go](https://github.com/ory/hydra/blob/v26.2.0/oauth2/handler.go)：标准授权/token 端点，Apache-2.0；只通过协议组合，不复制 Go 实现。
 - 2026-09-08 crates.io 复核：contract/request-context/redact/transactional-messaging/transactional-messaging-postgres 索引 404；diag-context 0.1.0 artifact SHA-256 `31262d0e465e713c8d86b1f0907f03866ce66069d5ddbb4dac6de0c9e00c7d48` 与索引相符。该历史事实不再是 Git 消费的阻塞，也不证明完整闭包已发布。
+
+## I04 会话来源
+
+- [RSS 历史 refresh.rs](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity/src/domain/refresh.rs&version=GC5b63e10a1b396b0ff70b7d1e6e55db296cd7a891)：实际读取其摘要、grant 绑定和 absolute lifetime；本项不采用其 family/history/compromise 模型，不复制源码。
+- [RSS 历史 auth_grant_lifecycle.rs](https://dev.azure.com/shengming0923/rss/_git/rss?path=/adapters/postgres/src/auth_grant_lifecycle.rs&version=GC5b63e10a1b396b0ff70b7d1e6e55db296cd7a891)：账户锁、代际复核、凭据提交后释放；实际执行仍复用固定 RSS bf5dd1350997d01aa834094a3347fce30247814e 的 PG transaction。
+- [Axum state extractor](https://github.com/tokio-rs/axum/blob/c59208c86fded335cd85e388030ad59347b0e5ae/axum/src/extract/state.rs#L296-L324)、[Router](https://github.com/tokio-rs/axum/blob/c59208c86fded335cd85e388030ad59347b0e5ae/axum/src/routing/mod.rs)：实际读取本机 registry 的 axum 0.8.9 发布源码与 .cargo_vcs_info.json，MIT；复用 Router/state/JSON/ConnectInfo，不复制其源码，不引入第二个 session store。
+
+## PR #968 fix：查询、策略与结算边界
+
+- 实际读取固定 RSS `bf5dd1350997d01aa834094a3347fce30247814e` 的 `crates/transactional-messaging-postgres/src/transaction.rs:402–525,731–801`：local_tx 是单一截止点与结算 owner，drop 不证明回滚，未确认连接隔离；本项复用其 CommitUnknown/RollbackFailed，不额外发明 HTTP 结算窗口。
+- [Tower 0.5.3 timeout future](https://github.com/tower-rs/tower/blob/4b0a6b0e688bd177eb2c9c97f5268dd9703c66fc/tower/src/timeout/future.rs#L35-L53)：超时可结束 response future，所以将 HTTP 取消限定在 JSON body 读取，事务阶段交给其 owner。读取了 registry 源码和 .cargo_vcs_info.json；未复制源码。
+- [RustCrypto Argon2 0.5.3 Params](https://github.com/RustCrypto/password-hashes/blob/argon2-v0.5.3/argon2/src/params.rs)：实际读取构造时验证和私有参数字段；仅借鉴“校验后持有策略”的封装方式，SessionClass 仍为 Identity 自己的业务规则，无公开策略框架。

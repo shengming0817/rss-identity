@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/identity-core", "crates/identity-postgres", "crates/identity-oidc", "app/identity-admin"]
+members = ["crates/identity-core", "crates/identity-postgres", "crates/identity-oidc", "app/identity-admin", "crates/identity-http-axum"]
 resolver = "3"
 
 [workspace.package]

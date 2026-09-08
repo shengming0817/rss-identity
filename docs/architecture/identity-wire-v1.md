@@ -1,6 +1,6 @@
 # Identity v1 wire 草案
 
-Owner：#2331；实现 owner：#2336。此文档不是已运行 HTTP API。标准 OIDC discovery/authorize/token/JWKS/logout 由 Hydra 提供，不在 Identity 复制同名端点。
+I01 Owner：#2331；下述 internal validate 的实现 owner 为 #2336，目前仍是草案。I04 中央会话 Router 已实现，见末节；listener/TLS 属于后续装配。标准 OIDC discovery/authorize/token/JWKS/logout 由 Hydra 提供，不在 Identity 复制同名端点。
 
 ## POST /internal/v1/identity/validate
 
@@ -21,3 +21,24 @@ Owner：#2331；实现 owner：#2336。此文档不是已运行 HTTP API。标�
 ## 演进与来源
 
 新可选字段仅在旧 consumer 可忽略时增加；身份字段含义、错误安全语义和隔离边界变化使用新 major。未知 auth strength 不提升 assurance，未知必要 identity enum 拒绝。I02 的 core 是绑定规则库，不提供反序列化即可构造的 VerifiedIdentityContext。
+
+## 中央会话 HTTP（I04）
+
+Owner：#2334。rss-identity-http-axum 提供可挂载 Router；生产 listener/TLS 配置与 UI 尚由后续 owner 实施。身份绑定的 internal validate 仍归 I06，不由这些接口替代。
+
+路径前缀 `/api/v1/tenants/{tenant}/`；tenant 是 UUID，只认证其固定租户的会话。
+
+| 方法 / 路径 | 输入与成功结果 |
+| --- | --- |
+| POST login | JSON `{login,password}`；X-Identity-Request: 1；200 session + csrf_token，并设置新 cookie。有效旧 cookie 另需 CSRF，同主体原子替换。 |
+| GET session | cookie；200 session + csrf_token，只读验证、不延长 idle，不重发 cookie。 |
+| POST session/refresh | cookie + CSRF；200 session + 新 csrf_token，并轮换 cookie；不改变 session ID 和 absolute。 |
+| POST session/logout | cookie + CSRF；204，确认撤销后清除 cookie。 |
+| POST sessions/logout-all | cookie + CSRF；204，确认推进账户 auth_epoch 后清除 cookie。 |
+| GET sessions | cookie；可选 cursor UUID、limit 1–100（默认 50）；200 `{sessions,next_cursor}`，只读列出本主体本租户有效会话，不延长 idle；nil/无效游标400。 |
+
+session 形状为 `{id,auth_time,idle_expires_at,absolute_expires_at}`，时间是 Unix 秒。CSRF 通过 `X-CSRF-Token` 呈递，随 cookie 轮换。GET/HEAD 查询不续期；客户端只在需要续期的有效用户活动期间串行调用受 Origin+CSRF 保护的 POST refresh，不用后台无条件心跳绕过 idle。客户端应串行刷新；并发失败方不覆盖已有 cookie/CSRF，失败响应不发送 Set-Cookie。刷新响应丢失后须重新登录。
+
+所有写入口必须有精确同源 Origin；登录仅 JSON，不接受表单。Cookie 固定 `__Host-identity-session`、Path=/、Secure、HttpOnly、SameSite=Lax、无 Domain。Max-Age 为剩余 absolute 时间，不能以浏览器仍持 cookie 推断会话有效。
+
+400 malformed_request；401 invalid_credential（密码错误、无效/失效凭据不暴露具体原因）；403 csrf_rejected；429 rate_limited；503 identity_unavailable（含存储故障、未确认提交）。业务错误 JSON 仅 code，不输出 SQL/provider 原文；所有响应 Cache-Control: no-store。路由框架的路径/方法/体积拒绝沿用其 HTTP 状态，仍 no-store。
