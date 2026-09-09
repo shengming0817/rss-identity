@@ -83,6 +83,35 @@ impl From<AuthorityError> for HttpError {
     fn from(error: AuthorityError) -> Self {
         let mut response = match error {
             AuthorityError::Invalid => BAD,
+            AuthorityError::Federation(error) => match error {
+                rss_identity_core::federation::FederationError::Configuration => BAD,
+                rss_identity_core::federation::FederationError::Conflict => {
+                    Self(StatusCode::CONFLICT, "identity_link_conflict", None)
+                }
+                rss_identity_core::federation::FederationError::StaleConfiguration => {
+                    Self(StatusCode::CONFLICT, "configuration_changed", None)
+                }
+                rss_identity_core::federation::FederationError::Unavailable => Self(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "identity_unavailable",
+                    None,
+                ),
+                rss_identity_core::federation::FederationError::Provider(f) => {
+                    use rss_identity_core::federation::{ProviderReason, ProviderStage};
+                    if f.stage == ProviderStage::Exchange
+                        && f.reason == ProviderReason::CodeRejected
+                    {
+                        UNAUTH
+                    } else {
+                        Self(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "identity_unavailable",
+                            None,
+                        )
+                    }
+                }
+                _ => UNAUTH,
+            },
             AuthorityError::Rejected | AuthorityError::RuleRejected(_) => UNAUTH,
             AuthorityError::RateLimited => {
                 Self(StatusCode::TOO_MANY_REQUESTS, "rate_limited", None)
@@ -121,6 +150,12 @@ pub(crate) fn login_cookie(headers: &HeaderMap) -> Result<Option<SessionSecret>,
     Ok(cookie_value(headers)?.and_then(|value| SessionSecret::parse(value.into()).ok()))
 }
 fn cookie_value(headers: &HeaderMap) -> Result<Option<&str>, HttpError> {
+    named_cookie(headers, SESSION_COOKIE_NAME)
+}
+pub(crate) fn named_cookie<'a>(
+    headers: &'a HeaderMap,
+    name_expected: &str,
+) -> Result<Option<&'a str>, HttpError> {
     let mut found = None;
     let mut size = 0;
     for value in headers.get_all(header::COOKIE) {
@@ -132,7 +167,7 @@ fn cookie_value(headers: &HeaderMap) -> Result<Option<&str>, HttpError> {
             let Some((name, value)) = part.trim().split_once('=') else {
                 return Err(BAD);
             };
-            if name == SESSION_COOKIE_NAME {
+            if name == name_expected {
                 if found.is_some() {
                     return Err(BAD);
                 }
@@ -171,7 +206,9 @@ pub(crate) async fn request_boundary(
 ) -> Response {
     let budget = RequestBudget(Instant::now() + state.config.timeout);
     request.extensions_mut().insert(budget);
-    let origin = if request.method().is_safe() {
+    let origin = if request.uri().to_string().len() > 8192 {
+        Err(BAD)
+    } else if request.method().is_safe() {
         Ok(())
     } else {
         match unique(request.headers(), "origin") {
@@ -185,6 +222,10 @@ pub(crate) async fn request_boundary(
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     };
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),

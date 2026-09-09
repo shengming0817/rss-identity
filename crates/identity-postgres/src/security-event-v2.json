@@ -51,7 +51,6 @@
         "administrator",
         "emergency",
         "member_active",
-        "credential_version",
         "membership_epoch"
       ],
       "properties": {
@@ -66,10 +65,6 @@
         },
         "member_active": {
           "type": "boolean"
-        },
-        "credential_version": {
-          "type": "integer",
-          "minimum": 1
         },
         "membership_epoch": {
           "type": "integer",

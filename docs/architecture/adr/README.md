@@ -7,3 +7,5 @@ I01 固定首期产品会话路径、协议 owner、租户模型与撤销承诺�
 - [#2333 / #2358 本地账户 authority 与维护边界](202609080509-2333-local-authority.md)
 
 - [#2334 中央登录会话](202609080900-2334-central-session.md)
+
+- [#2335 租户 IdP 与联合身份](202609082050-2335-federated-identity.md)

@@ -30,7 +30,6 @@ pub(crate) struct EventState {
     administrator: bool,
     emergency: bool,
     member_active: bool,
-    credential_version: i64,
     membership_epoch: i64,
 }
 impl AccountEvent {
@@ -46,7 +45,6 @@ impl AccountEvent {
                 administrator: state.administrator(),
                 emergency: state.emergency(),
                 member_active: state.member_active(),
-                credential_version: state.credential_version(),
                 membership_epoch: state.membership_epoch(),
             },
         }
@@ -58,6 +56,7 @@ impl AccountEvent {
 pub(crate) enum SecurityEvent {
     Account(AccountEvent),
     Session(crate::sessions::SessionEvent),
+    Federation(crate::federation::FederationEvent),
 }
 impl SecurityEvent {
     pub fn account(action: SecurityAction, state: AccountState, actor: Option<AccountKey>) -> Self {
@@ -67,14 +66,27 @@ impl SecurityEvent {
         match self {
             Self::Account(v) => &v.tenant,
             Self::Session(v) => &v.tenant,
+            Self::Federation(v) => &v.tenant,
         }
     }
-    fn contract(&self) -> (&'static str, &'static str, &'static str) {
+    fn contract(&self) -> (&'static str, &'static str, u32, &'static str) {
         match self {
-            Self::Account(_) => ("account.changed", "identity.account.security", EVENT_SCHEMA),
+            Self::Account(_) => (
+                "account.changed",
+                "identity.account.security",
+                2,
+                EVENT_SCHEMA,
+            ),
+            Self::Federation(_) => (
+                "federation.changed",
+                "identity.federation.security",
+                1,
+                include_str!("federation-security-event-v1.json"),
+            ),
             Self::Session(_) => (
                 "session.changed",
                 "identity.session.security",
+                1,
                 include_str!("session-security-event-v1.json"),
             ),
         }
@@ -86,13 +98,15 @@ pub(crate) enum MutationError {
     Storage(#[from] PgError),
     #[error(transparent)]
     Rule(#[from] AccountRuleError),
+    #[error(transparent)]
+    Federation(#[from] rss_identity_core::federation::FederationError),
 }
 impl From<sqlx::Error> for MutationError {
     fn from(error: sqlx::Error) -> Self {
         Self::Storage(error.into())
     }
 }
-const EVENT_SCHEMA: &str = include_str!("security-event-v1.json");
+const EVENT_SCHEMA: &str = include_str!("security-event-v2.json");
 pub(crate) fn reject() -> PgError {
     MessagingError::new(
         MessagingErrorKind::Conflict,
@@ -141,6 +155,49 @@ impl Authority {
                 |_| Err(AuthorityError::Fenced),
             )
     }
+    pub(crate) async fn read_sql<T: Send + 'static, F>(
+        &self,
+        tenant: TenantId,
+        deadline: OperationDeadline,
+        work: F,
+    ) -> Result<T, AuthorityError>
+    where
+        F: for<'a> FnOnce(&'a mut sqlx::PgConnection) -> BoxFuture<'a, Result<T, MutationError>>
+            + Send
+            + 'static,
+    {
+        let reason = std::sync::Arc::new(std::sync::OnceLock::new());
+        let slot = reason.clone();
+        let result = self
+            .read(tenant, deadline, move |tx| {
+                Box::pin(async move {
+                    connection(tx, work)
+                        .await
+                        .map_err(|e| sql_failure(e, &slot))
+                })
+            })
+            .await;
+        domain_result(result, reason.get().copied())
+    }
+    pub(crate) async fn write_sql<T: Send + 'static, F>(
+        &self,
+        tenant: TenantId,
+        deadline: OperationDeadline,
+        work: F,
+    ) -> Result<T, AuthorityError>
+    where
+        F: for<'a> FnOnce(
+                &'a mut sqlx::PgConnection,
+            )
+                -> BoxFuture<'a, Result<(T, Vec<SecurityEvent>), MutationError>>
+            + Send
+            + 'static,
+    {
+        self.mutate_events(tenant, deadline, move |tx| {
+            Box::pin(async move { connection(tx, work).await })
+        })
+        .await
+    }
     pub(crate) async fn mutate<T: Send, F>(
         &self,
         tenant: TenantId,
@@ -154,75 +211,91 @@ impl Authority {
             + Send
             + 'static,
     {
+        self.mutate_events(tenant, deadline, move |tx| {
+            Box::pin(async move {
+                let (value, event) = operation(tx).await?;
+                Ok((value, vec![event]))
+            })
+        })
+        .await
+    }
+    pub(crate) async fn mutate_events<T: Send, F>(
+        &self,
+        tenant: TenantId,
+        deadline: OperationDeadline,
+        operation: F,
+    ) -> Result<T, AuthorityError>
+    where
+        F: for<'a> FnOnce(
+                &'a mut PgTransaction<'_>,
+            )
+                -> BoxFuture<'a, Result<(T, Vec<SecurityEvent>), MutationError>>
+            + Send
+            + 'static,
+    {
         let outbox = self.outbox.clone();
         let reason = std::sync::Arc::new(std::sync::OnceLock::new());
         let reason_slot = reason.clone();
         let result = self
             .read(tenant, deadline, move |tx| {
                 Box::pin(async move {
-                    let (result, event) = operation(tx).await.map_err(|error| match error {
-                        MutationError::Storage(error) => error,
-                        MutationError::Rule(rule) => {
-                            let _ = reason_slot.set(rule);
-                            reject()
-                        }
-                    })?;
-                    if event.tenant() != tenant.to_string() {
+                    let (result, events) = operation(tx)
+                        .await
+                        .map_err(|e| sql_failure(e, &reason_slot))?;
+                    if events.is_empty() || events.len() > 8 {
                         return Err(corrupt());
                     }
-                    let now: i64 = tx
-                        .with_connection(|c| {
-                            Box::pin(async {
-                                sqlx::query_scalar(
+                    for event in events {
+                        if event.tenant() != tenant.to_string() {
+                            return Err(corrupt());
+                        }
+                        let now: i64 = tx
+                            .with_connection(|c| {
+                                Box::pin(async {
+                                    sqlx::query_scalar(
                                     "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint",
                                 )
                                 .fetch_one(c)
                                 .await
+                                })
                             })
-                        })
-                        .await?;
-                    let (route, contract, schema) = event.contract();
-                    let envelope = MessageEnvelope::new(
-                        MessageId::parse(&Uuid::new_v4().to_string()).map_err(|_| corrupt())?,
-                        MessageMetadata::new(
-                            AuthoredMessageMetadata::new(
-                                tenant,
-                                Timepoint::try_from(now).map_err(|_| corrupt())?,
-                                MessagingDomain::parse("identity.security")
-                                    .map_err(|_| corrupt())?,
-                                MessageRoute::parse(route).map_err(|_| corrupt())?,
-                                ContractIdentity::new(
-                                    ContractId::parse(contract).map_err(|_| corrupt())?,
-                                    ContractVersion::from_major(1).map_err(|_| corrupt())?,
-                                    SchemaDigest::parse(&format!(
-                                        "sha256:{:x}",
-                                        Sha256::digest(schema)
-                                    ))
-                                    .map_err(|_| corrupt())?,
+                            .await?;
+                        let (route, contract, version, schema) = event.contract();
+                        let envelope = MessageEnvelope::new(
+                            MessageId::parse(&Uuid::new_v4().to_string()).map_err(|_| corrupt())?,
+                            MessageMetadata::new(
+                                AuthoredMessageMetadata::new(
+                                    tenant,
+                                    Timepoint::try_from(now).map_err(|_| corrupt())?,
+                                    MessagingDomain::parse("identity.security")
+                                        .map_err(|_| corrupt())?,
+                                    MessageRoute::parse(route).map_err(|_| corrupt())?,
+                                    ContractIdentity::new(
+                                        ContractId::parse(contract).map_err(|_| corrupt())?,
+                                        ContractVersion::from_major(version)
+                                            .map_err(|_| corrupt())?,
+                                        SchemaDigest::parse(&format!(
+                                            "sha256:{:x}",
+                                            Sha256::digest(schema)
+                                        ))
+                                        .map_err(|_| corrupt())?,
+                                    ),
                                 ),
+                                MessageMetadataExtensions::default(),
                             ),
-                            MessageMetadataExtensions::default(),
-                        ),
-                        serde_json::to_vec(&event).map_err(|_| corrupt())?,
-                    );
-                    if outbox.append(tx, PendingMessage::new(envelope)).await?
-                        != AppendOutcome::Inserted
-                    {
-                        return Err(corrupt());
+                            serde_json::to_vec(&event).map_err(|_| corrupt())?,
+                        );
+                        if outbox.append(tx, PendingMessage::new(envelope)).await?
+                            != AppendOutcome::Inserted
+                        {
+                            return Err(corrupt());
+                        }
                     }
                     Ok(result)
                 })
             })
             .await;
-        match (result, reason.get().copied()) {
-            (Err(AuthorityError::Rejected), Some(AccountRuleError::Rejected)) => {
-                Err(AuthorityError::Rejected)
-            }
-            (Err(AuthorityError::Rejected), Some(reason)) => {
-                Err(AuthorityError::RuleRejected(reason))
-            }
-            (result, _) => result, // Uncertain settlement always wins over domain diagnostics.
-        }
+        domain_result(result, reason.get().copied())
     }
 }
 
@@ -240,4 +313,31 @@ where
     })
     .await
     .map_err(E::from)?
+}
+
+fn sql_failure(error: MutationError, reason: &std::sync::OnceLock<AuthorityError>) -> PgError {
+    match error {
+        MutationError::Storage(e) => e,
+        MutationError::Rule(e) => {
+            let _ = reason.set(AuthorityError::RuleRejected(e));
+            reject()
+        }
+        MutationError::Federation(e) => {
+            let _ = reason.set(AuthorityError::Federation(e));
+            reject()
+        }
+    }
+}
+fn domain_result<T>(
+    result: Result<T, AuthorityError>,
+    reason: Option<AuthorityError>,
+) -> Result<T, AuthorityError> {
+    match (result, reason) {
+        (
+            Err(AuthorityError::Rejected),
+            Some(AuthorityError::RuleRejected(AccountRuleError::Rejected)),
+        ) => Err(AuthorityError::Rejected),
+        (Err(AuthorityError::Rejected), Some(reason)) => Err(reason),
+        (result, _) => result,
+    }
 }

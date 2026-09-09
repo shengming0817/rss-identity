@@ -45,6 +45,8 @@ impl AttemptSource {
 pub enum AuthorityError {
     #[error("invalid account input")]
     Invalid,
+    #[error(transparent)]
+    Federation(#[from] rss_identity_core::federation::FederationError),
     #[error("authentication or operation rejected")]
     Rejected,
     #[error("transaction rolled back: {0}")]

@@ -1,8 +1,11 @@
 #![cfg(feature = "test-support")]
 use reqwest::{Client, Response, Url};
-use rss_identity_oidc::{OidcError, Provider, ProviderConfig};
+use rss_identity_core::federation::*;
+use rss_identity_oidc::{ApprovedProvider, HttpOidc};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::time::Duration;
+use zeroize::Zeroizing;
 const REDIRECT: &str = "http://127.0.0.1:19999/auth/callback";
 fn location(response: &Response) -> anyhow::Result<Url> {
     Ok(Url::parse(
@@ -26,14 +29,33 @@ fn browser() -> anyhow::Result<Client> {
         .timeout(Duration::from_secs(10))
         .build()?)
 }
-async fn provider(issuer: &str) -> anyhow::Result<Provider> {
-    Ok(Provider::discover(ProviderConfig::for_loopback_test(
-        issuer,
-        "identity-test",
-        "fixture-secret",
-        REDIRECT,
-    )?)
-    .await?)
+fn provider(issuer: &str) -> anyhow::Result<(HttpOidc, ProviderSettings)> {
+    let p = HttpOidc::for_loopback_test(
+        vec![ApprovedProvider {
+            tenant: tenant(),
+            issuer: issuer.into(),
+            client_id: "identity-test".into(),
+            secret_ref: "fixture@1".into(),
+            redirect_uri: REDIRECT.into(),
+            addresses: vec!["127.0.0.0/8".parse()?],
+        }],
+        BTreeMap::from([("fixture@1".into(), Zeroizing::new("fixture-secret".into()))]),
+    )?;
+    let c = (rss_identity_core::federation::ProviderSettingsInput {
+        issuer: issuer.into(),
+        client_id: "identity-test".into(),
+        secret_ref: "fixture@1".into(),
+        redirect_uri: REDIRECT.into(),
+        scopes: vec!["openid".into(), "profile".into()],
+        claims: ClaimMapping {
+            email: None,
+            groups: None,
+        },
+        jit: false,
+    })
+    .try_into()
+    .unwrap();
+    Ok((p, c))
 }
 
 async fn keycloak_login(url: Url) -> anyhow::Result<Url> {
@@ -96,76 +118,57 @@ async fn callback(url: Url, admin: Option<&str>) -> anyhow::Result<Url> {
         keycloak_login(url).await
     }
 }
+async fn prepare(p: &HttpOidc, c: &ProviderSettings) -> anyhow::Result<(Url, ProtocolMaterial)> {
+    let material = ProtocolMaterial::new(random_secret()?.to_string())?;
+    let url = p.prepare(tenant(), c, &material, false).await?;
+    Ok((Url::parse(&url)?, material))
+}
 async fn flow(issuer: &str, admin: Option<&str>) -> anyhow::Result<()> {
-    let p = provider(issuer).await?;
-    let (url, attempt) = p.begin();
+    let (p, c) = provider(issuer)?;
+    let (url, material) = prepare(&p, &c).await?;
     assert_eq!(query(&url, "code_challenge_method")?, "S256");
     let cb = callback(url, admin).await?;
+    assert_eq!(query(&cb, "state")?, material.state.as_str());
     let code = query(&cb, "code")?;
-    let state = query(&cb, "state")?;
-    let subject = p.finish(attempt, &state, code.clone()).await?;
-    assert_eq!(subject.issuer(), issuer);
-    assert!(!subject.subject().is_empty());
-    // Code replay cannot succeed, even from the same registered client.
-    let (url, attempt) = p.begin();
-    assert!(matches!(
-        p.finish(attempt, &query(&url, "state")?, code).await,
-        Err(OidcError::Exchange)
-    ));
-    let (url, attempt) = p.begin();
-    assert!(matches!(
-        p.finish(attempt, "wrong-state", "unused".into()).await,
-        Err(OidcError::State)
-    ));
-    // Provider issues a valid signed ID token with a different nonce: adapter must reject it.
-    let (_, attempt) = p.begin();
-    assert!(matches!(
-        p.finish(attempt, &query(&url, "state")?, "unused".into())
-            .await,
-        Err(OidcError::State)
-    ));
-    let (mut url, attempt) = p.begin();
-    let pairs: Vec<(String, String)> = url
-        .query_pairs()
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .filter(|(k, _)| k != "nonce")
-        .collect();
-    url.query_pairs_mut()
-        .clear()
-        .extend_pairs(pairs)
-        .append_pair("nonce", "wrong-nonce");
-    let cb = callback(url, admin).await?;
-    assert!(matches!(
-        p.finish(attempt, &query(&cb, "state")?, query(&cb, "code")?)
-            .await,
-        Err(OidcError::Claims)
-    ));
-    // Wrong verifier: keep the returned state but send an authorization challenge the attempt cannot satisfy.
-    let (mut url, attempt) = p.begin();
-    let pairs: Vec<(String, String)> = url
-        .query_pairs()
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .filter(|(k, _)| k != "code_challenge")
-        .collect();
-    url.query_pairs_mut()
-        .clear()
-        .extend_pairs(pairs)
-        .append_pair(
+    let claims = p
+        .exchange(tenant(), &c, material, Zeroizing::new(code.clone()))
+        .await?;
+    assert_eq!(claims.issuer, issuer);
+    assert!(!claims.subject.is_empty());
+    let (_, material) = prepare(&p, &c).await?;
+    assert!(
+        p.exchange(tenant(), &c, material, Zeroizing::new(code))
+            .await
+            .is_err()
+    );
+    for (field, value, error) in [
+        ("nonce", "wrong-nonce", FederationError::Claims),
+        (
             "code_challenge",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            FederationError::provider(ProviderStage::Exchange, ProviderReason::CodeRejected),
+        ),
+    ] {
+        let (mut url, material) = prepare(&p, &c).await?;
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(k, _)| k != field)
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(pairs)
+            .append_pair(field, value);
+        let cb = callback(url, admin).await?;
+        assert!(
+            matches!(p.exchange(tenant(), &c,material,Zeroizing::new(query(&cb,"code")?)).await,Err(e) if e==error)
         );
-    let cb = callback(url, admin).await?;
-    assert!(matches!(
-        p.finish(attempt, &query(&cb, "state")?, query(&cb, "code")?)
-            .await,
-        Err(OidcError::Exchange)
-    ));
-    // A wrong redirect URI must never yield an authorization code to that destination.
-    let (mut url, _) = p.begin();
+    }
+    let (mut url, _) = prepare(&p, &c).await?;
     let pairs: Vec<(String, String)> = url
         .query_pairs()
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .filter(|(k, _)| k != "redirect_uri")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
     url.query_pairs_mut()
         .clear()
@@ -190,17 +193,13 @@ async fn real_provider_flows() -> anyhow::Result<()> {
             Some(&std::env::var("IDENTITY_TEST_HYDRA_ADMIN")?),
         )
         .await?;
-        assert!(
-            Provider::discover(ProviderConfig::for_loopback_test(
-                "http://127.0.0.1:1",
-                "client",
-                "secret",
-                REDIRECT
-            )?)
-            .await
-            .is_err()
-        );
+        let (p, c) = provider("http://127.0.0.1:1")?;
+        assert!(p.test(tenant(), &c).await.is_err());
         Ok::<(), anyhow::Error>(())
     })
     .await?
+}
+
+fn tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap()
 }

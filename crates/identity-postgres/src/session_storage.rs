@@ -34,16 +34,31 @@ pub(crate) async fn lookup(
     digest: &[u8; 32],
 ) -> Result<Loaded, PgError> {
     lock_guard(c, tenant).await?;
-    let locator = sqlx::query("SELECT principal_id::text,session_id::text FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND token_hash=$2")
-        .bind(tenant.to_string()).bind(digest.as_slice()).fetch_optional(&mut *c).await?.ok_or_else(reject)?;
+    let locator = sqlx::query(concat!(
+        "SELECT principal_id::text,session_id::text FROM identity_authority.sessions WHER",
+        "E tenant_id=$1::uuid AND token_hash=$2"
+    ))
+    .bind(tenant.to_string())
+    .bind(digest.as_slice())
+    .fetch_optional(&mut *c)
+    .await?
+    .ok_or_else(reject)?;
     let key = AccountKey {
         tenant,
         principal: principal(&locator.try_get::<String, _>("principal_id")?)?,
     };
     let state = load(c, key).await?.state;
     let id: String = locator.try_get("session_id")?;
-    let row = sqlx::query("SELECT auth_epoch,membership_epoch,auth_time,idle_expires_at,absolute_expires_at,revoked_at,token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid FOR UPDATE")
-        .bind(tenant.to_string()).bind(&id).fetch_optional(&mut *c).await?.ok_or_else(reject)?;
+    let row = sqlx::query(concat!(
+        "SELECT auth_epoch,membership_epoch,auth_time,idle_expires_at,absolute_expires_at",
+        ",revoked_at,token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
+        " AND session_id=$2::uuid FOR UPDATE"
+    ))
+    .bind(tenant.to_string())
+    .bind(&id)
+    .fetch_optional(&mut *c)
+    .await?
+    .ok_or_else(reject)?;
     if !state.active()
         || row.try_get::<i64, _>("auth_epoch")? != state.epoch()
         || row.try_get::<i64, _>("membership_epoch")? != state.membership_epoch()
@@ -51,6 +66,10 @@ pub(crate) async fn lookup(
         || row.try_get::<Vec<u8>, _>("token_hash")? != digest.as_slice()
     {
         return Err(reject());
+    }
+    let origin = crate::federation_storage::origin(c, tenant, session_id(&id)?).await?;
+    if let Some(origin) = &origin {
+        crate::federation_storage::check_origin(c, tenant, origin).await?;
     }
     let lifetime = SessionLifetime::restore(
         row.try_get("auth_time")?,
@@ -89,8 +108,15 @@ pub(crate) async fn recheck(
 pub(crate) async fn touch(c: &mut PgConnection, loaded: &mut Loaded) -> Result<(), PgError> {
     loaded.lifetime.renew(loaded.now).map_err(|_| reject())?;
     loaded.view = SessionView::new(loaded.view.id, loaded.lifetime);
-    sqlx::query("UPDATE identity_authority.sessions SET idle_expires_at=$3 WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
-        .bind(loaded.state.key().tenant.to_string()).bind(loaded.view.id.to_string()).bind(loaded.lifetime.idle_expires_at()).execute(c).await?;
+    sqlx::query(concat!(
+        "UPDATE identity_authority.sessions SET idle_expires_at=$3 WHERE tenant_id=$1::uu",
+        "id AND session_id=$2::uuid"
+    ))
+    .bind(loaded.state.key().tenant.to_string())
+    .bind(loaded.view.id.to_string())
+    .bind(loaded.lifetime.idle_expires_at())
+    .execute(c)
+    .await?;
     Ok(())
 }
 pub(crate) async fn close(
@@ -99,7 +125,14 @@ pub(crate) async fn close(
     id: SessionId,
     now: i64,
 ) -> Result<(), PgError> {
-    sqlx::query("UPDATE identity_authority.sessions SET revoked_at=$3 WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
-        .bind(key.tenant.to_string()).bind(id.to_string()).bind(now).execute(c).await?;
+    sqlx::query(concat!(
+        "UPDATE identity_authority.sessions SET revoked_at=$3 WHERE tenant_id=$1::uuid AN",
+        "D session_id=$2::uuid"
+    ))
+    .bind(key.tenant.to_string())
+    .bind(id.to_string())
+    .bind(now)
+    .execute(c)
+    .await?;
     Ok(())
 }

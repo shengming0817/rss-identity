@@ -1,6 +1,6 @@
 # 本机维护：开发库安装与不确定结果核实
 
-适用 #2358/#2334 的可丢弃专属开发库（当前初始安装为 schema version 3）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin recover`，下列账户/事件查询只有只读用途。
+适用 #2358/#2334/#2335 的可丢弃专属开发库（当前初始安装为 schema version 4）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin recover`，下列账户/事件查询只有只读用途。
 
 ## 连接与凭据前置条件
 
@@ -98,7 +98,7 @@ SQL
 Owner 只读核实非秘密安装身份：
 
 ```sql
-SELECT version FROM identity_authority.schema_version; -- 恰好一行，2
+SELECT version FROM identity_authority.schema_version; -- 恰好一行，4
 SELECT authority_id,bootstrap_tenant FROM identity_authority.deployment; -- 恰好一行，记录 authority_id；tenant 为 NULL
 SELECT encode(target,'hex'),encode(lineage,'hex') FROM rss_transactional_messaging.storage_lineage;
 SELECT tenant_id,epoch FROM rss_transactional_messaging.tenant_epoch;
@@ -185,7 +185,7 @@ BEGIN
     (bootstrap IS NOT NULL AND (bootstrap<>t OR accounts_count<>1)))) THEN
   RAISE EXCEPTION 'inconsistent deployment/account/membership evidence; stop maintenance';
  END IF;
- SELECT a.enabled,a.administrator,a.emergency,a.auth_epoch,a.credential_version,
+ SELECT a.enabled,a.administrator,a.emergency,a.auth_epoch,
         m.active,m.epoch AS membership_epoch INTO account
  FROM identity_authority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal_id)
  WHERE a.tenant_id=t AND a.principal_id=p;
@@ -208,7 +208,7 @@ BEGIN
   OR (event_epoch=account.auth_epoch AND evidence.payload->'state' IS DISTINCT FROM
    jsonb_build_object('enabled',account.enabled,'administrator',account.administrator,
     'emergency',account.emergency,'member_active',account.active,
-    'credential_version',account.credential_version,'membership_epoch',account.membership_epoch)) THEN
+    'membership_epoch',account.membership_epoch)) THEN
    RAISE EXCEPTION 'account and event evidence disagree; stop maintenance';
   END IF;
   evidence_count := evidence_count+1;
@@ -225,7 +225,7 @@ EXCEPTION WHEN data_exception THEN
 END $$;
 SELECT authority_id,bootstrap_tenant FROM identity_authority.deployment;
 SELECT a.tenant_id,a.principal_id,a.enabled,a.administrator,a.emergency,
-       a.auth_epoch,a.credential_version,m.active,m.epoch AS membership_epoch
+       a.auth_epoch,m.active,m.epoch AS membership_epoch
 FROM identity_authority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal_id)
 WHERE a.tenant_id=:'tenant'::uuid AND a.principal_id=:'principal'::uuid;
 COMMIT;

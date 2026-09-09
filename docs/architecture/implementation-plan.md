@@ -113,3 +113,8 @@ schema version 2、事件 V1 payload、账户/租户/authority/lineage/epoch 的
 ## I04 实施落点
 
 #2334 的当前决定见 [中央会话 ADR](adr/202609080900-2334-central-session.md)：identity-core 会话策略、identity-postgres 单表/统一 auth_epoch 与事务事件、identity-http-axum Router。初始安装更新为 schema version 3，替代上文更名阶段的 v2；不兼容旧开发库。仅 T1/T2，验证结果随实现 PR 记录，I05/I06/I07/I08 与独立 T3 的退出条件保持独立。
+
+## I05 实施决定（#2335）
+
+用户决定一个 PR 完成账户/本地凭据替换与全部联合身份闭环，不保留旧内存 LoginAttempt 或 schema 兼容。
+实现模型与安全边界由 [I05 ADR](adr/202609082050-2335-federated-identity.md) 持有，管理与接入见[指南](../guides/federation.md)。实际版本/SHA/lock、provider digest 和验证结果记录于实现 PR，不以文档更新代替运行验收。

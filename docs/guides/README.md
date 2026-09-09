@@ -5,3 +5,5 @@
 - [本机维护 runbook](local-maintenance.md)：开发库安装、身份配置与不确定提交的只读核实。
 
 完整产品启动与 I06 consumer 指南由后续工作项提供。
+
+- [IdP 配置与联合登录](federation.md)：部署出站许可、不可变 secret_ref、管理 CLI 和浏览器接缝。

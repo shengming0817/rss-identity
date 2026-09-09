@@ -33,8 +33,8 @@ fn core_owns_transitions_and_last_administrator() {
             .change(&member, LocalChange::Administrator(false), 2)
             .is_err()
     );
-    assert!(AccountState::restore(key(), true, true, false, true, 0, 1, 1).is_err());
-    let max = AccountState::restore(key(), true, true, false, true, i64::MAX, 1, 1).unwrap();
+    assert!(AccountState::restore(key(), true, true, false, true, 0, true, 1).is_err());
+    let max = AccountState::restore(key(), true, true, false, true, i64::MAX, true, 1).unwrap();
     assert_eq!(max.recover().unwrap_err(), AccountRuleError::EpochExhausted);
 }
 

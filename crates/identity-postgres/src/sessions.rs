@@ -57,7 +57,7 @@ impl IssuedSession {
             .saturating_sub(self.observed.elapsed())
             .as_secs()
     }
-    fn new(secret: SessionSecret, view: SessionView, now: i64) -> Self {
+    pub(crate) fn new(secret: SessionSecret, view: SessionView, now: i64) -> Self {
         Self {
             remaining: Duration::from_secs(
                 view.absolute_expires_at.saturating_sub(now).max(0) as u64
@@ -124,6 +124,45 @@ fn event(
         epoch: state.epoch(),
     })
 }
+pub(crate) async fn insert(
+    c: &mut sqlx::PgConnection,
+    state: AccountState,
+    replaced: Option<SessionId>,
+    origin: Option<crate::federation_storage::Origin>,
+    now: i64,
+) -> Result<(IssuedSession, SecurityEvent), transaction::MutationError> {
+    let key = state.key();
+    let secret = SessionSecret::generate().map_err(|_| corrupt())?;
+    let lifetime = SessionLifetime::new(now, state.administrator()).map_err(|_| corrupt())?;
+    if let Some(id) = replaced {
+        db::close(c, key, id, now).await?;
+    }
+    let id = SessionId::generate();
+    sqlx::query(concat!(
+        "INSERT INTO identity_authority.sessions(tenant_id,principal_id,session_id,token_",
+        "hash,auth_epoch,membership_epoch,auth_time,idle_expires_at,absolute_expires_at,e",
+        "xternal_identity_id,provider_epoch,auth_facts) VALUES($1::uuid,$2::uuid,$3::uuid",
+        ",$4,$5,$6,$7,$8,$9,$10,$11,$12)"
+    ))
+    .bind(key.tenant.to_string())
+    .bind(key.principal.as_uuid().to_string())
+    .bind(id.to_string())
+    .bind(secret.digest().as_slice())
+    .bind(state.epoch())
+    .bind(state.membership_epoch())
+    .bind(now)
+    .bind(lifetime.idle_expires_at())
+    .bind(lifetime.absolute_expires_at())
+    .bind(origin.as_ref().map(|o| o.identity))
+    .bind(origin.as_ref().map(|o| o.epoch))
+    .bind(origin.map(|o| o.facts))
+    .execute(c)
+    .await?;
+    Ok((
+        IssuedSession::new(secret, SessionView::new(id, lifetime), now),
+        event(SessionAction::Created, state, id, replaced),
+    ))
+}
 impl Authority {
     pub async fn create_session(
         &self,
@@ -141,26 +180,29 @@ impl Authority {
             budget.0 = budget.0.min(old.expires);
         }
         let key = candidate.state.key();
-        let secret = SessionSecret::generate().map_err(|_| AuthorityError::Unavailable)?;
-        self.mutate(key.tenant,budget.remaining(),move|tx|Box::pin(async move {
-            connection(tx,move|c|Box::pin(async move {
-                lock_guard(c,key.tenant).await?;
-                let state = current(c,&candidate,false).await?;
-                let replaced = match replacement {
-                    Some(proof) => Some(db::recheck(c,&proof).await?.view.id), None => None,
-                };
-                let now = db::now(c).await?;
-                // current() checks before waiting on account locks; recheck its original deadline.
-                if Instant::now() >= candidate.expires { return Err(reject().into()); }
-                let lifetime = SessionLifetime::new(now,state.administrator()).map_err(|_|corrupt())?;
-                if let Some(id) = replaced { db::close(c,key,id,now).await?; }
-                let id = SessionId::generate();
-                sqlx::query("INSERT INTO identity_authority.sessions(tenant_id,principal_id,session_id,token_hash,auth_epoch,membership_epoch,auth_time,idle_expires_at,absolute_expires_at) VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9)")
-                    .bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).bind(id.to_string()).bind(secret.digest().as_slice()).bind(state.epoch()).bind(state.membership_epoch())
-                    .bind(now).bind(lifetime.idle_expires_at()).bind(lifetime.absolute_expires_at()).execute(c).await?;
-                Ok((IssuedSession::new(secret,SessionView::new(id,lifetime),now),event(SessionAction::Created,state,id,replaced)))
-            })).await
-        })).await
+        self.mutate(key.tenant, budget.remaining(), move |tx| {
+            Box::pin(async move {
+                connection(tx, move |c| {
+                    Box::pin(async move {
+                        lock_guard(c, key.tenant).await?;
+                        let state = current(c, &candidate, false).await?;
+                        let replaced = match replacement {
+                            Some(proof) => Some(db::recheck(c, &proof).await?.view.id),
+                            None => None,
+                        };
+                        let now = db::now(c).await?;
+                        // current() checks before waiting on account locks; recheck its original deadline.
+                        if Instant::now() >= candidate.expires {
+                            return Err(reject().into());
+                        }
+                        let (issued, fact) = insert(c, state, replaced, None, now).await?;
+                        Ok((issued, fact))
+                    })
+                })
+                .await
+            })
+        })
+        .await
     }
     /// Validate without extending idle, for login replacement before its CSRF check.
     pub async fn inspect_session(
@@ -230,7 +272,7 @@ impl Authority {
             connection(tx,move|c|Box::pin(async move {
                 let mut loaded = db::lookup(c,tenant,&old.digest()).await?;
                 db::touch(c,&mut loaded).await?;
-                sqlx::query("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
+                sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
                     .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;
                 let fact = event(SessionAction::Refreshed,loaded.state,loaded.view.id,None);
                 Ok((IssuedSession::new(secret,loaded.view,loaded.now),fact))
@@ -265,7 +307,7 @@ impl Authority {
                 let loaded = db::recheck(c,&actor).await?;
                 let state = if all {
                     let next = loaded.state.revoke_sessions()?;
-                    sqlx::query("UPDATE identity_authority.accounts SET auth_epoch=$3 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
+                    sqlx::query(concat!("UPDATE identity_authority.accounts SET auth_epoch=$3 WHERE tenant_id=$1::uuid AN","D principal_id=$2::uuid"))
                         .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid().to_string()).bind(next.epoch()).execute(c).await?;
                     next
                 } else { db::close(c,actor.key,actor.view.id,loaded.now).await?; loaded.state };
@@ -289,7 +331,7 @@ impl Authority {
         self.read(actor.key.tenant,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let loaded = db::recheck(c,&actor).await?;
-                let rows = sqlx::query("SELECT session_id::text,auth_time,idle_expires_at,absolute_expires_at FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND principal_id=$2::uuid AND auth_epoch=$3 AND membership_epoch=$4 AND revoked_at IS NULL AND auth_time <= $5 AND idle_expires_at > $5 AND absolute_expires_at > $5 AND ($6::uuid IS NULL OR session_id > $6::uuid) ORDER BY session_id LIMIT $7")
+                let rows = sqlx::query(concat!("SELECT session_id::text,auth_time,idle_expires_at,absolute_expires_at FROM ident","ity_authority.sessions s WHERE (external_identity_id IS NULL OR EXISTS(SELECT FR","OM identity_authority.external_identities e JOIN identity_authority.providers p ","USING(tenant_id,provider_id) WHERE e.tenant_id=s.tenant_id AND e.identity_id=s.e","xternal_identity_id AND p.enabled AND p.revocation_epoch=s.provider_epoch)) AND ","tenant_id=$1::uuid AND principal_id=$2::uuid AND auth_epoch=$3 AND membership_ep","och=$4 AND revoked_at IS NULL AND auth_time <= $5 AND idle_expires_at > $5 AND a","bsolute_expires_at > $5 AND ($6::uuid IS NULL OR session_id > $6::uuid) ORDER BY"," session_id LIMIT $7"))
                     .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid().to_string()).bind(loaded.state.epoch()).bind(loaded.state.membership_epoch()).bind(loaded.now).bind(cursor.map(|v|v.to_string())).bind(i64::from(limit)+1).fetch_all(c).await?;
                 let mut sessions = Vec::with_capacity(rows.len());
                 for row in rows {

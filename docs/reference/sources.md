@@ -84,3 +84,10 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - 实际读取固定 RSS `bf5dd1350997d01aa834094a3347fce30247814e` 的 `crates/transactional-messaging-postgres/src/transaction.rs:402–525,731–801`：local_tx 是单一截止点与结算 owner，drop 不证明回滚，未确认连接隔离；本项复用其 CommitUnknown/RollbackFailed，不额外发明 HTTP 结算窗口。
 - [Tower 0.5.3 timeout future](https://github.com/tower-rs/tower/blob/4b0a6b0e688bd177eb2c9c97f5268dd9703c66fc/tower/src/timeout/future.rs#L35-L53)：超时可结束 response future，所以将 HTTP 取消限定在 JSON body 读取，事务阶段交给其 owner。读取了 registry 源码和 .cargo_vcs_info.json；未复制源码。
 - [RustCrypto Argon2 0.5.3 Params](https://github.com/RustCrypto/password-hashes/blob/argon2-v0.5.3/argon2/src/params.rs)：实际读取构造时验证和私有参数字段；仅借鉴“校验后持有策略”的封装方式，SessionClass 仍为 Identity 自己的业务规则，无公开策略框架。
+
+## I05 联合身份来源
+
+- [openidconnect verifier](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/verification/mod.rs)：4.0.1 发布源码的固定 Git 身份，实际读取 issuer/audience/signature/nonce/expiry 校验；额外产品事务由本仓持有。
+- [RustCrypto HMAC](https://github.com/RustCrypto/MACs/blob/hmac-v0.12.1/hmac/src/lib.rs)：HMAC-SHA256 与常量时间验证；复用算法，state 编码/租户/浏览器/单次事务由 Identity 持有。
+- 固定 RSS bf5dd1350997d01aa834094a3347fce30247814e `crates/transactional-messaging-postgres/src/transaction.rs`：读取私有 pool 与 tenant-bound local_tx/with_connection；使用同一个有界结算 owner，不新增无租户 SQL 旁路。
+- reqwest 0.12.28 发布源码的 `src/dns/resolve.rs`、`src/async_impl/client.rs`：复用 resolver/HTTPS/no_proxy/redirect policy，不复制网络栈。

@@ -12,17 +12,19 @@ serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 tokio.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["uuid", "json"] }
 rss-request-context.workspace = true
 rss-transactional-messaging.workspace = true
 rss-transactional-messaging-postgres.workspace = true
 futures = "0.3"
+zeroize.workspace = true
+url = "2.5"
 thiserror.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 rss-contract.workspace = true
 rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["uuid", "json"] }
 tokio.workspace = true
 [lints]
 workspace = true

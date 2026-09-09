@@ -67,16 +67,15 @@ impl Authority {
                         let old = load_for_maintenance(c, key).await?.state;
                         let (next, action) = old.recover()?;
                         sqlx::query(
-                            "UPDATE identity_authority.accounts SET password_hash=$3,auth_epoch=$4,credential_version=$5
+                            "UPDATE identity_authority.accounts SET auth_epoch=$3
                              WHERE tenant_id=$1::uuid AND principal_id=$2::uuid",
                         )
                         .bind(key.tenant.to_string())
                         .bind(key.principal.as_uuid().to_string())
-                        .bind(hash.as_str())
                         .bind(next.epoch())
-                        .bind(next.credential_version())
                         .execute(&mut *c)
                         .await?;
+                        sqlx::query(concat!("UPDATE identity_authority.local_credentials SET password_hash=$3 WHERE tenant_id","=$1::uuid AND principal_id=$2::uuid")).bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).bind(hash.as_str()).execute(c).await?;
                         Ok((next, SecurityEvent::account(action, next, None)))
                     })
                 })

@@ -378,7 +378,15 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
     let hash = PasswordKdf::new()
         .hash(Password::new("other tenant secret password".into())?)
         .await?;
-    sqlx::query("INSERT INTO identity_authority.accounts(tenant_id,principal_id,login_key,password_hash,administrator) VALUES($1::uuid,$2::uuid,'admin',$3,true)").bind(B).bind(other.principal.as_uuid().to_string()).bind(hash.as_str()).execute(&f.owner).await?;
+    sqlx::query("INSERT INTO identity_authority.accounts(tenant_id,principal_id,administrator) VALUES($1::uuid,$2::uuid,true)").bind(B).bind(other.principal.as_uuid().to_string()).execute(&f.owner).await?;
+    sqlx::query(
+        "INSERT INTO identity_authority.local_credentials VALUES($1::uuid,$2::uuid,'admin',$3)",
+    )
+    .bind(B)
+    .bind(other.principal.as_uuid().to_string())
+    .bind(hash.as_str())
+    .execute(&f.owner)
+    .await?;
     sqlx::query("INSERT INTO identity_authority.memberships(tenant_id,principal_id) VALUES($1::uuid,$2::uuid)").bind(B).bind(other.principal.as_uuid().to_string()).execute(&f.owner).await?;
     assert!(
         f.store
@@ -506,7 +514,7 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     ));
     assert_eq!(f.events().await?, before + 1);
     let n: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM identity_authority.accounts WHERE login_key='unknown-commit'",
+        "SELECT count(*) FROM identity_authority.local_credentials WHERE login_key='unknown-commit'",
     )
     .fetch_one(&f.owner)
     .await?;
@@ -528,7 +536,7 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     assert!(matches!(result, Err(AuthorityError::RolledBack(_))));
     assert!(!format!("{result:?}").contains("synthetic secret"));
     let n: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM identity_authority.accounts WHERE login_key='rollback'",
+        "SELECT count(*) FROM identity_authority.local_credentials WHERE login_key='rollback'",
     )
     .fetch_one(&f.owner)
     .await?;
@@ -570,7 +578,7 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
             .is_err()
     );
     let n: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM identity_authority.accounts WHERE login_key='duplicate-event'",
+        "SELECT count(*) FROM identity_authority.local_credentials WHERE login_key='duplicate-event'",
     )
     .fetch_one(&f.owner)
     .await?;
@@ -652,8 +660,8 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             StorageMismatch::Role,
         ),
         (
-            "ALTER TABLE identity_authority.accounts DROP CONSTRAINT accounts_tenant_id_login_key_key",
-            "ALTER TABLE identity_authority.accounts ADD UNIQUE(tenant_id,login_key)",
+            "ALTER TABLE identity_authority.local_credentials DROP CONSTRAINT local_credentials_tenant_id_login_key_key",
+            "ALTER TABLE identity_authority.local_credentials ADD UNIQUE(tenant_id,login_key)",
             StorageMismatch::SchemaContract,
         ),
     ] {
@@ -850,10 +858,6 @@ async fn fencing_and_generation_overflow() -> anyhow::Result<()> {
             AccountChange::Password(password()),
         ),
         (
-            "UPDATE identity_authority.accounts SET credential_version=9223372036854775807",
-            AccountChange::Password(password()),
-        ),
-        (
             "UPDATE identity_authority.memberships SET epoch=9223372036854775807",
             AccountChange::Membership(false),
         ),
@@ -872,7 +876,7 @@ async fn fencing_and_generation_overflow() -> anyhow::Result<()> {
         // Avoid assertion formatting of stored credential data on failure.
         assert!(before_rows == after_rows);
         assert_eq!(f.events().await?, before);
-        sqlx::raw_sql("UPDATE identity_authority.accounts SET auth_epoch=1,credential_version=1; UPDATE identity_authority.memberships SET epoch=1;").execute(&f.owner).await?;
+        sqlx::raw_sql("UPDATE identity_authority.accounts SET auth_epoch=1; UPDATE identity_authority.memberships SET epoch=1;").execute(&f.owner).await?;
     }
     f.reset_attempts().await?;
     let actor = f.actor().await?;
@@ -919,7 +923,7 @@ fn assert_envelope(
     let envelope: serde_json::Value = serde_json::from_str(raw)?;
     let bytes: Vec<u8> = serde_json::from_value(envelope["payload"].clone())?;
     let payload: serde_json::Value = serde_json::from_slice(&bytes)?;
-    let expected_state = state.map(|s| serde_json::json!({"enabled":s.enabled(),"administrator":s.administrator(),"emergency":s.emergency(),"member_active":s.member_active(),"credential_version":s.credential_version(),"membership_epoch":s.membership_epoch()}));
+    let expected_state = state.map(|s| serde_json::json!({"enabled":s.enabled(),"administrator":s.administrator(),"emergency":s.emergency(),"member_active":s.member_active(),"membership_epoch":s.membership_epoch()}));
     assert_eq!(
         payload,
         serde_json::json!({"action":action,"tenant":key.tenant.to_string(),"principal":key.principal.as_uuid(),"actor":actor.map(|a| a.principal.as_uuid()),"epoch":epoch,"state":expected_state})
@@ -930,13 +934,13 @@ fn assert_envelope(
     assert_eq!(envelope["contract"], "identity.account.security");
     assert_eq!(
         envelope["version"],
-        rss_contract::ContractVersion::from_major(1)?.to_string()
+        rss_contract::ContractVersion::from_major(2)?.to_string()
     );
     assert_eq!(
         envelope["schema"],
         format!(
             "sha256:{:x}",
-            Sha256::digest(include_str!("../src/security-event-v1.json"))
+            Sha256::digest(include_str!("../src/security-event-v2.json"))
         )
     );
     assert!(uuid::Uuid::parse_str(envelope["id"].as_str().unwrap()).is_ok());
@@ -1262,19 +1266,15 @@ async fn maintenance_races_preserve_current_state() -> anyhow::Result<()> {
             } else {
                 assert_eq!(recovered.as_ref().unwrap_err(), &AuthorityError::Rejected);
             }
-            let row: (bool,bool,bool,bool,i64,i64,i64) = sqlx::query_as("SELECT a.enabled,a.administrator,a.emergency,m.active,a.auth_epoch,a.credential_version,m.epoch FROM identity_authority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid")
+            let row: (bool,bool,bool,bool,i64,i64) = sqlx::query_as("SELECT a.enabled,a.administrator,a.emergency,m.active,a.auth_epoch,m.epoch FROM identity_authority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid")
                 .bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).fetch_one(&f.owner).await?;
             assert_eq!(
                 (row.0, row.1, row.2, row.3),
                 (i != 0, i != 2, i != 2, i != 1)
             );
             assert_eq!(
-                (row.4, row.5, row.6),
-                (
-                    2 + i64::from(recovery_succeeds),
-                    1 + i64::from(i == 3) + i64::from(recovery_succeeds),
-                    1 + i64::from(i == 1)
-                )
+                (row.4, row.5),
+                (2 + i64::from(recovery_succeeds), 1 + i64::from(i == 1))
             );
             let expected_password = if i == 3 && maintenance_first {
                 "daily replacement password"
@@ -1283,7 +1283,7 @@ async fn maintenance_races_preserve_current_state() -> anyhow::Result<()> {
             } else {
                 PASSWORD
             };
-            let hash: String = sqlx::query_scalar("SELECT password_hash FROM identity_authority.accounts WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
+            let hash: String = sqlx::query_scalar("SELECT password_hash FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
                 .bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).fetch_one(&f.owner).await?;
             assert!(
                 PasswordKdf::new()
@@ -1400,7 +1400,7 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
             StorageMismatch::SchemaVersion
         ))
     ));
-    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=3; ALTER TABLE identity_authority.schema_version ADD CHECK(version=3)").execute(&f.owner).await?;
+    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=4; ALTER TABLE identity_authority.schema_version ADD CHECK(version=4)").execute(&f.owner).await?;
     assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
     for (remove, restore, expected) in [
         (
@@ -1497,7 +1497,7 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
             .await
             .is_err()
     );
-    for column in ["auth_epoch", "credential_version"] {
+    for column in ["auth_epoch"] {
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "UPDATE identity_authority.accounts SET {column}=9223372036854775807"
         )))
@@ -1511,7 +1511,7 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
             AuthorityError::RuleRejected(AccountRuleError::EpochExhausted)
         );
         assert_eq!(f.events().await?, 1);
-        sqlx::raw_sql("UPDATE identity_authority.accounts SET auth_epoch=1,credential_version=1")
+        sqlx::raw_sql("UPDATE identity_authority.accounts SET auth_epoch=1")
             .execute(&f.owner)
             .await?;
     }
@@ -1549,7 +1549,7 @@ async fn maintenance_runbook_respects_forced_rls() -> anyhow::Result<()> {
         sqlx::query_scalar("SELECT authority_id::text FROM identity_authority.deployment")
             .fetch_one(&f.owner)
             .await?;
-    sqlx::query("INSERT INTO identity_authority.accounts SELECT $1::uuid,principal_id,login_key,password_hash,enabled,administrator,emergency,auth_epoch,credential_version FROM identity_authority.accounts WHERE tenant_id=$2::uuid")
+    sqlx::query("INSERT INTO identity_authority.accounts SELECT $1::uuid,principal_id,enabled,administrator,emergency,auth_epoch FROM identity_authority.accounts WHERE tenant_id=$2::uuid")
         .bind(B).bind(A).execute(&f.owner).await?;
     sqlx::query("INSERT INTO identity_authority.memberships SELECT $1::uuid,principal_id,active,epoch FROM identity_authority.memberships WHERE tenant_id=$2::uuid")
         .bind(B).bind(A).execute(&f.owner).await?;

@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -85,8 +86,16 @@ def wait(url):
         time.sleep(0.5)
     raise RuntimeError(f'provider readiness timed out: {last}')
 
+def report_tests(package, test, expected, result):
+    # Only canonical names and closed statuses cross the diagnostic boundary.
+    statuses = re.findall(r'^test ([a-zA-Z0-9_:]+) \.\.\. (ok|FAILED|ignored)$', result.stdout, re.M)
+    for name, status in statuses:
+        if name in expected:
+            print(f'{package}/{test}: {name}: {status}')
+    print(f'{package}/{test}: cargo exit={result.returncode}; raw output withheld')
+
 def cargo(package, test, env, features=()):
-    expected = {('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
+    expected = {('rss-identity-http-axum','federated_http'): {'real_federated_login_and_linking','federated_http_rejects_mismatch_and_uncertain_commit','federated_tls_and_egress_policy'}, ('rss-identity-postgres','federated_atomic'): {'federation_concurrent_linking_keeps_one_owner','federation_configuration_authorization_and_versions','federation_state_restart_expiry_and_replay','federation_jit_isolated_subjects_and_membership','federation_config_races_and_provider_revocation','federation_atomic_events_and_unknown_commit','federation_local_and_federated_linking','federation_link_conflict_logout_and_wrong_reauthentication','federation_concurrent_jit_rls_and_schema_drift'}, ('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
                 ('rss-identity-postgres', 'session_atomic'): {'session_rotation_and_revocation', 'session_isolation_replacement_and_restart', 'session_account_changes_fence_racing_credentials', 'session_settlement_and_event_failure_are_atomic', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations'},
                 ('rss-identity-http-axum', 'session_http'): {'session_http_login_cookie_csrf_and_replacement', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_recovery_current_logout_and_deadline', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_pending_commit_preserves_settlement'},
                 ('rss-identity-admin', 'operator'): {'maintenance_file_and_settlement'},
@@ -97,21 +106,30 @@ def cargo(package, test, env, features=()):
     names = re.findall(r'^(.+): test$', listing, re.M)
     if set(names) != expected or len(names) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test set missing or changed')
-    result = subprocess.run([*command, '--nocapture', '--format', 'pretty'], cwd=ROOT, env=environment, check=True, text=True, stdout=subprocess.PIPE).stdout
-    print(result, end='')
+    completed = subprocess.run([*command, '--nocapture', '--format', 'pretty'], cwd=ROOT, env=environment, text=True, capture_output=True)
+    result = completed.stdout
+    report_tests(package, test, expected, completed)
+    if completed.returncode:
+        raise RuntimeError(f'{package}/{test}: cargo exit={completed.returncode}')
     counts = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out', result, re.M)
     executed = re.findall(r'^test (.+) \.\.\. ok$', result, re.M)
     if counts != [(str(len(expected)), '0', '0', '0', '0')] or set(executed) != expected or len(executed) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test execution incomplete')
 
-def pg():
+@contextlib.contextmanager
+def postgres():
     with container(PG, [5432], [("POSTGRES_PASSWORD", "fixture-only")]) as (cid, ports):
         for _ in range(120):
             p = subprocess.run(["docker", "exec", cid, "pg_isready", "-U", "postgres"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
             if p.returncode == 0: break
             time.sleep(0.5)
         else: raise RuntimeError(f"PostgreSQL readiness timed out: pg_isready exit={p.returncode}")
+        yield cid, ports
+
+def pg():
+    with postgres() as (_, ports):
         env = {"IDENTITY_TEST_PG_PORT": str(ports[5432])}
+        cargo("rss-identity-postgres", "federated_atomic", env)
         cargo("rss-identity-postgres", "atomic", env)
         cargo("rss-identity-postgres", "session_atomic", env)
         cargo("rss-identity-http-axum", "session_http", env)
@@ -169,7 +187,41 @@ def oidc():
         cargo("rss-identity-oidc", "provider", {"IDENTITY_TEST_KEYCLOAK_ISSUER": kc, "IDENTITY_TEST_HYDRA_ISSUER": issuer,
               "IDENTITY_TEST_HYDRA_ADMIN": admin}, ["--features", "test-support"])
 
+def federated():
+    realm = {"realm":"identity", "enabled":True, "sslRequired":"all", "duplicateEmailsAllowed":True,
+             "loginWithEmailAllowed":False,
+             "groups":[{"name":"staff"}],
+             "clients":[{"clientId":"identity-test", "secret":"fixture-secret", "publicClient":False,
+                         "standardFlowEnabled":True, "directAccessGrantsEnabled":False,
+                         "redirectUris":["https://identity.example.test/api/v1/oidc/callback"],
+                         "attributes":{"pkce.code.challenge.method":"S256"},
+                         "protocolMappers":[{"name":"groups","protocol":"openid-connect","protocolMapper":"oidc-group-membership-mapper",
+                         "config":{"claim.name":"groups","full.path":"false","id.token.claim":"true","access.token.claim":"false"}}]}],
+             "users":[{"username":name,"enabled":True,"email":"same@example.test","emailVerified":True,
+                       "firstName":name,"lastName":"Fixture","groups":["staff"],
+                       "credentials":[{"type":"password","value":"fixture-password","temporary":False}]} for name in ["alice","bob"]]}
+    with tempfile.TemporaryDirectory(prefix="identity-federated-") as tmp, contextlib.ExitStack() as stack:
+        tmp=Path(tmp);cert=tmp/"tls.crt";key=tmp/"tls.key";realm_file=tmp/"identity-realm.json"
+        realm_file.write_text(json.dumps(realm))
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-keyout",str(key),"-out",str(cert),"-days","2",
+                        "-subj","/CN=identity-t2", "-addext","basicConstraints=critical,CA:FALSE","-addext","keyUsage=critical,digitalSignature,keyEncipherment","-addext","extendedKeyUsage=serverAuth","-addext","subjectAltName=IP:127.0.0.1,DNS:localhost"],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+        key.chmod(0o644)  # Synthetic disposable fixture key readable by the container's unprivileged uid.
+        port=free_port();origin=f"https://127.0.0.1:{port}";issuer=origin+"/realms/identity"
+        stack.enter_context(container(KEYCLOAK,{8443:port},args=["start-dev","--import-realm","--http-enabled=false",f"--hostname={origin}",
+            "--https-certificate-file=/opt/keycloak/conf/tls.crt","--https-certificate-key-file=/opt/keycloak/conf/tls.key"],
+            mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro",f"{cert}:/opt/keycloak/conf/tls.crt:ro",f"{key}:/opt/keycloak/conf/tls.key:ro"]))
+        context=ssl.create_default_context(cafile=str(cert));deadline=time.monotonic()+120
+        while time.monotonic()<deadline:
+            try:
+                with urllib.request.urlopen(issuer+"/.well-known/openid-configuration",context=context,timeout=2) as response:
+                    if response.status==200:break
+            except (OSError,urllib.error.URLError):time.sleep(.5)
+        else:raise RuntimeError("Keycloak TLS readiness timed out")
+        _,ports=stack.enter_context(postgres())
+        cargo("rss-identity-http-axum","federated_http",{"IDENTITY_TEST_PG_PORT":str(ports[5432]),"IDENTITY_TEST_FEDERATED_ISSUER":issuer,"IDENTITY_TEST_FEDERATED_CA":str(cert)})
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["pg"]: pg()
     elif sys.argv[1:] == ["oidc"]: oidc()
-    else: raise SystemExit("usage: providers.py pg|oidc")
+    elif sys.argv[1:] == ["federated"]: federated()
+    else: raise SystemExit("usage: providers.py pg|oidc|federated")

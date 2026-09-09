@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 rss-identity-core.workspace = true
+rss-identity-oidc = { path = "../../crates/identity-oidc" }
 rss-identity-postgres = { path = "../../crates/identity-postgres" }
 rss-request-context.workspace = true
 rss-transactional-messaging.workspace = true

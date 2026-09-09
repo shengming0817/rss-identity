@@ -30,11 +30,23 @@ pub(crate) async fn lock_guard(c: &mut PgConnection, tenant: TenantId) -> Result
 }
 pub(crate) struct Stored {
     pub state: AccountState,
-    pub hash: rss_identity_core::account::PasswordEncoding,
+    pub hash: Option<rss_identity_core::account::PasswordEncoding>,
 }
 pub(crate) async fn load(c: &mut PgConnection, key: AccountKey) -> Result<Stored, PgError> {
-    let r=sqlx::query("SELECT a.enabled,a.administrator,a.emergency,a.auth_epoch,a.credential_version,a.password_hash,m.active,m.epoch FROM identity_authority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid FOR UPDATE OF a,m")
-        .bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).fetch_optional(c).await?.ok_or_else(reject)?;
+    // Serialize the account/membership/local-credential snapshot with every credential writer.
+    lock_guard(c, key.tenant).await?;
+    let r = sqlx::query(concat!(
+        "SELECT a.enabled,a.administrator,a.emergency,a.auth_epoch,(l.principal_id IS NOT",
+        " NULL) AS has_local_password,l.password_hash,m.active,m.epoch FROM identity_auth",
+        "ority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal",
+        "_id) LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_",
+        "id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid FOR UPDATE OF a,m"
+    ))
+    .bind(key.tenant.to_string())
+    .bind(key.principal.as_uuid().to_string())
+    .fetch_optional(c)
+    .await?
+    .ok_or_else(reject)?;
     decode(key, &r)
 }
 
@@ -44,8 +56,18 @@ pub(crate) async fn load_for_maintenance(
     c: &mut PgConnection,
     key: AccountKey,
 ) -> Result<Stored, PgError> {
-    let row = sqlx::query("SELECT a.enabled,a.administrator,a.emergency,a.auth_epoch,a.credential_version,a.password_hash,m.active,m.epoch FROM identity_authority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid")
-        .bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).fetch_optional(c).await?.ok_or_else(reject)?;
+    let row = sqlx::query(concat!(
+        "SELECT a.enabled,a.administrator,a.emergency,a.auth_epoch,(l.principal_id IS NOT",
+        " NULL) AS has_local_password,l.password_hash,m.active,m.epoch FROM identity_auth",
+        "ority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal",
+        "_id) LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_",
+        "id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid"
+    ))
+    .bind(key.tenant.to_string())
+    .bind(key.principal.as_uuid().to_string())
+    .fetch_optional(c)
+    .await?
+    .ok_or_else(reject)?;
     decode(key, &row)
 }
 
@@ -58,14 +80,15 @@ fn decode(key: AccountKey, r: &sqlx::postgres::PgRow) -> Result<Stored, PgError>
             r.try_get("emergency")?,
             r.try_get("active")?,
             r.try_get("auth_epoch")?,
-            r.try_get("credential_version")?,
+            r.try_get("has_local_password")?,
             r.try_get("epoch")?,
         )
         .map_err(|_| corrupt())?,
-        hash: rss_identity_core::account::PasswordEncoding::from_storage(
-            r.try_get("password_hash")?,
-        )
-        .map_err(|_| corrupt())?,
+        hash: r
+            .try_get::<Option<String>, _>("password_hash")?
+            .map(rss_identity_core::account::PasswordEncoding::from_storage)
+            .transpose()
+            .map_err(|_| corrupt())?,
     })
 }
 pub(crate) async fn authority_id(c: &mut PgConnection) -> Result<Uuid, PgError> {
@@ -105,15 +128,48 @@ pub(crate) async fn insert_account(
     emergency: bool,
 ) -> Result<(), PgError> {
     AccountState::new_local(key, admin, emergency).map_err(|_| reject())?;
-    sqlx::query("INSERT INTO identity_authority.accounts(tenant_id,principal_id,login_key,password_hash,administrator,emergency) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6)").bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).bind(login).bind(hash).bind(admin).bind(emergency).execute(&mut *c).await?;
+    sqlx::query(concat!(
+        "INSERT INTO identity_authority.accounts(tenant_id,principal_id,administrator,eme",
+        "rgency) VALUES($1::uuid,$2::uuid,$3,$4)"
+    ))
+    .bind(key.tenant.to_string())
+    .bind(key.principal.as_uuid().to_string())
+    .bind(admin)
+    .bind(emergency)
+    .execute(&mut *c)
+    .await?;
+    sqlx::query("INSERT INTO identity_authority.local_credentials VALUES($1::uuid,$2::uuid,$3,$4)")
+        .bind(key.tenant.to_string())
+        .bind(key.principal.as_uuid().to_string())
+        .bind(login)
+        .bind(hash)
+        .execute(&mut *c)
+        .await?;
     sqlx::query("INSERT INTO identity_authority.memberships(tenant_id,principal_id) VALUES($1::uuid,$2::uuid)").bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).execute(c).await?;
     Ok(())
 }
 pub(crate) async fn admin_count(c: &mut PgConnection, tenant: TenantId) -> Result<i64, PgError> {
-    let n:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND a.enabled AND a.administrator AND m.active")
-        .bind(tenant.to_string()).fetch_one(c).await?;
+    let n: i64 = sqlx::query_scalar(concat!(
+        "SELECT count(*) FROM identity_authority.accounts a JOIN identity_authority.membe",
+        "rships m USING(tenant_id,principal_id) LEFT JOIN identity_authority.local_creden",
+        "tials l USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND a.enabled A",
+        "ND a.administrator AND m.active AND l.principal_id IS NOT NULL"
+    ))
+    .bind(tenant.to_string())
+    .fetch_one(c)
+    .await?;
     Ok(n)
 }
 pub(crate) fn principal(s: &str) -> Result<PrincipalId, PgError> {
     PrincipalId::parse(s).map_err(|_| corrupt())
+}
+
+pub(crate) async fn insert_federated_account(
+    c: &mut PgConnection,
+    key: AccountKey,
+) -> Result<(), PgError> {
+    let state = AccountState::new_federated(key).map_err(|_| corrupt())?;
+    sqlx::query("INSERT INTO identity_authority.accounts(tenant_id,principal_id,enabled,administrator,emergency,auth_epoch) VALUES($1::uuid,$2,$3,$4,$5,$6)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(state.enabled()).bind(state.administrator()).bind(state.emergency()).bind(state.epoch()).execute(&mut *c).await?;
+    sqlx::query("INSERT INTO identity_authority.memberships(tenant_id,principal_id,active,epoch) VALUES($1::uuid,$2,$3,$4)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(state.member_active()).bind(state.membership_epoch()).execute(c).await?;
+    Ok(())
 }

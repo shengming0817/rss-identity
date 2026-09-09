@@ -17,11 +17,11 @@ make ci
 
 - `rss-identity-core` 持有租户/issuer/client/audience 绑定及会话快照有效性检查。issuer/client/audience、principal/session、epoch/UnixTime 分别由私有字段 newtype 表达，参数互换有 compile-fail 验证。它不认证 HTTP 请求，也不把普通输入转换为 VerifiedContext。
 - `rss-identity-postgres` 注入 RSS PgRuntime，具体账户操作与关闭的安全事件在同一事务提交；不再开放 I02 的任意 SQL/字节事件探针。明确保留回滚、回滚失败、提交不确定及 fencing。
-- `rss-identity-oidc` 通过 openidconnect 完成 discovery、Authorization Code + PKCE、state/nonce/ID token 校验，返回上游 subject，尚不执行 Identity JIT 或建立产品会话。出站限制为配置 issuer 同源、禁止重定向、5 秒超时和 1 MiB 响应上限。生产配置必须 HTTPS，`test-support` 仅开放显式 loopback fixture 构造器。
+- `rss-identity-oidc` 通过 openidconnect 完成 discovery、Authorization Code + PKCE、state/nonce/ID token 校验，返回经过验证的上游 claims；I05 的 Federation 用例执行持久登录事务/JIT/关联及中央会话原子结算。出站由部署批准的 issuer origin/地址范围约束，DNS 解析后再次检查，禁隐式环境代理；后续端点保持 issuer 同源、禁止重定向、5 秒超时和 1 MiB 响应上限。生产配置必须 HTTPS，`test-support` 仅开放显式 loopback fixture 构造器。
 
 真实 PG 测试覆盖正常提交、SQL 失败回滚、CommitUnknownAfterAck、重复事件、跨租户 RLS 与 outbox 绑定。真实 Keycloak/Hydra 测试覆盖发现、code exchange、S256、重放、错误 state/nonce/verifier/redirect 及 provider 不可用。补充签名 token 的 azp/issuer/audience/expiry 负例、外源 discovery/JWKS、禁止跳转、响应上限和容器清理失败测试。Hydra 的 login/consent 接受逻辑是测试夹具，不是 Identity authority 实现。
 
-固定容器版本与摘要的单源为 `hack/providers.py`：PostgreSQL 17.6、Keycloak 26.7.3、Hydra v26.2.0。首次执行会拉取镜像。此测试不证明生产 TLS、持久化 Hydra、Keycloak 升级、JIT、生产恢复流程、完整撤销或 MDM 接入；这些由 #2333–#2343 各自验收。会话验证 HTTP wire 文档是 I01 契约，尚无可启动产品 binary。
+固定容器版本与摘要的单源为 `hack/providers.py`：PostgreSQL 17.6、Keycloak 26.7.3、Hydra v26.2.0。首次执行会拉取镜像。此测试不证明生产 TLS、持久化 Hydra、Keycloak 升级、生产恢复流程或 MDM 接入；这些由 #2333–#2343 各自验收。会话验证 HTTP wire 文档是 I01 契约，尚无可启动产品 binary。
 
 ## 独立消费复核
 
@@ -77,7 +77,7 @@ identity-admin MAINTENANCE_CONFIG initialize PRINCIPAL_UUID LOGIN PASSWORD_FILE
 identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 ```
 
-配置显式指定 tenant，命令显式指定 principal，不按登录名猜测管理员。初始化 UUID 由部署 owner 随机生成，成功后永久记录该 tenant；重复或跨租户再次初始化被拒绝。恢复只针对已有管理员，保留 enabled、administrator、emergency 和 membership，推进认证 epoch 与凭据版本。并发恢复按事务顺序执行，最后提交的密码生效。
+配置显式指定 tenant，命令显式指定 principal，不按登录名猜测管理员。初始化 UUID 由部署 owner 随机生成，成功后永久记录该 tenant；重复或跨租户再次初始化被拒绝。恢复只针对已有本地管理员，保留 enabled、administrator、emergency 和 membership，更新 `local_credentials` 中的密码哈希并推进 `auth_epoch`，使旧密码认证候选和既有会话失效。并发恢复按事务顺序执行，最后提交的密码生效。
 
 成功仅输出主体/epoch。NotStarted 或确认回滚不表示提交成功；CommitUnknown/RollbackFailed 必须当作结果不确定，不自动重试或交付凭据。运维按 [只读核实与判定表](local-maintenance.md#不确定提交只读核实) 核实非秘密安全事件/状态与账户可用性，再决定是否执行新的恢复；不能根据失败退出码推断密码没变。输入密码文件由操作者管理，工具不创建或自动删除它。
 
@@ -85,11 +85,11 @@ identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 
 ### 开发库重建与兼容性
 
-#2334 再次确认只有可丢弃开发库，初始安装 SQL 直接改为 schema version 3。旧库/旧角色/旧参数不兼容，不提供增量迁移、旧命令别名或运行时兼容开关。
+#2334 再次确认只有可丢弃开发库，I05 初始安装 SQL 直接改为 schema version 4。旧库/旧角色/旧参数不兼容，不提供增量迁移、旧命令别名或运行时兼容开关。
 
 具体 owner 连接、删除顺序、RSS 前置角色、固定八个 RSS 迁移、Identity 初始安装、lineage/epoch、登录身份及 GRANT 和验收命令见 [开发库重建与安装](local-maintenance.md#重建与安装)。安装 SQL 全批单事务执行；CLI 不自动清库，遇到未知角色依赖停止，不使用 CASCADE。
 
-安装遇到同名全局角色即失败，不静默复用。`Authority::connect` 检查当前七张表、五张 tenant RLS 表及精确有效权限；运行角色无 deployment 写权限，维护角色无 attempts/session 和成员更新权限。权限漂移、旧 schema 和高权身份均拒绝连接。错误提供 schema 版本、角色不匹配、权限漂移和 schema/RLS 契约漂移四类安全诊断，底层 provider 故障仍保留 settlement。
+安装遇到同名全局角色即失败，不静默复用。`Authority::connect` 检查当前完整结构摘要、十二张表、十张 tenant RLS 表及精确有效权限；运行角色无 deployment 写权限，维护角色无 attempts/session 和成员更新权限。权限漂移、旧 schema 和高权身份均拒绝连接。错误提供 schema 版本、角色不匹配、权限漂移和 schema/RLS 契约漂移四类安全诊断，底层 provider 故障仍保留 settlement。
 
 ### 简化结果与验证范围
 
@@ -113,3 +113,10 @@ identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 HTTP 外部错误保持模糊；宿主可从 response extensions 读取 `HttpFailure`，区分内部 AuthorityError（含 CommitUnknown/RollbackFailed/Fenced）与 RequestTimeout。该分类不含 SQL/provider 原文，不作为自动重试许可。body 读取受 HTTP timeout 限制；下游操作接收原截止点的剩余预算，由 Authority/RSS 完成有界结算。宿主不应再用同截止点的通用 timeout 包住会话 Router，否则取消写 future 会丢失 CommitUnknown/RollbackFailed 分类；取消本身不证明回滚。
 
 GET/HEAD 会话查询不续期。客户端在有效用户活动期间通过受 Origin+CSRF 保护的 POST refresh 续期，串行处理新 cookie/CSRF；不以无条件后台心跳绕过 idle。会话 ID 和游标在 Rust 中统一使用 core SessionId，JSON/SQL 边界仍为 UUID 字符串且拒绝 nil。
+
+
+## I05 联合身份
+
+新增 `make test-federated`：固定 Keycloak HTTPS + PostgreSQL + in-process Axum，验证真实 JIT、本地/纯联合账户关联、TLS、浏览器绑定与 Cookie 释放；它已纳入 make ci。此接缝不替代生产 binary/域名/反代/MDM 的 T3。
+
+[联合身份指南](federation.md) 持有 CLI 和部署注入参数。[I05 ADR](../architecture/adr/202609082050-2335-federated-identity.md) 持有单行配置/version、state HMAC、单次领取、原子事件、provider epoch 和无兼容退出。更新 schema 时通过 `python3 hack/schema_signature.py` 取得新安装结构摘要，再同步受控 `schema-signature.sha256`；不从现有业务库自动接受漂移。

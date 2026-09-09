@@ -42,7 +42,13 @@ fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
         )
         .unwrap();
         assert_eq!(
-            verify_subject(&token, &verifier, &Nonce::new("nonce".into()), &client).is_ok(),
+            verify(
+                &serde_json::from_value(serde_json::json!(token.to_string())).unwrap(),
+                &verifier,
+                &Nonce::new("nonce".into()),
+                &client
+            )
+            .is_ok(),
             valid,
             "{field}"
         );
@@ -89,10 +95,42 @@ fn server(status: &str, extra: &str, body: Vec<u8>) -> (String, std::thread::Joi
     });
     (url, handle)
 }
-fn transport(origin: &str) -> Transport {
-    Transport::new(origin.into()).unwrap()
+fn config(issuer: &str) -> ProviderSettings {
+    (rss_identity_core::federation::ProviderSettingsInput {
+        issuer: issuer.into(),
+        client_id: "client".into(),
+        secret_ref: "fixture@1".into(),
+        redirect_uri: "http://127.0.0.1/callback".into(),
+        scopes: vec!["openid".into()],
+        claims: rss_identity_core::federation::ClaimMapping {
+            email: None,
+            groups: None,
+        },
+        jit: false,
+    })
+    .try_into()
+    .unwrap()
 }
-async fn get(t: &Transport, url: &str) -> Result<HttpResponse, OidcError> {
+fn adapter(issuer: &str) -> HttpOidc {
+    HttpOidc::for_loopback_test(
+        vec![ApprovedProvider {
+            tenant: tenant(),
+            issuer: issuer.into(),
+            client_id: "client".into(),
+            secret_ref: "fixture@1".into(),
+            redirect_uri: "http://127.0.0.1/callback".into(),
+            addresses: vec!["127.0.0.0/8".parse().unwrap()],
+        }],
+        BTreeMap::from([("fixture@1".into(), Zeroizing::new("fixture-secret".into()))]),
+    )
+    .unwrap()
+}
+fn transport(origin: &str) -> Transport {
+    adapter(origin)
+        .transport(tenant(), &config(origin))
+        .unwrap()
+}
+async fn get(t: &Transport, url: &str) -> Result<HttpResponse, FederationError> {
     t.call(
         openidconnect::http::Request::builder()
             .uri(url)
@@ -111,7 +149,10 @@ async fn outbound_origin_redirect_and_size_are_enforced() {
     let target_url = format!("http://{}", target.local_addr().unwrap());
     assert!(matches!(
         get(&transport("https://issuer.test"), &target_url).await,
-        Err(OidcError::Configuration)
+        Err(FederationError::Provider(ProviderFailure {
+            reason: ProviderReason::EgressDenied,
+            ..
+        }))
     ));
     let (url, handle) = server("302 Found", &format!("Location: {target_url}\r\n"), vec![]);
     assert_eq!(get(&transport(&url), &url).await.unwrap().status(), 302);
@@ -123,7 +164,10 @@ async fn outbound_origin_redirect_and_size_are_enforced() {
     let (url, handle) = server("200 OK", "", vec![b'x'; 1024 * 1024 + 1]);
     assert!(matches!(
         get(&transport(&url), &url).await,
-        Err(OidcError::Unavailable)
+        Err(FederationError::Provider(ProviderFailure {
+            reason: ProviderReason::InvalidResponse,
+            ..
+        }))
     ));
     handle.join().unwrap();
 }
@@ -176,20 +220,13 @@ async fn discovery_rejects_external_authorization_and_jwks() {
                 write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
-        let result = Provider::discover(
-            ProviderConfig::parse(
-                &issuer,
-                "client",
-                "secret",
-                "http://127.0.0.1/callback",
-                true,
-            )
-            .unwrap(),
-        )
-        .await;
+        let result = adapter(&issuer).discover(tenant(), &config(&issuer)).await;
         assert!(matches!(
             result,
-            Err(OidcError::Discovery | OidcError::Configuration)
+            Err(FederationError::Provider(ProviderFailure {
+                reason: ProviderReason::EgressDenied,
+                ..
+            }))
         ));
         handle.join().unwrap();
         assert_eq!(
@@ -206,61 +243,47 @@ async fn discovery_preserves_unavailable_and_protocol_failure() {
         ("200 OK", b"invalid json".to_vec(), false),
     ] {
         let (issuer, handle) = server(status, "", body);
-        let config = ProviderConfig::parse(
-            &issuer,
-            "client",
-            "secret",
-            "http://127.0.0.1/callback",
-            true,
-        )
-        .unwrap();
-        let error = Provider::discover(config).await.err().unwrap();
-        assert_eq!(matches!(error, OidcError::Unavailable), unavailable);
-        if !unavailable {
-            assert!(matches!(error, OidcError::Discovery));
-        }
+        let error = adapter(&issuer)
+            .discover(tenant(), &config(&issuer))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            error,
+            failure(
+                ProviderStage::Discovery,
+                if unavailable {
+                    ProviderReason::Unavailable
+                } else {
+                    ProviderReason::InvalidResponse
+                }
+            )
+        );
         handle.join().unwrap();
     }
 }
 
 #[tokio::test]
-async fn exchange_preserves_unavailable_and_protocol_failure() {
-    for (status, body, unavailable) in [
-        ("503 Service Unavailable", b"private error".to_vec(), true),
-        (
-            "400 Bad Request",
-            br#"{"error":"invalid_grant"}"#.to_vec(),
-            false,
-        ),
-    ] {
-        let (issuer, handle) = server(status, "Content-Type: application/json\r\n", body);
-        let metadata: CoreProviderMetadata = serde_json::from_value(json!({
-            "issuer":issuer,"authorization_endpoint":issuer,"token_endpoint":issuer,"jwks_uri":issuer,
-            "response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]
-        })).unwrap();
-        let p = Provider {
-            config: ProviderConfig::parse(
-                &issuer,
-                "client",
-                "secret",
-                "http://127.0.0.1/callback",
-                true,
-            )
-            .unwrap(),
-            metadata,
-            transport: transport(&issuer),
-        };
-        let (_, attempt) = p.begin();
-        let state = attempt.state.secret().clone();
-        let error = p
-            .finish(attempt, &state, "code".into())
+async fn blocked_dns_resolution_never_connects() {
+    use reqwest::dns::Resolve;
+    let resolver = Resolver {
+        host: "localhost".into(),
+        addresses: vec!["192.0.2.0/24".parse().unwrap()],
+    };
+    assert!(
+        resolver
+            .resolve("localhost".parse().unwrap())
             .await
-            .err()
-            .unwrap();
-        assert_eq!(matches!(error, OidcError::Unavailable), unavailable);
-        if !unavailable {
-            assert!(matches!(error, OidcError::Exchange));
-        }
-        handle.join().unwrap();
-    }
+            .is_err()
+    );
+    assert!(
+        resolver
+            .resolve("other.test".parse().unwrap())
+            .await
+            .is_err()
+    );
+}
+
+fn tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap()
 }

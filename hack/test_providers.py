@@ -73,5 +73,16 @@ class ProviderProofTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'HTTP 503'):
                 providers.wait('http://fixture')
 
+class SafeTestReportTests(unittest.TestCase):
+    def test_failure_preserves_canonical_name_without_payload(self):
+        import io
+        output=io.StringIO()
+        result=subprocess.CompletedProcess([],101,stdout='test known ... FAILED\ntest secret ... FAILED\npassword=secret\n',stderr='token=secret')
+        with patch('providers.sys.stdout',output):
+            providers.report_tests('package','suite',{'known'},result)
+        self.assertIn('known: FAILED',output.getvalue())
+        self.assertIn('exit=101',output.getvalue())
+        self.assertNotIn('secret',output.getvalue())
+
 if __name__ == "__main__":
     unittest.main()

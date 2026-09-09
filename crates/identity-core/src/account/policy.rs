@@ -16,7 +16,7 @@ pub struct AccountState {
     emergency: bool,
     member_active: bool,
     epoch: i64,
-    credential_version: i64,
+    has_local_password: bool,
     membership_epoch: i64,
 }
 #[derive(Debug)]
@@ -82,14 +82,10 @@ impl AccountState {
         emergency: bool,
         member_active: bool,
         epoch: i64,
-        credential_version: i64,
+        has_local_password: bool,
         membership_epoch: i64,
     ) -> Result<Self, AccountRuleError> {
-        if epoch < 1
-            || credential_version < 1
-            || membership_epoch < 1
-            || (emergency && !administrator)
-        {
+        if epoch < 1 || membership_epoch < 1 || (emergency && !administrator) {
             return Err(AccountRuleError::InvalidState);
         }
         Ok(Self {
@@ -99,7 +95,7 @@ impl AccountState {
             emergency,
             member_active,
             epoch,
-            credential_version,
+            has_local_password,
             membership_epoch,
         })
     }
@@ -108,7 +104,7 @@ impl AccountState {
         administrator: bool,
         emergency: bool,
     ) -> Result<Self, AccountRuleError> {
-        Self::restore(key, true, administrator, emergency, true, 1, 1, 1)
+        Self::restore(key, true, administrator, emergency, true, 1, true, 1)
     }
     pub fn key(self) -> AccountKey {
         self.key
@@ -128,8 +124,14 @@ impl AccountState {
     pub fn epoch(self) -> i64 {
         self.epoch
     }
-    pub fn credential_version(self) -> i64 {
-        self.credential_version
+    pub fn has_local_password(self) -> bool {
+        self.has_local_password
+    }
+    pub fn new_federated(key: AccountKey) -> Result<Self, AccountRuleError> {
+        Self::restore(key, true, false, false, true, 1, false, 1)
+    }
+    pub fn available_local_administrator(self) -> bool {
+        self.available_administrator() && self.has_local_password
     }
     pub fn membership_epoch(self) -> i64 {
         self.membership_epoch
@@ -162,7 +164,7 @@ impl AccountState {
         self.active()
             && self.key == expected.key
             && self.epoch == expected.epoch
-            && self.credential_version == expected.credential_version
+            && self.has_local_password == expected.has_local_password
             && self.membership_epoch == expected.membership_epoch
     }
     pub fn change(
@@ -171,6 +173,9 @@ impl AccountState {
         change: LocalChange,
         available_admins: i64,
     ) -> Result<(Self, SecurityAction), AccountRuleError> {
+        if matches!(change, LocalChange::Password) && !self.has_local_password {
+            return Err(AccountRuleError::Rejected);
+        }
         if available_admins < 0 {
             return Err(AccountRuleError::InvalidState);
         }
@@ -214,16 +219,10 @@ impl AccountState {
                     SecurityAction::MembershipDisabled
                 }
             }
-            LocalChange::Password => {
-                next.credential_version = next
-                    .credential_version
-                    .checked_add(1)
-                    .ok_or(AccountRuleError::EpochExhausted)?;
-                SecurityAction::PasswordChanged
-            }
+            LocalChange::Password => SecurityAction::PasswordChanged,
         };
-        if !next.available_administrator()
-            && available_admins - i64::from(self.available_administrator()) < 1
+        if !next.available_local_administrator()
+            && available_admins - i64::from(self.available_local_administrator()) < 1
         {
             return Err(AccountRuleError::LastAdministrator);
         }
@@ -231,16 +230,12 @@ impl AccountState {
     }
     /// The adapter must verify maintenance authority before persisting this result.
     pub fn recover(self) -> Result<(Self, SecurityAction), AccountRuleError> {
-        if !self.administrator {
+        if !self.administrator || !self.has_local_password {
             return Err(AccountRuleError::Rejected);
         }
         let mut next = self;
         next.epoch = next
             .epoch
-            .checked_add(1)
-            .ok_or(AccountRuleError::EpochExhausted)?;
-        next.credential_version = next
-            .credential_version
             .checked_add(1)
             .ok_or(AccountRuleError::EpochExhausted)?;
         Ok((next, SecurityAction::AdministratorRecovered))

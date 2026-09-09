@@ -27,7 +27,7 @@ impl Authority {
         .await?;
         let snapshot=self.read(tenant,budget.remaining(),move|tx|Box::pin(async move {
             crate::transaction::connection(tx,move|c|Box::pin(async move {
-                let id:Option<String>=sqlx::query_scalar("SELECT principal_id::text FROM identity_authority.accounts WHERE tenant_id=$1::uuid AND login_key=$2").bind(tenant.to_string()).bind(login.as_str()).fetch_optional(&mut *c).await?;
+                let id:Option<String>=sqlx::query_scalar(concat!("SELECT principal_id::text FROM identity_authority.local_credentials WHERE tenant","_id=$1::uuid AND login_key=$2")).bind(tenant.to_string()).bind(login.as_str()).fetch_optional(&mut *c).await?;
                 match id {
                     Some(id)=>Ok(Some((load(c,AccountKey {tenant,principal:principal(&id)?}).await?,authority_id(c).await?))),
                     None=>Ok(None)
@@ -39,7 +39,8 @@ impl Authority {
             budget.password(kdf.dummy(password)).await?;
             return Err(AuthorityError::Rejected);
         };
-        let valid = budget.password(kdf.verify(password, stored.hash)).await?;
+        let hash = stored.hash.ok_or(AuthorityError::Rejected)?;
+        let valid = budget.password(kdf.verify(password, hash)).await?;
         if !valid || !stored.state.enabled() || !stored.state.member_active() {
             return Err(AuthorityError::Rejected);
         }
@@ -143,9 +144,10 @@ impl Authority {
                 let actor_state=current(c,&actor,false).await?;
                 let old=load(c,target).await?.state;
                 let (next,action)=old.change(&actor_state,change,admin_count(c,target.tenant).await?)?;
-                sqlx::query("UPDATE identity_authority.accounts SET enabled=$3,administrator=$4,emergency=emergency AND $4,auth_epoch=$5,credential_version=$6,password_hash=coalesce($7,password_hash) WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
-                    .bind(target.tenant.to_string()).bind(target.principal.as_uuid().to_string()).bind(next.enabled()).bind(next.administrator()).bind(next.epoch()).bind(next.credential_version()).bind(hash.as_ref().map(|h|h.as_str())).execute(&mut *c).await?;
-                sqlx::query("UPDATE identity_authority.memberships SET active=$3,epoch=$4 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
+                sqlx::query(concat!("UPDATE identity_authority.accounts SET enabled=$3,administrator=$4,emergency=eme","rgency AND $4,auth_epoch=$5 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid"))
+                    .bind(target.tenant.to_string()).bind(target.principal.as_uuid().to_string()).bind(next.enabled()).bind(next.administrator()).bind(next.epoch()).execute(&mut *c).await?;
+                if let Some(hash)=hash { sqlx::query(concat!("UPDATE identity_authority.local_credentials SET password_hash=$3 WHERE tenant_id","=$1::uuid AND principal_id=$2::uuid")).bind(target.tenant.to_string()).bind(target.principal.as_uuid().to_string()).bind(hash.as_str()).execute(&mut *c).await?; }
+                sqlx::query(concat!("UPDATE identity_authority.memberships SET active=$3,epoch=$4 WHERE tenant_id=$1:",":uuid AND principal_id=$2::uuid"))
                     .bind(target.tenant.to_string()).bind(target.principal.as_uuid().to_string()).bind(next.member_active()).bind(next.membership_epoch()).execute(&mut *c).await?;
                 let state=load(c,target).await?.state;
                 Ok((state,SecurityEvent::account(action,state,Some(actor.state.key()))))

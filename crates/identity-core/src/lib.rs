@@ -3,6 +3,7 @@
 //! Passing these checks does not authenticate a caller. The future I06 authority must first
 //! authenticate the protocol credential and load the authoritative session from storage.
 pub mod account;
+pub mod federation;
 pub mod session;
 use rss_request_context::TenantId;
 use uuid::Uuid;
@@ -64,6 +65,10 @@ impl<'de> serde::Deserialize<'de> for SessionId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssuerId(String);
 impl IssuerId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// Reject empty, surrounding whitespace and control characters.
     pub fn parse(value: &str) -> Result<Self, ValidationError> {
         if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
@@ -77,6 +82,10 @@ impl IssuerId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientId(String);
 impl ClientId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// Reject empty, surrounding whitespace and control characters.
     pub fn parse(value: &str) -> Result<Self, ValidationError> {
         if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
@@ -228,4 +237,16 @@ pub enum ValidationError {
     BindingMismatch,
     #[error("identity is not active")]
     Inactive,
+}
+
+impl serde::Serialize for IssuerId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for ClientId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
 }

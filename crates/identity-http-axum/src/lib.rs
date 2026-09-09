@@ -1,12 +1,14 @@
 //! Central Identity session HTTP adapter; no listener or forwarded-header trust.
 //! ref: axum extract/state.rs @ c59208c86fded335cd85e388030ad59347b0e5ae.
 mod boundary;
+mod federation;
 mod handlers;
 use axum::{
     Router, middleware,
     routing::{get, post},
 };
 pub use boundary::{HttpConfig, HttpConfigError, HttpFailure};
+pub use federation::federated_router;
 use rss_identity_postgres::{Authority, AuthorityError};
 
 #[derive(Clone)]

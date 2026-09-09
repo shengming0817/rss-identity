@@ -1,3 +1,4 @@
+mod idp;
 use rss_identity_admin::{AdminError, read_public_file, read_secret};
 use rss_identity_core::account::{AccountChange, AccountKey};
 use rss_identity_core::{
@@ -136,6 +137,7 @@ async fn run() -> Result<(), AdminError> {
 }
 async fn execute(a: &Authority, tenant: TenantId, command: Command<'_>) -> Result<(), AdminError> {
     let result = match command {
+        Command::Idp(command) => return idp::execute(a, tenant, command).await,
         Command::Initialize(principal, name, pw) => {
             a.initialize(
                 key(tenant, principal)?,
@@ -223,6 +225,7 @@ async fn execute(a: &Authority, tenant: TenantId, command: Command<'_>) -> Resul
 
 #[derive(Debug)]
 enum Command<'a> {
+    Idp(idp::Command<'a>),
     Initialize(&'a str, &'a str, &'a str),
     Recover(&'a str, &'a str),
     Create {
@@ -245,7 +248,7 @@ impl Command<'_> {
     fn profile(&self) -> AuthorityProfile {
         match self {
             Self::Initialize(..) | Self::Recover(..) => AuthorityProfile::Maintenance,
-            Self::Create { .. } | Self::Password(..) | Self::Change { .. } => {
+            Self::Create { .. } | Self::Password(..) | Self::Change { .. } | Self::Idp(..) => {
                 AuthorityProfile::Runtime
             }
         }
@@ -264,6 +267,87 @@ const CHANGE_ARGUMENTS: &[&str] = &[
     "<target-principal>",
 ];
 const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "idp-list",
+        arguments: &["<actor>", "<actor_pw>"],
+        parse: |a| match a {
+            [actor, actor_pw] => Ok(Command::Idp(idp::Command {
+                actor,
+                password: actor_pw,
+                operation: idp::Operation::List,
+            })),
+            _ => Err(AdminError::Arguments),
+        },
+    },
+    CommandSpec {
+        name: "idp-create",
+        arguments: &["<policy>", "<actor>", "<actor_pw>", "<settings>"],
+        parse: |a| match a {
+            [policy, actor, actor_pw, settings] => Ok(Command::Idp(idp::Command {
+                actor,
+                password: actor_pw,
+                operation: idp::Operation::Create(policy, settings),
+            })),
+            _ => Err(AdminError::Arguments),
+        },
+    },
+    CommandSpec {
+        name: "idp-update",
+        arguments: &[
+            "<policy>",
+            "<actor>",
+            "<actor_pw>",
+            "<provider>",
+            "<version>",
+            "<settings>",
+        ],
+        parse: |a| match a {
+            [policy, actor, actor_pw, provider, version, settings] => {
+                Ok(Command::Idp(idp::Command {
+                    actor,
+                    password: actor_pw,
+                    operation: idp::Operation::Update(policy, provider, version, settings),
+                }))
+            }
+            _ => Err(AdminError::Arguments),
+        },
+    },
+    CommandSpec {
+        name: "idp-enable",
+        arguments: &["<actor>", "<actor_pw>", "<provider>", "<version>"],
+        parse: |a| match a {
+            [actor, actor_pw, provider, version] => Ok(Command::Idp(idp::Command {
+                actor,
+                password: actor_pw,
+                operation: idp::Operation::Enable(provider, version, true),
+            })),
+            _ => Err(AdminError::Arguments),
+        },
+    },
+    CommandSpec {
+        name: "idp-disable",
+        arguments: &["<actor>", "<actor_pw>", "<provider>", "<version>"],
+        parse: |a| match a {
+            [actor, actor_pw, provider, version] => Ok(Command::Idp(idp::Command {
+                actor,
+                password: actor_pw,
+                operation: idp::Operation::Enable(provider, version, false),
+            })),
+            _ => Err(AdminError::Arguments),
+        },
+    },
+    CommandSpec {
+        name: "idp-test",
+        arguments: &["<policy>", "<actor>", "<actor_pw>", "<provider>"],
+        parse: |a| match a {
+            [policy, actor, actor_pw, provider] => Ok(Command::Idp(idp::Command {
+                actor,
+                password: actor_pw,
+                operation: idp::Operation::Test(policy, provider),
+            })),
+            _ => Err(AdminError::Arguments),
+        },
+    },
     CommandSpec {
         name: "initialize",
         arguments: &["<principal>", "<login>", "<password-file>"],

@@ -15,7 +15,11 @@ serde_json.workspace = true
 url = "2.5"
 thiserror.workspace = true
 tokio.workspace = true
+zeroize.workspace = true
 [dev-dependencies]
+rss-identity-oidc = { path = "../identity-oidc" }
+reqwest = { workspace = true, features = ["cookies"] }
+scraper = "0.26"
 uuid.workspace = true
 futures = "0.3"
 anyhow.workspace = true
