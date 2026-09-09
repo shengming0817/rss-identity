@@ -31,6 +31,7 @@ ARG IDENTITY_REVISION
 LABEL org.opencontainers.image.revision=${IDENTITY_REVISION}
 COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-admin /usr/local/bin/identity-admin
 COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-migrate /usr/local/bin/identity-migrate
+COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-clients /usr/local/bin/identity-clients
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/identity-migrate"]
 FROM scratch AS evidence
@@ -40,6 +41,7 @@ COPY --from=build /build/metadata.json /metadata.json
 COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-server /identity-server
 COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-admin /identity-admin
 COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-migrate /identity-migrate
+COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-clients /identity-clients
 FROM ${NGINX_IMAGE} AS gateway
 ARG IDENTITY_REVISION
 LABEL org.opencontainers.image.revision=${IDENTITY_REVISION}

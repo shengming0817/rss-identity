@@ -22,7 +22,7 @@ Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定�
 1. `docker compose -f /private/rendered/compose.json up -d postgres`。首次 PG 初始化建立独立 hydra/keycloak数据库；已有卷不会重放初始化 SQL。
 2. `docker compose -f /private/rendered/compose.json run --rm migrate`。该命令内嵌 RSS/Identity SQL，执行单库安装并核验实际 runtime/maintenance 权限；旧版本、身份错配、角色碰撞和权限漂移拒绝。
 3. `docker compose -f /private/rendered/compose.json run --rm hydra-migrate`。Hydra 独立执行官方迁移，不受 Identity 事务回滚保护。
-4. 启动 Hydra、hydra-admin和Keycloak，按 clients.json 用受控私有 admin API静态注册下游 client（authorization_code/code/openid/client_secret_basic、精确redirect、S256、opaque token）；必须与 hydra.json期限一致。初次Keycloak导入批准realm/client，既有realm变化须经其管理员显式更新，不通过重复导入修复漂移。
+4. 启动 Hydra、hydra-admin和Keycloak：`docker compose -f /private/rendered/compose.json up -d hydra hydra-admin keycloak`。然后运行 `docker compose -f /private/rendered/compose.json run --rm hydra-clients`。该 operator 任务共享 Hydra 网络命名空间，通过固定 loopback admin/public 端口注册并验证 runtime.json 中的静态 client；仅挂载配置及 OIDC client 秘密，不挂载数据库/维护凭据。缺失时创建，一致时核验通过，配置或凭据漂移时拒绝覆盖；超时/未知创建结果只回读核验，不盲目重发 POST。核验包含 client 认证，成功输出不含秘密。Hydra 全局配置保持 S256，client 固定 authorization_code/code/openid/client_secret_basic、精确 redirect、opaque token 及声明期限。初次Keycloak导入批准realm/client，既有realm变化须经其管理员显式更新，不通过重复导入修复漂移。
 5. 通过独立维护任务初始化首个管理员：`docker compose ... run --rm -v /private/new-password:/run/input/new-password:ro maintenance initialize <principal-uuid> <login> /run/input/new-password`。tenant来自维护配置；初始化只能成功一次，重启不能再次夺取authority。
 6. 启动 Identity；使用 `docker compose ... exec identity identity-server --probe 127.0.0.1:8080` 执行固定内部探针，Compose healthcheck使用同一命令。公私网网关依赖Identity healthy后才启动并开放端口；不存在启动即自动DDL或自动初始化管理员。
 
@@ -45,3 +45,7 @@ SIGTERM关闭admission并有界等待请求/响应、worker、实际KDF和PG。C
 维护恢复继续使用 identity-admin recover，详见[维护指南](../guides/local-maintenance.md)。MFA、备份恢复、凭据轮换演练属于 I09。
 
 Hydra admin实际仅监听其网络命名空间的127.0.0.1:4445，认证TLS侧车共享该命名空间；其它protocol网络成员不能直连4445。provider版本始终从candidate.json的providers读取，不随执行脚本旁的新checkout改变。
+
+Identity runtime/maintenance 只使用 RSS producer 连接入口：业务变更与 Outbox 同事务提交，
+保留 check_execution fencing；不给 Inbox 访问或 claim/lease/settle 执行权限。重复安装与启动
+会拒绝这些额外权限。实际消息投递由独立 relay owner 承担，不由 Identity 进程代行。

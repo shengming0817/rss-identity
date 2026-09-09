@@ -14,4 +14,4 @@
 
 ## 产品装配
 
-`app/identity` 输出 identity-server / identity-migrate / identity-admin；配置与操作见 [部署入口](docs/deployment/README.md)。完整产品T3单独验收。
+`app/identity` 输出 identity-server / identity-migrate / identity-admin / identity-clients；配置与操作见 [部署入口](docs/deployment/README.md)。完整产品T3单独验收。

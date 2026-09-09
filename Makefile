@@ -4,7 +4,7 @@ export PATH := /usr/bin:$(PATH)
 export PYTHONDONTWRITEBYTECODE := 1
 export CARGO_TARGET_DIR := $(CURDIR)/target
 .PHONY: ci check test test-pg test-oidc dependencies licenses
-ci: check test dependencies licenses test-pg test-oidc test-federated test-downstream test-assembly test-gateway
+ci: check test dependencies licenses test-pg test-oidc test-federated test-downstream test-assembly test-gateway test-clients
 check:
 	cargo fmt --all -- --check
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -50,3 +50,7 @@ candidate:
 .PHONY: test-gateway
 test-gateway:
 	$(PYTHON) hack/gateway.py
+
+.PHONY: test-clients
+test-clients:
+	$(PYTHON) hack/clients.py

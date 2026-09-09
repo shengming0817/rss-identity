@@ -4,7 +4,7 @@
 
 ## Owner 与退出
 
-`app/identity` 是唯一可执行装配 package，输出 identity-server、identity-migrate、identity-admin。三个入口共享安全文件读取和数据库配置，部署分别授予 runtime、migration owner、maintenance 凭据。没有兼容应用目录、日常管理 CLI、配置别名或 provider registry。
+`app/identity` 是唯一可执行装配 package，输出 identity-server、identity-migrate、identity-admin、identity-clients。数据库相关入口共享安全文件读取和数据库配置，部署分别授予 runtime、migration owner、maintenance 凭据。没有兼容应用目录、日常管理 CLI、配置别名或 provider registry。
 
 RSS managed listener 提供标准 accepted TCP ConnectInfo；Identity 根据真实 peer 和固定网关地址解释单值 X-Forwarded-For，再提供 ClientAddress 给限流。原始 peer 保留。NGINX 覆盖来源头，公网和私网使用独立网络地址；backend 不发布宿主端口。Hydra admin 使用既有私有 TLS + service credential。
 
@@ -33,3 +33,19 @@ JSON format_version 只表示文件结构；schema version 只表示数据库结
 #2357 的 owner 已在本项确认继续限定接受 RSA 公钥验签路径，必须以最终生产依赖图和用途复核为准，不扩大私钥操作或其它公告例外。
 
 参考：Axum axum/src/extract/connect_info.rs @ axum-v0.8.9；Tokio tokio-util/src/task/task_tracker.rs；NGINX ngx_http_proxy_module.c @ release-1.30.4；Hydra cmd/migrate_sql.go @ 0b84568fffccf151dc5e6c7955fdfb738555bf4b。RSS 消费的唯一完整 revision 由 Cargo.toml/Cargo.lock 持有。
+
+## 首审修正：producer 权限与静态 client 注册
+
+Identity 只写 Outbox，不运行消息 relay。使用 RSS `PgRuntime::connect_producer` 保留事务、
+RLS/schema/definer/fencing 检查，拒绝 Inbox 和 claim/lease/settle 权限；数据库配置不能迫使
+产品持有未消费能力的授权。RSS 原有完整 runtime 入口继续用于 consumer/relay。
+
+`identity-clients` 作为 operator 镜像中的一次性安装任务共享 Hydra 网络命名空间，固定访问
+其 loopback admin/public 端口，不打开外部未认证 admin 接缝。期望配置直接来自 runtime.json；
+不再生成无消费者的 clients.json。不存在时创建、一致时通过、漂移时拒绝；未知创建结果仅
+回读核验，不自动重复 POST。通过无效授权码请求验证实际 client secret，只有已经过 client
+认证的 invalid_grant 才表示凭据一致，不把不能回读的 secret 当作已验证。
+
+参考：[Hydra v26.2.0 client handler](https://github.com/ory/hydra/blob/v26.2.0/client/handler.go)、
+[Fosite access request](https://github.com/ory/hydra/blob/v26.2.0/fosite/access_request_handler.go)。
+持久化 Hydra T2 覆盖首次创建响应丢失、重复注册、配置/凭据漂移与 provider 重启后的核验。

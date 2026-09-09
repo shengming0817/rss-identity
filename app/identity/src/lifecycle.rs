@@ -142,7 +142,7 @@ pub async fn serve(
     .map_err(|_| AppError::Shutdown)?;
     let outcome=scope.drive(|mut startup|Box::pin(async move {
         // Register each owned resource before any subsequent cancellable await.
-        let pool=Arc::new(PgRuntime::connect(config.database.pg()?,assembly::Timer,config.storage.binding()?).await.map_err(|_|AppError::Connection)?);
+        let pool=Arc::new(PgRuntime::connect_producer(config.database.pg()?,assembly::Timer,config.storage.binding()?).await.map_err(|_|AppError::Connection)?);
         startup.stage_resource(DynManagedResource::new_box(PoolResource{pool:pool.clone(),timeout:per}));
         let kdf=Arc::new(PasswordKdf::new());
         startup.stage_resource(DynManagedResource::new_box(KdfResource{kdf:kdf.clone(),timeout:per}));

@@ -92,8 +92,8 @@ impl Fixture {
         sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
         sqlx::raw_sql("UPDATE identity_authority.deployment SET environment_id='fixture', identity_config_version=1, identity_public_origin='https://identity.test', product_public_origin='https://product.test'").execute(&owner).await?;
         sqlx::raw_sql("GRANT identity_account_runtime TO identity_runtime; GRANT identity_account_maintenance TO identity_maintenance;").execute(&owner).await?;
-        sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO identity_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO identity_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO identity_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),rss_transactional_messaging.check_execution() TO identity_runtime;").execute(&owner).await?;
-        sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_maintenance; GRANT SELECT ON rss_transactional_messaging.policy TO identity_maintenance; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO identity_maintenance; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_maintenance; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO identity_maintenance; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),rss_transactional_messaging.check_execution() TO identity_maintenance;").execute(&owner).await?;
+        sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO identity_runtime;  GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO identity_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO identity_runtime;").execute(&owner).await?;
+        sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_maintenance; GRANT SELECT ON rss_transactional_messaging.policy TO identity_maintenance;  GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_maintenance; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO identity_maintenance; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO identity_maintenance;").execute(&owner).await?;
         sqlx::query("INSERT INTO rss_transactional_messaging.storage_lineage VALUES(true,$1,$2)")
             .bind([1_u8; 16].as_slice())
             .bind([2_u8; 16].as_slice())
@@ -113,7 +113,7 @@ impl Fixture {
             ],
         )?;
         let runtime = Arc::new(
-            PgRuntime::connect(
+            PgRuntime::connect_producer(
                 PgConfig::new_for_test_plaintext(
                     "127.0.0.1",
                     port,
@@ -127,7 +127,7 @@ impl Fixture {
             .await?,
         );
         let maintenance_runtime = Arc::new(
-            PgRuntime::connect(
+            PgRuntime::connect_producer(
                 PgConfig::new_for_test_plaintext(
                     "127.0.0.1",
                     port,
@@ -191,7 +191,7 @@ impl Fixture {
             ],
         )?;
         Ok(Arc::new(
-            PgRuntime::connect(
+            PgRuntime::connect_producer(
                 PgConfig::new_for_test_plaintext(
                     "127.0.0.1",
                     self.port,

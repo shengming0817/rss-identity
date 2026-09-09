@@ -2,7 +2,6 @@ GRANT identity_account_runtime TO identity_runtime;
 GRANT identity_account_maintenance TO identity_maintenance;
 GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_runtime,identity_maintenance;
 GRANT SELECT ON rss_transactional_messaging.policy TO identity_runtime,identity_maintenance;
-GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO identity_runtime,identity_maintenance;
 GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_runtime,identity_maintenance;
 GRANT USAGE ON SEQUENCE rss_transactional_messaging.outbox_seq_seq TO identity_runtime,identity_maintenance;
-GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),rss_transactional_messaging.check_execution() TO identity_runtime,identity_maintenance;
+GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO identity_runtime,identity_maintenance;

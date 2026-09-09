@@ -1,5 +1,6 @@
 //! Identity executable composition and shared safe file boundary.
 pub mod assembly;
+pub mod clients;
 pub mod config;
 pub mod lifecycle;
 pub mod migration;

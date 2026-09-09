@@ -15,7 +15,12 @@ path = "src/bin/server.rs"
 name = "identity-migrate"
 path = "src/bin/migrate.rs"
 
+[[bin]]
+name = "identity-clients"
+path = "src/bin/clients.rs"
+
 [dependencies]
+reqwest.workspace = true
 rss-runtime.workspace = true
 rss-axum = { workspace = true, features = ["http1"] }
 rss-identity-http-axum = { path = "../../crates/identity-http-axum" }

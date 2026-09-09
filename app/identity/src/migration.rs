@@ -63,7 +63,7 @@ pub async fn install(c: MigrationConfig) -> Result<(), AppError> {
         // Verify real runtime/maintenance logins after commit, still holding the installation lock.
         for (user,path,profile) in [("identity_runtime",&c.runtime_password_file,rss_identity_postgres::AuthorityProfile::Runtime),("identity_maintenance",&c.maintenance_password_file,rss_identity_postgres::AuthorityProfile::Maintenance)]{
             let mut db=c.database.clone();db.user=user.into();db.password_file=path.clone();
-            let pool=std::sync::Arc::new(rss_transactional_messaging_postgres::PgRuntime::connect(db.pg()?,assembly::Timer,c.storage.binding()?).await.map_err(|_|AppError::Migration)?);
+            let pool=std::sync::Arc::new(rss_transactional_messaging_postgres::PgRuntime::connect_producer(db.pg()?,assembly::Timer,c.storage.binding()?).await.map_err(|_|AppError::Migration)?);
             let kdf=std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new());
             let result=async{for tenant in c.storage.tenants()? {rss_identity_postgres::Authority::connect(pool.clone(),kdf.clone(),c.identity_origin.clone(),assembly::delivery_budget()?,tenant,profile,assembly::deadline()).await?;}Ok::<_,AppError>(())}.await;
             pool.close().await;

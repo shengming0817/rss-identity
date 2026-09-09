@@ -31,7 +31,11 @@ class Deployment(unittest.TestCase):
    public=(root/'rendered/public.conf').read_text();self.assertIn('proxy_set_header X-Forwarded-For $remote_addr;',public);self.assertNotIn('proxy_add_x_forwarded_for',public);self.assertIn('location ^~ /internal/ { return 404; }',public)
    self.assertEqual(json.loads((root/'rendered/runtime.json').read_text())['identity_origin'],data['runtime']['identity_origin'])
    self.assertEqual(json.loads((root/'rendered/hydra.json').read_text())['urls']['self']['issuer'],'https://identity.example.test/oidc')
-   self.assertEqual(json.loads((root/'rendered/clients.json').read_text())[0]['redirect_uris'],['https://mdm.example.test/auth/callback'])
+   registration=services['hydra-clients']
+   self.assertEqual(registration['network_mode'],'service:hydra')
+   self.assertEqual(registration['entrypoint'],['identity-clients'])
+   self.assertIn('/run/config/runtime.json',{v['target'] for v in registration['volumes']})
+   self.assertNotIn('/run/input/owner-password',{v['target'] for v in registration['volumes']})
  def test_topology_drift_and_unsafe_secret_are_rejected(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);data=self.data(root);data['runtime']['public_gateway']='172.29.0.9'

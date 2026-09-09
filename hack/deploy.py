@@ -58,11 +58,9 @@ def render(data,out,candidate):
  require(len(idp_hosts)==1,'reference profile requires one Keycloak hostname');idph=next(iter(idp_hosts));require(idph not in (ih,ph),'IdP origin must be distinct')
  c['hydra']['ca_file']=mounted(c['hydra']['ca_file'],'hydra-ca');service=secret(c['hydra']['service_secret_file']);require(re.fullmatch(r'[A-Za-z0-9_-]{32,256}',service),'Hydra gateway secret must be base64url')
  c['hydra']['service_secret_file']=mounted(c['hydra']['service_secret_file'],'hydra-service',True)
- registrations=[]
  for n,client in enumerate(c['hydra']['clients']):
   oidc_secret=secret(client['oidc_secret_file']);require(oidc_secret!=secret(client['validation_secret_file']),'client secret domains overlap')
   client['oidc_secret_file']=mounted(client['oidc_secret_file'],'client-oidc-'+str(n),True);client['validation_secret_file']=mounted(client['validation_secret_file'],'client-validation-'+str(n),True)
-  registrations.append({'client_id':client['client_id'],'client_secret':oidc_secret,'grant_types':['authorization_code'],'response_types':['code'],'scope':'openid','audience':[client['audience']],'redirect_uris':[origin['product_public_origin']+'/auth/callback'],'token_endpoint_auth_method':'client_secret_basic','authorization_code_grant_access_token_lifespan':str(c['hydra']['access_token_seconds'])+'s'})
  runtime_keys=set(mounts);write('runtime.json',json.dumps(c))
  owner_db=copy.deepcopy(c['database']);owner_db['user']='postgres';owner_db['password_file']=mounted(data['owner_password_file'],'owner-password',True)
  migration={'format_version':1,'identity_origin':origin,'database':owner_db,'storage':c['storage'],'runtime_password_file':c['database']['password_file'],'maintenance_password_file':mounted(data['maintenance_password_file'],'maintenance-password',True)}
@@ -72,7 +70,7 @@ def render(data,out,candidate):
  hp=secret(data['hydra_database_password_file']);kp=secret(data['keycloak_database_password_file']);require(hp!=kp and re.fullmatch(r'[A-Za-z0-9_-]{32,256}',kp),'invalid provider passwords')
  write('00-databases.sql',f"SET standard_conforming_strings=on;\nCREATE USER hydra WITH PASSWORD {sql_literal(hp)};\nCREATE DATABASE hydra OWNER hydra;\nCREATE USER keycloak WITH PASSWORD {sql_literal(kp)};\nCREATE DATABASE keycloak OWNER keycloak;\n")
  hydra={'serve':{'admin':{'host':'127.0.0.1','port':4445},'public':{'host':'0.0.0.0','port':4444}},'dsn':'postgres://hydra:'+quote(hp,safe='')+'@postgres:5432/hydra?sslmode=verify-full&sslrootcert=/run/input/runtime-ca','urls':{'self':{'issuer':origin['identity_public_origin']+'/oidc'},'login':origin['identity_public_origin']+'/login','consent':origin['identity_public_origin']+'/consent'},'secrets':{'system':[secret(data['hydra_system_secret_file'])]},'oauth2':{'pkce':{'enforced':True}},'strategies':{'access_token':'opaque'},'ttl':{'login_consent_request':str(c['hydra']['request_seconds'])+'s','auth_code':str(c['hydra']['code_seconds'])+'s','access_token':str(c['hydra']['access_token_seconds'])+'s'},'log':{'level':'error'}}
- write('hydra.json',json.dumps(hydra));write('clients.json',json.dumps(registrations))
+ write('hydra.json',json.dumps(hydra))
  for realm,v in realms.items():write('realm-'+realm+'.json',json.dumps(v),(KEYCLOAK_UID,KEYCLOAK_GID))
  cert=mounted(data['tls_certificate_file'],'public-cert');key=mounted(data['tls_key_file'],'public-key',True)
  hc=mounted(data['hydra_admin_certificate_file'],'hydra-cert');hk=mounted(data['hydra_admin_key_file'],'hydra-key',True)
@@ -97,6 +95,7 @@ def render(data,out,candidate):
  common=['hydra.json','runtime-ca']
  sv['hydra-migrate']=service(images['hydra'],common,['protocol'],['migrate','sql','-e','--yes','--config','/run/config/hydra.json']);sv['hydra-migrate']['profiles']=['install'];sv['hydra-migrate']['depends_on']={'postgres':{'condition':'service_healthy'}}
  sv['hydra']=service(images['hydra'],common,{'protocol':{'ipv4_address':str(proto.network_address+5),'aliases':['hydra-admin']}},['serve','all','--config','/run/config/hydra.json']);sv['hydra']['restart']='unless-stopped'
+ sv['hydra-clients']=service(artifacts['operator'],['runtime.json']+['client-oidc-'+str(n) for n in range(len(c['hydra']['clients']))],[],['--config','/run/config/runtime.json']);sv['hydra-clients'].pop('networks');sv['hydra-clients'].update(entrypoint=['identity-clients'],network_mode='service:hydra',profiles=['install'],depends_on=['hydra'])
  kfiles=['keycloak.conf','keycloak-cert','keycloak-key','runtime-ca']+['realm-'+r+'.json' for r in realms]
  sv['keycloak']=service(images['keycloak'],kfiles,['protocol'],['--config-file=/run/config/keycloak.conf','start','--import-realm']);sv['keycloak']['user']=str(KEYCLOAK_UID)+':'+str(KEYCLOAK_GID);sv['keycloak']['read_only']=False;sv['keycloak']['volumes'] += [{'type':'volume','source':'keycloak','target':'/opt/keycloak/data','volume':{'nocopy':True}}];sv['keycloak']['restart']='unless-stopped'
  for mount in sv['keycloak']['volumes']:

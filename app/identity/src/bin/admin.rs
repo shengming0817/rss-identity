@@ -101,7 +101,7 @@ async fn run() -> Result<(), AppError> {
     )
     .map_err(|_| AppError::StorageIdentity)?;
     let runtime = Arc::new(
-        PgRuntime::connect(pg, Timer, binding)
+        PgRuntime::connect_producer(pg, Timer, binding)
             .await
             .map_err(|_| AppError::Connection)?,
     );

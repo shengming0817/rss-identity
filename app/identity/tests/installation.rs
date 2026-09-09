@@ -101,7 +101,9 @@ async fn installation_configuration_and_rollback_are_verified() -> anyhow::Resul
         leaked, 0,
         "failed startup must close the acquired runtime pool"
     );
-    let pool = Arc::new(PgRuntime::connect(db.pg()?, assembly::Timer, c.storage.binding()?).await?);
+    let pool = Arc::new(
+        PgRuntime::connect_producer(db.pg()?, assembly::Timer, c.storage.binding()?).await?,
+    );
     let kdf = Arc::new(PasswordKdf::new());
     let tenant = c.storage.tenants()?[0];
     let authority = Authority::connect(
@@ -134,6 +136,18 @@ async fn installation_configuration_and_rollback_are_verified() -> anyhow::Resul
         .await
         .is_err()
     );
+    // The app is a producer: neither runtime nor maintenance may acquire relay authority.
+    for statement in [
+        "GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) TO identity_runtime",
+        "GRANT EXECUTE ON FUNCTION rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid) TO identity_maintenance",
+        "GRANT EXECUTE ON FUNCTION rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO identity_runtime",
+        "GRANT SELECT ON rss_transactional_messaging.inbox TO identity_runtime",
+    ] {
+        sqlx::raw_sql(statement).execute(&mut owner).await?;
+        assert!(migration::install(config()).await.is_err());
+        sqlx::raw_sql("REVOKE ALL ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) FROM identity_runtime,identity_maintenance; REVOKE ALL ON rss_transactional_messaging.inbox FROM identity_runtime,identity_maintenance").execute(&mut owner).await?;
+    }
+    migration::install(config()).await?;
     // Normal runtime settings/artifact versions are not deployment identity.
     let again = Authority::connect(
         pool.clone(),

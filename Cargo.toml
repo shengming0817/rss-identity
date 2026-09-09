@@ -11,12 +11,12 @@ publish = false
 [workspace.dependencies]
 rss-identity-contracts = { path = "crates/identity-contracts" }
 rss-identity-core = { path = "crates/identity-core" }
-rss-runtime = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "253503cc5a6a59909fcdfec2b5921ffc6b733394", default-features = false }
-rss-axum = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "253503cc5a6a59909fcdfec2b5921ffc6b733394", default-features = false }
-rss-contract = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "253503cc5a6a59909fcdfec2b5921ffc6b733394" }
-rss-request-context = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "253503cc5a6a59909fcdfec2b5921ffc6b733394" }
-rss-transactional-messaging = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "253503cc5a6a59909fcdfec2b5921ffc6b733394", default-features = false, features = ["producer"] }
-rss-transactional-messaging-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "253503cc5a6a59909fcdfec2b5921ffc6b733394", default-features = false }
+rss-runtime = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838", default-features = false }
+rss-axum = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838", default-features = false }
+rss-contract = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838" }
+rss-request-context = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838" }
+rss-transactional-messaging = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838", default-features = false, features = ["producer"] }
+rss-transactional-messaging-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
