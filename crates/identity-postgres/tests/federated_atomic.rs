@@ -9,6 +9,152 @@ use std::sync::atomic::Ordering;
 use support::*;
 use zeroize::Zeroizing;
 
+async fn step_begin(
+    f: &Fixture,
+    s: &Federation,
+    p: &ProviderView,
+    session: &IssuedSession,
+) -> anyhow::Result<String> {
+    f.reset_attempts().await?;
+    Ok(state(
+        s.begin_step_up(
+            LoginRequest {
+                tenant: f.key.tenant,
+                provider: p.id,
+                browser: BROWSER.into(),
+                client: "identity".into(),
+                target: "home".into(),
+                replacement: Some(
+                    f.store
+                        .inspect_session(f.key.tenant, secret(session), deadline())
+                        .await?,
+                ),
+                source: source(),
+            },
+            deadline(),
+        )
+        .await?,
+    ))
+}
+
+async fn step_finish(
+    s: &Federation,
+    token: String,
+    session: &IssuedSession,
+    subject: &str,
+) -> Result<FederatedOutcome, AuthorityError> {
+    s.complete(
+        token,
+        BROWSER.into(),
+        Zeroizing::new(subject.into()),
+        "https://idp.example.test".into(),
+        Some(secret(session)),
+        deadline(),
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
+    use rss_identity_core::assurance::Assurance;
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let s = service(&f, upstream.clone());
+    let p = enabled(&f, &s).await?;
+    let old = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
+    let now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    for (time, acr) in [
+        (None, Some("2")),
+        (Some(now - 1000), Some("2")),
+        (Some(now + 1000), Some("2")),
+        (Some(now), Some("1")),
+    ] {
+        *upstream.assurance.lock().unwrap() =
+            Some(Assurance::from_verified_oidc(time, acr, vec![], true)?);
+        let token = step_begin(&f, &s, &p, &old).await?;
+        assert!(step_finish(&s, token, &old, "alice").await.is_err());
+        f.store
+            .inspect_session(f.key.tenant, secret(&old), deadline())
+            .await?;
+    }
+    *upstream.assurance.lock().unwrap() = Some(Assurance::from_verified_oidc(
+        Some(now),
+        Some("2"),
+        vec![],
+        true,
+    )?);
+    let token = step_begin(&f, &s, &p, &old).await?;
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.accounts")
+        .fetch_one(&f.owner)
+        .await?;
+    assert!(
+        step_finish(&s, token, &old, "unlinked-subject")
+            .await
+            .is_err()
+    );
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.accounts")
+        .fetch_one(&f.owner)
+        .await?;
+    assert_eq!(before, after, "step-up must never JIT");
+    let token = step_begin(&f, &s, &p, &old).await?;
+    let upgraded = issued(step_finish(&s, token.clone(), &old, "alice").await?);
+    assert!(
+        f.store
+            .inspect_session(f.key.tenant, secret(&old), deadline())
+            .await
+            .is_err()
+    );
+    assert!(step_finish(&s, token, &upgraded, "alice").await.is_err());
+    let facts: serde_json::Value = sqlx::query_scalar(
+        "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1::uuid",
+    )
+    .bind(upgraded.view().id.to_string())
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(facts["assurance"]["acr"], "mfa");
+    assert_eq!(facts["assurance"]["auth_time"], now);
+    // A config edit after beginning the flow invalidates the exact persisted binding.
+    let token = step_begin(&f, &s, &p, &upgraded).await?;
+    let p = s
+        .update_provider(actor(&f).await?, p.id, p.version, settings(), deadline())
+        .await?;
+    assert!(step_finish(&s, token, &upgraded, "alice").await.is_err());
+    // Fault injection is after exchange, so it targets the session/event commit, not attempt claim.
+    let token = step_begin(&f, &s, &p, &upgraded).await?;
+    let runtime = f.runtime.clone();
+    *upstream.hook.lock().unwrap() = Some(Box::new(move || {
+        Box::pin(async move {
+            runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+            Ok(())
+        })
+    }));
+    assert!(matches!(
+        step_finish(&s, token, &upgraded, "alice").await,
+        Err(AuthorityError::CommitUnknown(_))
+    ));
+    // Recreate a usable session; revocation between begin and callback rejects before exchange.
+    let current = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
+    let token = step_begin(&f, &s, &p, &current).await?;
+    f.store
+        .revoke_all_sessions(
+            f.store
+                .inspect_session(f.key.tenant, secret(&current), deadline())
+                .await?,
+            deadline(),
+        )
+        .await?;
+    let calls = upstream.calls.load(Ordering::SeqCst);
+    assert!(step_finish(&s, token, &current, "alice").await.is_err());
+    assert_eq!(upstream.calls.load(Ordering::SeqCst), calls);
+    f.close().await;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn federation_configuration_authorization_and_versions() -> anyhow::Result<()> {

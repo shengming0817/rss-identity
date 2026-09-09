@@ -1,6 +1,7 @@
 //! Real PG + production HTTPS Keycloak adapter + in-process Axum. No product binary/T3 claim.
 #[path = "../../identity-postgres/tests/federation_support/mod.rs"]
 mod federation_support;
+mod keycloak_support;
 #[allow(dead_code)]
 #[path = "../../identity-postgres/tests/support/mod.rs"]
 mod support;
@@ -28,6 +29,7 @@ fn production(ca: bool, allow: bool) -> anyhow::Result<HttpOidc> {
     let pem = std::fs::read(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
     Ok(HttpOidc::new(
         vec![ApprovedProvider {
+            keycloak_totp: true,
             tenant: tenant(),
             issuer,
             client_id: "identity-test".into(),
@@ -148,41 +150,13 @@ async fn begin(
         .into())
 }
 async fn authorize(url: &str, user: &str) -> anyhow::Result<String> {
-    let pem = std::fs::read(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
-    let browser = reqwest::Client::builder()
-        .no_proxy()
-        .cookie_store(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .add_root_certificate(reqwest::Certificate::from_pem(&pem)?)
-        .timeout(Duration::from_secs(10))
-        .build()?;
-    let response = browser.get(url).send().await?.error_for_status()?;
-    let html = response.text().await?;
-    let action = {
-        let dom = scraper::Html::parse_document(&html);
-        dom.select(&scraper::Selector::parse("form#kc-form-login").unwrap())
-            .next()
-            .and_then(|f| f.value().attr("action"))
-            .ok_or_else(|| anyhow::anyhow!("Keycloak login form absent"))?
-            .to_owned()
-    };
-    let response = browser
-        .post(action)
-        .form(&[
-            ("username", user),
-            ("password", "fixture-password"),
-            ("credentialId", ""),
-        ])
-        .send()
-        .await?;
-    let location = response
-        .headers()
-        .get("location")
-        .ok_or_else(|| anyhow::anyhow!("Keycloak callback absent: {}", response.status()))?
-        .to_str()?;
-    let u = reqwest::Url::parse(location)?;
+    authorize_factor(url, user, false).await
+}
+async fn authorize_factor(url: &str, user: &str, totp: bool) -> anyhow::Result<String> {
+    let u = keycloak_support::authorize(url, user, totp).await?;
     Ok(format!("{}?{}", u.path(), u.query().unwrap_or_default()))
 }
+
 async fn callback(app: &Router, path: &str, cookie: &str) -> anyhow::Result<Response> {
     Ok(app
         .clone()
@@ -208,6 +182,207 @@ async fn successful(app: &Router, p: &ProviderView, user: &str) -> anyhow::Resul
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(response.headers()["location"], format!("{ORIGIN}/done"));
     Ok(cookie(&response))
+}
+
+#[tokio::test]
+#[ignore = "requires make test-federated"]
+async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let s = service(&f, Arc::new(production(true, true)?));
+    let p = provider(&f, &s).await?;
+    let app = app(&s);
+    let original = successful(&app, &p, "alice").await?;
+    let path = format!("/api/v1/tenants/{A}/oidc/{}/step-up", p.id);
+    let browser = format!("{BROWSER}; {original}");
+    let csrf = secret(&original).csrf();
+    let input = json!({"client_id":"identity","return_target":"home"});
+    for (cookies, token) in [(BROWSER, None), (browser.as_str(), None)] {
+        let r = app
+            .clone()
+            .oneshot(request("POST", &path, cookies, token, input.clone()))
+            .await?;
+        assert!(r.status().is_client_error());
+    }
+    // Removing the requested ACR from the browser URL cannot weaken the stored requirement.
+    let r = app
+        .clone()
+        .oneshot(request("POST", &path, &browser, Some(&csrf), input.clone()))
+        .await?;
+    assert_eq!(r.status(), StatusCode::OK);
+    let url = body(r).await?["authorization_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut lowered = reqwest::Url::parse(&url)?;
+    assert!(
+        lowered
+            .query_pairs()
+            .any(|(k, v)| k == "acr_values" && v == "2")
+    );
+    assert!(
+        lowered
+            .query_pairs()
+            .any(|(k, v)| k == "max_age" && v == "0")
+    );
+    let pairs: Vec<(String, String)> = lowered
+        .query_pairs()
+        .filter(|(k, _)| k != "acr_values")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    lowered.query_pairs_mut().clear().extend_pairs(pairs);
+    let cb = authorize(lowered.as_str(), "alice").await?;
+    let r = callback(&app, &cb, &browser).await?;
+    assert_eq!(r.headers()["location"], "/auth/error?reason=failed");
+    assert!(!r.headers().contains_key("set-cookie"));
+    f.store
+        .inspect_session(f.key.tenant, secret(&original), deadline())
+        .await?;
+    // A different real Keycloak user cannot replace the current principal.
+    let r = app
+        .clone()
+        .oneshot(request("POST", &path, &browser, Some(&csrf), input.clone()))
+        .await?;
+    let url = body(r).await?["authorization_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let cb = authorize_factor(&url, "bob", true).await?;
+    let r = callback(&app, &cb, &browser).await?;
+    assert_eq!(r.headers()["location"], "/auth/error?reason=failed");
+    assert!(!r.headers().contains_key("set-cookie"));
+    let r = app
+        .clone()
+        .oneshot(request("POST", &path, &browser, Some(&csrf), input))
+        .await?;
+    let url = body(r).await?["authorization_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let cb = authorize_factor(&url, "alice", true).await?;
+    let r = callback(&app, &cb, &browser).await?;
+    assert_eq!(r.headers()["location"], format!("{ORIGIN}/done"));
+    let upgraded = cookie(&r);
+    let current = f
+        .store
+        .inspect_session(f.key.tenant, secret(&upgraded), deadline())
+        .await?;
+    assert!(
+        f.store
+            .inspect_session(f.key.tenant, secret(&original), deadline())
+            .await
+            .is_err()
+    );
+    let facts: Value = sqlx::query_scalar("SELECT auth_facts FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
+        .bind(A).bind(current.view().id.to_string()).fetch_one(&f.owner).await?;
+    assert_eq!(facts["assurance"]["acr"], "mfa");
+    assert!(facts["assurance"]["auth_time"].as_i64().unwrap() > 0);
+    let replay = callback(&app, &cb, &format!("{BROWSER}; {upgraded}")).await?;
+    assert!(!replay.headers().contains_key("set-cookie"));
+    let envelopes: Vec<Value> = sqlx::query_scalar("SELECT envelope FROM rss_transactional_messaging.outbox WHERE envelope->>'route'='federation.changed'").fetch_all(&f.owner).await?;
+    let audit: Vec<Value> = envelopes
+        .into_iter()
+        .map(|v| {
+            let bytes: Vec<u8> = serde_json::from_value(v["payload"].clone()).unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        })
+        .collect();
+    assert_eq!(
+        audit.iter().filter(|v| v["action"] == "stepped_up").count(),
+        1
+    );
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-federated"]
+async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let old = service(&f, Arc::new(production(true, true)?));
+    let p = provider(&f, &old).await?;
+    let old_app = app(&old);
+    let url = begin(&old_app, &p, BROWSER, None, None, false).await?;
+    let cb = authorize(&url, "alice").await?;
+    let issuer = std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?;
+    let base = issuer.strip_suffix("/realms/identity").unwrap();
+    let ca = std::fs::read(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
+    let operator = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .add_root_certificate(reqwest::Certificate::from_pem(&ca)?)
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let token: Value = operator
+        .post(format!(
+            "{base}/realms/master/protocol/openid-connect/token"
+        ))
+        .form(&[
+            ("grant_type", "password"),
+            ("client_id", "admin-cli"),
+            ("username", "fixture-operator"),
+            ("password", "fixture-operator-password"),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let admin_token = Zeroizing::new(token["access_token"].as_str().unwrap().to_owned());
+    let clients: Value = operator
+        .get(format!(
+            "{base}/admin/realms/identity/clients?clientId=identity-test"
+        ))
+        .bearer_auth(admin_token.as_str())
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let id = clients[0]["id"].as_str().unwrap();
+    let secret_value: Value = operator
+        .post(format!(
+            "{base}/admin/realms/identity/clients/{id}/client-secret"
+        ))
+        .bearer_auth(admin_token.as_str())
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let new_secret = Zeroizing::new(secret_value["value"].as_str().unwrap().to_owned());
+    let rejected = callback(&old_app, &cb, BROWSER).await?;
+    assert_eq!(rejected.headers()["location"], "/auth/error?reason=failed");
+    assert!(!rejected.headers().contains_key("set-cookie"));
+    let next = HttpOidc::new(
+        vec![ApprovedProvider {
+            tenant: f.key.tenant,
+            issuer,
+            client_id: "identity-test".into(),
+            redirect_uri: CALLBACK.into(),
+            secret_ref: "fixture@2".into(),
+            addresses: vec!["127.0.0.0/8".parse()?],
+            keycloak_totp: true,
+        }],
+        BTreeMap::from([("fixture@2".into(), new_secret)]),
+        Some(&ca),
+    )?;
+    let next = service(&f, Arc::new(next));
+    let mut settings = p.settings.input();
+    settings.secret_ref = "fixture@2".into();
+    let updated = next
+        .update_provider(
+            federation_support::actor(&f).await?,
+            p.id,
+            p.version,
+            settings.try_into()?,
+            deadline(),
+        )
+        .await?;
+    successful(&app(&next), &updated, "alice").await?;
+    f.close().await;
+    Ok(())
 }
 #[tokio::test]
 #[ignore = "requires make test-federated"]
@@ -483,6 +658,7 @@ async fn real_provider_management_and_missing_secret() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let settings = config()?;
     let binding = ApprovedProvider {
+        keycloak_totp: true,
         tenant: tenant(),
         issuer: settings.issuer().as_str().into(),
         client_id: settings.client_id().as_str().into(),

@@ -114,6 +114,7 @@ fn config(issuer: &str) -> ProviderSettings {
 fn adapter(issuer: &str) -> HttpOidc {
     HttpOidc::for_loopback_test(
         vec![ApprovedProvider {
+            keycloak_totp: false,
             tenant: tenant(),
             issuer: issuer.into(),
             client_id: "client".into(),

@@ -55,6 +55,10 @@ pub fn federated_router(
         )
         .route("/api/v1/tenants/{tenant}/oidc/{provider}/link", post(link))
         .route(
+            "/api/v1/tenants/{tenant}/oidc/{provider}/step-up",
+            post(step_up),
+        )
+        .route(
             "/api/v1/oidc/callback",
             get(callback).head(|| async { StatusCode::METHOD_NOT_ALLOWED }),
         )
@@ -197,6 +201,47 @@ async fn begin(
     let redirect = state
         .federation
         .begin_login(
+            rss_identity_postgres::LoginRequest {
+                tenant,
+                provider,
+                browser: browser.clone(),
+                client: input.client_id,
+                target: input.return_target,
+                replacement: actor,
+                source,
+            },
+            budget.remaining(),
+        )
+        .await?;
+
+    redirect_response(redirect, &browser, created)
+}
+
+async fn step_up(
+    State(state): State<FederationState>,
+    Path((raw, provider)): Path<(String, ProviderId)>,
+    Extension(budget): Extension<RequestBudget>,
+    request: Request,
+) -> Result<Response, HttpError> {
+    let tenant = tenant(&raw)?;
+
+    let actor = actor(&state, tenant, request.headers(), budget, true).await?;
+
+    let (browser, created) = browser(request.headers(), true)?;
+
+    let source = source(&request)?;
+
+    let Json(input) = tokio::time::timeout_at(
+        budget.cutoff(),
+        Json::<Begin>::from_request(request, &state),
+    )
+    .await
+    .map_err(|_| HttpError::request_timeout())?
+    .map_err(|_| BAD)?;
+
+    let redirect = state
+        .federation
+        .begin_step_up(
             rss_identity_postgres::LoginRequest {
                 tenant,
                 provider,

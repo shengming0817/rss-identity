@@ -25,7 +25,7 @@ pub use sessions::{
     AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
 };
 pub use types::*;
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 pub const SCHEMA_SIGNATURE_SQL: &str = include_str!("schema-signature.sql");
 pub const SCHEMA_SIGNATURE: &str = include_str!("schema-signature.sha256");
 pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_authority.sql");

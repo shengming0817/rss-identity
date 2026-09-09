@@ -78,6 +78,7 @@ pub(crate) enum Action {
     Linked,
     AlreadyLinked,
     Reauthenticated,
+    SteppedUp,
 }
 #[derive(Serialize)]
 pub(crate) struct FederationEvent {
@@ -414,6 +415,7 @@ mod contract_tests {
             Action::Linked,
             Action::AlreadyLinked,
             Action::Reauthenticated,
+            Action::SteppedUp,
         ];
         let values: Vec<_> = actions
             .into_iter()

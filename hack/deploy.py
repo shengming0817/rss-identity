@@ -27,7 +27,7 @@ def render(data,out,candidate):
  require(set(images)==set(IMAGES) and set(artifacts)=={'server','operator','gateway'},'incomplete candidate images')
  require(all(re.fullmatch(r'[A-Za-z0-9_./:-]+@sha256:[a-f0-9]{64}',v) for v in [*images.values(),*artifacts.values()]),'candidate images must have exact digests')
  require(os.getuid()==0 or (os.getuid()==DEPLOY_UID==KEYCLOAK_UID and os.getgid()==DEPLOY_GID==KEYCLOAK_GID),'render as root to deliver provider-specific ownership')
- require(set(data)=={'runtime','owner_password_file','maintenance_password_file','hydra_database_password_file','keycloak_database_password_file','hydra_system_secret_file','tls_certificate_file','tls_key_file','hydra_admin_certificate_file','hydra_admin_key_file','keycloak_certificate_file','keycloak_key_file','postgres_certificate_file','postgres_key_file','backend_subnet','protocol_subnet','consumer_network'},'unknown deployment fields')
+ require(set(data)=={'runtime','owner_password_file','maintenance_password_file','hydra_database_password_file','keycloak_database_password_file','hydra_system_secret_files','hydra_cookie_secret_files','tls_certificate_file','tls_key_file','hydra_admin_certificate_file','hydra_admin_key_file','keycloak_certificate_file','keycloak_key_file','postgres_certificate_file','postgres_key_file','backend_subnet','protocol_subnet','consumer_network'},'unknown deployment fields')
  require(not out.exists(),'output directory must be new');out.mkdir(mode=0o700,parents=True);os.chown(out,DEPLOY_UID,DEPLOY_GID)
  c=copy.deepcopy(data['runtime']);origin=c['identity_origin'];ih=host(origin['identity_public_origin']);ph=host(origin['product_public_origin']);require(ih!=ph,'distinct origins required')
  back=ipaddress.ip_network(data['backend_subnet']);proto=ipaddress.ip_network(data['protocol_subnet']);require(back.version==4 and proto.version==4 and back.prefixlen==24 and proto.prefixlen==24 and not back.overlaps(proto),'distinct /24 networks required')
@@ -54,7 +54,10 @@ def render(data,out,candidate):
   u=urlsplit(p['issuer']);idp_hosts.add(host('https://'+u.netloc));require(re.fullmatch(r'/realms/[A-Za-z0-9_-]+',u.path),'Keycloak realm issuer required')
   require(p['addresses']==[str(proto.network_address+2)+'/32'],'OIDC must use the fixed TLS gateway')
   value=secret(p['secret_file']);p['secret_file']=mounted(p['secret_file'],'idp-'+str(n),True)
+  require(type(p['keycloak_totp']) is bool,'invalid Keycloak assurance approval')
   realm=u.path.split('/')[-1];realms.setdefault(realm,{'realm':realm,'enabled':True,'sslRequired':'all','clients':[]})['clients'].append({'clientId':p['client_id'],'secret':value,'publicClient':False,'standardFlowEnabled':True,'directAccessGrantsEnabled':False,'serviceAccountsEnabled':False,'redirectUris':[origin['identity_public_origin']+'/api/v1/oidc/callback'],'attributes':{'pkce.code.challenge.method':'S256'}})
+ for p in c['oidc']['providers']:
+  if p['keycloak_totp']:realms[urlsplit(p['issuer']).path.split('/')[-1]].update(json.loads((ROOT/'deployment/keycloak-totp.json').read_text()))
  require(len(idp_hosts)==1,'reference profile requires one Keycloak hostname');idph=next(iter(idp_hosts));require(idph not in (ih,ph),'IdP origin must be distinct')
  c['hydra']['ca_file']=mounted(c['hydra']['ca_file'],'hydra-ca');service=secret(c['hydra']['service_secret_file']);require(re.fullmatch(r'[A-Za-z0-9_-]{32,256}',service),'Hydra gateway secret must be base64url')
  c['hydra']['service_secret_file']=mounted(c['hydra']['service_secret_file'],'hydra-service',True)
@@ -69,7 +72,16 @@ def render(data,out,candidate):
  maintenance.update(identity_origin=origin,tenant_id=c['storage']['tenants'][0]['tenant_id'],storage_target=c['storage']['target'],storage_lineage=c['storage']['lineage'],storage_tenant_epoch=c['storage']['tenants'][0]['epoch']);write('maintenance.json',json.dumps(maintenance))
  hp=secret(data['hydra_database_password_file']);kp=secret(data['keycloak_database_password_file']);require(hp!=kp and re.fullmatch(r'[A-Za-z0-9_-]{32,256}',kp),'invalid provider passwords')
  write('00-databases.sql',f"SET standard_conforming_strings=on;\nCREATE USER hydra WITH PASSWORD {sql_literal(hp)};\nCREATE DATABASE hydra OWNER hydra;\nCREATE USER keycloak WITH PASSWORD {sql_literal(kp)};\nCREATE DATABASE keycloak OWNER keycloak;\n")
- hydra={'serve':{'admin':{'host':'127.0.0.1','port':4445},'public':{'host':'0.0.0.0','port':4444}},'dsn':'postgres://hydra:'+quote(hp,safe='')+'@postgres:5432/hydra?sslmode=verify-full&sslrootcert=/run/input/runtime-ca','urls':{'self':{'issuer':origin['identity_public_origin']+'/oidc'},'login':origin['identity_public_origin']+'/login','consent':origin['identity_public_origin']+'/consent'},'secrets':{'system':[secret(data['hydra_system_secret_file'])]},'oauth2':{'pkce':{'enforced':True}},'strategies':{'access_token':'opaque'},'ttl':{'login_consent_request':str(c['hydra']['request_seconds'])+'s','auth_code':str(c['hydra']['code_seconds'])+'s','access_token':str(c['hydra']['access_token_seconds'])+'s'},'log':{'level':'error'}}
+ def keyring(paths):
+  require(isinstance(paths,list) and 1<=len(paths)<=8 and all(isinstance(p,str) for p in paths),'invalid Hydra key file list')
+  values=[secret(p) for p in paths]
+  require(all(len(v)>=32 and not any(ch in v for ch in '\r\n') for v in values) and len(set(values))==len(values),'invalid or duplicate Hydra keys')
+  for p in paths:
+   m=Path(p).stat();require((m.st_uid,m.st_gid)==(DEPLOY_UID,DEPLOY_GID),'Hydra secret owner must match service')
+  return values
+ system_keys=keyring(data['hydra_system_secret_files']);cookie_keys=keyring(data['hydra_cookie_secret_files'])
+ require(not set(system_keys)&set(cookie_keys),'Hydra key domains overlap')
+ hydra={'serve':{'admin':{'host':'127.0.0.1','port':4445},'public':{'host':'0.0.0.0','port':4444}},'dsn':'postgres://hydra:'+quote(hp,safe='')+'@postgres:5432/hydra?sslmode=verify-full&sslrootcert=/run/input/runtime-ca','urls':{'self':{'issuer':origin['identity_public_origin']+'/oidc'},'login':origin['identity_public_origin']+'/login','consent':origin['identity_public_origin']+'/consent'},'secrets':{'system':system_keys,'cookie':cookie_keys},'oauth2':{'pkce':{'enforced':True}},'strategies':{'access_token':'opaque'},'ttl':{'login_consent_request':str(c['hydra']['request_seconds'])+'s','auth_code':str(c['hydra']['code_seconds'])+'s','access_token':str(c['hydra']['access_token_seconds'])+'s'},'log':{'level':'error'}}
  write('hydra.json',json.dumps(hydra))
  for realm,v in realms.items():write('realm-'+realm+'.json',json.dumps(v),(KEYCLOAK_UID,KEYCLOAK_GID))
  cert=mounted(data['tls_certificate_file'],'public-cert');key=mounted(data['tls_key_file'],'public-key',True)

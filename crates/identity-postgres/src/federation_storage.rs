@@ -3,6 +3,7 @@ use crate::{
     transaction::{corrupt, reject},
     *,
 };
+use rss_identity_core::assurance::AuthenticationMode;
 use rss_identity_core::federation::*;
 use rss_request_context::TenantId;
 use sqlx::{PgConnection, Row};
@@ -138,6 +139,7 @@ pub(crate) async fn identity(
     ))
 }
 pub(crate) struct Attempt {
+    pub mode: AuthenticationMode,
     pub browser: [u8; 32],
     pub provider: ProviderId,
     pub version: i64,
@@ -183,6 +185,8 @@ pub(crate) async fn attempt(
     };
     Ok((
         Attempt {
+            mode: AuthenticationMode::from_storage(r.try_get("authentication_mode")?)
+                .map_err(|_| corrupt())?,
             browser: digest(browser),
             provider: ProviderId::parse(&r.try_get::<Uuid, _>("provider_id")?.to_string())
                 .map_err(|_| corrupt())?,
@@ -204,6 +208,7 @@ pub(crate) async fn attempt(
     ))
 }
 pub(crate) struct NewAttempt {
+    pub mode: AuthenticationMode,
     pub locator: StateLocator,
     pub material: ProtocolMaterial,
     pub provider: ProviderView,
@@ -258,8 +263,8 @@ pub(crate) async fn insert_attempt(
     sqlx::query(concat!(
         "INSERT INTO identity_authority.oidc_transactions(tenant_id,attempt_id,provider_i",
         "d,config_version,state_hash,browser_hash,purpose,nonce,verifier,created_at,expir",
-        "es_at,target_client,return_url,link_intent,replacement_session) VALUES($1::uuid,",
-        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid)"
+        "es_at,target_client,return_url,link_intent,replacement_session,authentication_mode) VALUES($1::uuid,",
+        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid,$16)"
     ))
     .bind(tenant.to_string())
     .bind(input.locator.id().as_slice())
@@ -276,6 +281,7 @@ pub(crate) async fn insert_attempt(
     .bind(input.return_url)
     .bind(input.link)
     .bind(input.replacement.map(|v| v.to_string()))
+    .bind(input.mode as i16)
     .execute(c)
     .await?;
     Ok(())

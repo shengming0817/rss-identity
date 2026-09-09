@@ -394,7 +394,7 @@ pub struct UpstreamClaims {
     pub email: Option<String>,
     pub email_verified: bool,
     pub groups: Vec<String>,
-    pub auth_time: Option<i64>,
+    pub assurance: crate::assurance::Assurance,
 }
 
 impl UpstreamClaims {
@@ -442,7 +442,7 @@ pub trait UpstreamOidc: Send + Sync {
         tenant: TenantId,
         config: &'a ProviderSettings,
         material: &'a ProtocolMaterial,
-        reauth: bool,
+        mode: crate::assurance::AuthenticationMode,
     ) -> UpstreamFuture<'a, String>;
     fn exchange<'a>(
         &'a self,

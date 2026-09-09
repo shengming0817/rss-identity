@@ -11,3 +11,5 @@
 - [IdP 配置与联合登录](federation.md)：部署出站许可、不可变 secret_ref、管理 HTTP 和浏览器接缝。
 
 - [中央登录与日常管理](management.md)：独立前端挂载、会话管理与联合 T2。
+
+- [可信 MFA 与显式 step-up](assurance.md)：部署批准、会话轮换与下游事实。

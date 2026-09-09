@@ -77,7 +77,8 @@
           "secret_file": "/srv/rss-identity/input/keycloak-client-secret",
           "addresses": [
             "172.30.0.2/32"
-          ]
+          ],
+          "keycloak_totp": false
         }
       ],
       "ca_file": "/srv/rss-identity/input/keycloak-ca.pem",
@@ -109,7 +110,6 @@
   "maintenance_password_file": "/srv/rss-identity/input/maintenance-password",
   "hydra_database_password_file": "/srv/rss-identity/input/hydra-database-password",
   "keycloak_database_password_file": "/srv/rss-identity/input/keycloak-database-password",
-  "hydra_system_secret_file": "/srv/rss-identity/input/hydra-system-secret",
   "tls_certificate_file": "/srv/rss-identity/input/public.pem",
   "tls_key_file": "/srv/rss-identity/input/public.key",
   "hydra_admin_certificate_file": "/srv/rss-identity/input/hydra-admin.pem",
@@ -121,5 +121,11 @@
   "backend_subnet": "172.29.0.0/24",
   "protocol_subnet": "172.30.0.0/24",
   "consumer_network": "rss-identity-consumers",
-  "owner_password_file": "/srv/rss-identity/input/owner-password"
+  "owner_password_file": "/srv/rss-identity/input/owner-password",
+  "hydra_system_secret_files": [
+    "/srv/rss-identity/input/hydra-system-secret"
+  ],
+  "hydra_cookie_secret_files": [
+    "/srv/rss-identity/input/hydra-cookie-secret"
+  ]
 }

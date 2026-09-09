@@ -22,6 +22,8 @@ thiserror.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
 [dev-dependencies]
+hmac = "0.13"
+sha1 = { version = "0.11", default-features = false }
 rss-identity-client = { path = "../identity-client" }
 rss-identity-hydra = { path = "../identity-hydra" }
 rss-identity-oidc = { path = "../identity-oidc" }

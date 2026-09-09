@@ -85,3 +85,10 @@ I01 冻结首个 MDM 部署域名与会话路径、内部交接/标准协议选�
 现有仅可丢弃开发库，#2358 直接重建 schema，无向后兼容要求。操作和重建步骤见 [开发指南](../guides/development.md#本机账户管理与维护)，设计见 [本地 authority ADR](../architecture/adr/202609080509-2333-local-authority.md)。
 
 I04 会话实现决定见 [会话 ADR](../architecture/adr/202609080900-2334-central-session.md)。并发刷新只有一个成功，旧值拒绝但不自动撤销胜出值；全部退出推进统一认证 epoch。该决定不表示 Hydra 交接或产品 T3 已通过。
+
+
+## I09 范围冻结（#2339）
+
+首版只验证并传递选定 Keycloak password + TOTP assurance，提供显式同会话 step-up，不强制拦截 Identity 管理读写。没有旧部署，直接替换初始 schema 和受影响调用方。应急管理员启用、凭据独立封存，使用后立即维护改密，不新建应急激活权限。
+
+ACC-12 恢复保证具体化为：原生备份精确恢复到所选切点；部署 owner 负责选择包含所需安全状态的备份/WAL，并在秘密/状态核验前保持隔离。不承诺从任意历史快照自动恢复故障前最新撤销，不引入库外安全状态服务；缺完整证据不开放。I09 组件 T1/T2、独立候选 T3 与生产 SLO/RPO/RTO 冻结分别提供证据，未闭合前本项保持未完成。入口见 [ADR](../architecture/adr/202609091607-2339-assurance-recovery.md)。

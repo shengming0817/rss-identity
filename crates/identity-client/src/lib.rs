@@ -245,8 +245,13 @@ impl IdentityClient {
             || facts.expires_at <= now
             || facts.auth_time <= 0
             || facts.auth_time >= facts.expires_at
-            || facts.acr != "unspecified"
-            || !(facts.amr.is_empty() || facts.amr == ["pwd"])
+            || !matches!(facts.acr.as_str(), "unspecified" | "mfa")
+            || (facts.amr.len() > 3
+                || facts
+                    .amr
+                    .iter()
+                    .any(|m| !matches!(m.as_str(), "pwd" | "otp" | "mfa"))
+                || facts.amr.windows(2).any(|w| w[0] >= w[1]))
         {
             return Err(Error::Rejected);
         }
@@ -375,8 +380,8 @@ mod response_tests {
             ("auth_time", json!(0)),
             ("auth_time", json!(i64::MAX)),
             ("expires_at", json!(1)),
-            ("amr", json!(["mfa"])),
-            ("acr", json!("mfa")),
+            ("amr", json!(["invented"])),
+            ("acr", json!("invented")),
         ] {
             let mut value_body = facts();
             value_body[field] = value;
@@ -387,6 +392,16 @@ mod response_tests {
                 ),
                 "field {field}"
             );
+        }
+        for methods in [json!([]), json!(["otp", "pwd"])] {
+            let mut value = facts();
+            value["acr"] = json!("mfa");
+            value["amr"] = methods;
+            let proof = response(200, HEADERS, value.to_string(), false)
+                .await
+                .unwrap();
+            assert_eq!(proof.acr(), "mfa");
+            assert_eq!(proof.auth_time(), 990);
         }
         let mut ahead = facts();
         ahead["auth_time"] = json!(ahead["auth_time"].as_i64().unwrap() + 30);

@@ -35,7 +35,7 @@ WITH protected AS (
  WHERE n.nspname='identity_authority' AND c.relkind='r'
 ), checks AS (
  SELECT
- (SELECT count(*)=1 AND bool_and(version=6) FROM identity_authority.schema_version) AS version_ok,
+ (SELECT count(*)=1 AND bool_and(version=7) FROM identity_authority.schema_version) AS version_ok,
  ((SELECT count(*)=2 AND bool_and(NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication) FROM groups)
  AND (SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication FROM pg_roles WHERE rolname=current_user)
  AND NOT EXISTS(SELECT FROM pg_roles WHERE pg_has_role(current_user,oid,'MEMBER') AND (rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication))

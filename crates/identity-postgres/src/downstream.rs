@@ -263,8 +263,7 @@ impl Downstream {
             sqlx::query("UPDATE identity_authority.downstream_grants SET principal_id=$3,session_id=$4,subject=$5,horizon=created_at+$6 WHERE tenant_id=$1::uuid AND grant_id=$2")
                 .bind(t.to_string()).bind(id).bind(loaded.state.key().principal.as_uuid()).bind(loaded.view.id.as_uuid()).bind(&subject).bind(life.horizon()).execute(&mut*c).await?;
             db::state(c,t,&g,FlowState::LoginAccepting,loaded.now).await?;
-            let origin=crate::federation_storage::origin(c,t,loaded.view.id).await?;
-            Ok((LoginDecision{grant_id:id.to_string(),subject,amr:if origin.is_none(){vec!["pwd".into()]}else{vec![]}},vec![event(t,id,"login_claimed")]))
+            Ok((LoginDecision{grant_id:id.to_string(),subject,amr:loaded.assurance.amr().to_vec(),acr:loaded.assurance.acr().into()},vec![event(t,id,"login_claimed")]))
         })).await?;
         let result = self
             .remote(&b, self.protocol.accept_login(&challenge, decision))
@@ -474,7 +473,6 @@ impl Downstream {
                     {
                         return Err(DownstreamError::Rejected.into());
                     }
-                    let amr = db::amr(c, &g).await?;
                     Ok(ValidatedIdentity {
                         subject: token.subject,
                         tenant_id: t.to_string(),
@@ -482,9 +480,12 @@ impl Downstream {
                         client_id: r.client().into(),
                         audience: r.audience().into(),
                         issuer: r.issuer().into(),
-                        auth_time: loaded.view.auth_time,
-                        amr,
-                        acr: "unspecified".into(),
+                        auth_time: loaded
+                            .assurance
+                            .auth_time()
+                            .unwrap_or(loaded.view.auth_time),
+                        amr: loaded.assurance.amr().to_vec(),
+                        acr: loaded.assurance.acr().into(),
                         expires_at: token
                             .expires_at
                             .min(g.horizon)

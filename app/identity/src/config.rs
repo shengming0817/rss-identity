@@ -105,6 +105,7 @@ impl StorageConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
+    pub keycloak_totp: bool,
     pub tenant_id: String,
     pub issuer: String,
     pub client_id: String,

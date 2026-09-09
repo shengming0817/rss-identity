@@ -5,6 +5,7 @@ use crate::{
     transaction::{corrupt, reject},
     *,
 };
+use rss_identity_core::assurance::AuthenticationMode;
 use rss_identity_core::{PrincipalId, account::AccountKey, federation::*, session::SessionSecret};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
@@ -15,6 +16,27 @@ impl Federation {
     pub async fn begin_login(
         &self,
         request: LoginRequest,
+        deadline: OperationDeadline,
+    ) -> Result<FederatedRedirect, AuthorityError> {
+        self.begin_authentication(request, AuthenticationMode::Login, deadline)
+            .await
+    }
+    /// Upgrade only an existing session for the same already-linked principal.
+    pub async fn begin_step_up(
+        &self,
+        request: LoginRequest,
+        deadline: OperationDeadline,
+    ) -> Result<FederatedRedirect, AuthorityError> {
+        if request.replacement.is_none() {
+            return Err(FederationError::Rejected.into());
+        }
+        self.begin_authentication(request, AuthenticationMode::StepUp, deadline)
+            .await
+    }
+    async fn begin_authentication(
+        &self,
+        request: LoginRequest,
+        mode: AuthenticationMode,
         deadline: OperationDeadline,
     ) -> Result<FederatedRedirect, AuthorityError> {
         let LoginRequest {
@@ -47,7 +69,7 @@ impl Federation {
         let url = self
             .upstream(
                 &budget,
-                self.oidc.prepare(tenant, &view.settings, &material, false),
+                self.oidc.prepare(tenant, &view.settings, &material, mode),
             )
             .await?;
         self.authority
@@ -75,6 +97,7 @@ impl Federation {
                             link: None,
                             replacement,
                             expiry: None,
+                            mode,
                         },
                     )
                     .await
@@ -215,7 +238,7 @@ impl Federation {
                             false,
                         )
                     } else {
-                        if !view.settings.jit() {
+                        if attempt.mode == AuthenticationMode::StepUp || !view.settings.jit() {
                             return Err(FederationError::Rejected.into());
                         }
                         let key=AccountKey{tenant,principal:PrincipalId::generate()};
@@ -238,6 +261,7 @@ impl Federation {
                         return Err(reject().into());
                     }
                     let now = session_storage::now(c).await?;
+                    claims.assurance.check(attempt.mode, attempt.created, now)?;
                     let (origin, replaced) = if linked {
                         let intent =
                             crate::federation_link::intent(c, tenant, attempt.link.ok_or_else(reject)?).await?;
@@ -285,6 +309,8 @@ impl Federation {
                         } else {
                             Action::Linked
                         }
+                    } else if attempt.mode == AuthenticationMode::StepUp {
+                        Action::SteppedUp
                     } else if new_account {
                         Action::JitCreated
                     } else {
@@ -320,7 +346,7 @@ fn hex_digest(browser: &str) -> String {
 }
 pub(crate) fn claims_facts(claims: &UpstreamClaims, version: i64) -> serde_json::Value {
     serde_json::json!({
-    "email":claims.email,"email_verified":claims.email_verified,"groups":claims.groups,"mapping_version":version}
+    "email":claims.email,"email_verified":claims.email_verified,"groups":claims.groups,"mapping_version":version,"assurance":claims.assurance}
     )
 }
 pub(crate) async fn check_actor(

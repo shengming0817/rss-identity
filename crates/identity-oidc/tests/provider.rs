@@ -31,6 +31,7 @@ fn browser() -> anyhow::Result<Client> {
 fn provider(issuer: &str) -> anyhow::Result<(HttpOidc, ProviderSettings)> {
     let p = HttpOidc::for_loopback_test(
         vec![ApprovedProvider {
+            keycloak_totp: false,
             tenant: tenant(),
             issuer: issuer.into(),
             client_id: "identity-test".into(),
@@ -83,7 +84,14 @@ async fn keycloak_login(url: Url) -> anyhow::Result<Url> {
 }
 async fn prepare(p: &HttpOidc, c: &ProviderSettings) -> anyhow::Result<(Url, ProtocolMaterial)> {
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
-    let url = p.prepare(tenant(), c, &material, false).await?;
+    let url = p
+        .prepare(
+            tenant(),
+            c,
+            &material,
+            rss_identity_core::assurance::AuthenticationMode::Login,
+        )
+        .await?;
     Ok((Url::parse(&url)?, material))
 }
 async fn flow(issuer: &str) -> anyhow::Result<()> {

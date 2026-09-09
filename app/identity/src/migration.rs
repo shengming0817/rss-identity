@@ -53,7 +53,7 @@ pub async fn install(c: MigrationConfig) -> Result<(), AppError> {
         if !relay_safe {return Err(AppError::Migration);}
         // Existing installations never take a mutation/repair branch.
         let version:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *tx).await.map_err(|_|AppError::Migration)?;
-        if version!=[6]{return Err(AppError::Migration);}
+        if version!=[7]{return Err(AppError::Migration);}
         let matches:bool=sqlx::query_scalar("SELECT count(*)=1 AND coalesce(bool_and(environment_id=$1 AND identity_config_version=$2 AND identity_public_origin=$3 AND product_public_origin=$4),false) FROM identity_authority.deployment")
             .bind(c.identity_origin.environment()).bind(c.identity_origin.version()).bind(c.identity_origin.identity_origin()).bind(c.identity_origin.product_origin()).fetch_one(&mut *tx).await.map_err(|_|AppError::Migration)?;
         if !matches{return Err(AppError::Migration);}

@@ -17,6 +17,7 @@ pub const RETURN: &str = "https://identity.example.test/done";
 type Hook = Box<dyn FnOnce() -> UpstreamFuture<'static, ()> + Send>;
 pub struct ScriptedOidc {
     pub fail: AtomicBool,
+    pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
     pub groups: Mutex<Vec<String>>,
@@ -28,6 +29,7 @@ impl ScriptedOidc {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             fail: AtomicBool::new(false),
+            assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
             groups: Mutex::new(vec!["staff".into()]),
@@ -53,7 +55,7 @@ impl UpstreamOidc for ScriptedOidc {
         _tenant: TenantId,
         _: &'a ProviderSettings,
         m: &'a ProtocolMaterial,
-        _: bool,
+        _: rss_identity_core::assurance::AuthenticationMode,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
             Ok(format!(
@@ -89,11 +91,18 @@ impl UpstreamOidc for ScriptedOidc {
                 email: Some("same@example.test".into()),
                 email_verified: self.email_verified.load(Ordering::SeqCst),
                 groups: self.groups.lock().unwrap().clone(),
-                auth_time: Some(
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64,
+                assurance: self.assurance.lock().unwrap().clone().unwrap_or(
+                    rss_identity_core::assurance::Assurance::from_verified_oidc(
+                        Some(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs() as i64,
+                        ),
+                        None,
+                        vec![],
+                        false,
+                    )?,
                 ),
             })
         })

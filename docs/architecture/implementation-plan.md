@@ -126,3 +126,18 @@ schema version 2、事件 V1 payload、账户/租户/authority/lineage/epoch 的
 ## I07 当前决定
 
 [单一管理入口 ADR](adr/202609090801-2337-central-management-ui.md) 固定无兼容替换、CLI 退出与 rss-web/apps/identity UI owner。双仓 PR 分别持有后端管理和前端；实际源码版本与验证结果以交付记录为准。
+
+
+## I09 实施决定（#2339）
+
+[Assurance 与恢复 ADR](adr/202609091607-2339-assurance-recovery.md) 固定 Keycloak password/TOTP 的可信事实、显式 step-up 和下游传播。初始 schema v7 替换 v6，无旧部署兼容。应急沿用现有维护权限；恢复采用原生 PG 切点、真实 provider T2 和部署隔离规程，不增加 seal/激活业务状态机。
+
+`make measure-capacity` 只提供组件测量，真实生产目标待测后冻结；#2339 不随实现 PR 自动关闭。已登记独立 PBI，Parent 均为 #2330，原生 Predecessor 为已完成的 #2338；额外执行前提是 #2339 实现 PR 合入后的精确候选/API，不以 #2339 Done 为启动条件：
+
+| 项目 | 工作项 | Owner |
+| --- | --- | --- |
+| 候选 MFA/step-up T3 | [#2366](https://dev.azure.com/shengming0923/rss/_workitems/edit/2366) | rss-identity |
+| 候选恢复/轮换 T3 与生产目标冻结 | [#2367](https://dev.azure.com/shengming0923/rss/_workitems/edit/2367) | rss-identity |
+| 前端 step-up 入口与事实展示 | [#2368](https://dev.azure.com/shengming0923/rss/_workitems/edit/2368) | rss-web |
+
+登记不表示已实施或运行通过；避免把实现项的完整验收条件反向变为 T3 的执行阻塞。

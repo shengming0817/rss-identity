@@ -1,5 +1,6 @@
 //! Real Hydra code flow through the production bridge and TLS gateway.
 #![allow(dead_code)]
+mod keycloak_support;
 #[path = "../../identity-postgres/tests/support/mod.rs"]
 mod support;
 use reqwest::{Client, Url};
@@ -50,153 +51,254 @@ impl DownstreamProtocol for FaultHydra {
         self.inner.revoke(c, s)
     }
 }
-const VALIDATION: &str = "fixture-validation-mdm-secret-32bytes";
-const SERVICE: &str = "fixture-service-identity-admin-32bytes";
-fn query(u: &Url, k: &str) -> anyhow::Result<String> {
-    u.query_pairs()
-        .find(|(key, _)| key == k)
-        .map(|(_, v)| v.into_owned())
-        .ok_or_else(|| anyhow::anyhow!("missing expected redirect field"))
-}
-fn location(r: reqwest::Response) -> anyhow::Result<Url> {
-    if !r.status().is_redirection() {
-        anyhow::bail!("expected redirect, status={}", r.status());
-    }
-    Ok(Url::parse(
-        r.headers()
-            .get("location")
-            .ok_or_else(|| anyhow::anyhow!("missing redirect"))?
-            .to_str()?,
-    )?)
-}
-async fn post(
-    c: &Client,
-    origin: &str,
-    path: &str,
-    v: Value,
-    csrf: Option<&str>,
-) -> anyhow::Result<Value> {
-    let mut r = c
-        .post(format!("{origin}{path}"))
-        .header("Origin", origin)
-        .header("X-Identity-Request", "1")
-        .json(&v);
-    if let Some(csrf) = csrf {
-        r = r.header("X-CSRF-Token", csrf);
-    }
-    let r = r.send().await?;
-    if !r.status().is_success() {
-        let status = r.status();
-        let body: Value = r.json().await?;
-        anyhow::bail!("bridge rejected {path}: {} {}", status, body["code"]);
-    }
-    Ok(r.json().await?)
-}
-async fn flow(
-    c: &Client,
-    origin: &str,
-    issuer: &str,
-    csrf: &str,
-    exchange_verifier: &str,
-    replay: bool,
-) -> anyhow::Result<(String, Value)> {
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-    use sha2::{Digest, Sha256};
-    let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let mut authorize = Url::parse(&format!("{issuer}oauth2/auth"))?;
-    authorize.query_pairs_mut().extend_pairs([
-        ("client_id", "mdm"),
-        ("redirect_uri", "https://mdm.example.test/auth/callback"),
-        ("response_type", "code"),
-        ("scope", "openid"),
-        ("audience", "mdm-api"),
-        ("state", "consumer-state-value"),
-        ("nonce", "consumer-nonce-value"),
-        ("code_challenge_method", "S256"),
-        ("code_challenge", &challenge),
-    ]);
-    let login = location(c.get(authorize).send().await?)?;
-    let login_challenge = query(&login, "login_challenge")?;
-    let handle = post(
-        c,
-        origin,
-        "/api/v1/downstream/login",
-        json!({"challenge":login_challenge}),
-        None,
-    )
-    .await?;
-    let accepted = post(
-        c,
-        origin,
-        "/api/v1/downstream/login/accept",
-        json!({"flow":handle,"challenge":login_challenge}),
-        Some(csrf),
-    )
-    .await?;
-    let consent = location(
-        c.get(accepted["redirect_to"].as_str().unwrap())
-            .send()
-            .await?,
+mod downstream_support;
+use downstream_support::*;
+#[tokio::test]
+#[ignore = "make test-downstream"]
+async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Result<()> {
+    use rss_identity_core::federation::*;
+    use rss_identity_oidc::{ApprovedProvider, HttpOidc};
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let issuer = std::env::var("IDENTITY_TEST_DOWNSTREAM_ISSUER")?;
+    let origin = issuer.trim_end_matches('/');
+    let ca = std::fs::read(std::env::var("IDENTITY_TEST_DOWNSTREAM_CA")?)?;
+    let upstream_issuer = std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?;
+    let upstream_ca = std::fs::read(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
+    let callback = format!("{origin}/api/v1/oidc/callback");
+    let oidc = HttpOidc::new(
+        vec![ApprovedProvider {
+            tenant: f.key.tenant,
+            issuer: upstream_issuer.clone(),
+            client_id: "identity-test".into(),
+            redirect_uri: callback.clone(),
+            secret_ref: "fixture@1".into(),
+            addresses: vec!["127.0.0.0/8".parse()?],
+            keycloak_totp: true,
+        }],
+        BTreeMap::from([("fixture@1".into(), Zeroizing::new("fixture-secret".into()))]),
+        Some(&upstream_ca),
     )?;
-    let consent_challenge = query(&consent, "consent_challenge")?;
-    let continuation = post(
-        c,
-        origin,
-        "/api/v1/downstream/consent",
-        json!({"challenge":consent_challenge}),
-        None,
-    )
-    .await?;
-    assert_eq!(continuation, handle);
-    let accepted = post(
-        c,
-        origin,
-        "/api/v1/downstream/consent/accept",
-        json!({"flow":handle,"challenge":consent_challenge}),
-        Some(csrf),
-    )
-    .await?;
-    let callback = location(
-        c.get(accepted["redirect_to"].as_str().unwrap())
-            .send()
-            .await?,
+    let federation = Federation::new(
+        f.store.clone(),
+        Arc::new(oidc),
+        StateSigner::new([7; 32], origin)?,
+        BTreeMap::from([(("identity".into(), "home".into()), format!("{origin}/done"))]),
     )?;
-    assert_eq!(query(&callback, "state")?, "consumer-state-value");
-    let code = query(&callback, "code")?;
-    let response = c
-        .post(format!("{issuer}oauth2/token"))
-        .basic_auth("mdm", Some("fixture-oidc-mdm-secret"))
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", &code),
-            ("redirect_uri", "https://mdm.example.test/auth/callback"),
-            ("code_verifier", exchange_verifier),
-        ])
-        .send()
+    let p = federation
+        .create_provider(
+            session_actor(&f.store, f.candidate().await?).await?,
+            ProviderSettingsInput {
+                issuer: upstream_issuer,
+                client_id: "identity-test".into(),
+                secret_ref: "fixture@1".into(),
+                redirect_uri: callback,
+                scopes: vec!["openid".into()],
+                claims: ClaimMapping {
+                    email: None,
+                    groups: None,
+                },
+                jit: true,
+            }
+            .try_into()?,
+            deadline(),
+        )
         .await?;
-    anyhow::ensure!(
-        response.status().is_success(),
-        "token exchange failed {}",
-        response.status()
-    );
-    let token: Value = response.json().await?;
-    if replay {
-        let replay = c
-            .post(format!("{issuer}oauth2/token"))
-            .basic_auth("mdm", Some("fixture-oidc-mdm-secret"))
-            .form(&[
-                ("grant_type", "authorization_code"),
-                ("code", &code),
-                ("redirect_uri", "https://mdm.example.test/auth/callback"),
-                ("code_verifier", exchange_verifier),
-            ])
-            .send()
+    let p = federation
+        .enable_provider(
+            session_actor(&f.store, f.candidate().await?).await?,
+            p.id,
+            p.version,
+            true,
+            deadline(),
+        )
+        .await?;
+    let hydra = Arc::new(rss_identity_hydra::Hydra::new(
+        &issuer,
+        &issuer,
+        vec!["127.0.0.1/32".parse()?, "::1/128".parse()?],
+        Secret::new(SERVICE.into())?,
+        Some(&ca),
+    )?);
+    let d = Downstream::new(
+        f.store.clone(),
+        hydra.clone(),
+        vec![Registration::new(RegistrationInput {
+            tenant: f.key.tenant,
+            client: "mdm".into(),
+            audience: "mdm-api".into(),
+            issuer: issuer.clone(),
+            redirect: "https://mdm.example.test/auth/callback".into(),
+            version: 1,
+        })?],
+        Lifetimes::new(LifetimeLimits {
+            request: 300,
+            code: 60,
+            access_token: 300,
+            clock_skew: 30,
+        })?,
+        Arc::new(PrepareAdmission::new(8, 120, Duration::from_secs(60))?),
+    )?;
+    let config = HttpConfig::new(origin, Duration::from_secs(30))?;
+    let app = federated_router(federation.clone(), config.clone())?.merge(downstream_router(
+        d,
+        config,
+        BTreeMap::from([("mdm".into(), Zeroizing::new(VALIDATION.into()))]),
+    )?);
+    let listener = tokio::net::TcpListener::bind(format!(
+        "127.0.0.1:{}",
+        std::env::var("IDENTITY_TEST_BRIDGE_PORT")?
+    ))
+    .await?;
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.layer(axum::middleware::map_request(
+                |mut r: axum::extract::Request| async move {
+                    r.extensions_mut()
+                        .insert(ClientAddress("127.0.0.1".parse().unwrap()));
+                    r
+                },
+            ))
+            .into_make_service(),
+        )
+        .await
+    });
+    let c = Client::builder()
+        .no_proxy()
+        .cookie_store(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .add_root_certificate(reqwest::Certificate::from_pem(&ca)?)
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let input = json!({"client_id":"identity","return_target":"home"});
+    let login = post(
+        &c,
+        origin,
+        &format!("/api/v1/tenants/{A}/oidc/{}/login", p.id),
+        input.clone(),
+        None,
+    )
+    .await?;
+    let callback =
+        keycloak_support::authorize(login["authorization_url"].as_str().unwrap(), "alice", false)
             .await?;
-        assert!(replay.status().is_client_error());
-    }
-    Ok((token["access_token"].as_str().unwrap().into(), handle))
+    assert_eq!(
+        c.get(callback).send().await?.status(),
+        reqwest::StatusCode::SEE_OTHER
+    );
+    let session: Value = c
+        .get(format!("{origin}/api/v1/tenants/{A}/session"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let csrf = session["csrf_token"].as_str().unwrap();
+    let sdk = IdentityClient::new(
+        ClientConfig {
+            identity_origin: origin.into(),
+            issuer: issuer.clone(),
+            client_id: "mdm".into(),
+            validation_secret: Zeroizing::new(VALIDATION.into()),
+            tenant_id: A.into(),
+            audience: "mdm-api".into(),
+            timeout: Duration::from_secs(10),
+            ca_pem: Some(ca),
+        },
+        Arc::new(rss_identity_client::SystemClock),
+    )?;
+    let (old_token, _, _) = flow(
+        &c,
+        origin,
+        &issuer,
+        csrf,
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ",
+        false,
+    )
+    .await?;
+    let old_proof = sdk.validate(&old_token).await?;
+    assert_eq!(old_proof.acr(), "unspecified");
+    let step = post(
+        &c,
+        origin,
+        &format!("/api/v1/tenants/{A}/oidc/{}/step-up", p.id),
+        input,
+        Some(csrf),
+    )
+    .await?;
+    let callback =
+        keycloak_support::authorize(step["authorization_url"].as_str().unwrap(), "alice", true)
+            .await?;
+    assert_eq!(
+        c.get(callback).send().await?.status(),
+        reqwest::StatusCode::SEE_OTHER
+    );
+    let session: Value = c
+        .get(format!("{origin}/api/v1/tenants/{A}/session"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let csrf = session["csrf_token"].as_str().unwrap();
+    assert!(
+        hydra
+            .introspect(&Secret::new(old_token.clone())?)
+            .await?
+            .active
+    );
+    assert!(
+        sdk.validate(&old_token).await.is_err(),
+        "old grant must not inherit elevated session"
+    );
+    let (token, _, id_token) = flow(
+        &c,
+        origin,
+        &issuer,
+        csrf,
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ",
+        false,
+    )
+    .await?;
+    let proof = sdk.validate(&token).await?;
+    assert_eq!(proof.acr(), "mfa");
+    assert_eq!(proof.subject(), old_proof.subject());
+    assert_ne!(proof.session_id(), old_proof.session_id());
+    let facts:Value = sqlx::query_scalar("SELECT auth_facts FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
+        .bind(A).bind(proof.session_id()).fetch_one(&f.owner).await?;
+    assert_eq!(
+        proof.auth_time(),
+        facts["assurance"]["auth_time"].as_i64().unwrap()
+    );
+    // Inspect the actual TLS token response as an output assertion; it never constructs authority.
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(id_token.split('.').nth(1).unwrap())?;
+    let id_claims: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(id_claims["acr"], "mfa");
+    let methods: Vec<String> = id_claims
+        .get("amr")
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    assert_eq!(methods, proof.amr());
+    federation
+        .enable_provider(
+            session_actor(&f.store, f.candidate().await?).await?,
+            p.id,
+            p.version,
+            false,
+            deadline(),
+        )
+        .await?;
+    assert!(sdk.validate(&token).await.is_err());
+    server.abort();
+    let _ = server.await;
+    f.close().await;
+    Ok(())
 }
+
 #[tokio::test]
 #[ignore = "make test-downstream"]
 async fn real_downstream_code_pkce_and_online_validation() -> anyhow::Result<()> {
@@ -305,7 +407,7 @@ async fn real_downstream_code_pkce_and_online_validation() -> anyhow::Result<()>
     )
     .await?;
     let csrf = session["csrf_token"].as_str().unwrap();
-    let (token, handle) = flow(
+    let (token, handle, _) = flow(
         &c,
         origin,
         &issuer,
@@ -577,7 +679,7 @@ async fn real_downstream_code_pkce_and_online_validation() -> anyhow::Result<()>
         )
         .await?;
         let member_csrf = logged["csrf_token"].as_str().unwrap();
-        let (member_token, _) = flow(
+        let (member_token, _, _) = flow(
             &c,
             origin,
             &issuer,

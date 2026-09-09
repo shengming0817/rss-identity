@@ -8,7 +8,7 @@
 
 准备 CA 及独立服务端证书：public 证书 SAN 覆盖 Identity 与 Keycloak 外部 hostname；postgres 证书 SAN 含 postgres；Hydra admin 证书 SAN 含 hydra-admin；Keycloak 服务端证书 SAN 含 keycloak。数据库、Hydra、OIDC 各自 ca_file 必须信任对应证书；不关闭 VerifyFull。
 
-所有秘密为普通 0600 文件，无尾部换行：runtime/maintenance PG 密码彼此独立且至少32字节；每个产品的 validation secret、OIDC secret独立且至少32字节；OIDC state_key_file 是64位十六进制（32字节、非零）；Hydra gateway service secret和Keycloak DB密码使用32–256字符 base64url；Hydra system secret至少32字节。秘密不得传命令行值或提交到Git。
+所有秘密为普通 0600 文件，无尾部换行：runtime/maintenance PG 密码彼此独立且至少32字节；每个产品的 validation secret、OIDC secret独立且至少32字节；OIDC state_key_file 是64位十六进制（32字节、非零）；Hydra gateway service secret和Keycloak DB密码使用32–256字符 base64url；Hydra system/cookie keyring 分别通过 hydra_system_secret_files/hydra_cookie_secret_files 提供，每个 key 至少32字节且两域不重用。秘密不得传命令行值或提交到Git。
 
 Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定上游镜像的1000:0，以支持其启动时augmentation。渲染器由root执行，按唯一服务owner交付配置并核验权限；其它调用者明确拒绝。私钥和秘密按消费服务UID/GID准备（Keycloak私钥1000:0，其它容器秘密10001:10001），均0600；公共CA/证书须对消费用户可读；仅给各服务挂载其所需文件。安装前执行下文volume-init任务，为空卷固定目录设置10001所有权；有内容且属主不匹配的旧卷明确拒绝，不递归修改。维护秘密只在维护任务中挂载，日常服务无 owner/maintenance mount。
 
@@ -42,7 +42,7 @@ SIGTERM关闭admission并有界等待请求/响应、worker、实际KDF和PG。C
 
 回退仅限支持同一schema和同一身份配置的应用artifact；不得回退DB撤销状态。v5开发库只能由owner确认可丢弃后重建；不自动down migration。首版禁止同库改变environment/origin/config代际，修改配置会明确拒绝；需要保留数据的origin迁移属于后续专门交付。
 
-维护恢复继续使用 identity-admin recover，详见[维护指南](../guides/local-maintenance.md)。MFA、备份恢复、凭据轮换演练属于 I09。
+维护恢复继续使用 identity-admin recover，详见[维护指南](../guides/local-maintenance.md)。MFA 见[assurance 指南](../guides/assurance.md)；备份恢复、凭据轮换与测量见[I09 运维步骤](recovery.md)。
 
 Hydra admin实际仅监听其网络命名空间的127.0.0.1:4445，认证TLS侧车共享该命名空间；其它protocol网络成员不能直连4445。provider版本始终从candidate.json的providers读取，不随执行脚本旁的新checkout改变。
 

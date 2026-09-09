@@ -97,20 +97,6 @@ pub(crate) async fn session(
             }
         })
 }
-pub(crate) async fn amr(c: &mut PgConnection, g: &Grant) -> Result<Vec<String>, MutationError> {
-    let origin = crate::federation_storage::origin(
-        c,
-        g.key.ok_or(DownstreamError::Rejected)?.tenant,
-        g.session.ok_or(DownstreamError::Rejected)?,
-    )
-    .await?;
-    Ok(if origin.is_none() {
-        vec!["pwd".into()]
-    } else {
-        vec![]
-    })
-}
-
 /// Public pairwise identifier with its own 256-bit canonical hexadecimal encoding.
 /// It is never a bearer credential and deliberately does not use SessionSecret.
 pub(crate) struct ProductSubject(String);

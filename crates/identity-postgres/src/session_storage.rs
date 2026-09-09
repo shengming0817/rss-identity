@@ -6,6 +6,7 @@ use crate::{
     transaction::{corrupt, reject},
 };
 use rss_identity_core::SessionId;
+use rss_identity_core::assurance::{Assurance, AuthenticationMode};
 use rss_identity_core::session::SessionLifetime;
 use rss_request_context::TenantId;
 use rss_transactional_messaging_postgres::PgError;
@@ -23,6 +24,7 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 }
 
 pub(crate) struct Loaded {
+    pub assurance: Assurance,
     pub state: AccountState,
     pub view: SessionView,
     pub lifetime: SessionLifetime,
@@ -98,7 +100,18 @@ pub(crate) async fn by_id(
     if !lifetime.valid_at(now) {
         return Err(reject());
     }
+    let assurance = match origin {
+        Some(origin) => serde_json::from_value::<Assurance>(
+            origin.facts.get("assurance").cloned().ok_or_else(corrupt)?,
+        )
+        .map_err(|_| corrupt())?,
+        None => Assurance::password(lifetime.auth_time()).map_err(|_| corrupt())?,
+    };
+    assurance
+        .check(AuthenticationMode::Login, lifetime.auth_time(), now)
+        .map_err(|_| reject())?;
     Ok(Loaded {
+        assurance,
         state,
         view: SessionView::new(session_id(&id)?, lifetime),
         lifetime,

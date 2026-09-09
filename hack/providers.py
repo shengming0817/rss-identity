@@ -98,9 +98,17 @@ def report_tests(package, test, expected, result):
         if name in expected:
             print(f'{package}/{test}: {name}: {status}')
     print(f'{package}/{test}: cargo exit={result.returncode}; raw output withheld')
+    if test == 'capacity_http':
+        for match in re.finditer(r'CAPACITY (\{[^\n]+\})', result.stderr):
+            value=json.loads(match.group(1))
+            expected={'operation','concurrency','requests','succeeded','failed','seconds','successful_rps','p50_ms','p95_ms','p99_ms'}
+            if value.get('operation')=='cleanup_8_grants':expected-={'p50_ms','p95_ms','p99_ms'}
+            if set(value)!=expected or value['operation'] not in {'local_login','session_inspect','online_validation','cleanup_8_grants'} or any(not isinstance(v,(int,float)) for k,v in value.items() if k!='operation'):
+                raise RuntimeError('invalid capacity measurement')
+            print('CAPACITY '+json.dumps(value,sort_keys=True))
 
 def cargo(package, test, env, features=()):
-    expected = {('rss-identity-app','clients'): {'clients_are_created_verified_and_drift_is_refused'},('rss-identity-app','installation'): {'installation_configuration_and_rollback_are_verified'},('rss-identity-http-axum','ui_host'): {'real_identity_ui_management_seam'},('rss-identity-http-axum','management_http'): {'management_accounts_sessions_and_boundaries','management_provider_operations_safe_and_scoped','callback_cancellation_consumes_only_bound_attempts','management_rechecks_inflight_provider_authority','provider_capacity_is_atomic_and_keeps_management_available'},('rss-identity-postgres','downstream_atomic'): {'downstream_prepare_admission_precedes_invalid_protocol_work','downstream_cleanup_failure_concurrency_and_unknown_settlement','downstream_cleanup_claim_rollback_and_final_unknown','downstream_readonly_rotation_and_revocation','downstream_unknown_commit_and_single_accept','downstream_remote_unknown_never_returns_authority','downstream_accept_rechecks_revocation_and_final_commit','downstream_claim_and_event_roll_back_together','downstream_federated_provider_revocation','downstream_prepare_budget_is_per_client_and_releases_expired'}, ('rss-identity-http-axum','downstream_http'): {'real_downstream_code_pkce_and_online_validation','downstream_body_deadline_and_caller_auth'}, ('rss-identity-http-axum','federated_http'): {'real_provider_management_and_missing_secret','real_federated_login_and_linking','federated_http_rejects_mismatch_and_uncertain_commit','federated_tls_and_egress_policy'}, ('rss-identity-postgres','federated_atomic'): {'federation_concurrent_linking_keeps_one_owner','federation_configuration_authorization_and_versions','federation_state_restart_expiry_and_replay','federation_jit_isolated_subjects_and_membership','federation_config_races_and_provider_revocation','federation_atomic_events_and_unknown_commit','federation_local_and_federated_linking','federation_link_conflict_logout_and_wrong_reauthentication','federation_concurrent_jit_rls_and_schema_drift'}, ('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
+    expected = {('rss-identity-http-axum','capacity_http'): {'measure_single_consumer_identity_paths'},('rss-identity-http-axum','recovery_http'): {'physical_restore_preserves_the_selected_security_cut'},('rss-identity-app','clients'): {'clients_are_created_verified_and_drift_is_refused'},('rss-identity-app','installation'): {'installation_configuration_and_rollback_are_verified'},('rss-identity-http-axum','ui_host'): {'real_identity_ui_management_seam'},('rss-identity-http-axum','management_http'): {'management_accounts_sessions_and_boundaries','management_provider_operations_safe_and_scoped','callback_cancellation_consumes_only_bound_attempts','management_rechecks_inflight_provider_authority','provider_capacity_is_atomic_and_keeps_management_available'},('rss-identity-postgres','downstream_atomic'): {'downstream_prepare_admission_precedes_invalid_protocol_work','downstream_cleanup_failure_concurrency_and_unknown_settlement','downstream_cleanup_claim_rollback_and_final_unknown','downstream_readonly_rotation_and_revocation','downstream_unknown_commit_and_single_accept','downstream_remote_unknown_never_returns_authority','downstream_accept_rechecks_revocation_and_final_commit','downstream_claim_and_event_roll_back_together','downstream_federated_provider_revocation','downstream_prepare_budget_is_per_client_and_releases_expired'}, ('rss-identity-http-axum','downstream_http'): {'real_downstream_code_pkce_and_online_validation','downstream_body_deadline_and_caller_auth','real_totp_assurance_reaches_hydra_and_validation_client'}, ('rss-identity-http-axum','federated_http'): {'real_provider_management_and_missing_secret','real_federated_login_and_linking','federated_http_rejects_mismatch_and_uncertain_commit','federated_tls_and_egress_policy','real_step_up_rotates_only_the_bound_session','real_upstream_client_secret_rotation'}, ('rss-identity-postgres','federated_atomic'): {'federation_concurrent_linking_keeps_one_owner','federation_configuration_authorization_and_versions','federation_state_restart_expiry_and_replay','federation_jit_isolated_subjects_and_membership','federation_config_races_and_provider_revocation','federation_atomic_events_and_unknown_commit','federation_local_and_federated_linking','federation_link_conflict_logout_and_wrong_reauthentication','federation_concurrent_jit_rls_and_schema_drift','federation_step_up_binding_and_settlement'}, ('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
                 ('rss-identity-postgres', 'session_atomic'): {'session_rotation_and_revocation', 'session_isolation_replacement_and_restart', 'session_account_changes_fence_racing_credentials', 'session_settlement_and_event_failure_are_atomic', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations'},
                 ('rss-identity-http-axum', 'session_http'): {'session_http_login_cookie_csrf_and_replacement', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_recovery_current_logout_and_deadline', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_pending_commit_preserves_settlement'},
                 ('rss-identity-app', 'operator'): {'maintenance_file_and_settlement'},
@@ -111,7 +119,7 @@ def cargo(package, test, env, features=()):
     names = re.findall(r'^(.+): test$', listing, re.M)
     if set(names) != expected or len(names) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test set missing or changed')
-    completed = bounded_run([*command, '--nocapture', '--format', 'pretty'], timeout=max(300 if test == 'ui_host' else 180,len(expected)*180), cwd=ROOT, env=environment, text=True, capture_output=True)
+    completed = bounded_run([*command, '--nocapture', '--format', 'pretty'], timeout=max(600 if test == 'recovery_http' else 300 if test == 'ui_host' else 180,len(expected)*180), cwd=ROOT, env=environment, text=True, capture_output=True)
     result = completed.stdout
     report_tests(package, test, expected, completed)
     if completed.returncode:
@@ -164,19 +172,29 @@ def oidc():
         wait(kc + "/.well-known/openid-configuration")
         cargo("rss-identity-oidc", "provider", {"IDENTITY_TEST_KEYCLOAK_ISSUER": kc}, ["--features", "test-support"])
 
-def federated():
+def configure_totp(realm):
+    """Keycloak 26.7.3 conditional LoA flow; test credentials, never production defaults.
+    ref: Keycloak server_admin Creating a browser login flow with step-up mechanism.
+    """
+    realm.update(json.loads((ROOT/'deployment/keycloak-totp.json').read_text()))
+    for user in realm['users']:
+        user['credentials'].append({'type':'otp','userLabel':'fixture-totp','secretData':json.dumps({'value':'fixture-totp-secret-2339'}),'credentialData':json.dumps({'digits':6,'counter':0,'period':30,'algorithm':'HmacSHA1','subType':'totp'})})
+
+@contextlib.contextmanager
+def keycloak(redirect_uri="https://identity.example.test/api/v1/oidc/callback", database_env=(), network=None):
     realm = {"realm":"identity", "enabled":True, "sslRequired":"all", "duplicateEmailsAllowed":True,
              "loginWithEmailAllowed":False,
              "groups":[{"name":"staff"}],
              "clients":[{"clientId":"identity-test", "secret":"fixture-secret", "publicClient":False,
                          "standardFlowEnabled":True, "directAccessGrantsEnabled":False,
-                         "redirectUris":["https://identity.example.test/api/v1/oidc/callback"],
+                         "redirectUris":[redirect_uri],
                          "attributes":{"pkce.code.challenge.method":"S256"},
                          "protocolMappers":[{"name":"groups","protocol":"openid-connect","protocolMapper":"oidc-group-membership-mapper",
                          "config":{"claim.name":"groups","full.path":"false","id.token.claim":"true","access.token.claim":"false"}}]}],
              "users":[{"username":name,"enabled":True,"email":"same@example.test","emailVerified":True,
                        "firstName":name,"lastName":"Fixture","groups":["staff"],
                        "credentials":[{"type":"password","value":"fixture-password","temporary":False}]} for name in ["alice","bob"]]}
+    configure_totp(realm)
     with tempfile.TemporaryDirectory(prefix="identity-federated-") as tmp, contextlib.ExitStack() as stack:
         tmp=Path(tmp);cert=tmp/"tls.crt";key=tmp/"tls.key";realm_file=tmp/"identity-realm.json"
         realm_file.write_text(json.dumps(realm))
@@ -184,7 +202,7 @@ def federated():
                         "-subj","/CN=identity-t2", "-addext","basicConstraints=critical,CA:FALSE","-addext","keyUsage=critical,digitalSignature,keyEncipherment","-addext","extendedKeyUsage=serverAuth","-addext","subjectAltName=IP:127.0.0.1,DNS:localhost"],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
         key.chmod(0o644)  # Synthetic disposable fixture key readable by the container's unprivileged uid.
         port=free_port();origin=f"https://127.0.0.1:{port}";issuer=origin+"/realms/identity"
-        stack.enter_context(container(KEYCLOAK,{8443:port},args=["start-dev","--import-realm","--http-enabled=false",f"--hostname={origin}",
+        kc_id, _ = stack.enter_context(container(KEYCLOAK,{8443:port},env=[('KC_BOOTSTRAP_ADMIN_USERNAME','fixture-operator'),('KC_BOOTSTRAP_ADMIN_PASSWORD','fixture-operator-password'),*database_env],network=network,args=["start-dev","--import-realm","--http-enabled=false",f"--hostname={origin}",
             "--https-certificate-file=/opt/keycloak/conf/tls.crt","--https-certificate-key-file=/opt/keycloak/conf/tls.key"],
             mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro",f"{cert}:/opt/keycloak/conf/tls.crt:ro",f"{key}:/opt/keycloak/conf/tls.key:ro"]))
         context=ssl.create_default_context(cafile=str(cert));deadline=time.monotonic()+120
@@ -194,8 +212,11 @@ def federated():
                     if response.status==200:break
             except (OSError,urllib.error.URLError):time.sleep(.5)
         else:raise RuntimeError("Keycloak TLS readiness timed out")
-        _,ports=stack.enter_context(postgres())
-        cargo("rss-identity-http-axum","federated_http",{"IDENTITY_TEST_PG_PORT":str(ports[5432]),"IDENTITY_TEST_FEDERATED_ISSUER":issuer,"IDENTITY_TEST_FEDERATED_CA":str(cert)})
+        yield {"IDENTITY_TEST_FEDERATED_ISSUER":issuer,"IDENTITY_TEST_FEDERATED_CA":str(cert),"IDENTITY_TEST_KEYCLOAK_CONTAINER":kc_id}
+
+def federated():
+    with keycloak() as env, postgres() as (_, ports):
+        cargo("rss-identity-http-axum","federated_http",{**env,"IDENTITY_TEST_PG_PORT":str(ports[5432])})
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["pg"]: pg()
