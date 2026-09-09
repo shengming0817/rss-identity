@@ -51,7 +51,8 @@ def build(out,ui_source,ui_dist):
   for target in ['server','operator','gateway']:
    output=out/(target+'.oci.tar');name='rss-identity/'+target+':'+revision
    command=['docker','buildx','build','--platform','linux/amd64','--target',target,'--tag',name,'--provenance=false','--build-arg','RUST_IMAGE='+images['rust'],'--build-arg','RUNTIME_IMAGE='+images['runtime'],'--build-arg','NGINX_IMAGE='+images['nginx'],'--build-arg','IDENTITY_REVISION='+revision,'--output','type=oci,dest='+str(output.resolve()),str(context)]
-   if os.environ.get('SYSTEM_ACCESSTOKEN'):command[3:3]=['--secret','id=azure_token,env=SYSTEM_ACCESSTOKEN']
+   if os.environ.get('IDENTITY_GIT_AUTH_HEADER_FILE'):command[3:3]=['--secret','id=azure_header,src='+os.environ['IDENTITY_GIT_AUTH_HEADER_FILE']]
+   elif os.environ.get('SYSTEM_ACCESSTOKEN'):command[3:3]=['--secret','id=azure_token,env=SYSTEM_ACCESSTOKEN']
    # Pin source identity; no build credential reaches the binary compilation RUN.
    subprocess.run(command,check=True)
    digest,config=oci_identity(output)
@@ -64,7 +65,8 @@ def build(out,ui_source,ui_dist):
     if result['migrations']['identity_sql_sha256']!=result['migration_sha256'] or result['migrations']['schema_version']!=6:raise ValueError('embedded migration identity mismatch')
    result['images'][target]=name+'@'+digest;result['archives'][target]={'file':output.name,'sha256':sha(output),'manifest_digest':digest}
   command=['docker','buildx','build','--platform','linux/amd64','--target','evidence','--build-arg','RUST_IMAGE='+images['rust'],'--build-arg','RUNTIME_IMAGE='+images['runtime'],'--build-arg','NGINX_IMAGE='+images['nginx'],'--output','type=local,dest='+str((out/'binaries').resolve()),str(context)]
-  if os.environ.get('SYSTEM_ACCESSTOKEN'):command[3:3]=['--secret','id=azure_token,env=SYSTEM_ACCESSTOKEN']
+  if os.environ.get('IDENTITY_GIT_AUTH_HEADER_FILE'):command[3:3]=['--secret','id=azure_header,src='+os.environ['IDENTITY_GIT_AUTH_HEADER_FILE']]
+  elif os.environ.get('SYSTEM_ACCESSTOKEN'):command[3:3]=['--secret','id=azure_token,env=SYSTEM_ACCESSTOKEN']
   subprocess.run(command,check=True)
   built=json.loads((out/'binaries/metadata.json').read_text());packages={p['id']:p for p in built['packages']};features={}
   for line in (out/'binaries/artifacts.json').read_text().splitlines():
