@@ -8,4 +8,6 @@
 
 - [下游身份接入](downstream.md)：Hydra bridge、最小 client、在线撤销与独立 consumer。
 
-- [IdP 配置与联合登录](federation.md)：部署出站许可、不可变 secret_ref、管理 CLI 和浏览器接缝。
+- [IdP 配置与联合登录](federation.md)：部署出站许可、不可变 secret_ref、管理 HTTP 和浏览器接缝。
+
+- [中央登录与日常管理](management.md)：独立前端挂载、会话管理与联合 T2。

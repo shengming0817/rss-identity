@@ -24,7 +24,7 @@ I01 协议 owner：#2331；internal validate 和下游 bridge 的实现 owner �
 
 ## 中央会话 HTTP（I04）
 
-Owner：#2334。rss-identity-http-axum 提供可挂载 Router；生产 listener/TLS 配置与 UI 尚由后续 owner 实施。身份绑定的 internal validate 仍归 I06，不由这些接口替代。
+Owner：#2334。rss-identity-http-axum 提供可挂载 Router；生产 listener/TLS 配置由 I08 实施，UI 由 rss-web apps/identity 持有。身份绑定的 internal validate 仍归 I06，不由这些接口替代。
 
 路径前缀 `/api/v1/tenants/{tenant}/`；tenant 是 UUID，只认证其固定租户的会话。
 
@@ -36,6 +36,8 @@ Owner：#2334。rss-identity-http-axum 提供可挂载 Router；生产 listener/
 | POST session/logout | cookie + CSRF；204，确认撤销后清除 cookie。 |
 | POST sessions/logout-all | cookie + CSRF；204，确认推进账户 auth_epoch 后清除 cookie。 |
 | GET sessions | cookie；可选 cursor UUID、limit 1–100（默认 50）；200 `{sessions,next_cursor}`，只读列出本主体本租户有效会话，不延长 idle；nil/无效游标400。 |
+
+登录/current/refresh 均返回 `{session,identity,csrf_token}`；identity 为 `{principal_id,administrator,has_local_password}`，来自同一会话验证快照，仅用于显示，不代替后续授权。
 
 session 形状为 `{id,auth_time,idle_expires_at,absolute_expires_at}`，时间是 Unix 秒。CSRF 通过 `X-CSRF-Token` 呈递，随 cookie 轮换。GET/HEAD 查询不续期；客户端只在需要续期的有效用户活动期间串行调用受 Origin+CSRF 保护的 POST refresh，不用后台无条件心跳绕过 idle。客户端应串行刷新；并发失败方不覆盖已有 cookie/CSRF，失败响应不发送 Set-Cookie。刷新响应丢失后须重新登录。
 
@@ -58,4 +60,31 @@ provider/tenant 必须非空有效 UUID。client_id/return_target 是部署注�
 
 只有已确认提交的最终成功返回中央 Cookie；失败不设置、清除或覆盖 session Cookie。callback 拒绝过期、错误浏览器、重复消费、issuer 错配、配置修改或停用；源 session 退出/失效也拒绝关联。400 malformed_request、401 invalid_credential、403 csrf_rejected、409 identity_link_conflict/configuration_changed、429 rate_limited、503 identity_unavailable。框架拒绝保持原 HTTP 状态；所有响应 no-store/no-referrer，URI 上限 8192 字节。
 
-登录返回 Identity 中央会话，不返回上游 token 或下游 VerifiedIdentityContext。邮箱不作为关联键；账户合并不在本次范围。管理 CLI 与部署配置见[联合身份指南](../guides/federation.md)，事务/撤销规则见 [I05 ADR](adr/202609082050-2335-federated-identity.md)。
+登录返回 Identity 中央会话，不返回上游 token 或下游 VerifiedIdentityContext。邮箱不作为关联键；账户合并不在本次范围。管理 HTTP/UI 与部署配置见[联合身份指南](../guides/federation.md)，事务/撤销规则见 [I05 ADR](adr/202609082050-2335-federated-identity.md)。
+
+
+## 日常管理 HTTP（I07）
+
+前缀 `/api/v1/tenants/{tenant}/`，所有管理请求均检查中央 cookie；写入另要求精确 Origin、X-Identity-Request: 1、X-CSRF-Token。JSON 不接受额外字段；管理 body 上限 16 KiB。未确认事务不返回成功。
+
+| 方法 / 路径 | 输入 / 输出 |
+| --- | --- |
+| GET login-options | 匿名；`{providers:[{provider_id,label}]}`，仅 enabled provider 的安全展示投影 |
+| GET accounts | 管理员；cursor UUID/limit 1–100 默认50；`{accounts,next_cursor}` |
+| POST accounts | 管理员；`{login,password,role}`，role=member/administrator/emergency；201 AccountView |
+| POST accounts/{principal}/enabled | 管理员；`{enabled}`；200 AccountView |
+| POST accounts/{principal}/administrator | 管理员；`{enabled}`；200 AccountView |
+| POST accounts/{principal}/membership | 管理员；`{enabled}`；200 AccountView |
+| POST accounts/{principal}/password | 管理员重置他人；`{password}`；200 AccountView |
+| POST account/password | 本人改密；`{current_password,password}`；200 AccountView |
+| GET providers | 管理员；`{providers:[ProviderView]}` |
+| POST providers | ProviderSettings；201 ProviderView，默认 disabled |
+| PUT providers/{provider} | `{expected_version,settings}`；200 ProviderView |
+| POST providers/{provider}/enabled | `{expected_version,enabled}`；200 ProviderView |
+| POST providers/{provider}/test | 200 `{passed:true,report}` 或 `{passed:false,diagnostic:{stage,reason}}`；报告须在权限/version 重检与事件提交确认后返回 |
+
+AccountView 是 `{principal_id,login,enabled,administrator,emergency,member_active,has_local_password}`；login 可为 null，写操作返回状态投影，不填造 login。ProviderView 和 settings 使用 I05 的既有形状。
+
+错误 JSON 为 `{code}`：401 invalid_credential；403 insufficient_privilege/reauthentication_failed/csrf_rejected；409 last_administrator/configuration_changed/identity_link_conflict；400 malformed_request；429 rate_limited；503 identity_unavailable。错误 code 与状态严格对应；秘密与 SQL/provider 原文不输出。框架方法/路径拒绝保持其 HTTP 状态且 no-store。
+
+OIDC callback 的失败现在统一 303 到固定同源 `/auth/error?reason=cancelled|failed|unavailable`，上游 error_description 只接受并丢弃，不回显。成功仍到注册 target；没有第二 callback 或 JSON 错误兼容分支。

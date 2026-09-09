@@ -11,10 +11,10 @@ async fn session_rotation_and_revocation() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let issued = f
         .store
-        .create_session(f.actor().await?, None, deadline())
+        .create_session(f.candidate().await?, None, deadline())
         .await?;
     let old = issued.secret().expose().to_owned();
-    let candidate = f.actor().await?;
+    let candidate = f.candidate().await?;
     let a = f
         .store
         .refresh_session(f.key.tenant, SessionSecret::parse(old.clone())?, deadline());
@@ -76,7 +76,7 @@ fn secret(s: &IssuedSession) -> SessionSecret {
 async fn issue(f: &Fixture) -> anyhow::Result<IssuedSession> {
     f.reset_attempts().await?;
     Ok(f.store
-        .create_session(f.actor().await?, None, deadline())
+        .create_session(f.candidate().await?, None, deadline())
         .await?)
 }
 async fn proof(f: &Fixture, s: &IssuedSession) -> anyhow::Result<AuthenticatedSession> {
@@ -94,12 +94,11 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
     let second = issue(&f).await?;
     let member = f
         .store
-        .create_account(
-            f.actor().await?,
+        .create_local_account(
+            proof(&f, &first).await?,
             login("member"),
             password(),
-            false,
-            false,
+            rss_identity_postgres::LocalAccountRole::Member,
             deadline(),
         )
         .await?;
@@ -154,7 +153,11 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
     );
     let replacement = f
         .store
-        .create_session(f.actor().await?, Some(proof(&f, &first).await?), deadline())
+        .create_session(
+            f.candidate().await?,
+            Some(proof(&f, &first).await?),
+            deadline(),
+        )
         .await?;
     assert_ne!(replacement.view().id, first.view().id);
     assert!(proof(&f, &first).await.is_err());
@@ -217,12 +220,11 @@ async fn session_account_changes_fence_racing_credentials() -> anyhow::Result<()
     f.bootstrap().await?;
     let member = f
         .store
-        .create_account(
+        .create_local_account(
             f.actor().await?,
             login("member"),
             password(),
-            false,
-            false,
+            rss_identity_postgres::LocalAccountRole::Member,
             deadline(),
         )
         .await?;
@@ -259,8 +261,7 @@ async fn session_account_changes_fence_racing_credentials() -> anyhow::Result<()
         let (rotation, change) = tokio::join!(
             f.store
                 .refresh_session(f.key.tenant, secret(&issued), deadline()),
-            f.store
-                .change_account(actor, member.key(), change, deadline())
+            support::apply_change(&f.store, actor, member.key(), change, deadline())
         );
         change?;
         assert!(
@@ -283,22 +284,22 @@ async fn session_account_changes_fence_racing_credentials() -> anyhow::Result<()
                 .await
                 .is_err()
         );
-        f.store
-            .change_account(
-                f.actor().await?,
-                member.key(),
-                AccountChange::Enabled(true),
-                deadline(),
-            )
-            .await?;
-        f.store
-            .change_account(
-                f.actor().await?,
-                member.key(),
-                AccountChange::Membership(true),
-                deadline(),
-            )
-            .await?;
+        support::apply_change(
+            &f.store,
+            f.actor().await?,
+            member.key(),
+            AccountChange::Enabled(true),
+            deadline(),
+        )
+        .await?;
+        support::apply_change(
+            &f.store,
+            f.actor().await?,
+            member.key(),
+            AccountChange::Membership(true),
+            deadline(),
+        )
+        .await?;
         assert!(
             f.store
                 .authenticate_session(f.key.tenant, secret(&issued), deadline())
@@ -320,7 +321,7 @@ async fn session_account_changes_fence_racing_credentials() -> anyhow::Result<()
 async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let candidate = f.actor().await?;
+    let candidate = f.candidate().await?;
     let before = f.events().await?;
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
@@ -346,7 +347,7 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
     let live = issue(&f).await?;
     let before = f.events().await?;
     sqlx::raw_sql("CREATE FUNCTION public.reject_session_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'session secret marker'; END $$; CREATE TRIGGER reject_session_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_session_event();").execute(&f.owner).await?;
-    let candidate = f.actor().await?;
+    let candidate = f.candidate().await?;
     assert!(matches!(
         f.store.create_session(candidate, None, deadline()).await,
         Err(AuthorityError::RolledBack(_))
@@ -556,7 +557,7 @@ async fn session_logout_rotation_races_and_invalid_storage() -> anyhow::Result<(
     sqlx::raw_sql("ALTER TABLE identity_authority.sessions DROP CONSTRAINT session_lifetime; ALTER TABLE identity_authority.sessions ADD CONSTRAINT session_lifetime CHECK(auth_time < idle_expires_at AND idle_expires_at <= absolute_expires_at)").execute(&f.owner).await?;
     assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
     let before = f.events().await?;
-    let candidate = f.actor().await?;
+    let candidate = f.candidate().await?;
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitPending);
     assert!(
@@ -620,7 +621,7 @@ async fn session_events_match_committed_operations() -> anyhow::Result<()> {
     let replacement = f
         .store
         .create_session(
-            f.actor().await?,
+            f.candidate().await?,
             Some(proof(&f, &rotated).await?),
             deadline(),
         )

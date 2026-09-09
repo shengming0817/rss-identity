@@ -34,3 +34,7 @@ test-federated:
 .PHONY: test-downstream
 test-downstream:
 	$(PYTHON) hack/downstream.py
+
+.PHONY: test-ui
+test-ui:
+	$(PYTHON) hack/ui.py

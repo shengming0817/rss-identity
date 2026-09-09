@@ -56,7 +56,11 @@ pub enum HttpFailure {
     RequestTimeout,
 }
 #[derive(Debug)]
-pub(crate) struct HttpError(pub StatusCode, pub &'static str, Option<HttpFailure>);
+pub(crate) struct HttpError(
+    pub StatusCode,
+    pub &'static str,
+    pub(crate) Option<HttpFailure>,
+);
 pub(crate) const BAD: HttpError = HttpError(StatusCode::BAD_REQUEST, "malformed_request", None);
 pub(crate) const UNAUTH: HttpError =
     HttpError(StatusCode::UNAUTHORIZED, "invalid_credential", None);
@@ -204,6 +208,8 @@ pub(crate) async fn request_boundary(
     mut request: Request,
     next: Next,
 ) -> Response {
+    let callback = request.method() == axum::http::Method::GET
+        && request.uri().path() == "/api/v1/oidc/callback";
     let budget = RequestBudget(Instant::now() + state.config.timeout);
     request.extensions_mut().insert(budget);
     let origin = if request.uri().to_string().len() > 8192 {
@@ -222,6 +228,16 @@ pub(crate) async fn request_boundary(
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     };
+    if callback && (response.status().is_client_error() || response.status().is_server_error()) {
+        let reason = if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+            "unavailable"
+        } else {
+            "failed"
+        };
+        let extensions = std::mem::take(response.extensions_mut());
+        response = crate::federation::callback_failure(reason);
+        response.extensions_mut().extend(extensions);
+    }
     response.headers_mut().insert(
         header::REFERRER_POLICY,
         header::HeaderValue::from_static("no-referrer"),

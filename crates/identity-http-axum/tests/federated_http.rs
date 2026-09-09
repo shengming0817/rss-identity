@@ -74,18 +74,16 @@ fn app(s: &Federation) -> Router {
 }
 async fn provider(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
     let p = s
-        .authority()
         .create_provider(federation_support::actor(f).await?, config()?, deadline())
         .await?;
-    Ok(s.authority()
-        .enable_provider(
-            federation_support::actor(f).await?,
-            p.id,
-            p.version,
-            true,
-            deadline(),
-        )
-        .await?)
+    Ok(s.enable_provider(
+        federation_support::actor(f).await?,
+        p.id,
+        p.version,
+        true,
+        deadline(),
+    )
+    .await?)
 }
 fn request(
     method: &str,
@@ -219,12 +217,11 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
     let p = provider(&f, &s).await?;
     let app = app(&s);
     f.store
-        .create_account(
+        .create_local_account(
             federation_support::actor(&f).await?,
             login("same@example.test"),
             password(),
-            false,
-            false,
+            rss_identity_postgres::LocalAccountRole::Member,
             deadline(),
         )
         .await?;
@@ -345,7 +342,8 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
         BROWSER,
     )
     .await?;
-    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(missing.status(), StatusCode::SEE_OTHER);
+    assert_eq!(missing.headers()["location"], "/auth/error?reason=failed");
     parsed
         .query_pairs_mut()
         .append_pair("iss", "https://wrong.example.test");
@@ -355,14 +353,19 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
         BROWSER,
     )
     .await?;
-    assert_eq!(wrong_issuer.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong_issuer.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        wrong_issuer.headers()["location"],
+        "/auth/error?reason=failed"
+    );
     let wrong = callback(
         &app,
         &cb,
         "__Host-identity-oidc-browser=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
     )
     .await?;
-    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong.status(), StatusCode::SEE_OTHER);
+    assert_eq!(wrong.headers()["location"], "/auth/error?reason=failed");
     assert!(!wrong.headers().contains_key("set-cookie"));
     let response = app
         .clone()
@@ -372,12 +375,12 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
     let response = callback(&app, &cb, BROWSER).await?;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let response = callback(&app, &cb, BROWSER).await?;
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], "/auth/error?reason=failed");
     assert!(!response.headers().contains_key("set-cookie"));
     let url = begin(&app, &p, BROWSER, None, None, false).await?;
     let cb = authorize(&url, "alice").await?;
     let p = s
-        .authority()
         .update_provider(
             federation_support::actor(&f).await?,
             p.id,
@@ -387,14 +390,19 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
         )
         .await?;
     let response = callback(&app, &cb, BROWSER).await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], "/auth/error?reason=failed");
     assert!(!response.headers().contains_key("set-cookie"));
     let url = begin(&app, &p, BROWSER, None, None, false).await?;
     let cb = authorize(&url, "alice").await?;
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     let response = callback(&app, &cb, BROWSER).await?;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()["location"],
+        "/auth/error?reason=unavailable"
+    );
     assert!(!response.headers().contains_key("set-cookie"));
     let scripted = federation_support::ScriptedOidc::new();
     let mocked = service(&f, scripted.clone());
@@ -425,7 +433,11 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
         BROWSER,
     )
     .await?;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()["location"],
+        "/auth/error?reason=unavailable"
+    );
     assert!(!response.headers().contains_key("set-cookie"));
     f.close().await;
     Ok(())
@@ -461,4 +473,76 @@ async fn federated_tls_and_egress_policy() -> anyhow::Result<()> {
 
 fn tenant() -> rss_request_context::TenantId {
     rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires make test-federated"]
+async fn real_provider_management_and_missing_secret() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let settings = config()?;
+    let binding = ApprovedProvider {
+        tenant: tenant(),
+        issuer: settings.issuer().as_str().into(),
+        client_id: settings.client_id().as_str().into(),
+        secret_ref: settings.secret_ref().into(),
+        redirect_uri: settings.redirect_uri().into(),
+        addresses: vec!["127.0.0.0/8".parse()?],
+    };
+    let pem = std::fs::read(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
+    let missing = service(
+        &f,
+        Arc::new(HttpOidc::new(vec![binding], BTreeMap::new(), Some(&pem))?),
+    );
+    let p = missing
+        .create_provider(f.actor().await?, settings, deadline())
+        .await?;
+    assert!(!p.enabled);
+    let session = federation_support::session(&f).await?;
+    let cookie = format!("__Host-identity-session={}", session.secret().expose());
+    let csrf = session.secret().csrf();
+    let config = HttpConfig::new(ORIGIN, Duration::from_secs(30))?;
+    let app = rss_identity_http_axum::management_router(missing.clone(), config.clone())?;
+    let test = format!("/api/v1/tenants/{A}/providers/{}/test", p.id);
+    let r = app
+        .clone()
+        .oneshot(request("POST", &test, &cookie, Some(&csrf), json!({})))
+        .await?;
+    assert_eq!(r.status(), StatusCode::OK);
+    let result = body(r).await?;
+    assert_eq!(result["passed"], false);
+    assert_eq!(result["diagnostic"]["reason"], "missing_secret");
+    let r = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/tenants/{A}/providers"),
+            &cookie,
+            None,
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/tenants/{A}/providers/{}/enabled", p.id),
+            &cookie,
+            Some(&csrf),
+            json!({"expected_version":p.version,"enabled":false}),
+        ))
+        .await?;
+    assert_eq!(r.status(), StatusCode::OK);
+    let real = service(&f, Arc::new(production(true, true)?));
+    let app = rss_identity_http_axum::management_router(real, config)?;
+    let r = app
+        .oneshot(request("POST", &test, &cookie, Some(&csrf), json!({})))
+        .await?;
+    assert_eq!(r.status(), StatusCode::OK);
+    let result = body(r).await?;
+    assert_eq!(result["passed"], true);
+    assert_eq!(result["report"]["tls_verified"], true);
+    f.close().await;
+    Ok(())
 }

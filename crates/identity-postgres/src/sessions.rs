@@ -40,12 +40,16 @@ pub struct SessionPage {
 /// Only returned after confirmed commit. Secret is explicitly exposed by the HTTP adapter.
 #[derive(Debug)]
 pub struct IssuedSession {
+    identity: SessionIdentity,
     secret: SessionSecret,
     view: SessionView,
     remaining: Duration,
     observed: Instant,
 }
 impl IssuedSession {
+    pub fn identity(&self) -> &SessionIdentity {
+        &self.identity
+    }
     pub fn secret(&self) -> &SessionSecret {
         &self.secret
     }
@@ -57,8 +61,14 @@ impl IssuedSession {
             .saturating_sub(self.observed.elapsed())
             .as_secs()
     }
-    pub(crate) fn new(secret: SessionSecret, view: SessionView, now: i64) -> Self {
+    pub(crate) fn new(
+        secret: SessionSecret,
+        view: SessionView,
+        now: i64,
+        state: AccountState,
+    ) -> Self {
         Self {
+            identity: SessionIdentity::from_state(state),
             remaining: Duration::from_secs(
                 view.absolute_expires_at.saturating_sub(now).max(0) as u64
             ),
@@ -78,8 +88,12 @@ pub struct AuthenticatedSession {
     pub(crate) authority: Uuid,
     pub(crate) expires: Instant,
     pub(crate) view: SessionView,
+    pub(crate) identity: SessionIdentity,
 }
 impl AuthenticatedSession {
+    pub fn identity(&self) -> &SessionIdentity {
+        &self.identity
+    }
     pub fn account(&self) -> AccountKey {
         self.key
     }
@@ -159,7 +173,7 @@ pub(crate) async fn insert(
     .execute(c)
     .await?;
     Ok((
-        IssuedSession::new(secret, SessionView::new(id, lifetime), now),
+        IssuedSession::new(secret, SessionView::new(id, lifetime), now, state),
         event(SessionAction::Created, state, id, replaced),
     ))
 }
@@ -247,6 +261,7 @@ impl Authority {
                                 ),
                         );
                         Ok(AuthenticatedSession {
+                            identity: SessionIdentity::from_state(loaded.state),
                             key: loaded.state.key(),
                             digest,
                             authority,
@@ -275,7 +290,7 @@ impl Authority {
                 sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
                     .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;
                 let fact = event(SessionAction::Refreshed,loaded.state,loaded.view.id,None);
-                Ok((IssuedSession::new(secret,loaded.view,loaded.now),fact))
+                Ok((IssuedSession::new(secret,loaded.view,loaded.now,loaded.state),fact))
             })).await
         })).await
     }
@@ -381,5 +396,21 @@ mod contract_tests {
             ]
         );
         assert_eq!(schema["additionalProperties"], false);
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionIdentity {
+    pub principal_id: String,
+    pub administrator: bool,
+    pub has_local_password: bool,
+}
+impl SessionIdentity {
+    pub(crate) fn from_state(state: AccountState) -> Self {
+        Self {
+            principal_id: state.key().principal.as_uuid().to_string(),
+            administrator: state.administrator(),
+            has_local_password: state.has_local_password(),
+        }
     }
 }

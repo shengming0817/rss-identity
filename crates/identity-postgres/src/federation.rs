@@ -166,19 +166,19 @@ impl Federation {
 }
 
 impl Authority {
-    pub async fn create_provider(
+    pub(crate) async fn create_provider(
         &self,
-        actor: AuthenticationCandidate,
+        actor: AuthenticatedSession,
         settings: ProviderSettings,
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.require_runtime()?;
-        let tenant = actor.state.key().tenant;
+        let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
         self.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
-                    current(c, &actor, true).await?;
+                    crate::session_storage::recheck(c, &actor).await?.state.authorize_administration(tenant)?;
                     let view = ProviderView {
                         id: ProviderId::generate(),
                         version: 1,
@@ -196,14 +196,14 @@ impl Authority {
                         tenant,
                         Action::ProviderCreated,
                         &view,
-                        Some(actor.state.key().principal),
+                        Some(actor.key.principal),
                     );
                     Ok((view, vec![audit]))
                 }) }).await
     }
-    pub async fn update_provider(
+    pub(crate) async fn update_provider(
         &self,
-        actor: AuthenticationCandidate,
+        actor: AuthenticatedSession,
         id: ProviderId,
         expected_version: i64,
         settings: ProviderSettings,
@@ -213,9 +213,9 @@ impl Authority {
         self.edit_provider(actor, id, expected_version, Some(settings), None, deadline)
             .await
     }
-    pub async fn enable_provider(
+    pub(crate) async fn enable_provider(
         &self,
-        actor: AuthenticationCandidate,
+        actor: AuthenticatedSession,
         id: ProviderId,
         expected_version: i64,
         enabled: bool,
@@ -227,19 +227,19 @@ impl Authority {
     }
     async fn edit_provider(
         &self,
-        actor: AuthenticationCandidate,
+        actor: AuthenticatedSession,
         id: ProviderId,
         expected: i64,
         settings: Option<ProviderSettings>,
         enabled: Option<bool>,
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
-        let tenant = actor.state.key().tenant;
+        let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
         self.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
-                    current(c, &actor, true).await?;
+                    crate::session_storage::recheck(c, &actor).await?.state.authorize_administration(tenant)?;
                     let mut view = db::provider(c, tenant, id).await?;
                     if view.version != expected {
                         return Err(FederationError::StaleConfiguration.into());
@@ -282,22 +282,22 @@ impl Authority {
                     .bind(view.revocation_epoch)
                     .execute(c)
                     .await?;
-                    let audit = event(tenant, action, &view, Some(actor.state.key().principal));
+                    let audit = event(tenant, action, &view, Some(actor.key.principal));
                     Ok((view, vec![audit]))
                 }) }).await
     }
-    pub async fn list_providers(
+    pub(crate) async fn list_providers(
         &self,
-        actor: AuthenticationCandidate,
+        actor: AuthenticatedSession,
         deadline: OperationDeadline,
     ) -> Result<Vec<ProviderView>, AuthorityError> {
         self.require_runtime()?;
-        let tenant = actor.state.key().tenant;
+        let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
         self.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
-                    current(c, &actor, true).await?;
+                    crate::session_storage::recheck(c, &actor).await?.state.authorize_administration(tenant)?;
                     let ids: Vec<Uuid> = sqlx::query_scalar(concat!(
                         "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid OR",
                         "DER BY provider_id LIMIT 101"
@@ -322,9 +322,9 @@ impl Authority {
                     Ok(result)
                 }) }).await
     }
-    pub async fn test_provider<F>(
+    pub(crate) async fn test_provider<F>(
         &self,
-        actor: AuthenticationCandidate,
+        actor: AuthenticatedSession,
         id: ProviderId,
         test: F,
         deadline: OperationDeadline,
@@ -333,14 +333,17 @@ impl Authority {
         F: FnOnce(TenantId, ProviderSettings) -> UpstreamFuture<'static, ConnectionReport>,
     {
         self.require_runtime()?;
-        let tenant = actor.state.key().tenant;
+        let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
         let (actor, view) = self
             .read_sql(tenant, budget.remaining(), move |c| {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
-                    current(c, &actor, true).await?;
+                    crate::session_storage::recheck(c, &actor)
+                        .await?
+                        .state
+                        .authorize_administration(tenant)?;
                     Ok((actor, db::provider(c, tenant, id).await?))
                 })
             })
@@ -353,7 +356,10 @@ impl Authority {
         self.write_sql(tenant, budget.remaining(), move |c| {
             Box::pin(async move {
                 lock_guard(c, tenant).await?;
-                current(c, &actor, true).await?;
+                crate::session_storage::recheck(c, &actor)
+                    .await?
+                    .state
+                    .authorize_administration(tenant)?;
                 let current = db::provider(c, tenant, id).await?;
                 if current.version != view.version {
                     return Err(FederationError::StaleConfiguration.into());
@@ -367,7 +373,7 @@ impl Authority {
                     },
                     provider_id: view.id,
                     config_version: view.version,
-                    principal: Some(actor.state.key().principal.as_uuid()),
+                    principal: Some(actor.key.principal.as_uuid()),
                     diagnostic,
                 });
                 Ok(((), vec![audit]))
@@ -437,4 +443,90 @@ mod contract_tests {
             );
         }
     }
+}
+
+impl Federation {
+    pub async fn create_provider(
+        &self,
+        actor: AuthenticatedSession,
+        settings: ProviderSettings,
+        deadline: OperationDeadline,
+    ) -> Result<ProviderView, AuthorityError> {
+        self.authority.require_administrator(&actor)?;
+        self.oidc
+            .approve_configuration(actor.key.tenant, &settings)?;
+        self.authority
+            .create_provider(actor, settings, deadline)
+            .await
+    }
+    pub async fn update_provider(
+        &self,
+        actor: AuthenticatedSession,
+        id: ProviderId,
+        expected_version: i64,
+        settings: ProviderSettings,
+        deadline: OperationDeadline,
+    ) -> Result<ProviderView, AuthorityError> {
+        self.authority.require_administrator(&actor)?;
+        self.oidc
+            .approve_configuration(actor.key.tenant, &settings)?;
+        self.authority
+            .update_provider(actor, id, expected_version, settings, deadline)
+            .await
+    }
+    pub async fn enable_provider(
+        &self,
+        actor: AuthenticatedSession,
+        id: ProviderId,
+        expected_version: i64,
+        enabled: bool,
+        deadline: OperationDeadline,
+    ) -> Result<ProviderView, AuthorityError> {
+        self.authority
+            .enable_provider(actor, id, expected_version, enabled, deadline)
+            .await
+    }
+    pub async fn list_providers(
+        &self,
+        actor: AuthenticatedSession,
+        deadline: OperationDeadline,
+    ) -> Result<Vec<ProviderView>, AuthorityError> {
+        self.authority.list_providers(actor, deadline).await
+    }
+    pub async fn test_provider(
+        &self,
+        actor: AuthenticatedSession,
+        id: ProviderId,
+        deadline: OperationDeadline,
+    ) -> Result<ConnectionReport, AuthorityError> {
+        let oidc = self.oidc.clone();
+        self.authority
+            .test_provider(
+                actor,
+                id,
+                move |tenant, settings| Box::pin(async move { oidc.test(tenant, &settings).await }),
+                deadline,
+            )
+            .await
+    }
+    pub async fn login_options(
+        &self,
+        tenant: TenantId,
+        deadline: OperationDeadline,
+    ) -> Result<Vec<LoginOption>, AuthorityError> {
+        self.authority.read_sql(tenant,deadline,move |c|Box::pin(async move {
+            let rows:Vec<(Uuid,serde_json::Value)>=sqlx::query_as("SELECT provider_id,settings FROM identity_authority.providers WHERE tenant_id=$1::uuid AND enabled ORDER BY provider_id LIMIT 101").bind(tenant.to_string()).fetch_all(c).await?;
+            if rows.len()>100 {return Err(reject().into());}
+            rows.into_iter().map(|(id,value)|{
+                let settings:ProviderSettings=serde_json::from_value(value).map_err(|_|crate::transaction::corrupt())?;
+                let issuer=url::Url::parse(settings.issuer().as_str()).map_err(|_|crate::transaction::corrupt())?;
+                Ok(LoginOption{provider_id:id,label:issuer.host_str().ok_or_else(crate::transaction::corrupt)?.to_string()})
+            }).collect()
+        })).await
+    }
+}
+#[derive(Serialize)]
+pub struct LoginOption {
+    pub provider_id: Uuid,
+    pub label: String,
 }

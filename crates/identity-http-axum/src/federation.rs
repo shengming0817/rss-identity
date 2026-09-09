@@ -269,11 +269,33 @@ struct Callback {
     code: Option<String>,
     error: Option<String>,
     iss: String,
+    #[serde(rename = "error_description")]
+    _error_description: Option<String>,
     #[serde(rename = "session_state")]
     _session_state: Option<String>,
 }
 
 async fn callback(
+    state: State<FederationState>,
+    budget: Extension<RequestBudget>,
+    headers: HeaderMap,
+    query: Result<Query<Callback>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    match callback_result(state, budget, headers, query).await {
+        Ok(response) => response,
+        Err(error) => callback_failure(if error.0 == StatusCode::SERVICE_UNAVAILABLE {
+            "unavailable"
+        } else {
+            "failed"
+        }),
+    }
+}
+pub(crate) fn callback_failure(reason: &str) -> Response {
+    // Only closed literals selected in this module reach Location.
+    axum::response::Redirect::to(&format!("/auth/error?reason={reason}")).into_response()
+}
+
+async fn callback_result(
     State(state): State<FederationState>,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
@@ -286,12 +308,29 @@ async fn callback(
 
     let (browser, _) = browser(&headers, false)?;
 
+    if let Some(error) = query.error {
+        state
+            .federation
+            .cancel(
+                query.state,
+                browser,
+                query.iss,
+                login_cookie(&headers)?,
+                budget.remaining(),
+            )
+            .await?;
+        return Ok(callback_failure(if error == "access_denied" {
+            "cancelled"
+        } else {
+            "failed"
+        }));
+    }
     let outcome = state
         .federation
         .complete(
             query.state,
             browser,
-            Zeroizing::new(query.code.unwrap_or_default()),
+            Zeroizing::new(query.code.ok_or(BAD)?),
             query.iss,
             login_cookie(&headers)?,
             budget.remaining(),

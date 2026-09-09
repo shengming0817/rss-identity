@@ -38,6 +38,13 @@ impl ScriptedOidc {
     }
 }
 impl UpstreamOidc for ScriptedOidc {
+    fn approve_configuration(
+        &self,
+        _tenant: TenantId,
+        _c: &ProviderSettings,
+    ) -> Result<(), FederationError> {
+        Ok(())
+    }
     fn validate(&self, _tenant: TenantId, _c: &ProviderSettings) -> Result<(), FederationError> {
         Ok(())
     }
@@ -97,8 +104,16 @@ impl UpstreamOidc for ScriptedOidc {
         _: &'a ProviderSettings,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
+            let hook = self.hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook().await?;
+            }
+
             if self.fail.load(Ordering::SeqCst) {
-                Err(FederationError::Unavailable)
+                Err(FederationError::provider(
+                    ProviderStage::Jwks,
+                    ProviderReason::Unavailable,
+                ))
             } else {
                 Ok(ConnectionReport {
                     checks: vec![
@@ -138,18 +153,18 @@ pub fn settings() -> ProviderSettings {
     .try_into()
     .unwrap()
 }
-pub async fn actor(f: &Fixture) -> anyhow::Result<AuthenticationCandidate> {
+pub async fn actor(f: &Fixture) -> anyhow::Result<AuthenticatedSession> {
     f.reset_attempts().await?;
     f.actor().await
 }
 pub async fn enabled(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
     let p = s
-        .authority()
         .create_provider(actor(f).await?, settings(), deadline())
         .await?;
-    Ok(s.authority()
-        .enable_provider(actor(f).await?, p.id, p.version, true, deadline())
-        .await?)
+    Ok(
+        s.enable_provider(actor(f).await?, p.id, p.version, true, deadline())
+            .await?,
+    )
 }
 pub fn state(redirect: FederatedRedirect) -> String {
     url::Url::parse(&redirect.url)
@@ -206,7 +221,7 @@ pub fn issued(outcome: FederatedOutcome) -> IssuedSession {
 }
 pub async fn session(f: &Fixture) -> anyhow::Result<IssuedSession> {
     Ok(f.store
-        .create_session(actor(f).await?, None, deadline())
+        .create_session(f.candidate().await?, None, deadline())
         .await?)
 }
 pub fn secret(s: &IssuedSession) -> rss_identity_core::session::SessionSecret {

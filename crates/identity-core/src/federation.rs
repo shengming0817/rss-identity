@@ -424,6 +424,11 @@ pub type UpstreamFuture<'a, T> =
 
 /// Installed by trusted composition once. Tenant identity comes from the persisted flow.
 pub trait UpstreamOidc: Send + Sync {
+    fn approve_configuration(
+        &self,
+        tenant: TenantId,
+        config: &ProviderSettings,
+    ) -> Result<(), FederationError>;
     fn validate(&self, tenant: TenantId, config: &ProviderSettings) -> Result<(), FederationError>;
     fn prepare<'a>(
         &'a self,

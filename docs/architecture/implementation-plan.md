@@ -100,7 +100,7 @@ I03–I05 必须在各自实现时闭合安全事件，不能最后另加一个�
 
 ## I03 后续简化
 
-[#2358](https://dev.azure.com/shengming0923/rss/_workitems/edit/2358) 收敛初始化/管理员恢复为独立维护身份的单条命令，删除授权票据与文件交付。日常 CLI 继续复用 I03 业务规则，#2337 接入 API/UI；#2338/#2339 分别持有生产注入与恢复治理，#2341 仍独立证明 T3。schema 2 仅按已确认的可丢弃开发库重建，实际测试与交付状态以 PR/看板为准。
+[#2358](https://dev.azure.com/shengming0923/rss/_workitems/edit/2358) 收敛初始化/管理员恢复为独立维护身份的单条命令，删除授权票据与文件交付。日常 CLI 已由 #2337 的中央会话 API/UI 替代；#2338/#2339 分别持有生产注入与恢复治理，#2341 仍独立证明 T3。schema 2 仅按已确认的可丢弃开发库重建，实际测试与交付状态以 PR/看板为准。
 
 ## #2359 工程身份更名
 
@@ -122,3 +122,7 @@ schema version 2、事件 V1 payload、账户/租户/authority/lineage/epoch 的
 ## I06 实施决定（#2336）
 
 [下游 ADR](adr/202609090513-2336-downstream-identity.md) 持有真实 Hydra bridge、唯一 PG 关联、只读在线验证与有界清理；[接入指南](../guides/downstream.md) 持有公共消费面。当前安装更新为 schema v5，替代 I05 的 v4，不保留兼容。实际验证结果和版本身份由实现 PR 持有。
+
+## I07 当前决定
+
+[单一管理入口 ADR](adr/202609090801-2337-central-management-ui.md) 固定无兼容替换、CLI 退出与 rss-web/apps/identity UI owner。双仓 PR 分别持有后端管理和前端；实际源码版本与验证结果以交付记录为准。

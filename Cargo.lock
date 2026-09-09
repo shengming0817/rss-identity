@@ -2111,7 +2111,6 @@ dependencies = [
  "anyhow",
  "libc",
  "rss-identity-core",
- "rss-identity-oidc",
  "rss-identity-postgres",
  "rss-request-context",
  "rss-transactional-messaging",

@@ -1,6 +1,6 @@
 # 本机维护：开发库安装与不确定结果核实
 
-适用 #2358/#2334/#2335 的可丢弃专属开发库（当前初始安装为 schema version 4）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin recover`，下列账户/事件查询只有只读用途。
+适用 #2358/#2334/#2335 的可丢弃专属开发库（当前初始安装为 schema version 5）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin recover`，下列账户/事件查询只有只读用途。
 
 ## 连接与凭据前置条件
 
@@ -98,7 +98,7 @@ SQL
 Owner 只读核实非秘密安装身份：
 
 ```sql
-SELECT version FROM identity_authority.schema_version; -- 恰好一行，4
+SELECT version FROM identity_authority.schema_version; -- 恰好一行，5
 SELECT authority_id,bootstrap_tenant FROM identity_authority.deployment; -- 恰好一行，记录 authority_id；tenant 为 NULL
 SELECT encode(target,'hex'),encode(lineage,'hex') FROM rss_transactional_messaging.storage_lineage;
 SELECT tenant_id,epoch FROM rss_transactional_messaging.tenant_epoch;
@@ -108,7 +108,7 @@ SELECT NOT EXISTS(SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.membe
  WHERE r.rolname='rss_tmsg_relay') AS relay_has_no_parent_roles; -- 必须为 true
 ```
 
-两个 CLI 配置共用 host/port/database/CA/tenant/storage identity，但 user/password_file 分开。配置示例（替换主机、端口和文件路径；省略号不能放入实际 JSON）：
+维护 CLI 配置使用独立 identity_maintenance 用户；runtime 凭据由服务装配持有。配置示例（替换主机、端口和文件路径；省略号不能放入实际 JSON）：
 
 ```json
 {
@@ -122,13 +122,12 @@ SELECT NOT EXISTS(SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.membe
 }
 ```
 
-准备符合密码规则的私有新密码文件后，在 Identity checkout 中验收两个真实 profile。这里只说明操作，不将文档或低层测试冒充 T3 运行证明：
+准备符合密码规则的私有新密码文件后，在 Identity checkout 中初始化维护账户。这里只说明操作，不将文档或低层测试冒充 T3 运行证明：
 
 ```sh
 cargo build --locked -p rss-identity-admin
 PRINCIPAL_UUID=$(python3 -c 'import uuid; print(uuid.uuid4())')
 ./target/debug/identity-admin /private/identity/maintenance.json initialize "$PRINCIPAL_UUID" admin /private/identity/admin-password
-./target/debug/identity-admin /private/identity/runtime.json create admin /private/identity/admin-password member /private/identity/member-password member
 ```
 
 每个命令连接时都会执行 RSS 与 Identity 权限/存储探测。错误分类分别指示 schema 版本、角色不匹配、权限漂移或 schema/RLS 契约漂移；provider 失败仍保留其 settlement 分类，不回显连接值。
