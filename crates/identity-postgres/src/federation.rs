@@ -587,10 +587,12 @@ impl Federation {
         loop {
             let oidc = self.oidc.clone();
             let more = self.authority.conditional_write_sql(tenant, budget.remaining(), move |c| Box::pin(async move {
-            lock_guard(c, tenant).await?;
             let ids:Vec<Uuid> = sqlx::query_scalar("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT 101")
                 .bind(tenant.to_string()).fetch_all(&mut *c).await?;
             if ids.len()>100 { return Err(reject().into()); }
+            // Before first administrator initialization there is no guard or provider to synchronize.
+            if ids.is_empty() { return Ok((false,Vec::new())); }
+            lock_guard(c, tenant).await?;
             let mut events=Vec::new();
             for id in ids {
                 let id=ProviderId::parse(&id.to_string())?;

@@ -230,8 +230,13 @@ impl IdentityClient {
         if status != reqwest::StatusCode::OK {
             return Err(Error::Unavailable);
         }
-        let facts: IdentityFacts =
-            serde_json::from_slice(&bytes).map_err(|_| Error::Unavailable)?;
+        let facts: IdentityFacts = serde_json::from_slice(&bytes).map_err(|error| {
+            if error.is_data() {
+                Error::Rejected
+            } else {
+                Error::Unavailable
+            }
+        })?;
         let now = c.clock.unix_seconds()?;
         if started <= 0 || now < started {
             return Err(Error::Unavailable);
