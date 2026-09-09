@@ -1,4 +1,4 @@
-import json,os,tempfile,unittest
+import json,os,tempfile,unittest,sys
 from pathlib import Path
 from unittest.mock import patch
 import release
@@ -19,6 +19,7 @@ class Release(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp,patch.dict(os.environ,{'SYSTEM_ACCESSTOKEN':'synthetic-token','IDENTITY_GIT_AUTH_HEADER_FILE':'/private/header','GIT_CONFIG_COUNT':'1','GIT_CONFIG_VALUE_0':'synthetic-header'}):
    with patch.object(release,'run',side_effect=['','a'*40]),patch.object(release,'validate_ui',return_value={}),patch.object(release.subprocess,'run',side_effect=Stop) as child:
     with self.assertRaises(Stop):release.build(Path(tmp)/'candidate',Path(tmp),Path(tmp))
+    self.assertEqual(child.call_args.args[0][0],sys.executable)
     env=child.call_args.kwargs['env']
     self.assertEqual(env['CARGO_NET_OFFLINE'],'true')
     self.assertFalse(any(k in env for k in ['SYSTEM_ACCESSTOKEN','IDENTITY_GIT_AUTH_HEADER_FILE','GIT_CONFIG_COUNT','GIT_CONFIG_VALUE_0']))

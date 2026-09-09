@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build immutable candidate archives from clean, fixed Identity and UI source identities."""
-import argparse,hashlib,json,os,shutil,subprocess,tarfile,tempfile,tomllib
+import argparse,hashlib,json,os,shutil,subprocess,tarfile,tempfile,tomllib,sys
 from urllib.parse import urlsplit
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
@@ -45,7 +45,7 @@ def build(out,ui_source,ui_dist):
  if any('@sha256:' not in v for v in images.values()):raise ValueError('unlocked provider')
  build_env={k:v for k,v in os.environ.items() if k not in {'SYSTEM_ACCESSTOKEN','IDENTITY_GIT_AUTH_HEADER_FILE'} and not k.startswith('GIT_CONFIG_')}
  build_env['CARGO_NET_OFFLINE']='true'
- subprocess.run(['python3','hack/check_dependencies.py'],cwd=ROOT,env=build_env,check=True)
+ subprocess.run([sys.executable,'hack/check_dependencies.py'],cwd=ROOT,env=build_env,check=True)
  out.mkdir(parents=True)
  with tempfile.TemporaryDirectory(prefix='identity-candidate-') as temp:
   context=Path(temp);(context/'source').mkdir()
