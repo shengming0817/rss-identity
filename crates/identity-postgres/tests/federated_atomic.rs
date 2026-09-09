@@ -53,6 +53,32 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
         )))
     ));
     upstream.fail.store(false, Ordering::SeqCst);
+    *upstream.hook.lock().unwrap() = Some(Box::new(|| Box::pin(std::future::pending())));
+    let timed = s
+        .test_provider(
+            actor(&f).await?,
+            p.id,
+            rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+                std::time::Duration::from_secs(2),
+            ),
+        )
+        .await;
+    assert!(matches!(
+        timed,
+        Err(AuthorityError::Federation(FederationError::Unavailable))
+    ));
+    let timed_events = events(&f).await?;
+    assert_eq!(
+        timed_events.last().unwrap()["action"],
+        "provider_test_failed"
+    );
+    assert_eq!(
+        timed_events.last().unwrap()["diagnostic"]["reason"],
+        "timeout"
+    );
+    upstream.fail.store(true, Ordering::SeqCst);
+    let _ = s.test_provider(actor(&f).await?, p.id, deadline()).await;
+    upstream.fail.store(false, Ordering::SeqCst);
     let audits = events(&f).await?;
     let last = audits.last().unwrap();
     assert_eq!(last["action"], "provider_test_failed");

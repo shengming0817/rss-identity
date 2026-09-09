@@ -351,9 +351,17 @@ impl Authority {
                 })
             })
             .await?;
-        let result = tokio::time::timeout_at(budget.0.into(), test(tenant, view.settings.clone()))
-            .await
-            .unwrap_or(Err(FederationError::Unavailable));
+        // Cancel upstream work before the shared deadline: permission/version checks and
+        // the security event must settle before any report is released.
+        let remaining = budget.remaining().timeout();
+        let reserve = (remaining / 4).min(std::time::Duration::from_secs(1));
+        let upstream_deadline = budget.0 - reserve;
+        let result = tokio::time::timeout_at(
+            upstream_deadline.into(),
+            test(tenant, view.settings.clone()),
+        )
+        .await
+        .unwrap_or(Err(FederationError::Unavailable));
         let diagnostic = result.as_ref().err().map(|e| e.diagnostic());
         let passed = result.is_ok();
         self.write_sql(tenant, budget.remaining(), move |c| {
@@ -523,7 +531,7 @@ impl Federation {
             rows.into_iter().map(|(id,value)|{
                 let settings:ProviderSettings=serde_json::from_value(value).map_err(|_|crate::transaction::corrupt())?;
                 let issuer=url::Url::parse(settings.issuer().as_str()).map_err(|_|crate::transaction::corrupt())?;
-                Ok(LoginOption{provider_id:id,label:issuer.host_str().ok_or_else(crate::transaction::corrupt)?.to_string()})
+                Ok(LoginOption{provider_id:id,label:format!("{} · {} · {}", issuer.as_str(), settings.client_id().as_str(), id)})
             }).collect()
         })).await
     }

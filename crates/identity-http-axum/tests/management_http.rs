@@ -88,6 +88,32 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     let (app, _, _) = app(&f);
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let base = format!("/api/v1/tenants/{A}");
+    let duplicate = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("{base}/accounts"),
+            &cookie,
+            &csrf,
+            json!({"login":"admin","password":"different strong password","role":"member"}),
+        ))
+        .await?;
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(duplicate).await?["code"],
+        "account_already_exists"
+    );
+    let current = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("{base}/session"),
+            &cookie,
+            "",
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(current.status(), StatusCode::OK);
     let self_path = format!("{base}/accounts/{}/enabled", f.key.principal.as_uuid());
     let r = app
         .clone()
@@ -261,6 +287,60 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     let v = json_body(r).await?;
     assert_eq!(v["accounts"].as_array().unwrap().len(), 1);
     assert!(v["next_cursor"].is_string());
+    let mut seen = std::collections::BTreeSet::new();
+    seen.insert(
+        v["accounts"][0]["principal_id"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    );
+    let mut cursor = v["next_cursor"].clone();
+    while let Some(next) = cursor.as_str() {
+        let response = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("{base}/accounts?limit=1&cursor={next}"),
+                &cookie,
+                "",
+                json!(null),
+            ))
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = json_body(response).await?;
+        for account in page["accounts"].as_array().unwrap() {
+            assert!(seen.insert(account["principal_id"].as_str().unwrap().to_owned()));
+        }
+        cursor = page["next_cursor"].clone();
+    }
+    let all = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("{base}/accounts"),
+            &cookie,
+            "",
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(
+        seen.len(),
+        json_body(all).await?["accounts"].as_array().unwrap().len()
+    );
+    for query in ["cursor=invalid", "limit=0", "limit=101"] {
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("{base}/accounts?{query}"),
+                &cookie,
+                "",
+                json!(null),
+            ))
+            .await?;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
     assert!(!v.to_string().contains("password_hash"));
     f.close().await;
     Ok(())
@@ -286,6 +366,38 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     assert_eq!(r.status(), StatusCode::CREATED);
     let p = json_body(r).await?;
     assert_eq!(p["enabled"], false);
+    let mut original = federation_support::settings().input();
+    original.issuer = "https://idp.example.test/realms/other".into();
+    let created = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("{base}/providers"),
+            &cookie,
+            &csrf,
+            serde_json::to_value(&original)?,
+        ))
+        .await?;
+    let second = json_body(created).await?;
+    let second_path = format!("{base}/providers/{}", second["id"].as_str().unwrap());
+    let mut changed = original;
+    changed.client_id = "updated-client".into();
+    let update = json!({"expected_version":1,"settings":changed});
+    let updated = app
+        .clone()
+        .oneshot(req("PUT", &second_path, &cookie, &csrf, update.clone()))
+        .await?;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated = json_body(updated).await?;
+    assert_eq!(updated["version"], 2);
+    assert_eq!(updated["settings"]["client_id"], "updated-client");
+    assert_eq!(updated["enabled"], false);
+    let stale = app
+        .clone()
+        .oneshot(req("PUT", &second_path, &cookie, &csrf, update))
+        .await?;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(stale).await?["code"], "configuration_changed");
     let id = p["id"].as_str().unwrap();
     let url = format!("{base}/providers/{id}");
     let r = app
@@ -323,6 +435,37 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     let options = json_body(r).await?;
     assert_eq!(options["providers"].as_array().unwrap().len(), 1);
     assert!(!options.to_string().contains("secret_ref"));
+    let enabled = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("{second_path}/enabled"),
+            &cookie,
+            &csrf,
+            json!({"enabled":true,"expected_version":2}),
+        ))
+        .await?;
+    assert_eq!(enabled.status(), StatusCode::OK);
+    let choices = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("{base}/login-options"),
+            "",
+            "",
+            json!(null),
+        ))
+        .await?;
+    let choices = json_body(choices).await?;
+    let choices = choices["providers"].as_array().unwrap();
+    assert_eq!(choices.len(), 2);
+    assert_ne!(choices[0]["label"], choices[1]["label"]);
+    assert!(
+        choices
+            .iter()
+            .any(|p| p["label"].as_str().unwrap().contains("/realms/other"))
+    );
+
     let r = app
         .clone()
         .oneshot(req(

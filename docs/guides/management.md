@@ -23,3 +23,5 @@ pnpm test:identity:joint
 ```
 
 rss-web 自行构建实际 UI、选择同一源码内的 runner，记录两仓 commit/lock、UI 产物及 runner 摘要；后端仅提供 `make test-ui` 测试 fixture，不获取或构建消费者源码。fixture 创建临时 PG、测试 TLS gateway 与 in-process Router。浏览器验证账户写入、IdP 创建/更新/测试/启停、退出和普通成员拒绝。IdP 远程端口在此使用脚本实现，真实连接由 Keycloak 分组覆盖。该证明不是生产 binary/image/config T3。
+
+连接测试从剩余总预算中保留四分之一（最多一秒）用于权限/版本重检和审计结算，上游超时也须确认失败事件提交后才返回诊断；存储结算不确定仍返回不可用，不假定审计成功。重复本地登录名返回明确冲突，管理员会话不因此退出。

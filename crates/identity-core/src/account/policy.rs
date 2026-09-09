@@ -41,6 +41,8 @@ pub enum AccountRuleError {
     Rejected,
     #[error("administrator privilege required")]
     InsufficientPrivilege,
+    #[error("local login already exists in this tenant")]
+    AlreadyExists,
     #[error("last local administrator must remain available")]
     LastAdministrator,
     #[error("account generation exhausted")]

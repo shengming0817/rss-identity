@@ -424,11 +424,18 @@ pub type UpstreamFuture<'a, T> =
 
 /// Installed by trusted composition once. Tenant identity comes from the persisted flow.
 pub trait UpstreamOidc: Send + Sync {
+    /// Check only deployment-approved tenant, issuer, client, callback, secret reference
+    /// and egress bindings. Synchronous and without network I/O or secret resolution.
+    /// Called before saving configuration; an approved but unavailable secret is allowed.
+    /// Reject unapproved bindings with a closed configuration/provider error.
     fn approve_configuration(
         &self,
         tenant: TenantId,
         config: &ProviderSettings,
     ) -> Result<(), FederationError>;
+    /// Check runtime usability, including deployment approval and availability of
+    /// secrets/trust material. Synchronous: network checks belong to prepare/test/exchange.
+    /// Called for protocol operations, never required for listing or disabling providers.
     fn validate(&self, tenant: TenantId, config: &ProviderSettings) -> Result<(), FederationError>;
     fn prepare<'a>(
         &'a self,

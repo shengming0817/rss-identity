@@ -126,7 +126,7 @@ pub(crate) async fn insert_account(
     hash: &str,
     admin: bool,
     emergency: bool,
-) -> Result<(), PgError> {
+) -> Result<(), crate::transaction::MutationError> {
     AccountState::new_local(key, admin, emergency).map_err(|_| reject())?;
     sqlx::query(concat!(
         "INSERT INTO identity_authority.accounts(tenant_id,principal_id,administrator,eme",
@@ -144,7 +144,19 @@ pub(crate) async fn insert_account(
         .bind(login)
         .bind(hash)
         .execute(&mut *c)
-        .await?;
+        .await
+        .map_err(|error| {
+            if error.as_database_error().is_some_and(|db| {
+                db.code().as_deref() == Some("23505")
+                    && db.constraint() == Some("local_credentials_tenant_id_login_key_key")
+            }) {
+                crate::transaction::MutationError::Rule(
+                    rss_identity_core::account::AccountRuleError::AlreadyExists,
+                )
+            } else {
+                error.into()
+            }
+        })?;
     sqlx::query("INSERT INTO identity_authority.memberships(tenant_id,principal_id) VALUES($1::uuid,$2::uuid)").bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).execute(c).await?;
     Ok(())
 }

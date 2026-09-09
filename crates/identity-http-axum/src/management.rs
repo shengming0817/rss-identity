@@ -38,6 +38,9 @@ impl From<AuthorityError> for Error {
             AuthorityError::RuleRejected(AccountRuleError::InsufficientPrivilege) => {
                 (StatusCode::FORBIDDEN, "insufficient_privilege")
             }
+            AuthorityError::RuleRejected(AccountRuleError::AlreadyExists) => {
+                (StatusCode::CONFLICT, "account_already_exists")
+            }
             AuthorityError::RuleRejected(AccountRuleError::LastAdministrator) => {
                 (StatusCode::CONFLICT, "last_administrator")
             }

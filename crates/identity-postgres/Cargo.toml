@@ -22,6 +22,7 @@ zeroize.workspace = true
 url = "2.5"
 thiserror.workspace = true
 [dev-dependencies]
+syn = { version = "2", features = ["full", "visit"] }
 anyhow.workspace = true
 rss-contract.workspace = true
 rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
