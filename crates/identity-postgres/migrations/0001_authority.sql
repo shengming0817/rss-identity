@@ -1,7 +1,7 @@
 -- Identity owns this migration identity; RSS message schema is installed separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=6));
-INSERT INTO identity_authority.schema_version VALUES(6);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=7));
+INSERT INTO identity_authority.schema_version VALUES(7);
 CREATE ROLE identity_account_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE ROLE identity_account_maintenance NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE TABLE identity_authority.deployment (
@@ -62,7 +62,9 @@ CREATE TABLE identity_authority.providers (
  revocation_epoch bigint NOT NULL CHECK(revocation_epoch>0),
  enabled boolean NOT NULL,
  settings jsonb NOT NULL CHECK(jsonb_typeof(settings)='object' AND octet_length(settings::text)<=16384),
- PRIMARY KEY(tenant_id,provider_id)
+ PRIMARY KEY(tenant_id,provider_id),
+ deployment_approval bytea CHECK(deployment_approval IS NULL OR octet_length(deployment_approval)=32),
+ CHECK(NOT enabled OR deployment_approval IS NOT NULL)
 );
 CREATE TABLE identity_authority.external_identities (
  tenant_id uuid NOT NULL, identity_id uuid NOT NULL, principal_id uuid NOT NULL, provider_id uuid NOT NULL,
@@ -115,6 +117,7 @@ CREATE TABLE identity_authority.oidc_transactions (
  provider_id uuid NOT NULL, config_version bigint NOT NULL CHECK(config_version>0),
  state_hash bytea NOT NULL CHECK(octet_length(state_hash)=32), browser_hash bytea NOT NULL CHECK(octet_length(browser_hash)=32),
  purpose smallint NOT NULL CHECK(purpose BETWEEN 0 AND 2),
+ authentication_mode smallint NOT NULL CHECK(authentication_mode BETWEEN 0 AND 2),
  nonce text, verifier text, claimed boolean NOT NULL DEFAULT false,
  created_at bigint NOT NULL, expires_at bigint NOT NULL CHECK(expires_at>created_at),
  target_client text NOT NULL CHECK(octet_length(target_client) BETWEEN 1 AND 128),
@@ -124,6 +127,7 @@ CREATE TABLE identity_authority.oidc_transactions (
  FOREIGN KEY(tenant_id,provider_id) REFERENCES identity_authority.providers,
  FOREIGN KEY(tenant_id,link_intent) REFERENCES identity_authority.link_intents,
  FOREIGN KEY(tenant_id,replacement_session) REFERENCES identity_authority.sessions,
+ CHECK((purpose=1 AND authentication_mode=1) OR (purpose=2 AND authentication_mode=0) OR (purpose=0 AND (authentication_mode=0 OR (authentication_mode=2 AND replacement_session IS NOT NULL)))),
  CHECK((purpose=0 AND link_intent IS NULL) OR (purpose IN(1,2) AND link_intent IS NOT NULL)),
  CHECK((claimed AND nonce IS NULL AND verifier IS NULL) OR (NOT claimed AND octet_length(nonce)=43 AND octet_length(verifier)=43))
 );

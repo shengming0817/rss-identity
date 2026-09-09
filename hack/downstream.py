@@ -55,7 +55,7 @@ class Gateway(http.server.BaseHTTPRequestHandler):
         finally: conn.close()
     do_GET=do_POST=do_PUT=do_DELETE=handle_request
 
-def run():
+def run(measure=False):
     with tempfile.TemporaryDirectory(prefix='identity-downstream-') as tmp, contextlib.ExitStack() as stack:
         tmp=Path(tmp); cert=tmp/'tls.crt'; key=tmp/'tls.key'
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','2','-subj','/CN=identity-downstream-t2','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1','-addext','basicConstraints=critical,CA:FALSE','-addext','keyUsage=critical,digitalSignature,keyEncipherment','-addext','extendedKeyUsage=serverAuth'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
@@ -76,9 +76,19 @@ def run():
                 with urllib.request.urlopen(req,timeout=5) as r:
                     if r.status!=201:raise RuntimeError('client registration failed')
             env={'IDENTITY_TEST_PG_PORT':str(pg[5432]),'IDENTITY_TEST_DOWNSTREAM_ISSUER':issuer,'IDENTITY_TEST_DOWNSTREAM_CA':str(cert),'IDENTITY_TEST_BRIDGE_PORT':str(server.bridge_port)}
-            providers.cargo('rss-identity-postgres','downstream_atomic',env)
-            providers.cargo('rss-identity-http-axum','downstream_http',env)
+            if measure:
+                import platform,hashlib
+                source=providers.docker('image','inspect','--format','{{.Architecture}}',providers.HYDRA)
+                print(json.dumps({'profile':'one in-process consumer, 1 tenant, 16 accounts, 8 grants; 64 requests per run; existing fixture pool/KDF defaults; latency includes failures; cleanup is one revocation pass, not final deletion','host_arch':platform.machine(),'hydra_arch':source,'revision':subprocess.check_output(['/usr/bin/git','rev-parse','HEAD'],cwd=providers.ROOT,text=True).strip(),'dirty':bool(subprocess.check_output(['/usr/bin/git','status','--porcelain'],cwd=providers.ROOT)),'lock_sha256':hashlib.sha256((providers.ROOT/'Cargo.lock').read_bytes()).hexdigest(),'providers':{'postgres':providers.PG,'hydra':providers.HYDRA}},sort_keys=True))
+                providers.cargo('rss-identity-http-axum','capacity_http',env)
+            else:
+                env.update(stack.enter_context(providers.keycloak(issuer.rstrip('/')+'/api/v1/oidc/callback')))
+                providers.cargo('rss-identity-postgres','downstream_atomic',env)
+                providers.cargo('rss-identity-http-axum','downstream_http',env)
         finally:
             server.shutdown();server.server_close();thread.join(timeout=5)
 
-if __name__=='__main__':run()
+if __name__=='__main__':
+    import sys
+    if sys.argv[1:] not in ([],['--measure']):raise SystemExit('usage: downstream.py [--measure]')
+    run(measure=bool(sys.argv[1:]))

@@ -17,6 +17,8 @@ pub const RETURN: &str = "https://identity.example.test/done";
 type Hook = Box<dyn FnOnce() -> UpstreamFuture<'static, ()> + Send>;
 pub struct ScriptedOidc {
     pub fail: AtomicBool,
+    pub approval: AtomicBool,
+    pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
     pub groups: Mutex<Vec<String>>,
@@ -28,6 +30,8 @@ impl ScriptedOidc {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             fail: AtomicBool::new(false),
+            approval: AtomicBool::new(true),
+            assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
             groups: Mutex::new(vec!["staff".into()]),
@@ -42,8 +46,8 @@ impl UpstreamOidc for ScriptedOidc {
         &self,
         _tenant: TenantId,
         _c: &ProviderSettings,
-    ) -> Result<(), FederationError> {
-        Ok(())
+    ) -> Result<[u8; 32], FederationError> {
+        Ok([u8::from(self.approval.load(Ordering::SeqCst)); 32])
     }
     fn validate(&self, _tenant: TenantId, _c: &ProviderSettings) -> Result<(), FederationError> {
         Ok(())
@@ -53,7 +57,7 @@ impl UpstreamOidc for ScriptedOidc {
         _tenant: TenantId,
         _: &'a ProviderSettings,
         m: &'a ProtocolMaterial,
-        _: bool,
+        _: rss_identity_core::assurance::AuthenticationMode,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
             Ok(format!(
@@ -89,11 +93,17 @@ impl UpstreamOidc for ScriptedOidc {
                 email: Some("same@example.test".into()),
                 email_verified: self.email_verified.load(Ordering::SeqCst),
                 groups: self.groups.lock().unwrap().clone(),
-                auth_time: Some(
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64,
+                assurance: self.assurance.lock().unwrap().clone().unwrap_or(
+                    rss_identity_core::assurance::Assurance::new(
+                        Some(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs() as i64,
+                        ),
+                        rss_identity_core::assurance::Acr::Unspecified,
+                        vec![],
+                    )?,
                 ),
             })
         })

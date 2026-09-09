@@ -290,7 +290,7 @@ impl DownstreamProtocol for Hydra {
     }
     fn accept_login<'a>(&'a self, c: &'a Secret, d: LoginDecision) -> ProtocolFuture<'a, Secret> {
         Box::pin(async move {
-            self.redirect(self.request(Method::PUT,"admin/oauth2/auth/requests/login/accept",&[("login_challenge",c.expose())],Some(json!({"context":{"identity_grant_id":d.grant_id},"subject":d.subject,"amr":d.amr,"acr":"unspecified","remember":false})),None).await?)
+            self.redirect(self.request(Method::PUT,"admin/oauth2/auth/requests/login/accept",&[("login_challenge",c.expose())],Some(json!({"context":{"identity_grant_id":d.grant_id},"subject":d.subject,"acr":"unspecified","remember":false})),None).await?)
         })
     }
     fn accept_consent<'a>(

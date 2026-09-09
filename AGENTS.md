@@ -1,6 +1,6 @@
 # RSS Identity 协作说明
 
-rss-identity 是本地认证、租户联合身份接入与服务端会话产品仓。产品需求由 [PRD](docs/product/rss-identity-prd.md) 持有；当前具有 I01/I02 协议与工程接缝及 I03 本地账户/本机管理机制；I04 提供中央会话；I05 提供租户 IdP、持久 OIDC/JIT/关联及可挂载 HTTP Router；I06 提供 Hydra 下游 bridge、在线验证与最小 client；I07 的日常管理仅使用中央会话 API，UI 源码由 rss-web apps/identity 持有；产品服务仍由 I08 交付。
+rss-identity 是本地认证、租户联合身份接入与服务端会话产品仓。产品需求由 [PRD](docs/product/rss-identity-prd.md) 持有；当前具有 I01/I02 协议与工程接缝及 I03 本地账户/本机管理机制；I04 提供中央会话；I05 提供租户 IdP、持久 OIDC/JIT/关联及可挂载 HTTP Router；I06 提供 Hydra 下游 bridge、在线验证与最小 client；I07 的日常管理仅使用中央会话 API，UI 源码由 rss-web apps/identity 持有；I08 提供产品装配，I09 提供可信 assurance、显式 step-up、原生恢复/轮换 T2 与测量入口；生产目标及新增候选 T3 独立验收。
 
 ## 工作方式
 

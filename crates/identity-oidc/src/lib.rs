@@ -1,6 +1,7 @@
 //! Tenant-bound OIDC adapter. One deployment approval binds credentials to their exact AS/client.
 //! ref: openidconnect-rs src/verification/mod.rs @ b639b5d39eac6903238867aeb2b29326502e6b26.
 #![deny(missing_docs)]
+mod assurance;
 pub use ipnet::IpNet;
 use openidconnect::{
     AsyncHttpClient, AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
@@ -8,7 +9,7 @@ use openidconnect::{
     Scope, TokenResponse, core::*,
 };
 use reqwest::Url;
-use rss_identity_core::federation::*;
+use rss_identity_core::{assurance::AuthenticationMode, federation::*};
 use rss_request_context::TenantId;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -36,6 +37,8 @@ pub struct ApprovedProvider {
     pub secret_ref: String,
     /// Allowed addresses for this issuer, checked after resolution.
     pub addresses: Vec<IpNet>,
+    /// This exact Keycloak client uses the approved password + TOTP LoA 2 flow.
+    pub keycloak_totp: bool,
 }
 fn failure(stage: ProviderStage, reason: ProviderReason) -> FederationError {
     FederationError::provider(stage, reason)
@@ -429,8 +432,9 @@ impl UpstreamOidc for HttpOidc {
         &self,
         tenant: TenantId,
         c: &ProviderSettings,
-    ) -> Result<(), FederationError> {
-        approved(&self.bindings, tenant, c, self.loopback).map(|_| ())
+    ) -> Result<[u8; 32], FederationError> {
+        approved(&self.bindings, tenant, c, self.loopback)
+            .map(|binding| assurance::profile_identity(binding.keycloak_totp))
     }
     fn validate(&self, tenant: TenantId, c: &ProviderSettings) -> Result<(), FederationError> {
         approved(&self.bindings, tenant, c, self.loopback)?;
@@ -447,9 +451,13 @@ impl UpstreamOidc for HttpOidc {
         tenant: TenantId,
         c: &'a ProviderSettings,
         m: &'a ProtocolMaterial,
-        reauth: bool,
+        mode: AuthenticationMode,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
+            let binding = approved(&self.bindings, tenant, c, self.loopback)?;
+            if mode == AuthenticationMode::StepUp && !binding.keycloak_totp {
+                return Err(FederationError::Configuration);
+            }
             let (metadata, _) = self.discover(tenant, c).await?;
 
             let client = CoreClient::from_provider_metadata(
@@ -482,10 +490,16 @@ impl UpstreamOidc for HttpOidc {
                 }
             }
 
-            if reauth {
+            if mode != AuthenticationMode::Login {
                 request = request
-                    .add_extra_param("prompt", "login")
-                    .add_extra_param("max_age", "0");
+                    .add_prompt(CoreAuthPrompt::Login)
+                    .set_max_age(Duration::ZERO);
+            }
+            if mode == AuthenticationMode::StepUp {
+                request =
+                    request.add_auth_context_value(openidconnect::AuthenticationContextClass::new(
+                        assurance::KEYCLOAK_TOTP_ACR.into(),
+                    ));
             }
 
             Ok(request.url().0.to_string())
@@ -573,7 +587,15 @@ impl UpstreamOidc for HttpOidc {
                 email_verified: c.claims().email.as_deref() == Some("email")
                     && claims.email_verified() == Some(true),
                 groups,
-                auth_time: claims.auth_time().map(|v| v.timestamp()),
+                assurance: assurance::normalize(
+                    claims.auth_time().map(|v| v.timestamp()),
+                    claims.auth_context_ref().map(|v| v.as_str()),
+                    claims
+                        .auth_method_refs()
+                        .map(|v| v.iter().map(|v| v.as_str().to_owned()).collect())
+                        .unwrap_or_default(),
+                    approved(&self.bindings, tenant, c, self.loopback)?.keycloak_totp,
+                )?,
             };
 
             value.validate()?;

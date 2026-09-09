@@ -76,6 +76,7 @@ pub fn providers(c: &RuntimeConfig, a: Authority) -> Result<Providers, AppError>
             return Err(AppError::Configuration);
         }
         bindings.push(ApprovedProvider {
+            keycloak_totp: v.keycloak_totp,
             tenant: TenantId::parse(&v.tenant_id).map_err(|_| AppError::Tenant)?,
             issuer: v.issuer.clone(),
             client_id: v.client_id.clone(),

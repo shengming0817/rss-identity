@@ -1,4 +1,5 @@
 //! Request-scoped Identity validation client. No OIDC flow, database dependency, or success cache.
+pub use rss_identity_contracts::{Acr, Amr};
 use rss_identity_contracts::{
     IdentityFacts, ValidationFailure, ValidationFailureCode, ValidationRequest,
 };
@@ -116,11 +117,11 @@ impl VerifiedIdentity {
     pub fn expires_at(&self) -> i64 {
         self.0.expires_at
     }
-    pub fn amr(&self) -> &[String] {
+    pub fn amr(&self) -> &[Amr] {
         &self.0.amr
     }
-    pub fn acr(&self) -> &str {
-        &self.0.acr
+    pub fn acr(&self) -> Acr {
+        self.0.acr
     }
 }
 /// Explicit endpoint and binding; caller owns secret loading and product session storage.
@@ -229,8 +230,13 @@ impl IdentityClient {
         if status != reqwest::StatusCode::OK {
             return Err(Error::Unavailable);
         }
-        let facts: IdentityFacts =
-            serde_json::from_slice(&bytes).map_err(|_| Error::Unavailable)?;
+        let facts: IdentityFacts = serde_json::from_slice(&bytes).map_err(|error| {
+            if error.is_data() {
+                Error::Rejected
+            } else {
+                Error::Unavailable
+            }
+        })?;
         let now = c.clock.unix_seconds()?;
         if started <= 0 || now < started {
             return Err(Error::Unavailable);
@@ -245,8 +251,7 @@ impl IdentityClient {
             || facts.expires_at <= now
             || facts.auth_time <= 0
             || facts.auth_time >= facts.expires_at
-            || facts.acr != "unspecified"
-            || !(facts.amr.is_empty() || facts.amr == ["pwd"])
+            || !rss_identity_contracts::canonical_methods(&facts.amr)
         {
             return Err(Error::Rejected);
         }
@@ -375,8 +380,8 @@ mod response_tests {
             ("auth_time", json!(0)),
             ("auth_time", json!(i64::MAX)),
             ("expires_at", json!(1)),
-            ("amr", json!(["mfa"])),
-            ("acr", json!("mfa")),
+            ("amr", json!(["invented"])),
+            ("acr", json!("invented")),
         ] {
             let mut value_body = facts();
             value_body[field] = value;
@@ -387,6 +392,16 @@ mod response_tests {
                 ),
                 "field {field}"
             );
+        }
+        for methods in [json!([]), json!(["otp", "pwd"])] {
+            let mut value = facts();
+            value["acr"] = json!("mfa");
+            value["amr"] = methods;
+            let proof = response(200, HEADERS, value.to_string(), false)
+                .await
+                .unwrap();
+            assert_eq!(proof.acr(), Acr::Mfa);
+            assert_eq!(proof.auth_time(), 990);
         }
         let mut ahead = facts();
         ahead["auth_time"] = json!(ahead["auth_time"].as_i64().unwrap() + 30);

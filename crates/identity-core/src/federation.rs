@@ -217,6 +217,8 @@ pub struct ProviderView {
     pub enabled: bool,
     pub revocation_epoch: i64,
     pub settings: ProviderSettings,
+    #[serde(skip)]
+    pub deployment_approval: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,7 +396,7 @@ pub struct UpstreamClaims {
     pub email: Option<String>,
     pub email_verified: bool,
     pub groups: Vec<String>,
-    pub auth_time: Option<i64>,
+    pub assurance: crate::assurance::Assurance,
 }
 
 impl UpstreamClaims {
@@ -427,12 +429,13 @@ pub trait UpstreamOidc: Send + Sync {
     /// Check only deployment-approved tenant, issuer, client, callback, secret reference
     /// and egress bindings. Synchronous and without network I/O or secret resolution.
     /// Called before saving configuration; an approved but unavailable secret is allowed.
+    /// Return a stable profile identity; changing it fences attempts and revokes sessions.
     /// Reject unapproved bindings with a closed configuration/provider error.
     fn approve_configuration(
         &self,
         tenant: TenantId,
         config: &ProviderSettings,
-    ) -> Result<(), FederationError>;
+    ) -> Result<[u8; 32], FederationError>;
     /// Check runtime usability, including deployment approval and availability of
     /// secrets/trust material. Synchronous: network checks belong to prepare/test/exchange.
     /// Called for protocol operations, never required for listing or disabling providers.
@@ -442,7 +445,7 @@ pub trait UpstreamOidc: Send + Sync {
         tenant: TenantId,
         config: &'a ProviderSettings,
         material: &'a ProtocolMaterial,
-        reauth: bool,
+        mode: crate::assurance::AuthenticationMode,
     ) -> UpstreamFuture<'a, String>;
     fn exchange<'a>(
         &'a self,

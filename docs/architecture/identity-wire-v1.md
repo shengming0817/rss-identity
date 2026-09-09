@@ -20,7 +20,7 @@ I01 协议 owner：#2331；internal validate 和下游 bridge 的实现 owner �
 
 ## 演进与来源
 
-新可选字段仅在旧 consumer 可忽略时增加；身份字段含义、错误安全语义和隔离边界变化使用新 major。未知 auth strength 不提升 assurance，未知必要 identity enum 拒绝。首版 amr 为本地 pwd 或联合空数组，acr 为 unspecified；首版省略可选 groups。I02 绑定骨架已由真实 authority/client 路径替换；wire DTO 不等于可信上下文，只有 client 在线验证成功返回 VerifiedIdentity。
+新可选字段仅在旧 consumer 可忽略时增加；身份字段含义、错误安全语义和隔离边界变化使用新 major。未知 auth strength 不提升 assurance，未知必要 identity enum 拒绝。I09 规范化 acr 为 unspecified/mfa；本地 amr 为 pwd，联合 amr 只传已验证的已知方法，缺失为空。MFA 的 auth_time 来自实际上游认证，续期不刷新。省略可选 groups。I02 绑定骨架已由真实 authority/client 路径替换；wire DTO 不等于可信上下文，只有 client 在线验证成功返回 VerifiedIdentity。
 
 ## 中央会话 HTTP（I04）
 
@@ -92,3 +92,10 @@ OIDC callback 的失败现在统一 303 到固定同源 `/auth/error?reason=canc
 每租户 provider 容量为 100，创建在同一租户写锁下原子检查。超过容量返回 409 provider_limit_reached，不撤销会话；列表及停用仍可用。
 
 重复本地登录名仅在已授权创建操作中返回 409 account_already_exists；会话仍有效，失败创建与安全事件原子回滚。登录选项展示既有 issuer、client 与 provider 标识，区分同 host 的 realm/client，不增加展示 schema。
+
+
+## 显式 step-up（I09）
+
+`POST /api/v1/tenants/{tenant}/oidc/{provider}/step-up` 使用当前 session、Origin、CSRF 和 `X-Identity-Request: 1`；body 为既有 `client_id/return_target`，响应为 `authorization_url`。请求模式持久化，回调复用唯一 OIDC callback、原子轮换会话并返回既有目标，不增加回跳参数。仅提升同一已关联主体；缺 MFA/新鲜时间、配置漂移、退出、重放、换主体均拒绝，不 JIT 或 linking。管理权限不增加门禁；完整语义见 [assurance 指南](../guides/assurance.md)。
+
+MFA 强度与新鲜度以本在线响应的同源 `acr/amr/auth_time` 为准。Hydra 标准 ID Token 的时间是 Hydra 登录时间，`acr=unspecified` 且不投影上游 AMR，不提供上游 MFA 新鲜度。

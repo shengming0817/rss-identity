@@ -3,6 +3,7 @@ use crate::{
     transaction::{corrupt, reject},
     *,
 };
+use rss_identity_core::assurance::AuthenticationMode;
 use rss_identity_core::federation::*;
 use rss_request_context::TenantId;
 use sqlx::{PgConnection, Row};
@@ -13,7 +14,7 @@ pub(crate) async fn provider(
     id: ProviderId,
 ) -> Result<ProviderView, rss_transactional_messaging_postgres::PgError> {
     let r = sqlx::query(concat!(
-        "SELECT config_version,revocation_epoch,enabled,settings FROM identity_authority.",
+        "SELECT config_version,revocation_epoch,enabled,settings,deployment_approval FROM identity_authority.",
         "providers WHERE tenant_id=$1::uuid AND provider_id=$2::uuid FOR UPDATE"
     ))
     .bind(tenant.to_string())
@@ -35,6 +36,10 @@ pub(crate) async fn provider(
         revocation_epoch: epoch,
         enabled: r.try_get("enabled")?,
         settings,
+        deployment_approval: r
+            .try_get::<Option<Vec<u8>>, _>("deployment_approval")?
+            .map(|v| v.try_into().map_err(|_| corrupt()))
+            .transpose()?,
     })
 }
 pub(crate) fn exact(view: &ProviderView, version: i64) -> Result<(), FederationError> {
@@ -138,6 +143,7 @@ pub(crate) async fn identity(
     ))
 }
 pub(crate) struct Attempt {
+    pub mode: AuthenticationMode,
     pub browser: [u8; 32],
     pub provider: ProviderId,
     pub version: i64,
@@ -183,6 +189,8 @@ pub(crate) async fn attempt(
     };
     Ok((
         Attempt {
+            mode: AuthenticationMode::from_storage(r.try_get("authentication_mode")?)
+                .map_err(|_| corrupt())?,
             browser: digest(browser),
             provider: ProviderId::parse(&r.try_get::<Uuid, _>("provider_id")?.to_string())
                 .map_err(|_| corrupt())?,
@@ -204,6 +212,7 @@ pub(crate) async fn attempt(
     ))
 }
 pub(crate) struct NewAttempt {
+    pub mode: AuthenticationMode,
     pub locator: StateLocator,
     pub material: ProtocolMaterial,
     pub provider: ProviderView,
@@ -258,8 +267,8 @@ pub(crate) async fn insert_attempt(
     sqlx::query(concat!(
         "INSERT INTO identity_authority.oidc_transactions(tenant_id,attempt_id,provider_i",
         "d,config_version,state_hash,browser_hash,purpose,nonce,verifier,created_at,expir",
-        "es_at,target_client,return_url,link_intent,replacement_session) VALUES($1::uuid,",
-        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid)"
+        "es_at,target_client,return_url,link_intent,replacement_session,authentication_mode) VALUES($1::uuid,",
+        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid,$16)"
     ))
     .bind(tenant.to_string())
     .bind(input.locator.id().as_slice())
@@ -276,6 +285,7 @@ pub(crate) async fn insert_attempt(
     .bind(input.return_url)
     .bind(input.link)
     .bind(input.replacement.map(|v| v.to_string()))
+    .bind(input.mode as i16)
     .execute(c)
     .await?;
     Ok(())

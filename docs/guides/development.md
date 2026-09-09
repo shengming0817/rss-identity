@@ -115,4 +115,4 @@ GET/HEAD 会话查询不续期。客户端在有效用户活动期间通过受 O
 
 ## I08 装配入口
 
-[部署文档](../deployment/README.md)持有统一应用、v6安装、生命周期和候选构建。make test-assembly验证真实TLS PG配置/安装/失败清理，make test-gateway验证真实NGINX TLS/来源覆盖/私有路径；两者均纳入make ci。KDF由应用创建唯一共享实例并注入Authority，关闭使用同一scope。实际peer与ClientAddress分开；测试宿主须显式提供受信客户端归因。
+[部署文档](../deployment/README.md)持有统一应用、v7安装、生命周期和候选构建。make test-assembly验证真实TLS PG配置/安装/失败清理，make test-gateway验证真实NGINX TLS/来源覆盖/私有路径；两者均纳入make ci。KDF由应用创建唯一共享实例并注入Authority，关闭使用同一scope。实际peer与ClientAddress分开；测试宿主须显式提供受信客户端归因。

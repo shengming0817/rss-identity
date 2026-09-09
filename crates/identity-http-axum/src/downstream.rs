@@ -369,7 +369,7 @@ async fn validate(
         issuer: proof.issuer().to_owned(),
         auth_time: proof.auth_time(),
         amr: proof.amr().to_owned(),
-        acr: proof.acr().to_owned(),
+        acr: proof.acr(),
         expires_at: proof.expires_at(),
     }))
 }

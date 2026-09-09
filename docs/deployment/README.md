@@ -4,6 +4,7 @@
 
 - [首次安装与运维](operations.md)
 - [候选构建](candidate.md)
+- [停机备份、恢复、轮换与测量](recovery.md)
 - [I08 架构决定](../architecture/adr/202609091100-2338-production-assembly.md)
 
 生产输入必须由部署 owner 提供真实域名、证书、存储身份和秘密。deployment/example.json 是字段示例；其中 example.test、UUID 与字节数组均不是生产默认。禁止将渲染目录或秘密作为 artifact 发布。

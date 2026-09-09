@@ -1,15 +1,15 @@
 # 本机维护：开发库安装与不确定结果核实
 
-适用 #2358/#2334/#2335 的可丢弃专属开发库（当前初始安装为 schema version 6）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin recover`，下列账户/事件查询只有只读用途。
+适用 #2358/#2334/#2335 的可丢弃专属开发库（当前初始安装为 schema version 7）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin recover`，下列账户/事件查询只有只读用途。
 
 ## 安装与凭据
 
-旧checkout拼接SQL的安装步骤已退出。使用 [I08安装入口](../deployment/operations.md) 的 identity-migrate，凭据与schema/grants一次闭合；维护只消费独立的maintenance配置。当前初始schema为v6，旧v5开发库不得原地升级或自动清理。
+旧checkout拼接SQL的安装步骤已退出。使用 [I08安装入口](../deployment/operations.md) 的 identity-migrate，凭据与schema/grants一次闭合；维护只消费独立的maintenance配置。当前初始schema为v7，所有旧开发库（含v6）不得原地升级或自动清理。
 
 Owner 只读核实非秘密安装身份：
 
 ```sql
-SELECT version FROM identity_authority.schema_version; -- 恰好一行，6
+SELECT version FROM identity_authority.schema_version; -- 恰好一行，7
 SELECT authority_id,bootstrap_tenant FROM identity_authority.deployment; -- 恰好一行，记录 authority_id；tenant 为 NULL
 SELECT encode(target,'hex'),encode(lineage,'hex') FROM rss_transactional_messaging.storage_lineage;
 SELECT tenant_id,epoch FROM rss_transactional_messaging.tenant_epoch;

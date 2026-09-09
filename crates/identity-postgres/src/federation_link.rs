@@ -6,6 +6,7 @@ use crate::{
     transaction::{corrupt, reject},
     *,
 };
+use rss_identity_core::assurance::AuthenticationMode;
 use rss_identity_core::{PrincipalId, SessionId, account::LoginKey, federation::*};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
@@ -159,7 +160,11 @@ impl Federation {
                     tenant,
                     &provider.settings,
                     &material,
-                    purpose == Purpose::Reauthenticate,
+                    if purpose == Purpose::Reauthenticate {
+                        AuthenticationMode::Reauthenticate
+                    } else {
+                        AuthenticationMode::Login
+                    },
                 ),
             )
             .await?;
@@ -207,6 +212,7 @@ impl Federation {
                     db::insert_attempt(
                         c,
                         db::NewAttempt {
+                            mode: if purpose == Purpose::Reauthenticate { AuthenticationMode::Reauthenticate } else { AuthenticationMode::Login },
                             locator,
                             material,
                             provider,
@@ -255,8 +261,12 @@ impl Federation {
         let url = self
             .upstream(
                 budget,
-                self.oidc
-                    .prepare(tenant, &target.settings, &material, false),
+                self.oidc.prepare(
+                    tenant,
+                    &target.settings,
+                    &material,
+                    AuthenticationMode::Login,
+                ),
             )
             .await?;
         self.authority
@@ -277,8 +287,9 @@ impl Federation {
                         || issuer != claims.issuer
                         || subject != claims.subject
                         || claims
-                            .auth_time
-                            .is_none_or(|t| t < attempt.created - 30 || t > now + 30)
+                            .assurance
+                            .check(AuthenticationMode::Reauthenticate, attempt.created, now)
+                            .is_err()
                     {
                         return Err(FederationError::Claims.into());
                     }
@@ -296,6 +307,7 @@ impl Federation {
                     db::insert_attempt(
                         c,
                         db::NewAttempt {
+                            mode: AuthenticationMode::Login,
                             locator: new_locator,
                             material,
                             provider: target,

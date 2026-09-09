@@ -62,5 +62,18 @@ class SafeTestReportTests(unittest.TestCase):
         self.assertIn('exit=101',output.getvalue())
         self.assertNotIn('secret',output.getvalue())
 
+class CapacityTests(unittest.TestCase):
+    def test_measurement_matrix_and_numeric_contract(self):
+        import json
+        records=[dict(operation=op,concurrency=c,requests=64,succeeded=64,failed=0,seconds=1,successful_rps=64,p50_ms=1,p95_ms=2,p99_ms=3) for op in ['local_login','session_inspect','online_validation'] for c in [1,4,16]]
+        records.append(dict(operation='cleanup_8_grants',concurrency=1,requests=8,succeeded=8,failed=0,seconds=1,successful_rps=8))
+        def report(values):
+            result=subprocess.CompletedProcess([],0,stdout='',stderr='\n'.join('CAPACITY '+json.dumps(v) for v in values))
+            with patch('providers.sys.stdout'):
+                providers.report_tests('package','capacity_http',set(),result)
+        report(records)
+        for values in [records[:-1],records+[records[0]], [{**records[0],'failed':1}]+records[1:], [{**records[0],'seconds':float('nan')}]+records[1:]]:
+            with self.assertRaises(RuntimeError):report(values)
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,3 +15,5 @@ I01 固定首期产品会话路径、协议 owner、租户模型与撤销承诺�
 - [I07 单一日常管理入口与独立前端](202609090801-2337-central-management-ui.md)
 
 - [#2338 生产装配](202609091100-2338-production-assembly.md)
+
+- [#2339 Assurance 与原生恢复接缝](202609091607-2339-assurance-recovery.md)

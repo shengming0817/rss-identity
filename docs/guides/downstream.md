@@ -38,3 +38,5 @@ Hydra 注册 authorization_code/code/openid/client_secret_basic 和精确 redire
 准备入口先取得必填共享 PrepareAdmission 的并发许可和固定窗口预算，再执行任何 Hydra/DNS/TLS 工作；无效 challenge 也耗用预算，取消释放并发许可但不退还请求预算。构造时并发1–128、窗口内请求1–10000、窗口大于0且不超过60秒；同一 Hydra 服务的所有 coordinator 必须共享一个实例。该边界限制单进程资源，I08 仍持有多副本入口配额与可信来源配置。解析后按 tenant/client 独立限制每60秒60次与1000条容量，限速返回429 rate_limited，容量耗尽返回503。AwaitingLogin 的 request 窗口结束即可清理；进入 Accepting 后才保持完整 token 安全窗口。清理重试不重复发布安全状态事件。
 
 故障证明：canonical downstream_atomic 覆盖清理领取回滚、并发唯一远程调用、远程失败后退避、窗口内结算未知后以同一 consent/sid 重试、最终删除提交未知及 cleaned 事件唯一性。Hydra resolver 单测覆盖空/混合/越界解析和 hostname 错配，真实 TLS fixture 使用 localhost DNS SAN 与精确 loopback allowlist。
+
+MFA / 新鲜度使用在线 `VerifiedIdentity` 的 `acr/amr/auth_time`；Hydra 标准 ID Token 保持 `acr=unspecified`、不投影上游 AMR，其 Hydra 登录时间不能代表上游 MFA 时间。

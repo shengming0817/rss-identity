@@ -270,7 +270,10 @@ async fn downstream_readonly_rotation_and_revocation() -> anyhow::Result<()> {
     let first = d
         .validate("mdm", f.key.tenant, "mdm-api", secret("token"), deadline())
         .await?;
-    assert_eq!(first.amr(), ["pwd"]);
+    assert_eq!(
+        first.amr().iter().map(|m| m.as_str()).collect::<Vec<_>>(),
+        ["pwd"]
+    );
     assert_ne!(first.subject(), f.key.principal.as_uuid().to_string());
     for mutation in (1..=13).chain([15]) {
         p.mutation.store(mutation, Ordering::SeqCst);
@@ -592,6 +595,9 @@ async fn downstream_federated_provider_revocation() -> anyhow::Result<()> {
         d.validate("mdm", f.key.tenant, "mdm-api", secret("token"), deadline())
             .await?
             .amr()
+            .iter()
+            .map(|m| m.as_str())
+            .collect::<Vec<_>>()
             .is_empty()
     );
     let disabled = federation

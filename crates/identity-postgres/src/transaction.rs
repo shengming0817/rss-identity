@@ -116,6 +116,7 @@ impl From<sqlx::Error> for MutationError {
         Self::Storage(error.into())
     }
 }
+pub(crate) const MAX_MUTATION_EVENTS: usize = 8;
 const EVENT_SCHEMA: &str = include_str!("security-event-v2.json");
 pub(crate) fn reject() -> PgError {
     MessagingError::new(
@@ -292,7 +293,7 @@ impl Authority {
                     let (result, events) = operation(tx)
                         .await
                         .map_err(|e| sql_failure(e, &reason_slot))?;
-                    if (require_event && events.is_empty()) || events.len() > 8 {
+                    if (require_event && events.is_empty()) || events.len() > MAX_MUTATION_EVENTS {
                         return Err(corrupt());
                     }
                     for event in events {

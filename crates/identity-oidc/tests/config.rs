@@ -22,6 +22,7 @@ fn input() -> ProviderSettingsInput {
 }
 fn binding(c: &ProviderSettingsInput) -> ApprovedProvider {
     ApprovedProvider {
+        keycloak_totp: false,
         tenant: tenant(),
         issuer: c.issuer.clone(),
         client_id: c.client_id.clone(),

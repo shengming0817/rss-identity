@@ -248,7 +248,6 @@ pub struct Challenge {
 pub struct LoginDecision {
     pub grant_id: String,
     pub subject: String,
-    pub amr: Vec<String>,
 }
 pub struct ConsentDecision {
     pub grant_id: String,

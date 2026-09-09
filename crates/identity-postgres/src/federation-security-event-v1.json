@@ -27,7 +27,8 @@
         "logged_in",
         "linked",
         "already_linked",
-        "reauthenticated"
+        "reauthenticated",
+        "stepped_up"
       ]
     },
     "provider_id": {
