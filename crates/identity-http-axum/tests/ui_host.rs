@@ -51,7 +51,8 @@ async fn real_identity_ui_management_seam() -> anyhow::Result<()> {
     f.close().await;
     anyhow::ensure!(
         result.status.success(),
-        "UI browser seam failed (raw browser output withheld)"
+        "UI browser seam failed: {}",
+        String::from_utf8_lossy(&result.stdout)
     );
     assert_eq!(account_count, 1);
     assert_eq!(provider_count, 1);
