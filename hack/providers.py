@@ -128,7 +128,7 @@ def cargo(package, test, env, features=()):
                 ('rss-identity-app', 'operator'): {'maintenance_file_and_settlement'},
                 ('rss-identity-oidc', 'provider'): {'real_provider_flows'}}[(package, test)]
     command = ['cargo', 'test', '--locked', '-p', package, '--test', test, *features, '--', '--ignored', '--test-threads=1']
-    environment = {**os.environ, **env, 'CARGO_TARGET_DIR': str(ROOT / 'target')}
+    environment = {**os.environ, **env}
     listing = bounded_run([*command, '--list'], timeout=900, cwd=ROOT, env=environment, check=True, text=True, stdout=subprocess.PIPE).stdout
     names = re.findall(r'^(.+): test$', listing, re.M)
     if set(names) != expected or len(names) != len(expected):

@@ -24,7 +24,8 @@ if __name__=='__main__':
     meta=json.loads(subprocess.check_output(['cargo','metadata','--locked','--format-version','1','--manifest-path','tests/consumer/Cargo.toml'],cwd=ROOT))
     check(meta)
     import os
-    env={**os.environ,'CARGO_TARGET_DIR':str(ROOT/'target/consumer')}
+    target=Path(os.environ.get('CARGO_TARGET_DIR', ROOT/'target'))/'consumer'
+    env={**os.environ,'CARGO_TARGET_DIR':str(target)}
     subprocess.run(['cargo','fmt','--manifest-path','tests/consumer/Cargo.toml','--','--check'],cwd=ROOT,env=env,check=True)
     subprocess.run(['cargo','clippy','--locked','--manifest-path','tests/consumer/Cargo.toml','--all-targets','--','-D','warnings'],cwd=ROOT,env=env,check=True)
     subprocess.run(['cargo','deny','--manifest-path','tests/consumer/Cargo.toml','--locked','check','--config','tests/consumer/deny.toml','advisories','licenses','sources'],cwd=ROOT,check=True)

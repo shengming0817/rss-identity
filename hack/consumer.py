@@ -5,7 +5,8 @@ from bounded_process import run as bounded_run
 ROOT=Path(__file__).resolve().parents[1]
 NAME='tests::product_code_pkce_online_identity_and_logout'
 def run():
-    env={**os.environ,'CARGO_TARGET_DIR':str(ROOT/'target/consumer')}
+    target=Path(os.environ.get('CARGO_TARGET_DIR', ROOT/'target'))/'consumer'
+    env={**os.environ,'CARGO_TARGET_DIR':str(target)}
     command=['cargo','test','--locked','--manifest-path',str(ROOT/'tests/consumer/Cargo.toml'),'--','--ignored','--test-threads=1']
     listing=bounded_run([*command,'--list'],timeout=900,env=env,cwd=ROOT,text=True,capture_output=True,check=True)
     names=re.findall(r'^(.+): test$',listing.stdout,re.M)

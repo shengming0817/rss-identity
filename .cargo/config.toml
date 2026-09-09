@@ -3,3 +3,4 @@ git-fetch-with-cli = true
 
 [build]
 target-dir = "target"
+rustc-wrapper = ".cargo/rustc-cache-wrapper.sh"

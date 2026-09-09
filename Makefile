@@ -1,8 +1,10 @@
 SHELL := /bin/bash
 PYTHON := $(shell command -v python3)
+REPOSITORY_ROOT := $(shell /usr/bin/dirname "$$(/usr/bin/git rev-parse --path-format=absolute --git-common-dir)")
 export PATH := /usr/bin:$(PATH)
 export PYTHONDONTWRITEBYTECODE := 1
-export CARGO_TARGET_DIR := $(CURDIR)/target
+CARGO_TARGET_DIR ?= $(REPOSITORY_ROOT)/target
+export CARGO_TARGET_DIR
 .PHONY: ci check test test-pg test-oidc dependencies licenses
 ci: check test dependencies licenses test-pg test-oidc test-federated test-downstream test-assembly test-gateway test-clients test-recovery
 check:
