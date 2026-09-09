@@ -2,7 +2,7 @@ use crate::{storage::*, transaction::SecurityEvent, *};
 use rss_identity_core::account::{LocalChange, SecurityAction};
 use rss_identity_core::{
     PrincipalId,
-    account::{LoginKey, Password, PasswordKdf},
+    account::{LoginKey, Password},
 };
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
@@ -34,7 +34,7 @@ impl Authority {
                 }
             })).await
         })).await?;
-        let kdf = PasswordKdf::new();
+        let kdf = &self.kdf;
         let Some((stored, authority)) = snapshot else {
             budget.password(kdf.dummy(password)).await?;
             return Err(AuthorityError::Rejected);
@@ -75,7 +75,7 @@ impl Authority {
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
         self.require_administrator(&actor)?;
-        let hash = budget.password(PasswordKdf::new().hash(password)).await?;
+        let hash = budget.password(self.kdf.hash(password)).await?;
         let key = AccountKey {
             tenant: actor.key.tenant,
             principal: PrincipalId::generate(),
@@ -245,7 +245,7 @@ impl Authority {
         let (change, hash) = match change {
             AccountChange::Password(password) => (
                 LocalChange::Password,
-                Some(budget.password(PasswordKdf::new().hash(password)).await?),
+                Some(budget.password(self.kdf.hash(password)).await?),
             ),
             AccountChange::Enabled(v) => (LocalChange::Enabled(v), None),
             AccountChange::Administrator(v) => (LocalChange::Administrator(v), None),

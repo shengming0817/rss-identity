@@ -5,7 +5,7 @@ use crate::{
     transaction::{SecurityEvent, reject},
     *,
 };
-use rss_identity_core::account::{LoginKey, Password, PasswordKdf, SecurityAction};
+use rss_identity_core::account::{LoginKey, Password, SecurityAction};
 use rss_transactional_messaging::policy::OperationDeadline;
 
 impl Authority {
@@ -19,7 +19,7 @@ impl Authority {
     ) -> Result<AccountState, AuthorityError> {
         self.require_maintenance()?;
         let budget = Budget::new(deadline)?;
-        let hash = budget.password(PasswordKdf::new().hash(password)).await?;
+        let hash = budget.password(self.kdf.hash(password)).await?;
         self.mutate(key.tenant, budget.remaining(), move |tx| {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {
@@ -58,7 +58,7 @@ impl Authority {
     ) -> Result<AccountState, AuthorityError> {
         self.require_maintenance()?;
         let budget = Budget::new(deadline)?;
-        let hash = budget.password(PasswordKdf::new().hash(password)).await?;
+        let hash = budget.password(self.kdf.hash(password)).await?;
         self.mutate(key.tenant, budget.remaining(), move |tx| {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {

@@ -1,18 +1,26 @@
 -- Identity owns this migration identity; RSS message schema is installed separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=5));
-INSERT INTO identity_authority.schema_version VALUES(5);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=6));
+INSERT INTO identity_authority.schema_version VALUES(6);
 CREATE ROLE identity_account_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE ROLE identity_account_maintenance NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL DEFAULT gen_random_uuid(),
- bootstrap_tenant uuid
+ bootstrap_tenant uuid,
+ environment_id text,
+ identity_config_version bigint,
+ identity_public_origin text,
+ product_public_origin text,
+ CONSTRAINT complete_deployment_identity CHECK (
+ (environment_id IS NULL AND identity_config_version IS NULL AND identity_public_origin IS NULL AND product_public_origin IS NULL)
+ OR (environment_id IS NOT NULL AND environment_id ~ '^[A-Za-z0-9_-]{1,128}$' AND identity_config_version IS NOT NULL AND identity_config_version>0 AND identity_public_origin IS NOT NULL AND product_public_origin IS NOT NULL AND identity_public_origin<>product_public_origin))
 );
 INSERT INTO identity_authority.deployment DEFAULT VALUES;
 CREATE FUNCTION identity_authority.protect_deployment() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
- IF NEW.authority_id <> OLD.authority_id
+ IF (OLD.environment_id IS NOT NULL AND (NEW.environment_id,NEW.identity_config_version,NEW.identity_public_origin,NEW.product_public_origin) IS DISTINCT FROM (OLD.environment_id,OLD.identity_config_version,OLD.identity_public_origin,OLD.product_public_origin))
+ OR NEW.authority_id <> OLD.authority_id
  OR (OLD.bootstrap_tenant IS NOT NULL AND NEW.bootstrap_tenant IS DISTINCT FROM OLD.bootstrap_tenant) THEN
  RAISE EXCEPTION 'immutable authority state'; END IF;
  RETURN NEW;

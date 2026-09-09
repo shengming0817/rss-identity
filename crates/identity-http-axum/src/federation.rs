@@ -3,7 +3,7 @@ use crate::{boundary::*, *};
 use axum::{
     Extension, Json,
     body::Body,
-    extract::{ConnectInfo, FromRequest, Path, Query, Request, State},
+    extract::{FromRequest, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -20,8 +20,6 @@ use rss_identity_postgres::{
 };
 
 use serde::Deserialize;
-
-use std::net::SocketAddr;
 
 use zeroize::Zeroizing;
 
@@ -108,11 +106,11 @@ fn browser(headers: &HeaderMap, create: bool) -> Result<(String, bool), HttpErro
 fn source(request: &Request) -> Result<AttemptSource, HttpError> {
     let peer = request
         .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
+        .get::<crate::ClientAddress>()
         .ok_or(HttpError::from(AuthorityError::Unavailable))?
         .0;
 
-    Ok(AttemptSource::parse(&peer.ip().to_string())?)
+    Ok(AttemptSource::parse(&peer.to_string())?)
 }
 
 async fn actor(

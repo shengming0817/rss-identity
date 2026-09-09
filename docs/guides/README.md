@@ -4,7 +4,7 @@
 
 - [本机维护 runbook](local-maintenance.md)：开发库安装、身份配置与不确定提交的只读核实。
 
-完整产品启动由 I08 提供。
+[I08 部署入口](../deployment/README.md)持有产品启动、安装和候选。
 
 - [下游身份接入](downstream.md)：Hydra bridge、最小 client、在线撤销与独立 consumer。
 

@@ -2,7 +2,7 @@
 #[allow(dead_code)]
 #[path = "../../../crates/identity-postgres/tests/support/mod.rs"]
 mod support;
-use rss_identity_admin::read_secret;
+use rss_identity_app::read_secret;
 use rss_identity_core::account::Password;
 use rss_identity_postgres::*;
 use rss_transactional_messaging_postgres::PgTransactionFault;

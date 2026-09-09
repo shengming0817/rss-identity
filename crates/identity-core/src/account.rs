@@ -2,7 +2,7 @@
 //! ref: RustCrypto/password-hashes argon2/src/{lib,params}.rs @ argon2-v0.5.3.
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use rand_core::OsRng;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
@@ -78,31 +78,66 @@ pub enum PasswordError {
     Unavailable,
 }
 
-static GATE: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(4)));
 const DUMMY: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-#[derive(Clone, Default)]
-pub struct PasswordKdf;
+#[derive(Clone)]
+pub struct PasswordKdf {
+    gate: Arc<Semaphore>,
+    admission: Arc<Mutex<bool>>,
+    tasks: tokio_util::task::TaskTracker,
+}
+impl Default for PasswordKdf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl PasswordKdf {
     pub fn new() -> Self {
-        Self
+        Self {
+            gate: Arc::new(Semaphore::new(4)),
+            admission: Arc::new(Mutex::new(true)),
+            tasks: tokio_util::task::TaskTracker::new(),
+        }
+    }
+    /// Permanently close work admission. Existing blocking closures retain their tokens.
+    pub fn close(&self) {
+        let mut open = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        *open = false;
+        self.tasks.close();
+    }
+    /// Wait for real closure completion after close; the application supplies the drain budget.
+    pub async fn wait_closed(&self) {
+        self.tasks.wait().await;
     }
     async fn compute<T: Send + 'static>(
+        &self,
         work: impl FnOnce() -> Result<T, PasswordError> + Send + 'static,
     ) -> Result<T, PasswordError> {
-        let permit = GATE
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| PasswordError::Busy)?;
+        let (permit, tracked) = {
+            let open = self
+                .admission
+                .lock()
+                .map_err(|_| PasswordError::Unavailable)?;
+            if !*open {
+                return Err(PasswordError::Unavailable);
+            }
+            let permit = self
+                .gate
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| PasswordError::Busy)?;
+            (permit, self.tasks.token())
+        };
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let _tracked = tracked;
             work()
         })
         .await
         .map_err(|_| PasswordError::Unavailable)?
     }
     pub async fn hash(&self, secret: Password) -> Result<PasswordEncoding, PasswordError> {
-        Self::compute(move || {
+        self.compute(move || {
             let salt = SaltString::generate(&mut OsRng);
             Argon2::default()
                 .hash_password(secret.0.as_bytes(), &salt)
@@ -116,7 +151,7 @@ impl PasswordKdf {
         secret: Password,
         encoded: PasswordEncoding,
     ) -> Result<bool, PasswordError> {
-        Self::compute(move || {
+        self.compute(move || {
             let hash =
                 PasswordHash::new(encoded.as_str()).map_err(|_| PasswordError::Unavailable)?;
             if encoded.as_str().len() > 256
@@ -145,37 +180,76 @@ impl PasswordKdf {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn closing_kdf_waits_for_actual_work_and_rejects_new_work() {
+        let kdf = Arc::new(PasswordKdf::new());
+        let (started, seen) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = kdf.clone();
+        let caller = tokio::spawn(async move {
+            worker
+                .compute(move || {
+                    started.send(()).unwrap();
+                    wait.recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        seen.await.unwrap();
+        caller.abort();
+        kdf.close();
+        assert!(matches!(
+            kdf.compute(|| Ok(())).await,
+            Err(PasswordError::Unavailable)
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), kdf.wait_closed())
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), kdf.wait_closed())
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
     async fn cancelled_waiter_does_not_release_running_work() {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (end_tx, end_rx) = std::sync::mpsc::channel();
-        let task = tokio::spawn(PasswordKdf::compute(move || {
-            started_tx.send(()).unwrap();
-            end_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap();
-            Ok(())
-        }));
+        let kdf = Arc::new(PasswordKdf::new());
+        let worker = kdf.clone();
+        let task = tokio::spawn(async move {
+            worker
+                .compute(move || {
+                    started_tx.send(()).unwrap();
+                    end_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    Ok(())
+                })
+                .await
+        });
         started_rx.await.unwrap();
         task.abort();
-        let remaining = GATE.clone().try_acquire_many_owned(3).unwrap();
+        let remaining = kdf.gate.clone().try_acquire_many_owned(3).unwrap();
         assert!(matches!(
-            PasswordKdf::compute(|| Ok(())).await,
+            kdf.compute(|| Ok(())).await,
             Err(PasswordError::Busy)
         ));
         end_tx.send(()).unwrap();
         drop(remaining);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while GATE.available_permits() != 4 {
+            while kdf.gate.available_permits() != 4 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
         assert!(matches!(
-            PasswordKdf::compute::<()>(|| panic!("test worker failure")).await,
+            kdf.compute::<()>(|| panic!("test worker failure")).await,
             Err(PasswordError::Unavailable)
         ));
-        assert_eq!(GATE.available_permits(), 4);
+        assert_eq!(kdf.gate.available_permits(), 4);
     }
 }
 

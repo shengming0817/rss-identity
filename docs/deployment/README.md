@@ -1,7 +1,9 @@
-# 部署与运维
+# 部署与候选
 
-当前没有可部署 artifact。I08 持有配置、密钥注入、迁移、启动/readiness/drain、版本与回退手册；I09 补齐商用恢复和轮转。生产 T3 另项证明实际部署行为。
+本目录描述 #2338 的单副本 Linux amd64 Compose 接口。真实产品启停、登录、SSO 的 T3 分别属于 #2340–#2342；本项 T1/T2 通过不表示生产环境已验收。
 
-#2358 已明确维护身份由部署 owner 独占保管，仅注入受控维护任务；runtime 与 maintenance 使用独立登录身份，不混合角色，不共享可读 secret mount。远程执行入口承担授权和人工操作归属。生产注入及实际隔离仍须 I08/T32 验证。
+- [首次安装与运维](operations.md)
+- [候选构建](candidate.md)
+- [I08 架构决定](../architecture/adr/202609091100-2338-production-assembly.md)
 
-当前本机初始化、管理员密码恢复及开发库重建按 [维护 runbook](../guides/local-maintenance.md) 操作；不通过直接改库恢复账户。已有开发库可丢弃，schema 2 无升级兼容路径；工具不自动清库。密码恢复不覆盖 MFA、IdP、密钥、备份或宿主机失陷。
+生产输入必须由部署 owner 提供真实域名、证书、存储身份和秘密。deployment/example.json 是字段示例；其中 example.test、UUID 与字节数组均不是生产默认。禁止将渲染目录或秘密作为 artifact 发布。

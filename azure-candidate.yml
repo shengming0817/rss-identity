@@ -1,0 +1,66 @@
+trigger: none
+pr: none
+parameters:
+  - name: uiRevision
+    type: string
+    default: 37b7fb356aa7e436cc708caa1593427e6d553d30
+  - name: uiConnection
+    type: string
+    default: rss-web-read
+resources:
+  repositories:
+    - repository: identityUi
+      type: github
+      name: shengming0817/rss-web
+      endpoint: ${{ parameters.uiConnection }}
+      ref: ${{ parameters.uiRevision }}
+pool:
+  vmImage: ubuntu-24.04
+steps:
+  - checkout: self
+    clean: true
+    path: identity
+  - checkout: identityUi
+    clean: true
+    path: identity-ui
+  - task: NodeTool@0
+    inputs:
+      versionSpec: 24.14.1
+  - bash: |
+      set -euo pipefail
+      rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+      cargo +1.96.0 install cargo-deny --version 0.19.9 --locked
+      python3 hack/ci.py
+    workingDirectory: $(Pipeline.Workspace)/identity
+    displayName: Validate fixed Identity source
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+  - bash: |
+      set -euo pipefail
+      npm install --prefix "$AGENT_TEMPDIRECTORY/pnpm" pnpm@11.4.0
+      export PATH="$AGENT_TEMPDIRECTORY/pnpm/node_modules/.bin:$PATH"
+      pnpm install --frozen-lockfile
+      python3 - <<'PY_VERIFY_UI'
+      import os,re,subprocess
+      expected=os.environ['EXPECTED_UI_REVISION']
+      if not re.fullmatch('[0-9a-f]{40}',expected):raise SystemExit('full UI SHA required')
+      if subprocess.check_output(['/usr/bin/git','rev-parse','HEAD'],text=True).strip()!=expected:raise SystemExit('UI checkout mismatch')
+      PY_VERIFY_UI
+      export RSS_IDENTITY_WEB_REVISION=$(/usr/bin/git rev-parse HEAD)
+      pnpm --filter @rss/identity-app build
+      pnpm check:identity-app:build
+    workingDirectory: $(Pipeline.Workspace)/identity-ui
+    displayName: Build fixed Identity UI
+    env:
+      EXPECTED_UI_REVISION: ${{ parameters.uiRevision }}
+  - bash: |
+      set -euo pipefail
+      python3 hack/release.py --output "$BUILD_ARTIFACTSTAGINGDIRECTORY/candidate" --ui-source "$PIPELINE_WORKSPACE/identity-ui" --ui-dist "$PIPELINE_WORKSPACE/identity-ui/apps/identity/dist"
+    workingDirectory: $(Pipeline.Workspace)/identity
+    displayName: Build candidate OCI archives and binary evidence
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+  - task: PublishPipelineArtifact@1
+    inputs:
+      targetPath: $(Build.ArtifactStagingDirectory)/candidate
+      artifact: identity-candidate

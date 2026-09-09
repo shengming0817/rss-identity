@@ -4,11 +4,11 @@ export PATH := /usr/bin:$(PATH)
 export PYTHONDONTWRITEBYTECODE := 1
 export CARGO_TARGET_DIR := $(CURDIR)/target
 .PHONY: ci check test test-pg test-oidc dependencies licenses
-ci: check test dependencies licenses test-pg test-oidc test-federated test-downstream
+ci: check test dependencies licenses test-pg test-oidc test-federated test-downstream test-assembly test-gateway test-clients
 check:
 	cargo fmt --all -- --check
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-	cargo check --locked --workspace --lib
+	cargo check --locked --workspace --lib --bins
 
 test:
 	$(PYTHON) -m unittest discover -s hack -p 'test_*.py'
@@ -38,3 +38,19 @@ test-downstream:
 .PHONY: test-ui
 test-ui:
 	$(PYTHON) hack/ui.py
+
+.PHONY: test-assembly
+test-assembly:
+	$(PYTHON) hack/assembly.py
+
+.PHONY: candidate
+candidate:
+	$(PYTHON) hack/release.py --output "$(CANDIDATE_OUTPUT)" --ui-source "$(IDENTITY_UI_SOURCE)" --ui-dist "$(IDENTITY_UI_DIST)"
+
+.PHONY: test-gateway
+test-gateway:
+	$(PYTHON) hack/gateway.py
+
+.PHONY: test-clients
+test-clients:
+	$(PYTHON) hack/clients.py

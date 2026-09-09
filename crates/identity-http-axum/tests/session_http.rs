@@ -5,14 +5,13 @@ mod support;
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::ConnectInfo,
     http::{Request, StatusCode},
     response::Response,
 };
 use rss_identity_http_axum::{HttpConfig, router};
 use rss_transactional_messaging_postgres::PgTransactionFault;
 use serde_json::{Value, json};
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 use support::*;
 use tower::ServiceExt;
 
@@ -44,9 +43,10 @@ fn request(
         req = req.header("x-csrf-token", v);
     }
     let mut req = req.body(Body::from(body.to_string())).unwrap();
-    req.extensions_mut().insert(ConnectInfo(
-        "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
-    ));
+    req.extensions_mut()
+        .insert(rss_identity_http_axum::ClientAddress(
+            "127.0.0.1".parse().unwrap(),
+        ));
     req
 }
 fn login_request(cookie: Option<&str>, csrf: Option<&str>) -> Request<Body> {

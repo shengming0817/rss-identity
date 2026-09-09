@@ -169,6 +169,8 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
     let restarted_runtime = f.additional_runtime().await?;
     let restarted = Authority::connect(
         restarted_runtime.clone(),
+        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        deployment_identity(),
         DeliveryBudget::new(
             Duration::from_secs(60),
             Duration::from_secs(5),
@@ -494,6 +496,8 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
             assert!(
                 Authority::connect(
                     f.maintenance_runtime.clone(),
+                    std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                    deployment_identity(),
                     DeliveryBudget::new(
                         Duration::from_secs(60),
                         Duration::from_secs(5),

@@ -21,7 +21,7 @@ make ci
 
 真实 PG 测试覆盖正常提交、SQL 失败回滚、CommitUnknownAfterAck、重复事件、跨租户 RLS 与 outbox 绑定。真实 Keycloak 上游与 Hydra 下游测试覆盖发现、code exchange、S256、重放、错误 state/nonce/verifier/redirect 及 provider 不可用。补充签名 token 的 azp/issuer/audience/expiry 负例、外源 discovery/JWKS、禁止跳转、响应上限和容器清理失败测试。Hydra 下游测试运行真实 Identity bridge，见[下游接入](downstream.md)。
 
-固定容器版本与摘要的单源为 `hack/providers.py`：PostgreSQL 17.6、Keycloak 26.7.3、Hydra v26.2.0。首次执行会拉取镜像。此测试不证明生产 TLS、持久化 Hydra、Keycloak 升级、生产恢复流程或 MDM 接入；这些由 #2333–#2343 各自验收。在线身份验证已由 I06 router/client 提供，尚无可启动产品 binary。
+固定容器版本与摘要的单源为 `hack/providers.py`：PostgreSQL 17.6、Keycloak 26.7.3、Hydra v26.2.0。首次执行会拉取镜像。此测试不证明生产 TLS、持久化 Hydra、Keycloak 升级、生产恢复流程或 MDM 接入；这些由 #2333–#2343 各自验收。在线身份验证已由 I06 router/client 提供，生产binary/config入口见I08部署文档。
 
 ## 独立消费复核
 
@@ -50,9 +50,9 @@ owner shengming。仅 rss-identity-oidc 0.1.0 → openidconnect 4.0.1 → rsa 0.
 
 ## 本机账户管理与维护
 
-构建 `cargo build --locked -p rss-identity-admin`，离线参数说明用 `identity-admin --help`。工具不启动 HTTP，不自动迁移或清空数据库。
+构建 `cargo build --locked -p rss-identity-app`，离线参数说明用 `identity-admin --help`。工具不启动 HTTP，不自动迁移或清空数据库。
 
-配置 JSON 必填：`host`、`port`、`database`、`user`、`password_file`、`ca_file`、`tenant_id`、`storage_target`、`storage_lineage`、`storage_tenant_epoch`。后两个 identity 为非零 16 字节数组，epoch 为 RSS 存储 fencing 值。拒绝未知配置字段；生产连接始终 VerifyFull。RSS schema、lineage、tenant binding 和 Identity 安装 SQL 由部署 owner 先配置。
+维护配置 JSON 必填：`identity_origin`、`host`、`port`、`database`、`user`、`password_file`、`ca_file`、`tenant_id`、`storage_target`、`storage_lineage`、`storage_tenant_epoch`。后两个 identity 为非零 16 字节数组，epoch 为 RSS 存储 fencing 值。拒绝未知配置字段；生产连接始终 VerifyFull。RSS schema、lineage、tenant binding 和 Identity 安装 SQL 由部署 owner 先配置。
 
 配置/CA 只接受有界普通文件（16 KiB / 1 MiB）；数据库密码、当前口令和新口令从私有普通文件读取，拒绝末端 symlink、FIFO、group/other 权限和超长输入。密码按原字节读取，不自动去掉换行；不得将秘密放入命令参数、环境变量或日志。PG 关闭最多等 5 秒，关闭超时不改变已确认操作结果。
 
@@ -112,3 +112,7 @@ GET/HEAD 会话查询不续期。客户端在有效用户活动期间通过受 O
 新增 `make test-federated`：固定 Keycloak HTTPS + PostgreSQL + in-process Axum，验证真实 JIT、本地/纯联合账户关联、TLS、浏览器绑定与 Cookie 释放；它已纳入 make ci。此接缝不替代生产 binary/域名/反代/MDM 的 T3。
 
 [联合身份指南](federation.md) 持有管理 HTTP 与部署注入参数。[I05 ADR](../architecture/adr/202609082050-2335-federated-identity.md) 持有单行配置/version、state HMAC、单次领取、原子事件、provider epoch 和无兼容退出。更新 schema 时通过 `python3 hack/schema_signature.py` 取得新安装结构摘要，再同步受控 `schema-signature.sha256`；不从现有业务库自动接受漂移。
+
+## I08 装配入口
+
+[部署文档](../deployment/README.md)持有统一应用、v6安装、生命周期和候选构建。make test-assembly验证真实TLS PG配置/安装/失败清理，make test-gateway验证真实NGINX TLS/来源覆盖/私有路径；两者均纳入make ci。KDF由应用创建唯一共享实例并注入Authority，关闭使用同一scope。实际peer与ClientAddress分开；测试宿主须显式提供受信客户端归因。

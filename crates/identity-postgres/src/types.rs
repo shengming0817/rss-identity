@@ -77,6 +77,8 @@ pub enum AuthorityError {
 /// Non-secret deployment diagnostics, independent of provider/SQL error text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum StorageMismatch {
+    #[error("deployment environment or origin identity mismatch")]
+    DeploymentIdentity,
     #[error("unsupported schema version; check the development database rebuild guide")]
     SchemaVersion,
     #[error(
