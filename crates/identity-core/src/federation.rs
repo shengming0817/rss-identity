@@ -497,6 +497,8 @@ pub enum FederationError {
     Conflict,
     #[error("federation configuration changed")]
     StaleConfiguration,
+    #[error("federation provider limit reached")]
+    ProviderLimitReached,
     #[error("federation provider unavailable")]
     Unavailable,
     #[error("federation claims rejected")]

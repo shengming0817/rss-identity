@@ -3,10 +3,8 @@ import contextlib
 import functools
 import http.client
 import http.server
-import json
 import os
 from pathlib import Path
-import re
 import ssl
 import subprocess
 import tempfile
@@ -46,8 +44,6 @@ class Gateway(http.server.SimpleHTTPRequestHandler):
 def main():
     dist=Path(os.environ['IDENTITY_UI_DIST']).resolve(strict=True)
     runner=Path(os.environ['IDENTITY_UI_RUNNER']).resolve(strict=True)
-    revision=json.loads((dist/'identity-build.json').read_text())['revision']
-    if not re.fullmatch('[0-9a-f]{40}',revision):raise RuntimeError('UI source revision missing')
     with tempfile.TemporaryDirectory(prefix='identity-ui-t2-') as tmp,contextlib.ExitStack() as stack:
         tmp=Path(tmp);cert=tmp/'tls.crt';key=tmp/'tls.key'
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','2','-subj','/CN=identity-ui-t2','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
@@ -59,6 +55,6 @@ def main():
         try:
             env={'IDENTITY_TEST_PG_PORT':str(ports[5432]),'IDENTITY_TEST_UI_PORT':str(server.backend_port),'IDENTITY_TEST_UI_ORIGIN':f'https://localhost:{server.server_port}','IDENTITY_UI_RUNNER':str(runner)}
             providers.cargo('rss-identity-http-axum','ui_host',env)
-            print('Identity UI source:',revision)
+            print('Identity test fixture completed')
         finally:server.shutdown();server.server_close();thread.join(timeout=5)
 if __name__=='__main__':main()

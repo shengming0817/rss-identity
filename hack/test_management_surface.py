@@ -15,6 +15,9 @@ class ManagementSurface(unittest.TestCase):
         self.assertNotIn('AuthorityProfile::Runtime', source)
         self.assertIn('initialize', source)
         self.assertIn('recover', source)
+        library = (ROOT / 'app/identity-admin/src/lib.rs').read_text()
+        self.assertNotIn('IdpInputError', library)
+        self.assertNotIn('expected member, admin or emergency', library)
     def test_no_generic_public_account_change(self):
         source = (ROOT / 'crates/identity-postgres/src/operations.rs').read_text()
         self.assertNotRegex(source, r'pub async fn change_account\(')

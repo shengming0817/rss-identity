@@ -34,6 +34,6 @@ UI 只允许标签页内五分钟的 challenge/flow 定位信息，完成/失败
 
 ## 证明与装配
 
-T1 覆盖纯规则、wire、前端状态和组件；T2 使用真实 PG/Keycloak/Hydra 及测试专用 HTTPS/Axum 宿主消费独立前端构建。联合命令要求显式 UI dist 和 browser runner，不缺省跳过。I08 仍持有生产 listener/config/镜像，T31–T33 和 MDM 接入保持独立。
+T1 覆盖纯规则、wire、前端状态和组件；T2 使用真实 PG/Keycloak/Hydra 及测试专用 HTTPS/Axum 宿主消费独立前端构建。联合验收由 rss-web 自行构建、运行并记录两仓 commit/lock 与产物/runner 摘要；后端仅提供测试 fixture，不审查或构建消费者源码。每租户 provider 上限 100，与有界读取一致，创建事务超限返回明确 409，保持会话有效。I08 仍持有生产 listener/config/镜像，T31–T33 和 MDM 接入保持独立。
 
 参考：Axum `axum/src/extract/state.rs` @ `c59208c86fded335cd85e388030ad59347b0e5ae`；Vue Router `packages/router/src/navigationGuards.ts` @ v4.5.0；已有 I03/I04/I05/I06 事务和协议 owner。

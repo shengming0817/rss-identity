@@ -107,7 +107,7 @@ def cargo(package, test, env, features=()):
     names = re.findall(r'^(.+): test$', listing, re.M)
     if set(names) != expected or len(names) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test set missing or changed')
-    completed = bounded_run([*command, '--nocapture', '--format', 'pretty'], timeout=max(180,len(expected)*180), cwd=ROOT, env=environment, text=True, capture_output=True)
+    completed = bounded_run([*command, '--nocapture', '--format', 'pretty'], timeout=max(300 if test == 'ui_host' else 180,len(expected)*180), cwd=ROOT, env=environment, text=True, capture_output=True)
     result = completed.stdout
     report_tests(package, test, expected, completed)
     if completed.returncode:

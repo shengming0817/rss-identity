@@ -47,12 +47,14 @@ async fn real_identity_ui_management_seam() -> anyhow::Result<()> {
     .fetch_one(&f.owner)
     .await?;
     let events:i64=sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox WHERE envelope->>'contract'='identity.account.security'").fetch_one(&f.owner).await?;
+    let provider_count: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE settings->>'client_id'='ui-client-updated' AND config_version=4 AND NOT enabled AND revocation_epoch=2").fetch_one(&f.owner).await?;
     f.close().await;
     anyhow::ensure!(
         result.status.success(),
         "UI browser seam failed (raw browser output withheld)"
     );
     assert_eq!(account_count, 1);
+    assert_eq!(provider_count, 1);
     assert!(events >= 5);
     Ok(())
 }

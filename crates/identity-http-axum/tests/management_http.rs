@@ -382,6 +382,7 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
         .append_pair("state", &state)
         .append_pair("error", "access_denied")
         .append_pair("error_description", "private upstream marker")
+        .append_pair("error_uri", "https://upstream.test/private-error")
         .append_pair("iss", "https://idp.example.test");
     let path = format!("{}?{}", url.path(), url.query().unwrap());
     let wrong = app
@@ -504,5 +505,47 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
         assert_ne!(second.key(), f.key);
         f.close().await;
     }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let (app, _, _) = app(&f);
+    let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
+    let settings = serde_json::to_value(federation_support::settings().input())?;
+    sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2 FROM generate_series(1,99)")
+        .bind(A).bind(&settings).execute(&f.owner).await?;
+    let path = format!("/api/v1/tenants/{A}/providers");
+    let (first, second) = tokio::join!(
+        app.clone()
+            .oneshot(req("POST", &path, &cookie, &csrf, settings.clone())),
+        app.clone()
+            .oneshot(req("POST", &path, &cookie, &csrf, settings))
+    );
+    let first = first?;
+    let second = second?;
+    let rejected = if first.status() == StatusCode::CREATED {
+        second
+    } else {
+        assert_eq!(second.status(), StatusCode::CREATED);
+        first
+    };
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(rejected).await?["code"], "provider_limit_reached");
+    let list = app
+        .oneshot(req("GET", &path, &cookie, "", json!(null)))
+        .await?;
+    assert_eq!(list.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(list).await?["providers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        100
+    );
+    f.close().await;
     Ok(())
 }

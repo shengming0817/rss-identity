@@ -6,8 +6,6 @@ use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdminError {
-    #[error(transparent)]
-    Idp(#[from] IdpInputError),
     #[error("unknown command; use --help")]
     UnknownCommand,
     #[error("wrong number of arguments; use --help")]
@@ -20,8 +18,6 @@ pub enum AdminError {
     StorageIdentity,
     #[error("invalid storage_tenant_epoch")]
     StorageEpoch,
-    #[error("invalid account role; expected member, admin or emergency")]
-    Role,
     #[error("invalid principal identifier")]
     Principal,
     #[error("invalid login key")]
@@ -83,22 +79,4 @@ pub fn read_public_file(path: &Path, limit: usize) -> Result<Vec<u8>, AdminError
         return Err(AdminError::File);
     }
     Ok(data)
-}
-
-#[derive(Debug, Clone, Copy, thiserror::Error)]
-pub enum IdpInputError {
-    #[error("IdP deployment policy unavailable or invalid")]
-    Policy,
-    #[error("IdP provider settings unavailable or invalid")]
-    Settings,
-    #[error("IdP tenant/client binding not approved")]
-    Binding,
-    #[error("IdP egress address range invalid")]
-    Network,
-    #[error("IdP tenant id invalid")]
-    Tenant,
-    #[error("IdP provider id invalid")]
-    Provider,
-    #[error("IdP expected version invalid")]
-    Version,
 }

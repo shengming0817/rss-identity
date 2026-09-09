@@ -271,6 +271,8 @@ struct Callback {
     iss: String,
     #[serde(rename = "error_description")]
     _error_description: Option<String>,
+    #[serde(rename = "error_uri")]
+    _error_uri: Option<String>,
     #[serde(rename = "session_state")]
     _session_state: Option<String>,
 }

@@ -85,6 +85,8 @@ provider/tenant 必须非空有效 UUID。client_id/return_target 是部署注�
 
 AccountView 是 `{principal_id,login,enabled,administrator,emergency,member_active,has_local_password}`；login 可为 null，写操作返回状态投影，不填造 login。ProviderView 和 settings 使用 I05 的既有形状。
 
-错误 JSON 为 `{code}`：401 invalid_credential；403 insufficient_privilege/reauthentication_failed/csrf_rejected；409 last_administrator/configuration_changed/identity_link_conflict；400 malformed_request；429 rate_limited；503 identity_unavailable。错误 code 与状态严格对应；秘密与 SQL/provider 原文不输出。框架方法/路径拒绝保持其 HTTP 状态且 no-store。
+错误 JSON 为 `{code}`：401 invalid_credential；403 insufficient_privilege/reauthentication_failed/csrf_rejected；409 last_administrator/configuration_changed/identity_link_conflict/provider_limit_reached；400 malformed_request；429 rate_limited；503 identity_unavailable。错误 code 与状态严格对应；秘密与 SQL/provider 原文不输出。框架方法/路径拒绝保持其 HTTP 状态且 no-store。
 
-OIDC callback 的失败现在统一 303 到固定同源 `/auth/error?reason=cancelled|failed|unavailable`，上游 error_description 只接受并丢弃，不回显。成功仍到注册 target；没有第二 callback 或 JSON 错误兼容分支。
+OIDC callback 的失败现在统一 303 到固定同源 `/auth/error?reason=cancelled|failed|unavailable`，上游 error_description/error_uri 只接受并丢弃，不回显。成功仍到注册 target；没有第二 callback 或 JSON 错误兼容分支。
+
+每租户 provider 容量为 100，创建在同一租户写锁下原子检查。超过容量返回 409 provider_limit_reached，不撤销会话；列表及停用仍可用。

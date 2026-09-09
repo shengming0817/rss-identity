@@ -45,6 +45,9 @@ impl From<AuthorityError> for Error {
             | AuthorityError::Federation(FederationError::Configuration) => {
                 (StatusCode::BAD_REQUEST, "malformed_request")
             }
+            AuthorityError::Federation(FederationError::ProviderLimitReached) => {
+                (StatusCode::CONFLICT, "provider_limit_reached")
+            }
             AuthorityError::Federation(FederationError::StaleConfiguration) => {
                 (StatusCode::CONFLICT, "configuration_changed")
             }

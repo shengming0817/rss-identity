@@ -179,6 +179,9 @@ impl Authority {
         self.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     crate::session_storage::recheck(c, &actor).await?.state.authorize_administration(tenant)?;
+                    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid")
+                        .bind(tenant.to_string()).fetch_one(&mut *c).await?;
+                    if count >= 100 { return Err(FederationError::ProviderLimitReached.into()); }
                     let view = ProviderView {
                         id: ProviderId::generate(),
                         version: 1,
@@ -306,7 +309,7 @@ impl Authority {
                     .fetch_all(&mut *c)
                     .await?;
                     if ids.len() > 100 {
-                        return Err(reject().into());
+                        return Err(FederationError::ProviderLimitReached.into());
                     }
                     let mut result = vec![];
                     for id in ids {
