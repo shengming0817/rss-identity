@@ -4,7 +4,7 @@
 
 ## 安装与凭据
 
-旧checkout拼接SQL的安装步骤已退出。使用 [I08安装入口](../deployment/operations.md) 的 identity-migrate，凭据与schema/grants一次闭合；维护只消费独立的maintenance配置。当前初始schema为v6，旧v5开发库不得原地升级或自动清理。
+旧checkout拼接SQL的安装步骤已退出。使用 [I08安装入口](../deployment/operations.md) 的 identity-migrate，凭据与schema/grants一次闭合；维护只消费独立的maintenance配置。当前初始schema为v7，所有旧开发库（含v6）不得原地升级或自动清理。
 
 Owner 只读核实非秘密安装身份：
 

@@ -2,6 +2,7 @@
 """Isolated T2 providers. Loopback HTTP/plaintext is fixture-only, never production config."""
 import contextlib
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -99,13 +100,26 @@ def report_tests(package, test, expected, result):
             print(f'{package}/{test}: {name}: {status}')
     print(f'{package}/{test}: cargo exit={result.returncode}; raw output withheld')
     if test == 'capacity_http':
+        matrix={(op,c) for op in ('local_login','session_inspect','online_validation') for c in (1,4,16)} | {('cleanup_8_grants',1)}
+        records={}
         for match in re.finditer(r'CAPACITY (\{[^\n]+\})', result.stderr):
             value=json.loads(match.group(1))
             expected={'operation','concurrency','requests','succeeded','failed','seconds','successful_rps','p50_ms','p95_ms','p99_ms'}
             if value.get('operation')=='cleanup_8_grants':expected-={'p50_ms','p95_ms','p99_ms'}
             if set(value)!=expected or value['operation'] not in {'local_login','session_inspect','online_validation','cleanup_8_grants'} or any(not isinstance(v,(int,float)) for k,v in value.items() if k!='operation'):
                 raise RuntimeError('invalid capacity measurement')
-            print('CAPACITY '+json.dumps(value,sort_keys=True))
+            identity=(value['operation'],value['concurrency'])
+            if identity not in matrix or identity in records or any(type(v) not in (int,float) or not math.isfinite(v) or v<0 for k,v in value.items() if k!='operation'):
+                raise RuntimeError('invalid capacity measurement')
+            if any(type(value[k]) is not int for k in ('concurrency','requests','succeeded','failed')) or value['requests'] != (8 if identity[0]=='cleanup_8_grants' else 64) or value['succeeded']+value['failed']!=value['requests'] or value['seconds']<=0:
+                raise RuntimeError('invalid capacity measurement counts')
+            if not math.isclose(value['successful_rps'],value['succeeded']/value['seconds'],rel_tol=.001,abs_tol=.001):
+                raise RuntimeError('invalid capacity measurement rate')
+            if identity[0]!='cleanup_8_grants' and not value['p50_ms']<=value['p95_ms']<=value['p99_ms']:
+                raise RuntimeError('invalid capacity measurement percentiles')
+            records[identity]=value
+        if set(records)!=matrix:raise RuntimeError('incomplete capacity measurement matrix')
+        for value in records.values():print('CAPACITY '+json.dumps(value,sort_keys=True))
 
 def cargo(package, test, env, features=()):
     expected = {('rss-identity-http-axum','capacity_http'): {'measure_single_consumer_identity_paths'},('rss-identity-http-axum','recovery_http'): {'physical_restore_preserves_the_selected_security_cut'},('rss-identity-app','clients'): {'clients_are_created_verified_and_drift_is_refused'},('rss-identity-app','installation'): {'installation_configuration_and_rollback_are_verified'},('rss-identity-http-axum','ui_host'): {'real_identity_ui_management_seam'},('rss-identity-http-axum','management_http'): {'management_accounts_sessions_and_boundaries','management_provider_operations_safe_and_scoped','callback_cancellation_consumes_only_bound_attempts','management_rechecks_inflight_provider_authority','provider_capacity_is_atomic_and_keeps_management_available'},('rss-identity-postgres','downstream_atomic'): {'downstream_prepare_admission_precedes_invalid_protocol_work','downstream_cleanup_failure_concurrency_and_unknown_settlement','downstream_cleanup_claim_rollback_and_final_unknown','downstream_readonly_rotation_and_revocation','downstream_unknown_commit_and_single_accept','downstream_remote_unknown_never_returns_authority','downstream_accept_rechecks_revocation_and_final_commit','downstream_claim_and_event_roll_back_together','downstream_federated_provider_revocation','downstream_prepare_budget_is_per_client_and_releases_expired'}, ('rss-identity-http-axum','downstream_http'): {'real_downstream_code_pkce_and_online_validation','downstream_body_deadline_and_caller_auth','real_totp_assurance_reaches_hydra_and_validation_client'}, ('rss-identity-http-axum','federated_http'): {'real_provider_management_and_missing_secret','real_federated_login_and_linking','federated_http_rejects_mismatch_and_uncertain_commit','federated_tls_and_egress_policy','real_step_up_rotates_only_the_bound_session','real_upstream_client_secret_rotation'}, ('rss-identity-postgres','federated_atomic'): {'federation_concurrent_linking_keeps_one_owner','federation_configuration_authorization_and_versions','federation_state_restart_expiry_and_replay','federation_jit_isolated_subjects_and_membership','federation_config_races_and_provider_revocation','federation_atomic_events_and_unknown_commit','federation_local_and_federated_linking','federation_link_conflict_logout_and_wrong_reauthentication','federation_concurrent_jit_rls_and_schema_drift','federation_step_up_binding_and_settlement'}, ('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},

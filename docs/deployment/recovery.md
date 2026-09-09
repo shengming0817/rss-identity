@@ -23,7 +23,17 @@
 
    此命令使用受控容器内数据库本机身份；不同 PG 部署按其认证配置使用专用备份身份，密码从受控文件读取。禁止降低数据库访问控制来运行备份。
 
-3. 记录并独立保管 backup_manifest 摘要、PG system identifier/WAL 范围和切点时间；配置、证书、所需 system/cookie key 集合和当前服务秘密另行保管。Keycloak realm export 不能代替数据库备份。源端恢复写入后，该备份不再证明之后的安全状态。
+3. 外部副本复制完成后，在同版本 PG 工具中再次校验，记录 manifest 摘要后才清理容器内这个临时目录。外部 cut-001 备份继续保留：
+
+   ```sh
+   PG_IMAGE=$(python3 -c 'import json; print(json.load(open("/artifacts/candidate.json"))["providers"]["postgres"])')
+   docker run --rm --user 0:0 --entrypoint pg_verifybackup -v /private/backups/cut-001:/backup:ro "$PG_IMAGE" /backup
+   shasum -a 256 /private/backups/cut-001/backup_manifest > /private/backups/cut-001.manifest.sha256
+   # 仅在上述两步成功后执行；不删除外部副本。
+   docker compose -f /private/rendered/compose.json exec -T postgres rm -rf -- /tmp/identity-backup
+   ```
+
+4. 记录并独立保管 backup_manifest 摘要、PG system identifier/WAL 范围和切点时间；配置、证书、所需 system/cookie key 集合和当前服务秘密另行保管。Keycloak realm export 不能代替数据库备份。源端恢复写入后，该备份不再证明之后的安全状态。
 
 ## 恢复与开放
 
@@ -48,6 +58,7 @@
 
    ```sh
    docker compose -f /private/rendered/compose.json down
+   docker compose -p identity-restored -f /private/rendered/compose.json -f /private/restore-volume.json run --rm volume-init
    docker compose -p identity-restored -f /private/rendered/compose.json -f /private/restore-volume.json up -d postgres
    docker compose -p identity-restored -f /private/rendered/compose.json -f /private/restore-volume.json run --rm migrate
    docker compose -p identity-restored -f /private/rendered/compose.json -f /private/restore-volume.json up -d hydra hydra-admin keycloak

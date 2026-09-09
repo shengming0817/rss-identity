@@ -85,6 +85,61 @@ async fn control(c: &reqwest::Client, origin: &str, action: &str) -> anyhow::Res
     Ok(())
 }
 
+// Fresh admin authentication on every read avoids carrying an admin session across cuts.
+async fn keycloak_marker(create: bool) -> anyhow::Result<bool> {
+    let issuer = std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?;
+    let base = issuer.trim_end_matches("/realms/identity");
+    let pem = std::fs::read(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .add_root_certificate(reqwest::Certificate::from_pem(&pem)?)
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let token: serde_json::Value = client
+        .post(format!(
+            "{base}/realms/master/protocol/openid-connect/token"
+        ))
+        .form(&[
+            ("grant_type", "password"),
+            ("client_id", "admin-cli"),
+            ("username", "fixture-operator"),
+            ("password", "fixture-operator-password"),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let bearer = Zeroizing::new(
+        token["access_token"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("fixture admin token absent"))?
+            .to_owned(),
+    );
+    let url = format!("{base}/admin/realms/identity/users");
+    if create {
+        let result = client
+            .post(&url)
+            .bearer_auth(bearer.as_str())
+            .json(&json!({"username":"backup-cut-marker-2339", "enabled":false}))
+            .send()
+            .await?
+            .error_for_status()?;
+        assert_eq!(result.status(), reqwest::StatusCode::CREATED);
+    }
+    let users: Vec<serde_json::Value> = client
+        .get(url)
+        .bearer_auth(bearer.as_str())
+        .query(&[("username", "backup-cut-marker-2339"), ("exact", "true")])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    anyhow::ensure!(users.len() <= 1, "duplicate fixture marker");
+    Ok(!users.is_empty())
+}
+
 #[tokio::test]
 #[ignore = "make test-recovery: owns disposable backup/restore fixtures"]
 async fn physical_restore_preserves_the_selected_security_cut() -> anyhow::Result<()> {
@@ -191,7 +246,9 @@ async fn physical_restore_preserves_the_selected_security_cut() -> anyhow::Resul
         Arc::new(rss_identity_client::SystemClock),
     )?;
     sdk.validate(&token).await?;
+    assert!(!keycloak_marker(false).await?);
     control(&c, origin, "backup-old").await?;
+    assert!(keycloak_marker(true).await?);
     f.store
         .set_account_enabled(
             session_actor(&f.store, f.candidate().await?).await?,
@@ -230,6 +287,10 @@ async fn physical_restore_preserves_the_selected_security_cut() -> anyhow::Resul
     f.owner.close().await;
     f.admin.close().await;
     control(&c, origin, "restore-current").await?;
+    assert!(
+        keycloak_marker(false).await?,
+        "Keycloak current cut missing"
+    );
     let (store, runtime) = restored(&f.database, f.port, "fixture-only").await?;
     for name in ["disabled", "inactive-member", "emergency"] {
         assert!(
@@ -299,6 +360,10 @@ async fn physical_restore_preserves_the_selected_security_cut() -> anyhow::Resul
     // An earlier intact snapshot restores earlier account facts. No fictitious anti-rollback claim.
     // Only the fixture is inspected; no Identity listener is opened on this historical restore.
     control(&c, origin, "restore-old").await?;
+    assert!(
+        !keycloak_marker(false).await?,
+        "Keycloak historical cut not restored"
+    );
     let (old, old_runtime) = restored(&f.database, f.port, "fixture-only").await?;
     old.verify_password(
         f.key.tenant,

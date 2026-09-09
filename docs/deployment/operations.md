@@ -40,7 +40,7 @@ Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定�
 
 SIGTERM关闭admission并有界等待请求/响应、worker、实际KDF和PG。Compose stop_grace_period大于内部总预算。协议清理持久记录保存在PG，重启继续cleanup_once；应用不盲重试未知提交或远程接受。
 
-回退仅限支持同一schema和同一身份配置的应用artifact；不得回退DB撤销状态。v5开发库只能由owner确认可丢弃后重建；不自动down migration。首版禁止同库改变environment/origin/config代际，修改配置会明确拒绝；需要保留数据的origin迁移属于后续专门交付。
+回退仅限支持同一schema和同一身份配置的应用artifact；不得回退DB撤销状态。所有旧开发库（含v6）只能由owner确认可丢弃后重建；不自动down migration。首版禁止同库改变environment/origin/config代际，修改配置会明确拒绝；需要保留数据的origin迁移属于后续专门交付。
 
 维护恢复继续使用 identity-admin recover，详见[维护指南](../guides/local-maintenance.md)。MFA 见[assurance 指南](../guides/assurance.md)；备份恢复、凭据轮换与测量见[I09 运维步骤](recovery.md)。
 
