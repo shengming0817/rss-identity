@@ -118,3 +118,7 @@ schema version 2、事件 V1 payload、账户/租户/authority/lineage/epoch 的
 
 用户决定一个 PR 完成账户/本地凭据替换与全部联合身份闭环，不保留旧内存 LoginAttempt 或 schema 兼容。
 实现模型与安全边界由 [I05 ADR](adr/202609082050-2335-federated-identity.md) 持有，管理与接入见[指南](../guides/federation.md)。实际版本/SHA/lock、provider digest 和验证结果记录于实现 PR，不以文档更新代替运行验收。
+
+## I06 实施决定（#2336）
+
+[下游 ADR](adr/202609090513-2336-downstream-identity.md) 持有真实 Hydra bridge、唯一 PG 关联、只读在线验证与有界清理；[接入指南](../guides/downstream.md) 持有公共消费面。当前安装更新为 schema v5，替代 I05 的 v4，不保留兼容。实际验证结果和版本身份由实现 PR 持有。

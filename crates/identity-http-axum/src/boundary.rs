@@ -17,7 +17,7 @@ const SESSION_COOKIE_NAME: &str = "__Host-identity-session";
 #[derive(Clone)]
 pub struct HttpConfig {
     pub(crate) origin: String,
-    timeout: Duration,
+    pub(crate) timeout: Duration,
 }
 #[derive(Debug, thiserror::Error)]
 #[error("Identity requires a canonical HTTPS origin and a nonzero bounded request timeout")]

@@ -47,10 +47,26 @@ pub(crate) async fn lookup(
         tenant,
         principal: principal(&locator.try_get::<String, _>("principal_id")?)?,
     };
-    let state = load(c, key).await?.state;
     let id: String = locator.try_get("session_id")?;
+    let loaded = by_id(c, key, session_id(&id)?).await?;
+    let stored: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
+        .bind(tenant.to_string()).bind(&id).fetch_one(c).await?;
+    if stored != digest.as_slice() {
+        return Err(reject());
+    }
+    Ok(loaded)
+}
+/// Private shared authority check, only called after cookie or grant ownership was established.
+pub(crate) async fn by_id(
+    c: &mut PgConnection,
+    key: AccountKey,
+    sid: SessionId,
+) -> Result<Loaded, PgError> {
+    let tenant = key.tenant;
+    let id = sid.to_string();
+    let state = load(c, key).await?.state;
     let row = sqlx::query(concat!(
-        "SELECT auth_epoch,membership_epoch,auth_time,idle_expires_at,absolute_expires_at",
+        "SELECT principal_id,auth_epoch,membership_epoch,auth_time,idle_expires_at,absolute_expires_at",
         ",revoked_at,token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
         " AND session_id=$2::uuid FOR UPDATE"
     ))
@@ -59,11 +75,11 @@ pub(crate) async fn lookup(
     .fetch_optional(&mut *c)
     .await?
     .ok_or_else(reject)?;
-    if !state.active()
+    if row.try_get::<uuid::Uuid, _>("principal_id")? != key.principal.as_uuid()
+        || !state.active()
         || row.try_get::<i64, _>("auth_epoch")? != state.epoch()
         || row.try_get::<i64, _>("membership_epoch")? != state.membership_epoch()
         || row.try_get::<Option<i64>, _>("revoked_at")?.is_some()
-        || row.try_get::<Vec<u8>, _>("token_hash")? != digest.as_slice()
     {
         return Err(reject());
     }

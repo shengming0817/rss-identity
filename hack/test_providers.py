@@ -31,28 +31,6 @@ class CleanupTests(unittest.TestCase):
 
 
 class ProviderProofTests(unittest.TestCase):
-    def test_hydra_bind_collision_rebuilds_issuer(self):
-        import contextlib
-        seen = []
-        @contextlib.contextmanager
-        def fixture(image, ports, env, args):
-            seen.append((ports,dict(env)))
-            if len(seen) == 1:
-                raise subprocess.CalledProcessError(125, 'docker', stderr='bind: address already in use')
-            yield 'cid', {4444:ports[4444],4445:19003}
-        with patch('providers.free_port',side_effect=[19001,19002]), patch('providers.container',side_effect=fixture):
-            with providers.hydra() as (issuer, ports):
-                self.assertEqual(issuer,'http://127.0.0.1:19002/')
-                self.assertEqual(ports[4444],19002)
-        self.assertEqual([v['URLS_SELF_ISSUER'] for _,v in seen],['http://127.0.0.1:19001/','http://127.0.0.1:19002/'])
-
-    def test_hydra_only_retries_bind_collisions_and_stops(self):
-        for message, count in [('image unavailable',1),('port is already allocated',3)]:
-            with self.subTest(message=message), patch('providers.free_port',return_value=19001), patch('providers.container',side_effect=subprocess.CalledProcessError(125,'docker',stderr=message)) as fixture:
-                with self.assertRaises(subprocess.CalledProcessError):
-                    with providers.hydra(): self.fail('must not yield')
-                self.assertEqual(fixture.call_count,count)
-
     def test_diagnostics_precede_cleanup_and_do_not_leak(self):
         import io
         output=io.StringIO()

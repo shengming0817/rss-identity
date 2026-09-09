@@ -15,13 +15,13 @@ make ci
 
 ## 实际实现与证明范围
 
-- `rss-identity-core` 持有租户/issuer/client/audience 绑定及会话快照有效性检查。issuer/client/audience、principal/session、epoch/UnixTime 分别由私有字段 newtype 表达，参数互换有 compile-fail 验证。它不认证 HTTP 请求，也不把普通输入转换为 VerifiedContext。
+- `rss-identity-core` 持有账户、会话与下游协议策略；真实账户/member/session/source 判定归 PG authority，client 只在完成在线验证后返回可信上下文。旧绑定快照骨架已删除。
 - `rss-identity-postgres` 注入 RSS PgRuntime，具体账户操作与关闭的安全事件在同一事务提交；不再开放 I02 的任意 SQL/字节事件探针。明确保留回滚、回滚失败、提交不确定及 fencing。
 - `rss-identity-oidc` 通过 openidconnect 完成 discovery、Authorization Code + PKCE、state/nonce/ID token 校验，返回经过验证的上游 claims；I05 的 Federation 用例执行持久登录事务/JIT/关联及中央会话原子结算。出站由部署批准的 issuer origin/地址范围约束，DNS 解析后再次检查，禁隐式环境代理；后续端点保持 issuer 同源、禁止重定向、5 秒超时和 1 MiB 响应上限。生产配置必须 HTTPS，`test-support` 仅开放显式 loopback fixture 构造器。
 
-真实 PG 测试覆盖正常提交、SQL 失败回滚、CommitUnknownAfterAck、重复事件、跨租户 RLS 与 outbox 绑定。真实 Keycloak/Hydra 测试覆盖发现、code exchange、S256、重放、错误 state/nonce/verifier/redirect 及 provider 不可用。补充签名 token 的 azp/issuer/audience/expiry 负例、外源 discovery/JWKS、禁止跳转、响应上限和容器清理失败测试。Hydra 的 login/consent 接受逻辑是测试夹具，不是 Identity authority 实现。
+真实 PG 测试覆盖正常提交、SQL 失败回滚、CommitUnknownAfterAck、重复事件、跨租户 RLS 与 outbox 绑定。真实 Keycloak 上游与 Hydra 下游测试覆盖发现、code exchange、S256、重放、错误 state/nonce/verifier/redirect 及 provider 不可用。补充签名 token 的 azp/issuer/audience/expiry 负例、外源 discovery/JWKS、禁止跳转、响应上限和容器清理失败测试。Hydra 下游测试运行真实 Identity bridge，见[下游接入](downstream.md)。
 
-固定容器版本与摘要的单源为 `hack/providers.py`：PostgreSQL 17.6、Keycloak 26.7.3、Hydra v26.2.0。首次执行会拉取镜像。此测试不证明生产 TLS、持久化 Hydra、Keycloak 升级、生产恢复流程或 MDM 接入；这些由 #2333–#2343 各自验收。会话验证 HTTP wire 文档是 I01 契约，尚无可启动产品 binary。
+固定容器版本与摘要的单源为 `hack/providers.py`：PostgreSQL 17.6、Keycloak 26.7.3、Hydra v26.2.0。首次执行会拉取镜像。此测试不证明生产 TLS、持久化 Hydra、Keycloak 升级、生产恢复流程或 MDM 接入；这些由 #2333–#2343 各自验收。在线身份验证已由 I06 router/client 提供，尚无可启动产品 binary。
 
 ## 独立消费复核
 
@@ -30,7 +30,7 @@ make ci
 ## 门禁与已接受风险
 
 Provider runner 先枚举 canonical ignored 测试集合，再核对完整执行名及 passed/failed/ignored/filtered 计数；
-零测试或部分执行直接失败。Hydra 仅对端口绑定冲突最多尝试三次，每次整体重建 issuer 配置。
+零测试或部分执行直接失败。Hydra 下游使用已绑定的 TLS gateway 地址生成 issuer，provider 随机端口由 Docker 分配。
 失败时在移除容器前输出 provider、退出状态和有界日志尾部的安全统计；原始日志文本全部不输出，
 避免任意 provider 输出中的 token/password/URL 泄漏。readiness 错误保留 HTTP 状态或错误类别；诊断/清理异常不覆盖原始失败。
 
@@ -108,7 +108,7 @@ identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 
 `rss_identity_http_axum::router(authority, HttpConfig::new(origin, timeout)?)?` 返回 Router（构造时拒绝 Maintenance authority）；authority 必须使用 Runtime 数据库身份。origin 是显式 canonical HTTPS origin（无尾斜线、路径、userinfo、query、fragment），timeout 为非零且不超过 60 秒。使用真实连接的 `ConnectInfo<SocketAddr>` 提供登录尝试来源；反向代理的可信客户端地址接缝归装配方，不直接接受 X-Forwarded-For。不能给 Router 添加跨源凭据开放。
 
-[会话 wire](../architecture/identity-wire-v1.md#中央会话-httpi04) 定义 cookie、Origin、CSRF 和分页。日志/反代不能记录 Cookie、Set-Cookie、口令 body 或 CSRF；不把 session 响应缓存为新请求认证。新增 PG+Router 测试由 make test-pg 运行，界面、listener/TLS 与 Hydra/MDM 产品交接仍未由本项交付。
+[会话 wire](../architecture/identity-wire-v1.md#中央会话-httpi04) 定义 cookie、Origin、CSRF 和分页。日志/反代不能记录 Cookie、Set-Cookie、口令 body 或 CSRF；不把 session 响应缓存为新请求认证。新增 PG+Router 测试由 make test-pg 运行，界面与生产 listener/TLS 仍由后续 owner 提供；I06 的 Hydra 下游验证见下游指南，真实 MDM 接入独立。
 
 HTTP 外部错误保持模糊；宿主可从 response extensions 读取 `HttpFailure`，区分内部 AuthorityError（含 CommitUnknown/RollbackFailed/Fenced）与 RequestTimeout。该分类不含 SQL/provider 原文，不作为自动重试许可。body 读取受 HTTP timeout 限制；下游操作接收原截止点的剩余预算，由 Authority/RSS 完成有界结算。宿主不应再用同截止点的通用 timeout 包住会话 Router，否则取消写 future 会丢失 CommitUnknown/RollbackFailed 分类；取消本身不证明回滚。
 

@@ -2,7 +2,6 @@
 use reqwest::{Client, Response, Url};
 use rss_identity_core::federation::*;
 use rss_identity_oidc::{ApprovedProvider, HttpOidc};
-use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -82,52 +81,16 @@ async fn keycloak_login(url: Url) -> anyhow::Result<Url> {
         .await?;
     location(&response)
 }
-async fn hydra_login(url: Url, admin: &str) -> anyhow::Result<Url> {
-    // Test-only login/consent fixture. No production authority is implemented by this test.
-    let browser = browser()?;
-    let login_url = location(&browser.get(url).send().await?)?;
-    let challenge = query(&login_url, "login_challenge")?;
-    let accepted: Value = browser
-        .put(format!("{admin}/admin/oauth2/auth/requests/login/accept"))
-        .query(&[("login_challenge", challenge)])
-        .json(&json!({"subject":"fixture-principal", "remember":false}))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let consent_url = location(
-        &browser
-            .get(accepted["redirect_to"].as_str().unwrap())
-            .send()
-            .await?,
-    )?;
-    let challenge = query(&consent_url, "consent_challenge")?;
-    let accepted: Value = browser.put(format!("{admin}/admin/oauth2/auth/requests/consent/accept")).query(&[("consent_challenge",challenge)]).json(&json!({"grant_scope":["openid","profile"],"remember":false,"session":{"id_token":{"tenant_id":"fixture-tenant"}}})).send().await?.error_for_status()?.json().await?;
-    location(
-        &browser
-            .get(accepted["redirect_to"].as_str().unwrap())
-            .send()
-            .await?,
-    )
-}
-async fn callback(url: Url, admin: Option<&str>) -> anyhow::Result<Url> {
-    if let Some(admin) = admin {
-        hydra_login(url, admin).await
-    } else {
-        keycloak_login(url).await
-    }
-}
 async fn prepare(p: &HttpOidc, c: &ProviderSettings) -> anyhow::Result<(Url, ProtocolMaterial)> {
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let url = p.prepare(tenant(), c, &material, false).await?;
     Ok((Url::parse(&url)?, material))
 }
-async fn flow(issuer: &str, admin: Option<&str>) -> anyhow::Result<()> {
+async fn flow(issuer: &str) -> anyhow::Result<()> {
     let (p, c) = provider(issuer)?;
     let (url, material) = prepare(&p, &c).await?;
     assert_eq!(query(&url, "code_challenge_method")?, "S256");
-    let cb = callback(url, admin).await?;
+    let cb = keycloak_login(url).await?;
     assert_eq!(query(&cb, "state")?, material.state.as_str());
     let code = query(&cb, "code")?;
     let claims = p
@@ -159,7 +122,7 @@ async fn flow(issuer: &str, admin: Option<&str>) -> anyhow::Result<()> {
             .clear()
             .extend_pairs(pairs)
             .append_pair(field, value);
-        let cb = callback(url, admin).await?;
+        let cb = keycloak_login(url).await?;
         assert!(
             matches!(p.exchange(tenant(), &c,material,Zeroizing::new(query(&cb,"code")?)).await,Err(e) if e==error)
         );
@@ -184,15 +147,10 @@ async fn flow(issuer: &str, admin: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 #[tokio::test]
-#[ignore = "requires isolated Keycloak and Hydra; make test-oidc starts both"]
+#[ignore = "requires isolated Keycloak; make test-oidc"]
 async fn real_provider_flows() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(120), async {
-        flow(&std::env::var("IDENTITY_TEST_KEYCLOAK_ISSUER")?, None).await?;
-        flow(
-            &std::env::var("IDENTITY_TEST_HYDRA_ISSUER")?,
-            Some(&std::env::var("IDENTITY_TEST_HYDRA_ADMIN")?),
-        )
-        .await?;
+        flow(&std::env::var("IDENTITY_TEST_KEYCLOAK_ISSUER")?).await?;
         let (p, c) = provider("http://127.0.0.1:1")?;
         assert!(p.test(tenant(), &c).await.is_err());
         Ok::<(), anyhow::Error>(())

@@ -1,5 +1,9 @@
 //! Tenant-local account authority. SQL and event envelopes are private implementation details.
 mod attempts;
+mod downstream;
+mod downstream_cleanup;
+mod downstream_storage;
+pub use downstream::{Downstream, FlowHandle, PrepareAdmission, ValidatedIdentity};
 mod federation;
 mod federation_link;
 mod federation_login;
@@ -72,7 +76,7 @@ impl Authority {
                                 return Ok(Some(inventory));
                             }
                             let versions:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *c).await?;
-                            if versions != [4] {return Ok(Some("schema-version".into()));}
+                            if versions != [5] {return Ok(Some("schema-version".into()));}
                             let signature:String=sqlx::query_scalar(include_str!("schema-signature.sql")).fetch_one(&mut *c).await?;
                             if signature != include_str!("schema-signature.sha256").trim() { return Ok(Some("schema-contract".into())); }
                             sqlx::query_scalar::<_, Option<String>>(include_str!("probe.sql"))

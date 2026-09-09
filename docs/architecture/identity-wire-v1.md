@@ -1,6 +1,6 @@
-# Identity v1 wire 草案
+# Identity v1 wire
 
-I01 Owner：#2331；下述 internal validate 的实现 owner 为 #2336，目前仍是草案。I04 中央会话 Router 已实现，见末节；listener/TLS 属于后续装配。标准 OIDC discovery/authorize/token/JWKS/logout 由 Hydra 提供，不在 Identity 复制同名端点。
+I01 协议 owner：#2331；internal validate 和下游 bridge 的实现 owner 为 #2336，见[接入指南](../guides/downstream.md)。I04 中央会话 Router 已实现，见末节；listener/TLS 属于后续装配。标准 OIDC discovery/authorize/token/JWKS/logout 由 Hydra 提供，不在 Identity 复制同名端点。
 
 ## POST /internal/v1/identity/validate
 
@@ -12,7 +12,7 @@ I01 Owner：#2331；下述 internal validate 的实现 owner 为 #2336，目前�
 
 流程：认证 client → 有界 Hydra introspection → 检查 tenant/client/audience/issuer 与精确 grant/session 关联 → 读取 Identity 当前状态/epoch/expiry → 输出事实。任何一步失败都不返回部分可信上下文。
 
-错误：400 malformed_request；401 invalid_client/invalid_credential（外部不区分详细原因）；403 identity_not_active（不暴露账户存在性）；503 identity_unavailable（存储/上游不可用）；请求预算耗尽 503。响应 `Cache-Control: no-store`；error 仅 code 和不含敏感信息的 correlation_id。
+错误：400 malformed_request；401 invalid_client/invalid_credential（外部不区分详细原因）；403 identity_not_active（不暴露账户存在性）；503 identity_unavailable（存储/上游不可用）；请求预算耗尽 503。宿主通过 DownstreamDiagnostic 读取安全内部分类及同一 correlation_id；client 的 Error::Server 保留闭集 code 和 correlation UUID。响应 `Cache-Control: no-store`；error 仅 code 和不含敏感信息的 correlation_id。
 
 ## 产品浏览器回调
 
@@ -20,7 +20,7 @@ I01 Owner：#2331；下述 internal validate 的实现 owner 为 #2336，目前�
 
 ## 演进与来源
 
-新可选字段仅在旧 consumer 可忽略时增加；身份字段含义、错误安全语义和隔离边界变化使用新 major。未知 auth strength 不提升 assurance，未知必要 identity enum 拒绝。I02 的 core 是绑定规则库，不提供反序列化即可构造的 VerifiedIdentityContext。
+新可选字段仅在旧 consumer 可忽略时增加；身份字段含义、错误安全语义和隔离边界变化使用新 major。未知 auth strength 不提升 assurance，未知必要 identity enum 拒绝。首版 amr 为本地 pwd 或联合空数组，acr 为 unspecified；首版省略可选 groups。I02 绑定骨架已由真实 authority/client 路径替换；wire DTO 不等于可信上下文，只有 client 在线验证成功返回 VerifiedIdentity。
 
 ## 中央会话 HTTP（I04）
 

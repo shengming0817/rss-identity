@@ -91,3 +91,18 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - [RustCrypto HMAC](https://github.com/RustCrypto/MACs/blob/hmac-v0.12.1/hmac/src/lib.rs)：HMAC-SHA256 与常量时间验证；复用算法，state 编码/租户/浏览器/单次事务由 Identity 持有。
 - 固定 RSS bf5dd1350997d01aa834094a3347fce30247814e `crates/transactional-messaging-postgres/src/transaction.rs`：读取私有 pool 与 tenant-bound local_tx/with_connection；使用同一个有界结算 owner，不新增无租户 SQL 旁路。
 - reqwest 0.12.28 发布源码的 `src/dns/resolve.rs`、`src/async_impl/client.rs`：复用 resolver/HTTPS/no_proxy/redirect policy，不复制网络栈。
+
+## I06 下游来源
+
+- [Hydra flow 映射](https://github.com/ory/hydra/blob/0b84568fffccf151dc5e6c7955fdfb738555bf4b/flow/flow.go#L401-L425)：consent login_challenge 为内部 flow ID；采用受信 context 传递本地 grant 定位符。
+- [Hydra introspection](https://github.com/ory/hydra/blob/0b84568fffccf151dc5e6c7955fdfb738555bf4b/oauth2/handler.go#L1031-L1081)：ext 仅作关联定位，当前身份由 PG 复核。
+- [Hydra 精确撤销](https://github.com/ory/hydra/blob/0b84568fffccf151dc5e6c7955fdfb738555bf4b/consent/handler.go#L64-L141)：按 consent_request_id 清理；204 不替代迟到 verifier 的窗口证明。
+
+## PR #972 fix 参考（2026-09-09）
+
+- [oauth2-rs secret types](https://github.com/ramosbugs/oauth2-rs/blob/main/oauth2/src/types.rs)：读取独立 CSRF/PKCE secret 类型及脱敏实现；BrowserBindingSecret 由 Identity 自己持有，未复制宏或引入通用 credential 层。
+- [Tokio Semaphore](https://github.com/tokio-rs/tokio/blob/master/tokio/src/sync/semaphore.rs)：读取 try_acquire/RAII permit 与请求并发限制示例；直接复用现有 Tokio，PrepareAdmission 使用无队列拒绝及共享窗口预算。
+- [AWS Smithy time source](https://github.com/awslabs/smithy-rs/blob/main/rust-runtime/aws-smithy-async/src/time.rs)：读取显式时间依赖与系统实现；client 只需要 Unix 秒窄 port，不依赖服务器账户/runtime crate。
+- Hydra 固定 revision 的 consent/handler.go（见 I06 来源）：复核精确撤销和幂等204；补 PG 领取、远程失败、结算未知与最终事件恢复验证，不以204推断迟到窗口结束。
+
+前三项为本次读取的上游分支快照参考，只用于设计模式，不复制源码或新增依赖；构建身份仍由本仓 lock 持有。

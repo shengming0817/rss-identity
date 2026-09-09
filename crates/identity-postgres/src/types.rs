@@ -46,6 +46,8 @@ pub enum AuthorityError {
     #[error("invalid account input")]
     Invalid,
     #[error(transparent)]
+    Downstream(#[from] rss_identity_core::downstream::DownstreamError),
+    #[error(transparent)]
     Federation(#[from] rss_identity_core::federation::FederationError),
     #[error("authentication or operation rejected")]
     Rejected,

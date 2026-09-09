@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["tenant","grant_id","action"],"properties":{"tenant":{"type":"string"},"grant_id":{"type":"string","format":"uuid"},"action":{"enum":["prepared","login_claimed","login_accepted","consent_claimed","active","revoking","cleaned"]}}}

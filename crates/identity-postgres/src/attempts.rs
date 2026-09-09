@@ -45,3 +45,25 @@ impl Authority {
         }
     }
 }
+
+impl Authority {
+    /// Per registered client, independently committed. Invalid/replayed attempts do not refund it.
+    pub(crate) async fn reserve_downstream(
+        &self,
+        t: TenantId,
+        client: String,
+        d: OperationDeadline,
+    ) -> Result<(), AuthorityError> {
+        let allowed=self.read_sql(t,d,move|c|Box::pin(async move{
+            crate::storage::lock_guard(c,t).await?;
+            let count:i32=sqlx::query_scalar("INSERT INTO identity_authority.attempts VALUES($1::uuid,$2,1,clock_timestamp()+interval '60 seconds') ON CONFLICT(tenant_id,key) DO UPDATE SET count=CASE WHEN identity_authority.attempts.expires_at<=clock_timestamp() THEN 1 ELSE LEAST(identity_authority.attempts.count+1,61) END,expires_at=CASE WHEN identity_authority.attempts.expires_at<=clock_timestamp() THEN excluded.expires_at ELSE identity_authority.attempts.expires_at END RETURNING count")
+                .bind(t.to_string()).bind(format!("downstream:{client}")).fetch_one(c).await?;
+            Ok(count<=60)
+        })).await?;
+        if allowed {
+            Ok(())
+        } else {
+            Err(AuthorityError::RateLimited)
+        }
+    }
+}

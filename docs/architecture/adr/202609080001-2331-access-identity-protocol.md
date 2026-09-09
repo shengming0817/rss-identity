@@ -12,7 +12,7 @@ Identity 自有 AuthN、Principal、TenantMembership、联合身份、中央认�
 
 - Principal 是全局、不透明、非空 UUID；TenantMembership 明确关联 tenant/principal，带有效性和单调 epoch。认证 session 固定一个 tenant；切租户必须重新形成该租户的授权上下文。
 - 联合身份键为 tenant/provider/issuer/subject；email 不是身份键，不自动合并。groups 带来源和 mapping version，仅供 MDM 自行授权。
-- 产品凭据绑定 issuer/client/audience/tenant/session；subject 为按 tenant/client 隔离的稳定不透明映射，不向产品暴露可跨产品关联的内部 PrincipalId。该映射在 I06 持久化实现。
+- 产品凭据绑定 issuer/client/audience/tenant/session；subject 为按 tenant/client 隔离的稳定不透明映射，不向产品暴露可跨产品关联的内部 PrincipalId。该映射由 [I06](202609090513-2336-downstream-identity.md) 持久化实现。
 - 客户端元数据不构成 DeviceContext，Identity 管理员不自动获得 MDM 权限。首期 MDM 单租户不接纳 MSP/M2M。
 
 ## 登录路径和 UI
@@ -58,7 +58,7 @@ I06 覆盖基础设施不可用时不发产品凭据；I09 覆盖应急使用后
 
 Identity 失效事务提交后开始的复核必须拒绝；已通过复核的在途操作不追溯取消。密码变化、禁用、全会话退出提升对应身份 epoch；当前会话退出使该 session 失效。协议凭据清理/后通道通知加速下游退出；通知失败或 Hydra 旧凭据不恢复 Identity 状态。首期不提供离线认证模式，不承诺上游 IdP 禁用能被即时发现或全局退出。
 
-Identity 的状态和安全事件同 PG 事务；Hydra challenge 接受/token 发放不与此事务原子。先提交 Identity 状态，提交未知不接受 challenge；远程接受结果未知不盲重试，不返回成功，后续 I06 须证明通过关联和失效补偿消除孤儿授权。异常/日志不得泄漏 code、token、cookie、verifier、client secret。
+Identity 的状态和安全事件同 PG 事务；Hydra challenge 接受/token 发放不与此事务原子。先提交 Identity 状态，提交未知不接受 challenge；远程接受结果未知不盲重试，不返回成功，I06 按精确关联及持续到窗口末端的失效补偿处理孤儿授权。异常/日志不得泄漏 code、token、cookie、verifier、client secret。
 
 Hydra admin API 不公开，由 Identity 服务身份和受控网络独占；TLS/出站目标限制包含 discovery、JWKS、token，HTTP 自动重定向关闭。上游配置变更/停用使相应在途事务失败，不重取当前配置偷偷换 authority。
 

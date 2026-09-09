@@ -11,6 +11,8 @@ WITH protected AS (
  ('runtime','local_credentials','SELECT'),('runtime','local_credentials','INSERT'),('runtime','local_credentials','UPDATE'),
  ('maintenance','local_credentials','SELECT'),('maintenance','local_credentials','INSERT'),
  ('runtime','providers','SELECT'),('runtime','providers','INSERT'),('runtime','providers','UPDATE'),('runtime','external_identities','SELECT'),('runtime','external_identities','INSERT'),('runtime','external_identities','UPDATE'),('runtime','link_intents','SELECT'),('runtime','link_intents','INSERT'),('runtime','link_intents','UPDATE'),('runtime','link_intents','DELETE'),('runtime','oidc_transactions','SELECT'),('runtime','oidc_transactions','INSERT'),('runtime','oidc_transactions','UPDATE'),('runtime','oidc_transactions','DELETE'),
+ ('runtime','product_subjects','SELECT'),('runtime','product_subjects','INSERT'),
+ ('runtime','downstream_grants','SELECT'),('runtime','downstream_grants','INSERT'),('runtime','downstream_grants','UPDATE'),('runtime','downstream_grants','DELETE'),
  ('runtime','accounts','SELECT'),('runtime','accounts','INSERT'),('runtime','accounts','UPDATE'),
  ('runtime','memberships','SELECT'),('runtime','memberships','INSERT'),('runtime','memberships','UPDATE'),
  ('runtime','attempts','SELECT'),('runtime','attempts','INSERT'),('runtime','attempts','UPDATE'),('runtime','attempts','DELETE'),
@@ -33,7 +35,7 @@ WITH protected AS (
  WHERE n.nspname='identity_authority' AND c.relkind='r'
 ), checks AS (
  SELECT
- (SELECT count(*)=1 AND bool_and(version=4) FROM identity_authority.schema_version) AS version_ok,
+ (SELECT count(*)=1 AND bool_and(version=5) FROM identity_authority.schema_version) AS version_ok,
  ((SELECT count(*)=2 AND bool_and(NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication) FROM groups)
  AND (SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication FROM pg_roles WHERE rolname=current_user)
  AND NOT EXISTS(SELECT FROM pg_roles WHERE pg_has_role(current_user,oid,'MEMBER') AND (rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication))

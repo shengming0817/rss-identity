@@ -1,7 +1,7 @@
 -- Identity owns this migration identity; RSS message schema is installed separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=4));
-INSERT INTO identity_authority.schema_version VALUES(4);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=5));
+INSERT INTO identity_authority.schema_version VALUES(5);
 CREATE ROLE identity_account_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE ROLE identity_account_maintenance NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE TABLE identity_authority.deployment (
@@ -80,7 +80,7 @@ CREATE TABLE identity_authority.sessions (
  CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL) OR (external_identity_id IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND octet_length(auth_facts::text)<=32768)),
  FOREIGN KEY(tenant_id,principal_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,principal_id,identity_id),
  PRIMARY KEY(tenant_id,session_id),
- UNIQUE(tenant_id,token_hash),
+ UNIQUE(tenant_id,token_hash), UNIQUE(tenant_id,principal_id,session_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts,
  CONSTRAINT session_lifetime CHECK(auth_time < idle_expires_at AND idle_expires_at <= absolute_expires_at),
  CONSTRAINT session_duration CHECK(absolute_expires_at::numeric-auth_time::numeric IN (14400,28800)),
@@ -121,8 +121,36 @@ CREATE TABLE identity_authority.oidc_transactions (
 );
 CREATE INDEX oidc_expiry ON identity_authority.oidc_transactions(tenant_id,expires_at);
 CREATE INDEX link_expiry ON identity_authority.link_intents(tenant_id,expires_at);
+CREATE TABLE identity_authority.product_subjects (
+ tenant_id uuid NOT NULL, client_id text NOT NULL CHECK(octet_length(client_id) BETWEEN 1 AND 256),
+ principal_id uuid NOT NULL, subject text NOT NULL CHECK(octet_length(subject)=64),
+ PRIMARY KEY(tenant_id,client_id,principal_id), UNIQUE(tenant_id,client_id,subject), UNIQUE(tenant_id,client_id,principal_id,subject),
+ FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts
+);
+CREATE TABLE identity_authority.downstream_grants (
+ tenant_id uuid NOT NULL REFERENCES identity_authority.guard, grant_id uuid NOT NULL CHECK(grant_id <> '00000000-0000-0000-0000-000000000000'),
+ client_id text NOT NULL CHECK(octet_length(client_id) BETWEEN 1 AND 256), config_version bigint NOT NULL CHECK(config_version>0),
+ registration_hash bytea NOT NULL CHECK(octet_length(registration_hash)=32),
+ principal_id uuid, session_id uuid, subject text,
+ login_hash bytea NOT NULL CHECK(octet_length(login_hash)=32), consent_hash bytea CHECK(octet_length(consent_hash)=32),
+ browser_hash bytea NOT NULL CHECK(octet_length(browser_hash)=32),
+ hydra_sid text NOT NULL CHECK(octet_length(hydra_sid) BETWEEN 1 AND 512), consent_id text CHECK(octet_length(consent_id) BETWEEN 1 AND 512),
+ state smallint NOT NULL CHECK(state BETWEEN 0 AND 5),
+ created_at bigint NOT NULL CHECK(created_at>0), expires_at bigint NOT NULL, horizon bigint NOT NULL,
+ next_attempt bigint NOT NULL, lease_until bigint NOT NULL DEFAULT 0,
+ PRIMARY KEY(tenant_id,grant_id), UNIQUE(tenant_id,login_hash), UNIQUE(tenant_id,consent_hash), UNIQUE(tenant_id,consent_id),
+ FOREIGN KEY(tenant_id,session_id) REFERENCES identity_authority.sessions,
+ FOREIGN KEY(tenant_id,client_id,principal_id,subject) REFERENCES identity_authority.product_subjects(tenant_id,client_id,principal_id,subject),
+ FOREIGN KEY(tenant_id,principal_id,session_id) REFERENCES identity_authority.sessions(tenant_id,principal_id,session_id),
+ CHECK((principal_id IS NULL AND session_id IS NULL AND subject IS NULL) OR (principal_id IS NOT NULL AND session_id IS NOT NULL AND subject IS NOT NULL)),
+ CHECK(state IN(0,5) OR session_id IS NOT NULL),
+ CHECK(state NOT IN(3,4) OR (consent_id IS NOT NULL AND consent_hash IS NOT NULL)),
+ CHECK(created_at<expires_at AND expires_at<=horizon), CHECK(next_attempt>=created_at AND lease_until>=0)
+);
+CREATE INDEX downstream_client ON identity_authority.downstream_grants(tenant_id,client_id);
+CREATE INDEX downstream_sweep ON identity_authority.downstream_grants(tenant_id,next_attempt,grant_id);
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['guard','local_credentials','accounts','memberships','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
+ FOREACH t IN ARRAY ARRAY['guard','local_credentials','accounts','memberships','attempts','sessions','providers','external_identities','link_intents','oidc_transactions','product_subjects','downstream_grants'] LOOP
  EXECUTE format('ALTER TABLE identity_authority.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE identity_authority.%I FORCE ROW LEVEL SECURITY',t);
  EXECUTE format('CREATE POLICY tenant ON identity_authority.%I USING (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',t);
@@ -147,3 +175,6 @@ GRANT SELECT,INSERT,UPDATE ON identity_authority.sessions TO identity_account_ru
 
 GRANT SELECT,INSERT,UPDATE ON identity_authority.providers,identity_authority.external_identities TO identity_account_runtime;
 GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.link_intents,identity_authority.oidc_transactions TO identity_account_runtime;
+
+GRANT SELECT,INSERT ON identity_authority.product_subjects TO identity_account_runtime;
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.downstream_grants TO identity_account_runtime;

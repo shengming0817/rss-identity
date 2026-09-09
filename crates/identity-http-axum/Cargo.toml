@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 [dependencies]
+rss-identity-contracts.workspace = true
+base64 = "0.22"
+sha2.workspace = true
+subtle = "2.6"
+uuid.workspace = true
 rss-identity-core.workspace = true
 rss-identity-postgres = { path = "../identity-postgres" }
 rss-request-context.workspace = true
@@ -17,6 +22,8 @@ thiserror.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
 [dev-dependencies]
+rss-identity-client = { path = "../identity-client" }
+rss-identity-hydra = { path = "../identity-hydra" }
 rss-identity-oidc = { path = "../identity-oidc" }
 reqwest = { workspace = true, features = ["cookies"] }
 scraper = "0.26"

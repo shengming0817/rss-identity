@@ -57,6 +57,7 @@ pub(crate) enum SecurityEvent {
     Account(AccountEvent),
     Session(crate::sessions::SessionEvent),
     Federation(crate::federation::FederationEvent),
+    Downstream(crate::downstream::DownstreamEvent),
 }
 impl SecurityEvent {
     pub fn account(action: SecurityAction, state: AccountState, actor: Option<AccountKey>) -> Self {
@@ -64,6 +65,7 @@ impl SecurityEvent {
     }
     fn tenant(&self) -> &str {
         match self {
+            Self::Downstream(v) => &v.tenant,
             Self::Account(v) => &v.tenant,
             Self::Session(v) => &v.tenant,
             Self::Federation(v) => &v.tenant,
@@ -71,6 +73,12 @@ impl SecurityEvent {
     }
     fn contract(&self) -> (&'static str, &'static str, u32, &'static str) {
         match self {
+            Self::Downstream(_) => (
+                "downstream.changed",
+                "identity.downstream.security",
+                1,
+                include_str!("downstream-security-event-v1.json"),
+            ),
             Self::Account(_) => (
                 "account.changed",
                 "identity.account.security",
@@ -100,6 +108,8 @@ pub(crate) enum MutationError {
     Rule(#[from] AccountRuleError),
     #[error(transparent)]
     Federation(#[from] rss_identity_core::federation::FederationError),
+    #[error(transparent)]
+    Downstream(#[from] rss_identity_core::downstream::DownstreamError),
 }
 impl From<sqlx::Error> for MutationError {
     fn from(error: sqlx::Error) -> Self {
@@ -233,6 +243,46 @@ impl Authority {
             + Send
             + 'static,
     {
+        self.settle_events(tenant, deadline, operation, true).await
+    }
+    /// Conditional domain transition: empty events are permitted only for unchanged business state.
+    pub(crate) async fn conditional_write_sql<T: Send + 'static, F>(
+        &self,
+        tenant: TenantId,
+        deadline: OperationDeadline,
+        work: F,
+    ) -> Result<T, AuthorityError>
+    where
+        F: for<'a> FnOnce(
+                &'a mut sqlx::PgConnection,
+            )
+                -> BoxFuture<'a, Result<(T, Vec<SecurityEvent>), MutationError>>
+            + Send
+            + 'static,
+    {
+        self.settle_events(
+            tenant,
+            deadline,
+            move |tx| Box::pin(async move { connection(tx, work).await }),
+            false,
+        )
+        .await
+    }
+    async fn settle_events<T: Send, F>(
+        &self,
+        tenant: TenantId,
+        deadline: OperationDeadline,
+        operation: F,
+        require_event: bool,
+    ) -> Result<T, AuthorityError>
+    where
+        F: for<'a> FnOnce(
+                &'a mut PgTransaction<'_>,
+            )
+                -> BoxFuture<'a, Result<(T, Vec<SecurityEvent>), MutationError>>
+            + Send
+            + 'static,
+    {
         let outbox = self.outbox.clone();
         let reason = std::sync::Arc::new(std::sync::OnceLock::new());
         let reason_slot = reason.clone();
@@ -242,7 +292,7 @@ impl Authority {
                     let (result, events) = operation(tx)
                         .await
                         .map_err(|e| sql_failure(e, &reason_slot))?;
-                    if events.is_empty() || events.len() > 8 {
+                    if (require_event && events.is_empty()) || events.len() > 8 {
                         return Err(corrupt());
                     }
                     for event in events {
@@ -320,6 +370,10 @@ fn sql_failure(error: MutationError, reason: &std::sync::OnceLock<AuthorityError
         MutationError::Storage(e) => e,
         MutationError::Rule(e) => {
             let _ = reason.set(AuthorityError::RuleRejected(e));
+            reject()
+        }
+        MutationError::Downstream(e) => {
+            let _ = reason.set(AuthorityError::Downstream(e));
             reject()
         }
         MutationError::Federation(e) => {

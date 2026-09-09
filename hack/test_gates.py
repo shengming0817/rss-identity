@@ -19,9 +19,16 @@ class Gates(unittest.TestCase):
 
     def test_workspace_identity_and_binary(self):
         members = [p for p in self.metadata['packages'] if p['id'] in self.metadata['workspace_members']]
-        self.assertEqual({p['name'] for p in members}, {'rss-identity-core', 'rss-identity-postgres', 'rss-identity-oidc', 'rss-identity-admin', 'rss-identity-http-axum'})
+        self.assertEqual({p['name'] for p in members}, {'rss-identity-core', 'rss-identity-postgres', 'rss-identity-oidc', 'rss-identity-admin', 'rss-identity-http-axum', 'rss-identity-hydra', 'rss-identity-contracts', 'rss-identity-client'})
         binaries = [t['name'] for p in members for t in p['targets'] if 'bin' in t['kind']]
         self.assertEqual(binaries, ['identity-admin'])
+
+    def test_independent_consumer_rejects_server_dependencies(self):
+        import check_consumer
+        metadata=json.loads(subprocess.check_output(['cargo','metadata','--locked','--format-version','1','--manifest-path','tests/consumer/Cargo.toml']))
+        check_consumer.check(metadata)
+        metadata['packages'].append({'id':'forbidden','name':'rss-identity-postgres','source':None})
+        with self.assertRaises(ValueError):check_consumer.check(metadata)
 
     def test_local_identity_packages_preserve_rss_source_checks(self):
         deps.check(self.metadata, self.manifest)
@@ -53,13 +60,13 @@ class Gates(unittest.TestCase):
         self.assertEqual(calls[-1].kwargs['env']['CARGO_NET_OFFLINE'],'true')
 
     def test_provider_zero_tests_rejected(self):
-        with patch('providers.subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout='0 tests, 0 benchmarks\n')):
+        with patch('providers.bounded_run',return_value=subprocess.CompletedProcess([],0,stdout='0 tests, 0 benchmarks\n')):
             with self.assertRaises(RuntimeError): providers.cargo('rss-identity-oidc','provider',{})
 
     def test_provider_partial_execution_rejected(self):
         listing='real_provider_flows: test\n\n1 test, 0 benchmarks\n'
         result='test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\n'
-        with patch('providers.subprocess.run',side_effect=[subprocess.CompletedProcess([],0,stdout=listing),subprocess.CompletedProcess([],0,stdout=result)]):
+        with patch('providers.bounded_run',side_effect=[subprocess.CompletedProcess([],0,stdout=listing),subprocess.CompletedProcess([],0,stdout=result)]):
             with self.assertRaises(RuntimeError): providers.cargo('rss-identity-oidc','provider',{})
 
     def test_production_features_do_not_include_test_support(self):

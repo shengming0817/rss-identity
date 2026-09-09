@@ -2126,6 +2126,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-identity-client"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "rss-identity-contracts",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "rss-identity-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "rss-identity-core"
 version = "0.1.0"
 dependencies = [
@@ -2151,9 +2172,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "futures",
  "reqwest",
+ "rss-identity-client",
+ "rss-identity-contracts",
  "rss-identity-core",
+ "rss-identity-hydra",
  "rss-identity-oidc",
  "rss-identity-postgres",
  "rss-request-context",
@@ -2162,12 +2187,28 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
+ "subtle",
  "thiserror 2.0.20",
  "tokio",
  "tower",
  "url",
  "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "rss-identity-hydra"
+version = "0.1.0"
+dependencies = [
+ "ipnet",
+ "reqwest",
+ "rss-identity-core",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
  "zeroize",
 ]
 
@@ -2196,6 +2237,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
+ "rand_core 0.6.4",
  "rss-contract",
  "rss-identity-core",
  "rss-request-context",

@@ -14,6 +14,7 @@ import time
 import urllib.request
 import urllib.error
 import uuid
+from bounded_process import run as bounded_run
 
 ROOT = Path(__file__).resolve().parent.parent
 PG = "postgres:17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929"
@@ -95,18 +96,18 @@ def report_tests(package, test, expected, result):
     print(f'{package}/{test}: cargo exit={result.returncode}; raw output withheld')
 
 def cargo(package, test, env, features=()):
-    expected = {('rss-identity-http-axum','federated_http'): {'real_federated_login_and_linking','federated_http_rejects_mismatch_and_uncertain_commit','federated_tls_and_egress_policy'}, ('rss-identity-postgres','federated_atomic'): {'federation_concurrent_linking_keeps_one_owner','federation_configuration_authorization_and_versions','federation_state_restart_expiry_and_replay','federation_jit_isolated_subjects_and_membership','federation_config_races_and_provider_revocation','federation_atomic_events_and_unknown_commit','federation_local_and_federated_linking','federation_link_conflict_logout_and_wrong_reauthentication','federation_concurrent_jit_rls_and_schema_drift'}, ('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
+    expected = {('rss-identity-postgres','downstream_atomic'): {'downstream_prepare_admission_precedes_invalid_protocol_work','downstream_cleanup_failure_concurrency_and_unknown_settlement','downstream_cleanup_claim_rollback_and_final_unknown','downstream_readonly_rotation_and_revocation','downstream_unknown_commit_and_single_accept','downstream_remote_unknown_never_returns_authority','downstream_accept_rechecks_revocation_and_final_commit','downstream_claim_and_event_roll_back_together','downstream_federated_provider_revocation','downstream_prepare_budget_is_per_client_and_releases_expired'}, ('rss-identity-http-axum','downstream_http'): {'real_downstream_code_pkce_and_online_validation','downstream_body_deadline_and_caller_auth'}, ('rss-identity-http-axum','federated_http'): {'real_federated_login_and_linking','federated_http_rejects_mismatch_and_uncertain_commit','federated_tls_and_egress_policy'}, ('rss-identity-postgres','federated_atomic'): {'federation_concurrent_linking_keeps_one_owner','federation_configuration_authorization_and_versions','federation_state_restart_expiry_and_replay','federation_jit_isolated_subjects_and_membership','federation_config_races_and_provider_revocation','federation_atomic_events_and_unknown_commit','federation_local_and_federated_linking','federation_link_conflict_logout_and_wrong_reauthentication','federation_concurrent_jit_rls_and_schema_drift'}, ('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
                 ('rss-identity-postgres', 'session_atomic'): {'session_rotation_and_revocation', 'session_isolation_replacement_and_restart', 'session_account_changes_fence_racing_credentials', 'session_settlement_and_event_failure_are_atomic', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations'},
                 ('rss-identity-http-axum', 'session_http'): {'session_http_login_cookie_csrf_and_replacement', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_recovery_current_logout_and_deadline', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_pending_commit_preserves_settlement'},
                 ('rss-identity-admin', 'operator'): {'maintenance_file_and_settlement'},
                 ('rss-identity-oidc', 'provider'): {'real_provider_flows'}}[(package, test)]
     command = ['cargo', 'test', '--locked', '-p', package, '--test', test, *features, '--', '--ignored', '--test-threads=1']
     environment = {**os.environ, **env, 'CARGO_TARGET_DIR': str(ROOT / 'target')}
-    listing = subprocess.run([*command, '--list'], cwd=ROOT, env=environment, check=True, text=True, stdout=subprocess.PIPE).stdout
+    listing = bounded_run([*command, '--list'], timeout=900, cwd=ROOT, env=environment, check=True, text=True, stdout=subprocess.PIPE).stdout
     names = re.findall(r'^(.+): test$', listing, re.M)
     if set(names) != expected or len(names) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test set missing or changed')
-    completed = subprocess.run([*command, '--nocapture', '--format', 'pretty'], cwd=ROOT, env=environment, text=True, capture_output=True)
+    completed = bounded_run([*command, '--nocapture', '--format', 'pretty'], timeout=max(180,len(expected)*180), cwd=ROOT, env=environment, text=True, capture_output=True)
     result = completed.stdout
     report_tests(package, test, expected, completed)
     if completed.returncode:
@@ -141,25 +142,6 @@ def free_port():
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
 
-@contextlib.contextmanager
-def hydra():
-    # Rebuild the complete self-issuer configuration on each bounded bind collision.
-    with contextlib.ExitStack() as stack:
-        for attempt in range(3):
-            port = free_port()
-            issuer = f'http://127.0.0.1:{port}/'
-            try:
-                _, ports = stack.enter_context(container(HYDRA, {4444: port, 4445: ''},
-                    env=[('DSN', 'memory'), ('URLS_SELF_ISSUER', issuer),
-                         ('URLS_LOGIN', 'http://127.0.0.1:19998/login'), ('URLS_CONSENT', 'http://127.0.0.1:19998/consent'),
-                         ('SECRETS_SYSTEM', 'fixture-only-system-secret-32bytes'), ('LOG_LEVEL', 'error')], args=['serve', 'all', '--dev']))
-                break
-            except subprocess.CalledProcessError as error:
-                collision = any(marker in (error.stderr or '').lower() for marker in ['address already in use', 'port is already allocated'])
-                if not collision or attempt == 2:
-                    raise
-        yield issuer, ports
-
 def oidc():
     realm = {"realm": "identity", "enabled": True, "sslRequired": "none",
              "clients": [{"clientId": "identity-test", "secret": "fixture-secret", "publicClient": False,
@@ -175,17 +157,7 @@ def oidc():
         _, kc_ports = stack.enter_context(container(KEYCLOAK, [8080], args=["start-dev", "--import-realm"], mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro"]))
         kc = f"http://127.0.0.1:{kc_ports[8080]}/realms/identity"
         wait(kc + "/.well-known/openid-configuration")
-        issuer, hydra_ports = stack.enter_context(hydra())
-        admin = f"http://127.0.0.1:{hydra_ports[4445]}"
-        wait(issuer + ".well-known/openid-configuration")
-        client = {"client_id": "identity-test", "client_secret": "fixture-secret", "grant_types": ["authorization_code"],
-                  "response_types": ["code"], "scope": "openid profile", "token_endpoint_auth_method": "client_secret_basic",
-                  "redirect_uris": ["http://127.0.0.1:19999/auth/callback"]}
-        req = urllib.request.Request(admin + "/admin/clients", data=json.dumps(client).encode(), headers={"Content-Type":"application/json"})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            if response.status != 201: raise RuntimeError("Hydra client registration failed")
-        cargo("rss-identity-oidc", "provider", {"IDENTITY_TEST_KEYCLOAK_ISSUER": kc, "IDENTITY_TEST_HYDRA_ISSUER": issuer,
-              "IDENTITY_TEST_HYDRA_ADMIN": admin}, ["--features", "test-support"])
+        cargo("rss-identity-oidc", "provider", {"IDENTITY_TEST_KEYCLOAK_ISSUER": kc}, ["--features", "test-support"])
 
 def federated():
     realm = {"realm":"identity", "enabled":True, "sslRequired":"all", "duplicateEmailsAllowed":True,
