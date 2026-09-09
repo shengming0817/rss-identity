@@ -3,7 +3,7 @@ ARG RUST_IMAGE
 ARG RUNTIME_IMAGE
 ARG NGINX_IMAGE
 FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS build
-RUN apt-get update && apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu=4:12.2.0-3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu=4:12.2.0-3 libc6-dev-amd64-cross && rm -rf /var/lib/apt/lists/*
 RUN rustup target add x86_64-unknown-linux-gnu
 ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
 RUN rustc -vV > /toolchain.txt && x86_64-linux-gnu-gcc -dumpfullversion >> /toolchain.txt
