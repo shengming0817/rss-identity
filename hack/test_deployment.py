@@ -19,6 +19,19 @@ class Deployment(unittest.TestCase):
     p=root/Path(v).name;p.write_text('TestSecret_'+p.stem.replace('-','_')+'_'*64);p.chmod(0o600);return str(p)
    return v
   return files(source)
+ def test_configuration_diagnostics_are_actionable_without_input_values(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   for field in ['hydra_system_secret_files','hydra_cookie_secret_files']:
+    data=self.data(root);data.pop(field)
+    with self.assertRaises(ValueError) as error:deploy.render(data,root/field,self.candidate())
+    self.assertIn(field,deploy.configuration_diagnostic(error.exception))
+   data=self.data(root);data['runtime']['oidc']['providers'][0].pop('keycloak_totp')
+   with self.assertRaises(ValueError) as error:deploy.render(data,root/'profile',self.candidate())
+   self.assertIn('keycloak_totp',deploy.configuration_diagnostic(error.exception))
+   for error in [ValueError('synthetic-secret'),KeyError('synthetic-secret'),OSError('synthetic-secret')]:
+    self.assertNotIn('synthetic-secret',deploy.configuration_diagnostic(error))
+
  def test_render_keeps_credentials_and_ingress_separate(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);data=self.data(root)

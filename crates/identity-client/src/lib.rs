@@ -1,4 +1,5 @@
 //! Request-scoped Identity validation client. No OIDC flow, database dependency, or success cache.
+pub use rss_identity_contracts::{Acr, Amr};
 use rss_identity_contracts::{
     IdentityFacts, ValidationFailure, ValidationFailureCode, ValidationRequest,
 };
@@ -116,11 +117,11 @@ impl VerifiedIdentity {
     pub fn expires_at(&self) -> i64 {
         self.0.expires_at
     }
-    pub fn amr(&self) -> &[String] {
+    pub fn amr(&self) -> &[Amr] {
         &self.0.amr
     }
-    pub fn acr(&self) -> &str {
-        &self.0.acr
+    pub fn acr(&self) -> Acr {
+        self.0.acr
     }
 }
 /// Explicit endpoint and binding; caller owns secret loading and product session storage.
@@ -245,13 +246,7 @@ impl IdentityClient {
             || facts.expires_at <= now
             || facts.auth_time <= 0
             || facts.auth_time >= facts.expires_at
-            || !matches!(facts.acr.as_str(), "unspecified" | "mfa")
-            || (facts.amr.len() > 3
-                || facts
-                    .amr
-                    .iter()
-                    .any(|m| !matches!(m.as_str(), "pwd" | "otp" | "mfa"))
-                || facts.amr.windows(2).any(|w| w[0] >= w[1]))
+            || !rss_identity_contracts::canonical_methods(&facts.amr)
         {
             return Err(Error::Rejected);
         }
@@ -400,7 +395,7 @@ mod response_tests {
             let proof = response(200, HEADERS, value.to_string(), false)
                 .await
                 .unwrap();
-            assert_eq!(proof.acr(), "mfa");
+            assert_eq!(proof.acr(), Acr::Mfa);
             assert_eq!(proof.auth_time(), 990);
         }
         let mut ahead = facts();

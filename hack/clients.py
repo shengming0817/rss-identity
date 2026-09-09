@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Persistent Hydra + local operator seam, including a lost create acknowledgement."""
+import base64,hashlib,http.cookiejar
+from urllib.parse import urlencode,urlsplit,parse_qs
 import contextlib, http.client, http.server, tempfile, threading, uuid, json, urllib.request, urllib.error
 from pathlib import Path
 import providers
@@ -32,6 +34,36 @@ class LostCreateAck(http.server.BaseHTTPRequestHandler):
   finally:connection.close()
  do_GET=do_POST=do_PUT=request
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+ def redirect_request(self,*args):return None
+
+def paused_cookie_flow(public_port,admin_port):
+ """Pause after login acceptance, before Hydra validates the original browser CSRF cookie.
+ ref: ory/hydra v26.2.0 consent/strategy_default.go (login CSRF validation).
+ """
+ browser=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),NoRedirect())
+ challenge=base64.urlsafe_b64encode(hashlib.sha256(b'cookie-fixture-pkce-verifier-2339-0123456789').digest()).rstrip(b'=').decode()
+ query=urlencode(dict(client_id='cookie-rotation',response_type='code',scope='openid',redirect_uri='https://cookie.example.test/callback',state=uuid.uuid4().hex,nonce=uuid.uuid4().hex,code_challenge=challenge,code_challenge_method='S256'))
+ def get(url):
+  try:response=browser.open(url,timeout=10)
+  except urllib.error.HTTPError as error:response=error
+  with response:return response.status,response.headers.get('Location','')
+ status,location=get(f'http://127.0.0.1:{public_port}/oauth2/auth?{query}')
+ parameters=parse_qs(urlsplit(location).query)
+ if status!=302 or 'login_challenge' not in parameters:raise RuntimeError('cookie fixture did not begin login')
+ url=f'http://127.0.0.1:{admin_port}/admin/oauth2/auth/requests/login/accept?'+urlencode({'login_challenge':parameters['login_challenge'][0]})
+ request=urllib.request.Request(url,data=json.dumps({'subject':'cookie-fixture-subject','remember':False}).encode(),method='PUT',headers={'Content-Type':'application/json'})
+ with urllib.request.urlopen(request,timeout=10) as response:redirect=json.load(response)['redirect_to']
+ parts=urlsplit(redirect)
+ def resume(port):
+  status,location=get(f'http://127.0.0.1:{port}{parts.path}?{parts.query}')
+  parameters=parse_qs(urlsplit(location).query)
+  if status==302 and 'consent_challenge' in parameters:return True
+  if status in (400,401,403) or (status in (302,303) and parameters.get('error') in (['request_forbidden'],['invalid_request'])):return False
+  raise RuntimeError(f'unexpected cookie continuation status={status}; login={"login_challenge" in parameters}; error={"error" in parameters}; error_path={urlsplit(location).path == "/oauth2/fallbacks/error"}')
+ return resume
+
+
 def main():
  with tempfile.TemporaryDirectory(prefix='identity-clients-') as tmp,contextlib.ExitStack() as stack:
   network='identity-clients-'+uuid.uuid4().hex
@@ -61,6 +93,11 @@ def main():
    def public_keys(port):
     with urllib.request.urlopen(f'http://127.0.0.1:{port}/.well-known/jwks.json',timeout=5) as response:
      return {k['kid'] for k in json.load(response)['keys']}
+   request=urllib.request.Request(f'http://127.0.0.1:{ports[4445]}/admin/clients',data=json.dumps({'client_id':'cookie-rotation','token_endpoint_auth_method':'none','grant_types':['authorization_code'],'response_types':['code'],'scope':'openid','redirect_uris':['https://cookie.example.test/callback']}).encode(),headers={'Content-Type':'application/json'})
+   with urllib.request.urlopen(request,timeout=10) as response:
+    if response.status!=201:raise RuntimeError('cookie fixture registration failed')
+   retained_cookie=paused_cookie_flow(ports[4444],ports[4445])
+   retired_cookie=paused_cookie_flow(ports[4444],ports[4445])
    before=public_keys(ports[4444])
    if 'fixture-old-key' not in before:raise RuntimeError('old signing key not persisted')
    providers.docker('stop','--time','30',cid)
@@ -70,10 +107,17 @@ def main():
    rotated_id,rotated_ports=stack.enter_context(providers.container(providers.HYDRA,[4444,4445],env=rotated,args=['serve','all','--dev'],network=network))
    providers.wait(f'http://127.0.0.1:{rotated_ports[4445]}/health/ready')
    if not before<=public_keys(rotated_ports[4444]):raise RuntimeError('native keyring lost encrypted signing keys')
+   if not retained_cookie(rotated_ports[4444]):raise RuntimeError('retained old cookie key did not resume browser flow')
    server.upstream=rotated_ports[4445];server.startup_probes=0;server.ready=False
    variables['IDENTITY_TEST_CLIENT_PUBLIC_PORT']=str(rotated_ports[4444])
    providers.cargo('rss-identity-app','clients',variables)
    providers.docker('stop','--time','30',rotated_id)
+   cookie_only=[(k,new_cookie if k=='SECRETS_COOKIE' else v) for k,v in rotated]
+   cookie_id,cookie_ports=stack.enter_context(providers.container(providers.HYDRA,[4444,4445],env=cookie_only,args=['serve','all','--dev'],network=network))
+   providers.wait(f'http://127.0.0.1:{cookie_ports[4445]}/health/ready')
+   if not before<=public_keys(cookie_ports[4444]):raise RuntimeError('cookie rotation changed system key availability')
+   if retired_cookie(cookie_ports[4444]):raise RuntimeError('retired old cookie key still resumed browser flow')
+   providers.docker('stop','--time','30',cookie_id)
    new_only=[(k,new_system if k=='SECRETS_SYSTEM' else new_cookie if k=='SECRETS_COOKIE' else v) for k,v in env]
    missing_id,missing_ports=stack.enter_context(providers.container(providers.HYDRA,[4444,4445],env=new_only,args=['serve','all','--dev'],network=network))
    providers.wait(f'http://127.0.0.1:{missing_ports[4445]}/health/ready')
@@ -82,6 +126,7 @@ def main():
    except urllib.error.HTTPError:
     readable=False
    if readable:raise RuntimeError('old encrypted keys unexpectedly readable without the old system key')
+   print('Hydra cookie keyring: retained old cookie resumes; retired old cookie refused with system keys still readable')
    print('Hydra keyring: new-first + retained old key reads persistent keys; premature old-key removal rejected')
 
   finally:server.shutdown();server.server_close();thread.join(timeout=5)

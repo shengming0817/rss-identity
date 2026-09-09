@@ -218,7 +218,7 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
     )
     .await?;
     let old_proof = sdk.validate(&old_token).await?;
-    assert_eq!(old_proof.acr(), "unspecified");
+    assert_eq!(old_proof.acr().as_str(), "unspecified");
     let step = post(
         &c,
         origin,
@@ -264,7 +264,7 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
     )
     .await?;
     let proof = sdk.validate(&token).await?;
-    assert_eq!(proof.acr(), "mfa");
+    assert_eq!(proof.acr().as_str(), "mfa");
     assert_eq!(proof.subject(), old_proof.subject());
     assert_ne!(proof.session_id(), old_proof.session_id());
     let facts:Value = sqlx::query_scalar("SELECT auth_facts FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
@@ -465,8 +465,11 @@ async fn real_downstream_code_pkce_and_online_validation() -> anyhow::Result<()>
     assert!(error.correlation_id().is_some());
     sdk.validate(&token).await?;
 
-    assert_eq!(proof.amr(), ["pwd"]);
-    assert_eq!(proof.acr(), "unspecified");
+    assert_eq!(
+        proof.amr().iter().map(|m| m.as_str()).collect::<Vec<_>>(),
+        ["pwd"]
+    );
+    assert_eq!(proof.acr().as_str(), "unspecified");
     let before:String=sqlx::query_scalar("SELECT row_to_json(g)::text FROM identity_authority.downstream_grants g WHERE grant_id=$1::uuid").bind(handle["grant_id"].as_str().unwrap()).fetch_one(&f.owner).await?;
     sdk.validate(&token).await?;
     let after:String=sqlx::query_scalar("SELECT row_to_json(g)::text FROM identity_authority.downstream_grants g WHERE grant_id=$1::uuid").bind(handle["grant_id"].as_str().unwrap()).fetch_one(&f.owner).await?;

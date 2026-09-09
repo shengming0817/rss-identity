@@ -69,10 +69,10 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
             .fetch_one(&f.owner)
             .await?;
     for (time, acr) in [
-        (None, "unspecified"),
-        (Some(now - 1000), "mfa"),
-        (Some(now + 1000), "mfa"),
-        (Some(now), "unspecified"),
+        (None, rss_identity_core::assurance::Acr::Unspecified),
+        (Some(now - 1000), rss_identity_core::assurance::Acr::Mfa),
+        (Some(now + 1000), rss_identity_core::assurance::Acr::Mfa),
+        (Some(now), rss_identity_core::assurance::Acr::Unspecified),
     ] {
         *upstream.assurance.lock().unwrap() = Some(Assurance::new(time, acr, vec![])?);
         let token = step_begin(&f, &s, &p, &old).await?;
@@ -81,7 +81,11 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
             .inspect_session(f.key.tenant, secret(&old), deadline())
             .await?;
     }
-    *upstream.assurance.lock().unwrap() = Some(Assurance::new(Some(now), "mfa", vec![])?);
+    *upstream.assurance.lock().unwrap() = Some(Assurance::new(
+        Some(now),
+        rss_identity_core::assurance::Acr::Mfa,
+        vec![],
+    )?);
     let token = step_begin(&f, &s, &p, &old).await?;
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.accounts")
         .fetch_one(&f.owner)
@@ -118,19 +122,6 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
         .update_provider(actor(&f).await?, p.id, p.version, settings(), deadline())
         .await?;
     assert!(step_finish(&s, token, &upgraded, "alice").await.is_err());
-    // Fault injection is after exchange, so it targets the session/event commit, not attempt claim.
-    let token = step_begin(&f, &s, &p, &upgraded).await?;
-    let runtime = f.runtime.clone();
-    *upstream.hook.lock().unwrap() = Some(Box::new(move || {
-        Box::pin(async move {
-            runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
-            Ok(())
-        })
-    }));
-    assert!(matches!(
-        step_finish(&s, token, &upgraded, "alice").await,
-        Err(AuthorityError::CommitUnknown(_))
-    ));
     // Recreate a usable session; revocation between begin and callback rejects before exchange.
     let current = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
     let token = step_begin(&f, &s, &p, &current).await?;
@@ -1154,6 +1145,183 @@ async fn federation_concurrent_linking_keeps_one_owner() -> anyhow::Result<()> {
         committed.iter().filter(|v| v["action"] == "linked").count(),
         1
     );
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn federation_step_up_unknown_commit_and_event_rollback() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let s = service(&f, upstream.clone());
+    let p = enabled(&f, &s).await?;
+    let now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    let upgraded = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
+    *upstream.assurance.lock().unwrap() = Some(rss_identity_core::assurance::Assurance::new(
+        Some(now),
+        rss_identity_core::assurance::Acr::Mfa,
+        vec![],
+    )?);
+    // Fault injection is after exchange, so it targets the session/event commit, not attempt claim.
+    let token = step_begin(&f, &s, &p, &upgraded).await?;
+    let state_hash = digest(&token);
+    let sessions_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
+            .fetch_one(&f.owner)
+            .await?;
+    let events_before = events(&f).await?.len();
+    let runtime = f.runtime.clone();
+    *upstream.hook.lock().unwrap() = Some(Box::new(move || {
+        Box::pin(async move {
+            runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+            Ok(())
+        })
+    }));
+    assert!(matches!(
+        step_finish(&s, token.clone(), &upgraded, "alice").await,
+        Err(AuthorityError::CommitUnknown(_))
+    ));
+    let sessions_after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
+            .fetch_one(&f.owner)
+            .await?;
+    assert_eq!(sessions_after, sessions_before + 1);
+    assert!(
+        f.store
+            .inspect_session(f.key.tenant, secret(&upgraded), deadline())
+            .await
+            .is_err()
+    );
+    let committed: (i64,serde_json::Value) = sqlx::query_as("SELECT count(*) OVER(), auth_facts FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND principal_id=(SELECT principal_id FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid) AND revoked_at IS NULL")
+        .bind(A).bind(upgraded.view().id.to_string()).fetch_one(&f.owner).await?;
+    assert_eq!(committed.0, 1);
+    assert_eq!(committed.1["assurance"]["acr"], "mfa");
+    assert_eq!(committed.1["assurance"]["auth_time"], now);
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.oidc_transactions WHERE state_hash=$1",
+    )
+    .bind(state_hash.as_slice())
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(remaining, 0);
+    let committed_events = events(&f).await?;
+    assert_eq!(committed_events.len(), events_before + 2);
+    assert_eq!(committed_events[events_before]["action"], "stepped_up");
+    assert_eq!(committed_events[events_before + 1]["action"], "created");
+    assert!(step_finish(&s, token, &upgraded, "alice").await.is_err());
+    let current = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
+    let rollback_attempt = step_begin(&f, &s, &p, &current).await?;
+    let rollback_hash = digest(&rollback_attempt);
+    let before_sessions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
+            .fetch_one(&f.owner)
+            .await?;
+    let before_events = events(&f).await?.len();
+    sqlx::raw_sql("CREATE FUNCTION public.fail_step_up_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_step_up_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.fail_step_up_event();").execute(&f.owner).await?;
+    assert!(
+        step_finish(&s, rollback_attempt.clone(), &current, "alice")
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql("DROP TRIGGER fail_step_up_event ON rss_transactional_messaging.outbox; DROP FUNCTION public.fail_step_up_event();").execute(&f.owner).await?;
+    let after_sessions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
+            .fetch_one(&f.owner)
+            .await?;
+    assert_eq!(before_sessions, after_sessions);
+    assert_eq!(before_events, events(&f).await?.len());
+    f.store
+        .inspect_session(f.key.tenant, secret(&current), deadline())
+        .await?;
+    let claimed: bool = sqlx::query_scalar(
+        "SELECT claimed FROM identity_authority.oidc_transactions WHERE state_hash=$1",
+    )
+    .bind(rollback_hash.as_slice())
+    .fetch_one(&f.owner)
+    .await?;
+    assert!(
+        claimed,
+        "exchange claim remains consumed while session/event transaction rolls back"
+    );
+    assert!(
+        step_finish(&s, rollback_attempt, &current, "alice")
+            .await
+            .is_err()
+    );
+
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn federation_approval_change_revokes_attempts_and_sessions() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let s = service(&f, upstream.clone());
+    let p = enabled(&f, &s).await?;
+    let now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    *upstream.assurance.lock().unwrap() = Some(rss_identity_core::assurance::Assurance::new(
+        Some(now),
+        rss_identity_core::assurance::Acr::Mfa,
+        vec![],
+    )?);
+    // A deployment approval change must be settled before a restarted server opens admission.
+    let prior = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
+    let pending = step_begin(&f, &s, &p, &prior).await?;
+    upstream.approval.store(false, Ordering::SeqCst);
+    s.synchronize_approvals(f.key.tenant, deadline()).await?;
+    assert!(
+        f.store
+            .inspect_session(f.key.tenant, secret(&prior), deadline())
+            .await
+            .is_err()
+    );
+    assert!(step_finish(&s, pending, &prior, "alice").await.is_err());
+    upstream.approval.store(true, Ordering::SeqCst);
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    assert!(matches!(
+        s.synchronize_approvals(f.key.tenant, deadline()).await,
+        Err(AuthorityError::CommitUnknown(_))
+    ));
+    let settled_events = events(&f).await?.len();
+    s.synchronize_approvals(f.key.tenant, deadline()).await?;
+    assert_eq!(
+        events(&f).await?.len(),
+        settled_events,
+        "settled approval must not be applied twice"
+    );
+    assert!(
+        f.store
+            .inspect_session(f.key.tenant, secret(&prior), deadline())
+            .await
+            .is_err(),
+        "reapproval must not resurrect an old session"
+    );
+    // More providers than the transaction event bound must settle in bounded batches.
+    sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2 FROM generate_series(1,9)")
+        .bind(A).bind(serde_json::to_value(settings())?).execute(&f.owner).await?;
+    let before_batch = events(&f).await?.len();
+    s.synchronize_approvals(f.key.tenant, deadline()).await?;
+    assert_eq!(events(&f).await?.len(), before_batch + 9);
+    let unapproved: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.providers WHERE deployment_approval IS NULL",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(unapproved, 0);
+    s.synchronize_approvals(f.key.tenant, deadline()).await?;
+    assert_eq!(events(&f).await?.len(), before_batch + 9);
     f.close().await;
     Ok(())
 }

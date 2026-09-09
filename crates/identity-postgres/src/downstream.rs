@@ -1,5 +1,6 @@
 //! Single durable downstream coordinator; Hydra never participates in a PG transaction.
 use crate::{downstream_storage as db, storage::lock_guard, transaction::SecurityEvent, *};
+use rss_identity_core::assurance::{Acr, Amr};
 use rss_identity_core::downstream::*;
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
@@ -21,8 +22,8 @@ pub struct ValidatedIdentity {
     audience: String,
     issuer: String,
     auth_time: i64,
-    amr: Vec<String>,
-    acr: String,
+    amr: Vec<Amr>,
+    acr: Acr,
     expires_at: i64,
 }
 impl ValidatedIdentity {
@@ -55,12 +56,12 @@ impl ValidatedIdentity {
         self.auth_time
     }
     /// Validated amr for the current request.
-    pub fn amr(&self) -> &[String] {
+    pub fn amr(&self) -> &[Amr] {
         &self.amr
     }
     /// Validated acr for the current request.
-    pub fn acr(&self) -> &str {
-        &self.acr
+    pub fn acr(&self) -> Acr {
+        self.acr
     }
     /// Validated expires_at for the current request.
     pub fn expires_at(&self) -> i64 {
@@ -485,7 +486,7 @@ impl Downstream {
                             .auth_time()
                             .unwrap_or(loaded.view.auth_time),
                         amr: loaded.assurance.amr().to_vec(),
-                        acr: loaded.assurance.acr().into(),
+                        acr: loaded.assurance.acr(),
                         expires_at: token
                             .expires_at
                             .min(g.horizon)

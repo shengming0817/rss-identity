@@ -148,6 +148,9 @@ pub async fn serve(
         startup.stage_resource(DynManagedResource::new_box(KdfResource{kdf:kdf.clone(),timeout:per}));
         let authority=assembly::authority(&config,pool.clone(),kdf.clone()).await?;
         let providers=assembly::providers(&config,authority)?;
+        for tenant in config.storage.tenants()? {
+            providers.federation.synchronize_approvals(tenant,assembly::deadline()).await?;
+        }
         let http=HttpConfig::new(config.identity_origin.identity_origin(),config.budgets.request()).map_err(|_|AppError::Configuration)?;
         let gate=Arc::new(OnceLock::new());
         let app=federated_router(providers.federation.clone(),http.clone())?

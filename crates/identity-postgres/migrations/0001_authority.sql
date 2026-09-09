@@ -62,7 +62,9 @@ CREATE TABLE identity_authority.providers (
  revocation_epoch bigint NOT NULL CHECK(revocation_epoch>0),
  enabled boolean NOT NULL,
  settings jsonb NOT NULL CHECK(jsonb_typeof(settings)='object' AND octet_length(settings::text)<=16384),
- PRIMARY KEY(tenant_id,provider_id)
+ PRIMARY KEY(tenant_id,provider_id),
+ deployment_approval bytea CHECK(deployment_approval IS NULL OR octet_length(deployment_approval)=32),
+ CHECK(NOT enabled OR deployment_approval IS NOT NULL)
 );
 CREATE TABLE identity_authority.external_identities (
  tenant_id uuid NOT NULL, identity_id uuid NOT NULL, principal_id uuid NOT NULL, provider_id uuid NOT NULL,

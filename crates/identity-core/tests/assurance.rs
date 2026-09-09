@@ -1,22 +1,20 @@
-use rss_identity_core::assurance::{Assurance, AuthenticationMode};
+use rss_identity_core::assurance::{Acr, Amr, Assurance, AuthenticationMode};
 #[test]
 fn normalized_facts_enforce_time_strength_and_method_invariants() {
-    let facts = Assurance::new(Some(100), "mfa", vec!["otp".into()]).unwrap();
+    let facts = Assurance::new(Some(100), Acr::Mfa, vec![Amr::Otp]).unwrap();
     assert!(facts.check(AuthenticationMode::StepUp, 100, 101).is_ok());
     for time in [69, 132] {
         assert!(
-            Assurance::new(Some(time), "mfa", vec![])
+            Assurance::new(Some(time), Acr::Mfa, vec![])
                 .unwrap()
                 .check(AuthenticationMode::StepUp, 100, 101)
                 .is_err()
         );
     }
     for (time, acr, methods) in [
-        (None, "mfa", vec![]),
-        (Some(0), "unspecified", vec![]),
-        (Some(100), "unknown", vec![]),
-        (Some(100), "mfa", vec!["invented".into()]),
-        (Some(100), "mfa", vec!["otp".into(), "otp".into()]),
+        (None, Acr::Mfa, vec![]),
+        (Some(0), Acr::Unspecified, vec![]),
+        (Some(100), Acr::Mfa, vec![Amr::Otp, Amr::Otp]),
     ] {
         assert!(Assurance::new(time, acr, methods).is_err());
     }

@@ -432,8 +432,9 @@ impl UpstreamOidc for HttpOidc {
         &self,
         tenant: TenantId,
         c: &ProviderSettings,
-    ) -> Result<(), FederationError> {
-        approved(&self.bindings, tenant, c, self.loopback).map(|_| ())
+    ) -> Result<[u8; 32], FederationError> {
+        approved(&self.bindings, tenant, c, self.loopback)
+            .map(|binding| assurance::profile_identity(binding.keycloak_totp))
     }
     fn validate(&self, tenant: TenantId, c: &ProviderSettings) -> Result<(), FederationError> {
         approved(&self.bindings, tenant, c, self.loopback)?;

@@ -35,3 +35,7 @@ T1 证明 claims/配置/时钟边界；真实 PG、Keycloak TOTP 和 Hydra T2 �
 - [Kanidm v1.9.4 restore](https://github.com/kanidm/kanidm/blob/v1.9.4/server/core/src/lib.rs#L429-L486)：离线恢复、事务及内部一致性核验，不构成外部 freshness authority。
 - [PostgreSQL 17 pg_verifybackup](https://www.postgresql.org/docs/17/app-pgverifybackup.html)：manifest 校验不能替代实际恢复测试。
 - [Hydra key rotation](https://www.ory.com/docs/hydra/self-hosted/secrets-key-rotation)：旧数据不自动重新加密，原生列表的第一项用于新加密。
+
+部署批准的 profile identity 由 OIDC adapter 生成并持久保存在 provider 上，不由租户或浏览器提供。应用在单副本维护窗口启动时、监听入口开放之前同步当前部署批准；指纹变化或绑定退出在既有租户锁和事务中推进 provider config_version/revocation_epoch，并写 provider_updated 事件。版本冻结在途 attempt，epoch 撤销既有联合 session 与关联 grant；恢复旧批准也推进 epoch，不会复活旧会话。退出绑定同时停用 provider，重新批准不会自动启用。秘密轮换不改变 profile identity。profile 同步未知提交或失败时启动不开放入口；不支持多个不同批准配置的副本同时运行。
+
+规范化 ACR/AMR 的唯一闭集位于 contracts，core/adapter/client 直接消费类型；JSON wire 拼写保持 unspecified/mfa 与 mfa/otp/pwd，不保留旧字符串 API。当前前端 capability 发现与按钮继续由 #2368 联合交付。

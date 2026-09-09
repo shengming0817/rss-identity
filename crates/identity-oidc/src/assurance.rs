@@ -1,10 +1,21 @@
 //! Keycloak deployment profile interpretation after upstream token verification.
-use rss_identity_core::{assurance::Assurance, federation::FederationError};
+use rss_identity_core::{
+    assurance::{Acr, Amr, Assurance},
+    federation::FederationError,
+};
 pub(super) const KEYCLOAK_TOTP_ACR: &str = "2";
+// Bump this identity when changing the approved interpretation, not for ordinary key rotation.
+pub(super) fn profile_identity(approved: bool) -> [u8; 32] {
+    rss_identity_core::federation::digest(if approved {
+        "keycloak-26.7.3/password-totp/acr-2/v1"
+    } else {
+        "unspecified/v1"
+    })
+}
 pub(super) fn normalize(
     auth_time: Option<i64>,
     acr: Option<&str>,
-    mut amr: Vec<String>,
+    amr: Vec<String>,
     keycloak_totp: bool,
 ) -> Result<Assurance, FederationError> {
     if acr.is_some_and(|s| s.is_empty() || s.len() > 256 || s.chars().any(char::is_control))
@@ -15,15 +26,19 @@ pub(super) fn normalize(
     {
         return Err(FederationError::Claims);
     }
-    amr.retain(|m| keycloak_totp && matches!(m.as_str(), "pwd" | "otp" | "mfa"));
+    let mut amr: Vec<Amr> = amr
+        .iter()
+        .filter(|_| keycloak_totp)
+        .filter_map(|m| m.parse().ok())
+        .collect();
     amr.sort();
     amr.dedup();
     Assurance::new(
         auth_time,
         if keycloak_totp && acr == Some(KEYCLOAK_TOTP_ACR) && auth_time.is_some() {
-            "mfa"
+            Acr::Mfa
         } else {
-            "unspecified"
+            Acr::Unspecified
         },
         amr,
     )
@@ -37,8 +52,16 @@ mod tests {
     #[test]
     fn only_the_deployment_approved_acr_and_time_establish_mfa() {
         let facts = normalize(Some(100), Some("2"), vec![], true).unwrap();
-        assert_eq!(facts.acr(), "mfa");
-        assert!(facts.amr().is_empty(), "ACR must not manufacture AMR");
+        assert_eq!(facts.acr().as_str(), "mfa");
+        assert!(
+            facts
+                .amr()
+                .iter()
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>()
+                .is_empty(),
+            "ACR must not manufacture AMR"
+        );
         assert_eq!(facts.auth_time(), Some(100));
         assert!(facts.check(AuthenticationMode::StepUp, 100, 101).is_ok());
         for (time, acr, trusted) in [
@@ -48,7 +71,7 @@ mod tests {
             (None, Some("2"), true),
         ] {
             let facts = normalize(time, acr, vec![], trusted).unwrap();
-            assert_eq!(facts.acr(), "unspecified");
+            assert_eq!(facts.acr().as_str(), "unspecified");
             assert!(facts.check(AuthenticationMode::StepUp, 100, 101).is_err());
         }
     }
@@ -83,7 +106,10 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(facts.amr(), ["otp", "pwd"]);
+        assert_eq!(
+            facts.amr().iter().map(|m| m.as_str()).collect::<Vec<_>>(),
+            ["otp", "pwd"]
+        );
         let encoded = serde_json::to_string(&facts).unwrap();
         assert_eq!(serde_json::from_str::<Assurance>(&encoded).unwrap(), facts);
         assert!(normalize(Some(100), Some("2"), vec!["pwd".into(); 17], true).is_err());

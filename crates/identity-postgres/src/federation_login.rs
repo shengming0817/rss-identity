@@ -52,6 +52,7 @@ impl Federation {
         let budget = Budget::new(deadline)?;
         let return_url = self.target(&client, &target)?;
         let view = db::read_provider(&self.authority, tenant, provider, budget.remaining()).await?;
+        self.check_approval(tenant, &view)?;
         if !view.enabled {
             return Err(FederationError::Rejected.into());
         }
@@ -180,6 +181,7 @@ impl Federation {
                         },
                     ))
                 }) }).await?;
+        self.check_approval(tenant, &view)?;
         if !self.allowed_return(&attempt.client, &attempt.return_url) {
             return Err(FederationError::Rejected.into());
         }

@@ -35,6 +35,32 @@
 
 4. 记录并独立保管 backup_manifest 摘要、PG system identifier/WAL 范围和切点时间；配置、证书、所需 system/cookie key 集合和当前服务秘密另行保管。Keycloak realm export 不能代替数据库备份。源端恢复写入后，该备份不再证明之后的安全状态。
 
+### 备份后恢复原服务
+
+备份不是停机流程的终点。确认上述外部副本校验/摘要已成功后，在同一维护窗口按以下顺序恢复原服务。任何失败均保持入口关闭；不要运行初始化、migrate 或重建卷来“修好”恢复原服务。下面 helper 使用固定候选 NGINX 中的 curl，只共享 Hydra 网络、不发布端口。
+
+```sh
+set -eu
+compose() { docker compose -f /private/rendered/compose.json "$@"; }
+isolate() { compose stop public-gateway private-gateway; printf '%s\n' 'backup-resume failed; gateways kept closed' >&2; }
+trap isolate EXIT
+compose up -d --wait --wait-timeout 90 postgres hydra hydra-admin keycloak
+NGINX_IMAGE=$(python3 -c 'import json; print(json.load(open("/artifacts/candidate.json"))["providers"]["nginx"])')
+OIDC_CA=$(python3 -c 'import json; print(json.load(open("/private/deployment.json"))["runtime"]["oidc"]["ca_file"])')
+docker run --rm --network "container:$(compose ps -q hydra)" \
+  -v "$OIDC_CA:/run/oidc-ca:ro" --entrypoint curl "$NGINX_IMAGE" \
+  --fail --silent --show-error --max-time 3 --retry 20 --retry-delay 1 \
+  --retry-all-errors --retry-max-time 60 --cacert /run/oidc-ca \
+  -o /dev/null https://keycloak:8443/realms/master/.well-known/openid-configuration
+compose run --rm hydra-clients
+compose up -d --wait --wait-timeout 60 identity
+compose exec -T identity identity-server --probe 127.0.0.1:8080
+compose up -d --wait --wait-timeout 30 public-gateway private-gateway
+trap - EXIT
+```
+
+成功后恢复日常监控并记录备份切点与重新开放时间。失败时记录上述最后失败步骤和退出码，保留已校验备份及原卷，排障后从服务核验重新开始；不要把未开放误记为成功完成备份维护。
+
 ## 恢复与开放
 
 1. 保持入口、Identity、Hydra、Keycloak 停止，停止源 PG，保留原卷。恢复到新的空目标卷，不覆盖唯一现存数据。
@@ -83,7 +109,7 @@
 | Identity state key | 生成独立新 32 字节 key 并更换 state_key_file，重启服务；全部旧 state 拒绝，用户重新开始登录。没有双钥窗口。 |
 | 下游 OIDC client secret | 通过 Hydra 原生 admin API 在维护窗口替换，同步产品后端文件；`identity-clients` 仅核验最终配置，不自动覆盖漂移。旧 client secret 必须认证失败。 |
 | Identity validation / Hydra gateway service secret | 同步调用双方文件和渲染配置，重启双方；旧 secret 拒绝、新 secret 成功。凭据轮换本身不替代账户/会话撤销。 |
-| Hydra system / cookie keys | 使用必填有序 `hydra_system_secret_files`、`hydra_cookie_secret_files`，分别 1–8 个不重复密钥，两域不重用。新钥置首，旧钥仅在数据仍需解密时保留。实测旧签名 key 在新旧 keyring 中可读，提前移除旧 system key 后不可读；过期 token 不代表所有持久加密数据都已退出。 |
+| Hydra system / cookie keys | 使用必填有序 `hydra_system_secret_files`、`hydra_cookie_secret_files`，分别 1–8 个不重复密钥，两域不重用。新钥置首，旧钥仅在数据仍需解密时保留。实测旧签名 key 在新旧 keyring 中可读，提前移除旧 system key 后不可读；独立浏览器 flow 验证旧 cookie 在保留旧 cookie key 时可继续、退出旧 cookie key 后被拒绝，此时 system keys 仍可读；过期 token 不代表所有持久加密数据都已退出。 |
 | TLS 证书/私钥/CA | 使用同一既定 hostname/SAN，先准备双方信任配置，再在窗口内更换并重启。逐接缝验证 VerifyFull/TLS 成功及错误/退出 CA 拒绝。变更 origin 是独立身份迁移，不作为证书轮换处理。 |
 
 Hydra 旧数据不会自动重新加密。没有可靠旧钥退出证据时保留所需 key；不自写上游 SQL、不使用已退出的 migrate-secret 命令，也不以重建 Hydra 数据库冒充无损轮换。
@@ -98,3 +124,5 @@ Hydra 旧数据不会自动重新加密。没有可靠旧钥退出证据时保�
 测量输出绑定当前源码/dirty 状态、lock、provider/架构；它没有性能门禁或生产 SLO。正式接受前在固定候选、实际资源配额和负载上重测，记录失败类型及未覆盖场景。
 
 独立候选与生产验收：[MFA #2366](https://dev.azure.com/shengming0923/rss/_workitems/edit/2366)、[恢复/轮换与生产目标 #2367](https://dev.azure.com/shengming0923/rss/_workitems/edit/2367)。
+
+恢复 T2 失败仅输出闭合 action/stage/error 分类及子进程退出码，不打印命令、秘密或 provider 原文。渲染器对缺失 keyring/profile 字段及已退出的单钥字段提供明确诊断，仍拒绝接受旧配置。

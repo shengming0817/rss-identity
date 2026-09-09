@@ -14,7 +14,7 @@ pub(crate) async fn provider(
     id: ProviderId,
 ) -> Result<ProviderView, rss_transactional_messaging_postgres::PgError> {
     let r = sqlx::query(concat!(
-        "SELECT config_version,revocation_epoch,enabled,settings FROM identity_authority.",
+        "SELECT config_version,revocation_epoch,enabled,settings,deployment_approval FROM identity_authority.",
         "providers WHERE tenant_id=$1::uuid AND provider_id=$2::uuid FOR UPDATE"
     ))
     .bind(tenant.to_string())
@@ -36,6 +36,10 @@ pub(crate) async fn provider(
         revocation_epoch: epoch,
         enabled: r.try_get("enabled")?,
         settings,
+        deployment_approval: r
+            .try_get::<Option<Vec<u8>>, _>("deployment_approval")?
+            .map(|v| v.try_into().map_err(|_| corrupt()))
+            .transpose()?,
     })
 }
 pub(crate) fn exact(view: &ProviderView, version: i64) -> Result<(), FederationError> {

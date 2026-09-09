@@ -11,8 +11,20 @@ DEPLOY_GID=10001
 KEYCLOAK_UID=1000
 KEYCLOAK_GID=0
 IMAGES=json.loads((ROOT/'deployment/providers.lock.json').read_text())
+class ConfigurationError(ValueError):
+ """Messages are code-owned diagnostics, never interpolated input values."""
 def require(ok,message):
- if not ok:raise ValueError(message)
+ if not ok:raise ConfigurationError(message)
+def configuration_diagnostic(error):
+ if isinstance(error,ConfigurationError):return str(error)
+ if isinstance(error,KeyError):return 'missing_required_field'
+ if isinstance(error,OSError):return 'file_access_failed'
+ return 'invalid_configuration'
+def fields(data,expected,scope):
+ require(isinstance(data,dict),'invalid '+scope+' object')
+ missing=sorted(expected-set(data))
+ require(not missing,scope+' missing fields: '+','.join(missing))
+ require(not set(data)-expected,scope+' unexpected fields')
 def secret(path):
  fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
  with os.fdopen(fd) as f:
@@ -27,7 +39,12 @@ def render(data,out,candidate):
  require(set(images)==set(IMAGES) and set(artifacts)=={'server','operator','gateway'},'incomplete candidate images')
  require(all(re.fullmatch(r'[A-Za-z0-9_./:-]+@sha256:[a-f0-9]{64}',v) for v in [*images.values(),*artifacts.values()]),'candidate images must have exact digests')
  require(os.getuid()==0 or (os.getuid()==DEPLOY_UID==KEYCLOAK_UID and os.getgid()==DEPLOY_GID==KEYCLOAK_GID),'render as root to deliver provider-specific ownership')
- require(set(data)=={'runtime','owner_password_file','maintenance_password_file','hydra_database_password_file','keycloak_database_password_file','hydra_system_secret_files','hydra_cookie_secret_files','tls_certificate_file','tls_key_file','hydra_admin_certificate_file','hydra_admin_key_file','keycloak_certificate_file','keycloak_key_file','postgres_certificate_file','postgres_key_file','backend_subnet','protocol_subnet','consumer_network'},'unknown deployment fields')
+ require(isinstance(data,dict),'invalid deployment object')
+ require(not any(k in data for k in ('hydra_system_secret_file','hydra_cookie_secret_file')),'removed singular Hydra secret fields; use hydra_system_secret_files and hydra_cookie_secret_files')
+ fields(data,{'runtime','owner_password_file','maintenance_password_file','hydra_database_password_file','keycloak_database_password_file','hydra_system_secret_files','hydra_cookie_secret_files','tls_certificate_file','tls_key_file','hydra_admin_certificate_file','hydra_admin_key_file','keycloak_certificate_file','keycloak_key_file','postgres_certificate_file','postgres_key_file','backend_subnet','protocol_subnet','consumer_network'},'deployment')
+ for provider in data['runtime']['oidc']['providers']:
+  require('keycloak_totp' in provider,'provider missing field: keycloak_totp')
+  require(type(provider['keycloak_totp']) is bool,'invalid keycloak_totp approval')
  require(not out.exists(),'output directory must be new');out.mkdir(mode=0o700,parents=True);os.chown(out,DEPLOY_UID,DEPLOY_GID)
  c=copy.deepcopy(data['runtime']);origin=c['identity_origin'];ih=host(origin['identity_public_origin']);ph=host(origin['product_public_origin']);require(ih!=ph,'distinct origins required')
  back=ipaddress.ip_network(data['backend_subnet']);proto=ipaddress.ip_network(data['protocol_subnet']);require(back.version==4 and proto.version==4 and back.prefixlen==24 and proto.prefixlen==24 and not back.overlaps(proto),'distinct /24 networks required')
@@ -54,7 +71,6 @@ def render(data,out,candidate):
   u=urlsplit(p['issuer']);idp_hosts.add(host('https://'+u.netloc));require(re.fullmatch(r'/realms/[A-Za-z0-9_-]+',u.path),'Keycloak realm issuer required')
   require(p['addresses']==[str(proto.network_address+2)+'/32'],'OIDC must use the fixed TLS gateway')
   value=secret(p['secret_file']);p['secret_file']=mounted(p['secret_file'],'idp-'+str(n),True)
-  require(type(p['keycloak_totp']) is bool,'invalid Keycloak assurance approval')
   realm=u.path.split('/')[-1];realms.setdefault(realm,{'realm':realm,'enabled':True,'sslRequired':'all','clients':[]})['clients'].append({'clientId':p['client_id'],'secret':value,'publicClient':False,'standardFlowEnabled':True,'directAccessGrantsEnabled':False,'serviceAccountsEnabled':False,'redirectUris':[origin['identity_public_origin']+'/api/v1/oidc/callback'],'attributes':{'pkce.code.challenge.method':'S256'}})
  for p in c['oidc']['providers']:
   if p['keycloak_totp']:realms[urlsplit(p['issuer']).path.split('/')[-1]].update(json.loads((ROOT/'deployment/keycloak-totp.json').read_text()))
@@ -128,5 +144,5 @@ def render(data,out,candidate):
 def main():
  p=argparse.ArgumentParser();p.add_argument('--input',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--candidate',type=Path,required=True);a=p.parse_args()
  try:render(json.loads(a.input.read_text()),a.output,json.loads(a.candidate.read_text()))
- except (ValueError,KeyError,OSError) as e:raise SystemExit('deployment rendering refused: '+type(e).__name__)
+ except (ValueError,KeyError,OSError,TypeError) as e:raise SystemExit('deployment rendering refused: '+configuration_diagnostic(e))
 if __name__=='__main__':main()

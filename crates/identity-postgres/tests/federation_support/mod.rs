@@ -17,6 +17,7 @@ pub const RETURN: &str = "https://identity.example.test/done";
 type Hook = Box<dyn FnOnce() -> UpstreamFuture<'static, ()> + Send>;
 pub struct ScriptedOidc {
     pub fail: AtomicBool,
+    pub approval: AtomicBool,
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
@@ -29,6 +30,7 @@ impl ScriptedOidc {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             fail: AtomicBool::new(false),
+            approval: AtomicBool::new(true),
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
@@ -44,8 +46,8 @@ impl UpstreamOidc for ScriptedOidc {
         &self,
         _tenant: TenantId,
         _c: &ProviderSettings,
-    ) -> Result<(), FederationError> {
-        Ok(())
+    ) -> Result<[u8; 32], FederationError> {
+        Ok([u8::from(self.approval.load(Ordering::SeqCst)); 32])
     }
     fn validate(&self, _tenant: TenantId, _c: &ProviderSettings) -> Result<(), FederationError> {
         Ok(())
@@ -99,7 +101,7 @@ impl UpstreamOidc for ScriptedOidc {
                                 .unwrap()
                                 .as_secs() as i64,
                         ),
-                        "unspecified",
+                        rss_identity_core::assurance::Acr::Unspecified,
                         vec![],
                     )?,
                 ),

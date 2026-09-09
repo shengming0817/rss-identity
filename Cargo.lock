@@ -2214,6 +2214,7 @@ dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
  "rand_core 0.6.4",
+ "rss-identity-contracts",
  "rss-request-context",
  "serde",
  "serde_json",

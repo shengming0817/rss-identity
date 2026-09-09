@@ -24,12 +24,12 @@ use zeroize::Zeroizing;
 const ORIGIN: &str = "https://identity.example.test";
 const CALLBACK: &str = "https://identity.example.test/api/v1/oidc/callback";
 const BROWSER: &str = "__Host-identity-oidc-browser=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-fn production(ca: bool, allow: bool) -> anyhow::Result<HttpOidc> {
+fn production(ca: bool, allow: bool, keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
     let issuer = std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?;
     let pem = std::fs::read(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
     Ok(HttpOidc::new(
         vec![ApprovedProvider {
-            keycloak_totp: true,
+            keycloak_totp,
             tenant: tenant(),
             issuer,
             client_id: "identity-test".into(),
@@ -189,7 +189,7 @@ async fn successful(app: &Router, p: &ProviderView, user: &str) -> anyhow::Resul
 async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(production(true, true)?));
+    let s = service(&f, Arc::new(production(true, true, true)?));
     let p = provider(&f, &s).await?;
     let app = app(&s);
     let original = successful(&app, &p, "alice").await?;
@@ -291,6 +291,29 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         audit.iter().filter(|v| v["action"] == "stepped_up").count(),
         1
     );
+    // A real adapter profile withdrawal is applied before startup opens HTTP admission.
+    let withdrawn = service(&f, Arc::new(production(true, true, false)?));
+    withdrawn
+        .synchronize_approvals(f.key.tenant, deadline())
+        .await?;
+    assert!(
+        f.store
+            .inspect_session(f.key.tenant, secret(&upgraded), deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        federation_support::begin(&f, &s, &p).await.is_err(),
+        "stale approved process must not start flows"
+    );
+    s.synchronize_approvals(f.key.tenant, deadline()).await?;
+    assert!(
+        f.store
+            .inspect_session(f.key.tenant, secret(&upgraded), deadline())
+            .await
+            .is_err(),
+        "reapproval must not revive MFA"
+    );
     f.close().await;
     Ok(())
 }
@@ -300,7 +323,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
 async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let old = service(&f, Arc::new(production(true, true)?));
+    let old = service(&f, Arc::new(production(true, true, true)?));
     let p = provider(&f, &old).await?;
     let old_app = app(&old);
     let url = begin(&old_app, &p, BROWSER, None, None, false).await?;
@@ -389,7 +412,7 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
 async fn real_federated_login_and_linking() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(production(true, true)?));
+    let s = service(&f, Arc::new(production(true, true, true)?));
     let p = provider(&f, &s).await?;
     let app = app(&s);
     f.store
@@ -500,7 +523,7 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
 async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(production(true, true)?));
+    let s = service(&f, Arc::new(production(true, true, true)?));
     let p = provider(&f, &s).await?;
     let app = app(&s);
     let url = begin(&app, &p, BROWSER, None, None, false).await?;
@@ -582,6 +605,9 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
     assert!(!response.headers().contains_key("set-cookie"));
     let scripted = federation_support::ScriptedOidc::new();
     let mocked = service(&f, scripted.clone());
+    mocked
+        .synchronize_approvals(f.key.tenant, deadline())
+        .await?;
     let mock_app = federated_router(
         mocked.clone(),
         HttpConfig::new(ORIGIN, Duration::from_secs(30))?,
@@ -621,16 +647,18 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn federated_tls_and_egress_policy() -> anyhow::Result<()> {
-    production(true, true)?.test(tenant(), &config()?).await?;
+    production(true, true, true)?
+        .test(tenant(), &config()?)
+        .await?;
     assert_eq!(
-        production(false, true)?
+        production(false, true, true)?
             .test(tenant(), &config()?)
             .await
             .unwrap_err(),
         FederationError::provider(ProviderStage::Discovery, ProviderReason::TlsRejected)
     );
     assert_eq!(
-        production(true, false)?
+        production(true, false, true)?
             .test(tenant(), &config()?)
             .await
             .unwrap_err(),
@@ -639,7 +667,7 @@ async fn federated_tls_and_egress_policy() -> anyhow::Result<()> {
     let mut wrong = config()?.input();
     wrong.issuer = "https://169.254.169.254".into();
     assert!(
-        production(true, true)?
+        production(true, true, true)?
             .test(tenant(), &wrong.try_into()?)
             .await
             .is_err()
@@ -711,7 +739,7 @@ async fn real_provider_management_and_missing_secret() -> anyhow::Result<()> {
         ))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
-    let real = service(&f, Arc::new(production(true, true)?));
+    let real = service(&f, Arc::new(production(true, true, true)?));
     let app = rss_identity_http_axum::management_router(real, config)?;
     let r = app
         .oneshot(request("POST", &test, &cookie, Some(&csrf), json!({})))
