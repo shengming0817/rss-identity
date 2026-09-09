@@ -1,7 +1,7 @@
 use crate::{AppState, boundary::*};
 use axum::{
     Extension, Json,
-    extract::{ConnectInfo, FromRequest, Path, Query, Request, State},
+    extract::{FromRequest, Path, Query, Request, State},
     http::{HeaderMap, header},
     response::{IntoResponse, Response},
 };
@@ -12,7 +12,6 @@ use rss_identity_core::{
 };
 use rss_identity_postgres::{AttemptSource, AuthenticatedSession, AuthorityError, IssuedSession};
 use serde::Deserialize;
-use std::net::SocketAddr;
 
 type Result<T> = std::result::Result<T, HttpError>;
 #[derive(Deserialize)]
@@ -47,10 +46,10 @@ pub(crate) async fn login(
     }
     let peer = request
         .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
+        .get::<crate::ClientAddress>()
         .ok_or(HttpError::from(AuthorityError::Unavailable))?
         .0;
-    let source = AttemptSource::parse(&peer.ip().to_string()).map_err(HttpError::from)?;
+    let source = AttemptSource::parse(&peer.to_string()).map_err(HttpError::from)?;
     let replacement = match login_cookie(request.headers())? {
         Some(secret) => {
             let token = SessionSecret::parse(secret.expose().into()).map_err(|_| UNAUTH)?;

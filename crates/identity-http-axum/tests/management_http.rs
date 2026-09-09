@@ -7,13 +7,12 @@ mod support;
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::ConnectInfo,
     http::{Request, Response, StatusCode},
 };
 use rss_identity_http_axum::{HttpConfig, federated_router, management_router};
 use rss_identity_postgres::*;
 use serde_json::{Value, json};
-use std::{net::SocketAddr, sync::atomic::Ordering, time::Duration};
+use std::{sync::atomic::Ordering, time::Duration};
 use support::*;
 use tower::ServiceExt;
 const ORIGIN: &str = "https://identity.example.test";
@@ -50,7 +49,9 @@ fn req(method: &str, path: &str, cookie: &str, csrf: &str, value: Value) -> Requ
     }
     let mut r = r.body(Body::from(value.to_string())).unwrap();
     r.extensions_mut()
-        .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
+        .insert(rss_identity_http_axum::ClientAddress(
+            "127.0.0.1".parse().unwrap(),
+        ));
     r
 }
 async fn json_body(r: Response<Body>) -> anyhow::Result<Value> {

@@ -1,104 +1,15 @@
 # 本机维护：开发库安装与不确定结果核实
 
-适用 #2358/#2334/#2335 的可丢弃专属开发库（当前初始安装为 schema version 5）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin recover`，下列账户/事件查询只有只读用途。
+适用 #2358/#2334/#2335 的可丢弃专属开发库（当前初始安装为 schema version 6）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin recover`，下列账户/事件查询只有只读用途。
 
-## 连接与凭据前置条件
+## 安装与凭据
 
-准备已配置 VerifyFull TLS 的 PostgreSQL、CA 和 `psql`。在私有 `~/.pg_service.conf` 定义 `identity_owner_cluster`（连 postgres）与 `identity_owner_dev`（连 rss_identity_dev）的 owner 服务，密码由私有 `.pgpass` 或交互提示提供，勿写到 DSN 参数、环境或历史记录。两个服务须指向同一已核实实例；owner 须具备创建数据库/角色及迁移中转移函数所有权所需权限。下文名称固定为专属开发示例，实际采用其它名称时整套替换。
-
-先只读核实目标，停止其旧工具/服务；确认该库数据可丢弃且这些 Identity 角色不属于其它部署：
-
-```sh
-psql 'service=identity_owner_cluster' -X -v ON_ERROR_STOP=1 -c 'SELECT current_database(), inet_server_addr(), inet_server_port();'
-psql 'service=identity_owner_dev' -X -v ON_ERROR_STOP=1 -c 'SELECT version FROM identity_authority.schema_version;'
-```
-
-## 重建与安装
-
-仅在上述归属与丢弃条件成立时执行。DROP DATABASE 不在事务内；角色仍被其它数据库依赖时会失败，应核实归属，不添加 CASCADE、DROP OWNED 或强制断开连接。
-
-```sh
-psql 'service=identity_owner_cluster' -X -v ON_ERROR_STOP=1 <<'SQL'
-DROP DATABASE rss_identity_dev;
-DROP ROLE IF EXISTS identity_maintenance;
-DROP ROLE IF EXISTS identity_account_maintenance;
-DROP ROLE IF EXISTS identity_runtime;
-DROP ROLE IF EXISTS identity_account_runtime;
-CREATE DATABASE rss_identity_dev;
-SQL
-```
-
-全新环境没有旧数据库时，从 `CREATE DATABASE rss_identity_dev` 开始。`rss_tmsg_relay` 是 RSS 必要 NOLOGIN 角色，不能随意删除；下列安装在缺少时创建，存在时拒绝不安全属性和任何父角色成员关系（不依赖 ADMIN/SET/INHERIT 选项）。Identity 两个组角色必须由新的初始安装 SQL 创建，碰到同名角色即失败。
-
-在 Identity checkout 根目录执行，`RSS_CHECKOUT` 指向可读取固定 Git revision 的 RSS checkout；不要求该 checkout 的当前分支与固定 revision 相同。固定源码、八个有序迁移及 Identity 安装 SQL 合成一个非秘密临时文件后，在同一事务执行；任何失败中止整批安装。
-
-```sh
-set -e
-RSS_CHECKOUT=/absolute/path/to/rss
-RSS_REV=bf5dd1350997d01aa834094a3347fce30247814e
-IDENTITY_INSTALL=$(mktemp)
-trap 'rm -f "$IDENTITY_INSTALL"' EXIT
-cat > "$IDENTITY_INSTALL" <<'SQL'
-DO $$ BEGIN
- IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='rss_tmsg_relay') THEN
-  CREATE ROLE rss_tmsg_relay NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
- ELSIF EXISTS (SELECT FROM pg_roles WHERE rolname='rss_tmsg_relay' AND
-   (rolcanlogin OR rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls OR rolreplication))
- OR EXISTS (SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member
-   WHERE r.rolname='rss_tmsg_relay') THEN
-  RAISE EXCEPTION 'unsafe existing RSS relay role';
- END IF;
-END $$;
-SQL
-for migration in \
-  0001_create_transactional_messaging.sql \
-  0002_add_message_recovery.sql \
-  0003_enforce_replay_identity.sql \
-  0004_add_consumer_archive.sql \
-  0005_enforce_archive_settlement.sql \
-  0006_secure_archive_search_path.sql \
-  0007_add_message_dr.sql \
-  0008_apply_message_dr.sql
-do
-  /usr/bin/git -C "$RSS_CHECKOUT" show "$RSS_REV:crates/transactional-messaging-postgres/migrations/$migration" >> "$IDENTITY_INSTALL"
-  printf '\n' >> "$IDENTITY_INSTALL"
-done
-cat crates/identity-postgres/migrations/0001_authority.sql >> "$IDENTITY_INSTALL"
-psql 'service=identity_owner_dev' -X -v ON_ERROR_STOP=1 --single-transaction -f "$IDENTITY_INSTALL"
-```
-
-配置两个独立登录身份及固定 RSS PgRuntime 要求的事务权限。不给登录身份继承 `rss_tmsg_relay`，不授予 Identity owner 或表外额外权限。以下身份值只用于这个隔离开发库：target 为 16 个字节 1，lineage 为 16 个字节 2，tenant epoch 为 1；它们不是生产身份默认值。
-
-```sh
-psql 'service=identity_owner_dev' -X -v ON_ERROR_STOP=1 --single-transaction <<'SQL'
-CREATE ROLE identity_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
-CREATE ROLE identity_maintenance LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
-GRANT identity_account_runtime TO identity_runtime;
-GRANT identity_account_maintenance TO identity_maintenance;
-GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_runtime,identity_maintenance;
-GRANT SELECT ON rss_transactional_messaging.policy TO identity_runtime,identity_maintenance;
-GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO identity_runtime,identity_maintenance;
-GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_runtime,identity_maintenance;
-GRANT USAGE ON SEQUENCE rss_transactional_messaging.outbox_seq_seq TO identity_runtime,identity_maintenance;
-GRANT EXECUTE ON FUNCTION
- rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),
- rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),
- rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),
- rss_transactional_messaging.check_execution()
- TO identity_runtime,identity_maintenance;
-INSERT INTO rss_transactional_messaging.storage_lineage VALUES
- (true,decode(repeat('01',16),'hex'),decode(repeat('02',16),'hex'));
-INSERT INTO rss_transactional_messaging.tenant_epoch VALUES
- ('11111111-1111-4111-8111-111111111111',1);
-SQL
-```
-
-在交互 `psql 'service=identity_owner_dev' -X` 中分别执行 `\password identity_runtime` 和 `\password identity_maintenance`，交互设置数据库口令；由受控 secret 工具将相应口令注入各自普通 `0600` 文件，不把口令写进上述脚本。维护密码文件不得由日常服务读取。
+旧checkout拼接SQL的安装步骤已退出。使用 [I08安装入口](../deployment/operations.md) 的 identity-migrate，凭据与schema/grants一次闭合；维护只消费独立的maintenance配置。当前初始schema为v6，旧v5开发库不得原地升级或自动清理。
 
 Owner 只读核实非秘密安装身份：
 
 ```sql
-SELECT version FROM identity_authority.schema_version; -- 恰好一行，5
+SELECT version FROM identity_authority.schema_version; -- 恰好一行，6
 SELECT authority_id,bootstrap_tenant FROM identity_authority.deployment; -- 恰好一行，记录 authority_id；tenant 为 NULL
 SELECT encode(target,'hex'),encode(lineage,'hex') FROM rss_transactional_messaging.storage_lineage;
 SELECT tenant_id,epoch FROM rss_transactional_messaging.tenant_epoch;
@@ -112,6 +23,7 @@ SELECT NOT EXISTS(SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.membe
 
 ```json
 {
+  "identity_origin": {"environment_id":"development","config_version":1,"identity_public_origin":"https://identity.example.test","product_public_origin":"https://mdm.example.test"},
   "host": "pg.dev.example.test", "port": 5432, "database": "rss_identity_dev",
   "user": "identity_maintenance", "password_file": "/private/identity/maintenance-db-password",
   "ca_file": "/private/identity/ca.pem",
@@ -125,7 +37,7 @@ SELECT NOT EXISTS(SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.membe
 准备符合密码规则的私有新密码文件后，在 Identity checkout 中初始化维护账户。这里只说明操作，不将文档或低层测试冒充 T3 运行证明：
 
 ```sh
-cargo build --locked -p rss-identity-admin
+cargo build --locked -p rss-identity-app
 PRINCIPAL_UUID=$(python3 -c 'import uuid; print(uuid.uuid4())')
 ./target/debug/identity-admin /private/identity/maintenance.json initialize "$PRINCIPAL_UUID" admin /private/identity/admin-password
 ```

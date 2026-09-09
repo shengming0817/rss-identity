@@ -11,3 +11,7 @@
 - [历史参考](reference/README.md)、[证据索引](docs/reference/sources.md)。
 
 本地材料通过 `.git/info/exclude` 排除；克隆后按历史参考说明恢复。当前不包含业务数据库或密钥。
+
+## 产品装配
+
+`app/identity` 输出 identity-server / identity-migrate / identity-admin；配置与操作见 [部署入口](docs/deployment/README.md)。完整产品T3单独验收。

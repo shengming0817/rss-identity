@@ -8,6 +8,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 
 RSS_FEATURES = {
+    'rss-runtime': {'default'}, 'rss-axum': {'http1','managed-server'},
     'rss-contract': {'default'}, 'rss-request-context': {'default'},
     'rss-redact': {'default'}, 'rss-diag-context': {'default'},
     'rss-transactional-messaging': {'consumer', 'default', 'producer'},
@@ -80,7 +81,7 @@ if __name__ == "__main__":
     check_advisory_policy(tomllib.loads((ROOT / "deny.toml").read_text()))
     result = check(data, manifest)
     # Read actual normal library build artifacts, not a display approximation of resolution.
-    output = subprocess.check_output(['cargo', 'check', '--locked', '--workspace', '--lib', '--message-format=json'], cwd=ROOT, text=True)
+    output = subprocess.check_output(['cargo', 'check', '--locked', '--workspace', '--lib', '--bins', '--message-format=json'], cwd=ROOT, text=True)
     packages = {p['id']: p for p in data['packages']}
     actual = {}
     for line in output.splitlines():

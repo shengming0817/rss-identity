@@ -726,6 +726,8 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             .await?;
             let result = Authority::connect(
                 runtime.clone(),
+                std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                deployment_identity(),
                 rss_transactional_messaging::policy::DeliveryBudget::new(
                     Duration::from_secs(60),
                     Duration::from_secs(5),
@@ -748,6 +750,8 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             .await?;
             Authority::connect(
                 runtime.clone(),
+                std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                deployment_identity(),
                 rss_transactional_messaging::policy::DeliveryBudget::new(
                     Duration::from_secs(60),
                     Duration::from_secs(5),
@@ -799,6 +803,8 @@ async fn source_budgets_are_shared() -> anyhow::Result<()> {
     let other_runtime = f.additional_runtime().await?;
     let other = Authority::connect(
         other_runtime.clone(),
+        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        deployment_identity(),
         rss_transactional_messaging::policy::DeliveryBudget::new(
             Duration::from_secs(60),
             Duration::from_secs(5),
@@ -1404,7 +1410,7 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
             StorageMismatch::SchemaVersion
         ))
     ));
-    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=5; ALTER TABLE identity_authority.schema_version ADD CHECK(version=5)").execute(&f.owner).await?;
+    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=6; ALTER TABLE identity_authority.schema_version ADD CHECK(version=6)").execute(&f.owner).await?;
     assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
     for (remove, restore, expected) in [
         (

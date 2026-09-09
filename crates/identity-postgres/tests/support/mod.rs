@@ -18,6 +18,15 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+pub fn deployment_identity() -> DeploymentIdentity {
+    DeploymentIdentity::new(
+        "fixture".into(),
+        1,
+        "https://identity.test".into(),
+        "https://product.test".into(),
+    )
+    .unwrap()
+}
 pub const A: &str = "11111111-1111-4111-8111-111111111111";
 pub const B: &str = "22222222-2222-4222-8222-222222222222";
 pub const PASSWORD: &str = "correct horse battery staple";
@@ -81,6 +90,7 @@ impl Fixture {
             .execute(&owner)
             .await?;
         sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
+        sqlx::raw_sql("UPDATE identity_authority.deployment SET environment_id='fixture', identity_config_version=1, identity_public_origin='https://identity.test', product_public_origin='https://product.test'").execute(&owner).await?;
         sqlx::raw_sql("GRANT identity_account_runtime TO identity_runtime; GRANT identity_account_maintenance TO identity_maintenance;").execute(&owner).await?;
         sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO identity_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO identity_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO identity_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),rss_transactional_messaging.check_execution() TO identity_runtime;").execute(&owner).await?;
         sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_maintenance; GRANT SELECT ON rss_transactional_messaging.policy TO identity_maintenance; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO identity_maintenance; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_maintenance; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO identity_maintenance; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),rss_transactional_messaging.check_execution() TO identity_maintenance;").execute(&owner).await?;
@@ -138,6 +148,8 @@ impl Fixture {
         )?;
         let store = Authority::connect(
             runtime.clone(),
+            std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+            deployment_identity(),
             budget,
             TenantId::parse(A)?,
             AuthorityProfile::Runtime,
@@ -146,6 +158,8 @@ impl Fixture {
         .await?;
         let maintenance = Authority::connect(
             maintenance_runtime.clone(),
+            std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+            deployment_identity(),
             budget,
             TenantId::parse(A)?,
             AuthorityProfile::Maintenance,
@@ -201,6 +215,8 @@ impl Fixture {
         .unwrap();
         Authority::connect(
             self.runtime.clone(),
+            std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+            deployment_identity(),
             budget,
             self.key.tenant,
             profile,

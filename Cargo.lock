@@ -614,6 +614,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "dynosaur"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a12303417f378f29ba12cb12fc78a9df0d8e16ccb1ad94abf04d48d96bdda532"
+dependencies = [
+ "dynosaur_derive",
+]
+
+[[package]]
+name = "dynosaur_derive"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ac0893f103ae7bf50181323d748d505f27b6255777c28b502030bdaf8749f4c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -692,6 +712,16 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
+name = "errno"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
 
 [[package]]
 name = "etcetera"
@@ -2092,34 +2122,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-axum"
+version = "0.1.0"
+source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=253503cc5a6a59909fcdfec2b5921ffc6b733394#253503cc5a6a59909fcdfec2b5921ffc6b733394"
+dependencies = [
+ "axum",
+ "futures",
+ "hyper",
+ "hyper-util",
+ "rss-contract",
+ "rss-request-context",
+ "rss-runtime",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "rss-contract"
 version = "0.1.0"
-source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=bf5dd1350997d01aa834094a3347fce30247814e#bf5dd1350997d01aa834094a3347fce30247814e"
+source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=253503cc5a6a59909fcdfec2b5921ffc6b733394#253503cc5a6a59909fcdfec2b5921ffc6b733394"
 
 [[package]]
 name = "rss-diag-context"
 version = "0.1.0"
-source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=bf5dd1350997d01aa834094a3347fce30247814e#bf5dd1350997d01aa834094a3347fce30247814e"
+source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=253503cc5a6a59909fcdfec2b5921ffc6b733394#253503cc5a6a59909fcdfec2b5921ffc6b733394"
 dependencies = [
  "thiserror 2.0.20",
 ]
 
 [[package]]
-name = "rss-identity-admin"
+name = "rss-identity-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "hex",
+ "http-body",
+ "http-body-util",
  "libc",
+ "rss-axum",
  "rss-identity-core",
+ "rss-identity-http-axum",
+ "rss-identity-hydra",
+ "rss-identity-oidc",
  "rss-identity-postgres",
  "rss-request-context",
+ "rss-runtime",
  "rss-transactional-messaging",
  "rss-transactional-messaging-postgres",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
+ "url",
  "uuid",
  "zeroize",
 ]
@@ -2160,6 +2220,7 @@ dependencies = [
  "subtle",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "url",
  "uuid",
  "zeroize",
@@ -2257,7 +2318,7 @@ dependencies = [
 [[package]]
 name = "rss-redact"
 version = "0.1.0"
-source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=bf5dd1350997d01aa834094a3347fce30247814e#bf5dd1350997d01aa834094a3347fce30247814e"
+source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=253503cc5a6a59909fcdfec2b5921ffc6b733394#253503cc5a6a59909fcdfec2b5921ffc6b733394"
 dependencies = [
  "hmac 0.12.1",
  "rss-contract",
@@ -2271,16 +2332,31 @@ dependencies = [
 [[package]]
 name = "rss-request-context"
 version = "0.1.0"
-source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=bf5dd1350997d01aa834094a3347fce30247814e#bf5dd1350997d01aa834094a3347fce30247814e"
+source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=253503cc5a6a59909fcdfec2b5921ffc6b733394#253503cc5a6a59909fcdfec2b5921ffc6b733394"
 dependencies = [
  "thiserror 2.0.20",
  "uuid",
 ]
 
 [[package]]
+name = "rss-runtime"
+version = "0.1.0"
+source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=253503cc5a6a59909fcdfec2b5921ffc6b733394#253503cc5a6a59909fcdfec2b5921ffc6b733394"
+dependencies = [
+ "dynosaur",
+ "futures",
+ "rss-redact",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "trait-variant",
+]
+
+[[package]]
 name = "rss-transactional-messaging"
 version = "0.2.0"
-source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=bf5dd1350997d01aa834094a3347fce30247814e#bf5dd1350997d01aa834094a3347fce30247814e"
+source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=253503cc5a6a59909fcdfec2b5921ffc6b733394#253503cc5a6a59909fcdfec2b5921ffc6b733394"
 dependencies = [
  "futures",
  "rss-contract",
@@ -2294,7 +2370,7 @@ dependencies = [
 [[package]]
 name = "rss-transactional-messaging-postgres"
 version = "0.1.0"
-source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=bf5dd1350997d01aa834094a3347fce30247814e#bf5dd1350997d01aa834094a3347fce30247814e"
+source = "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=253503cc5a6a59909fcdfec2b5921ffc6b733394#253503cc5a6a59909fcdfec2b5921ffc6b733394"
 dependencies = [
  "futures",
  "rss-contract",
@@ -2624,6 +2700,16 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
 
 [[package]]
 name = "signature"
@@ -3071,6 +3157,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -3104,6 +3191,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
 dependencies = [
  "futures-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -3183,6 +3284,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "trait-variant"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70977707304198400eb4835a78f6a9f928bf41bba420deb8fdb175cd965d77a7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

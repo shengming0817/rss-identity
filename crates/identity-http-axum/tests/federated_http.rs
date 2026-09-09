@@ -7,7 +7,6 @@ mod support;
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::ConnectInfo,
     http::{Request, StatusCode},
     response::Response,
 };
@@ -17,7 +16,7 @@ use rss_identity_oidc::{ApprovedProvider, HttpOidc};
 use rss_identity_postgres::*;
 use rss_transactional_messaging_postgres::PgTransactionFault;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use support::*;
 use tower::ServiceExt;
 use zeroize::Zeroizing;
@@ -103,9 +102,11 @@ fn request(
         request = request.header("x-csrf-token", csrf)
     }
     let mut request = request.body(Body::from(body.to_string())).unwrap();
-    request.extensions_mut().insert(ConnectInfo(
-        "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
-    ));
+    request
+        .extensions_mut()
+        .insert(rss_identity_http_axum::ClientAddress(
+            "127.0.0.1".parse().unwrap(),
+        ));
     request
 }
 async fn body(response: Response) -> anyhow::Result<Value> {

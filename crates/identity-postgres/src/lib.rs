@@ -1,4 +1,6 @@
 //! Tenant-local account authority. SQL and event envelopes are private implementation details.
+mod deployment;
+pub use deployment::DeploymentIdentity;
 mod attempts;
 mod downstream;
 mod downstream_cleanup;
@@ -23,6 +25,8 @@ pub use sessions::{
     AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
 };
 pub use types::*;
+pub const SCHEMA_SIGNATURE_SQL: &str = include_str!("schema-signature.sql");
+pub const SCHEMA_SIGNATURE: &str = include_str!("schema-signature.sha256");
 pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_authority.sql");
 use rss_identity_core::account::{AccountChange, AccountKey, AccountState};
 use rss_transactional_messaging::message::MessagingDomain;
@@ -32,6 +36,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Authority {
+    kdf: Arc<rss_identity_core::account::PasswordKdf>,
     runtime: Arc<PgRuntime>,
     profile: AuthorityProfile,
     outbox: Arc<PgOutboxStore<()>>,
@@ -40,6 +45,8 @@ impl Authority {
     /// Validate the Identity schema and effective role before exposing an authority.
     pub async fn connect(
         runtime: Arc<PgRuntime>,
+        kdf: Arc<rss_identity_core::account::PasswordKdf>,
+        deployment: DeploymentIdentity,
         budget: DeliveryBudget,
         tenant: rss_request_context::TenantId,
         profile: AuthorityProfile,
@@ -50,6 +57,7 @@ impl Authority {
         let outbox = PgOutboxStore::new(runtime.clone(), domain, budget)
             .map_err(|_| AuthorityError::Unavailable)?;
         let authority = Self {
+            kdf,
             runtime,
             profile,
             outbox: Arc::new(outbox),
@@ -79,9 +87,12 @@ impl Authority {
                                 return Ok(Some(inventory));
                             }
                             let versions:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *c).await?;
-                            if versions != [5] {return Ok(Some("schema-version".into()));}
+                            if versions != [6] {return Ok(Some("schema-version".into()));}
                             let signature:String=sqlx::query_scalar(include_str!("schema-signature.sql")).fetch_one(&mut *c).await?;
                             if signature != include_str!("schema-signature.sha256").trim() { return Ok(Some("schema-contract".into())); }
+                            let identity_matches: bool = sqlx::query_scalar("SELECT count(*)=1 AND coalesce(bool_and(environment_id=$1 AND identity_config_version=$2 AND identity_public_origin=$3 AND product_public_origin=$4),false) FROM identity_authority.deployment")
+                                .bind(deployment.environment_id).bind(deployment.config_version).bind(deployment.identity_public_origin).bind(deployment.product_public_origin).fetch_one(&mut *c).await?;
+                            if !identity_matches { return Ok(Some("deployment-identity".into())); }
                             sqlx::query_scalar::<_, Option<String>>(include_str!("probe.sql"))
                                 .bind(label)
                                 .fetch_one(c)
@@ -117,6 +128,7 @@ fn check_probe(result: Result<Option<String>, AuthorityError>) -> Result<(), Aut
         Some("ok") => return Ok(()),
         Some("schema-version") => StorageMismatch::SchemaVersion,
         Some("role") => StorageMismatch::Role,
+        Some("deployment-identity") => StorageMismatch::DeploymentIdentity,
         Some("privileges") => StorageMismatch::Privileges,
         _ => StorageMismatch::SchemaContract,
     };

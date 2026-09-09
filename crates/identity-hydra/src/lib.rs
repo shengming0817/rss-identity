@@ -103,6 +103,12 @@ impl Hydra {
             service,
         })
     }
+    /// Bounded private provider readiness probe through the existing authenticated transport.
+    pub async fn ready(&self) -> Result<(), DownstreamError> {
+        self.request(Method::GET, "health/ready", &[], None, None)
+            .await
+            .map(|_| ())
+    }
     async fn request(
         &self,
         method: Method,

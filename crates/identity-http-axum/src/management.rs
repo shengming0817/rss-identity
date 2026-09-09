@@ -2,7 +2,7 @@
 use crate::{AppState, HttpConfig, boundary::*};
 use axum::{
     Extension, Json, Router,
-    extract::{ConnectInfo, Path, Query, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response},
@@ -17,7 +17,7 @@ use rss_identity_postgres::{
     AccountView, AttemptSource, AuthenticatedSession, AuthorityError, Federation, LocalAccountRole,
 };
 use serde::{Deserialize, de::DeserializeOwned};
-use std::net::SocketAddr;
+
 #[derive(Clone)]
 struct Management {
     federation: Federation,
@@ -318,10 +318,10 @@ async fn own_password(
     let actor = actor(&s, &t, r.headers(), b, true).await?;
     let peer = r
         .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
+        .get::<crate::ClientAddress>()
         .ok_or(AuthorityError::Unavailable)?
         .0;
-    let source = AttemptSource::parse(&peer.ip().to_string())?;
+    let source = AttemptSource::parse(&peer.to_string())?;
     let v: ChangePassword = body(r, b).await?;
     Ok(account(
         s.federation

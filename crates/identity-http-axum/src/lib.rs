@@ -128,3 +128,8 @@ mod tests {
         }
     }
 }
+
+/// Client attribution supplied by the hosting transport after its proxy trust check.
+/// This is not authenticated identity; the raw TCP peer remains in ConnectInfo.
+#[derive(Clone, Copy, Debug)]
+pub struct ClientAddress(pub std::net::IpAddr);

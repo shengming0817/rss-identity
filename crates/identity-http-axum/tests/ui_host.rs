@@ -22,7 +22,19 @@ async fn real_identity_ui_management_seam() -> anyhow::Result<()> {
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
+            app.layer(axum::middleware::map_request(
+                |mut r: axum::extract::Request| async move {
+                    if let Some(peer) = r
+                        .extensions()
+                        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                    {
+                        let source = rss_identity_http_axum::ClientAddress(peer.0.ip());
+                        r.extensions_mut().insert(source);
+                    }
+                    r
+                },
+            ))
+            .into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
     });
