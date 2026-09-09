@@ -63,10 +63,34 @@ impl LocalHydra {
             });
             clients.push((desired, secret));
         }
+        self.wait_ready(Duration::from_secs(60)).await?;
         for (desired, secret) in &clients {
             self.ensure(desired, secret).await?;
         }
         Ok(clients.len())
+    }
+
+    // Only readiness GETs are retried. No client mutation occurs inside this deadline.
+    async fn wait_ready(&self, budget: Duration) -> Result<(), AppError> {
+        tokio::time::timeout(budget, async {
+            loop {
+                let mut ready = true;
+                for endpoint in [&self.admin, &self.public] {
+                    if !matches!(self.http.get(format!("{endpoint}/health/ready")).send().await,
+                        Ok(response) if response.status() == StatusCode::OK)
+                    {
+                        ready = false;
+                        break;
+                    }
+                }
+                if ready {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await
+        .map_err(|_| AppError::Provider)
     }
 
     async fn ensure(&self, desired: &Value, secret: &str) -> Result<(), AppError> {
@@ -192,4 +216,27 @@ async fn response(request: RequestBuilder) -> Result<(StatusCode, Value), AppErr
         secret.zeroize();
     }
     Ok((status, value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn readiness_budget_bounds_stalled_health_headers() {
+        // Listening without accepting keeps the request pending beyond the admission budget.
+        let admin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let public = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hydra = LocalHydra::new(
+            admin.local_addr().unwrap().port(),
+            public.local_addr().unwrap().port(),
+        )
+        .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            hydra.wait_ready(Duration::from_millis(20)),
+        )
+        .await;
+        assert!(matches!(result, Ok(Err(AppError::Provider))));
+    }
 }

@@ -33,6 +33,8 @@ class Deployment(unittest.TestCase):
    self.assertEqual(json.loads((root/'rendered/hydra.json').read_text())['urls']['self']['issuer'],'https://identity.example.test/oidc')
    registration=services['hydra-clients']
    self.assertEqual(registration['network_mode'],'service:hydra')
+   self.assertEqual(registration['depends_on'],{'hydra':{'condition':'service_healthy'}})
+   self.assertEqual(services['hydra']['healthcheck']['test'],['CMD','wget','-q','-T','3','-O','/dev/null','http://127.0.0.1:4445/health/ready'])
    self.assertEqual(registration['entrypoint'],['identity-clients'])
    self.assertIn('/run/config/runtime.json',{v['target'] for v in registration['volumes']})
    self.assertNotIn('/run/input/owner-password',{v['target'] for v in registration['volumes']})
