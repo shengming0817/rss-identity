@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build immutable candidate archives from clean, fixed Identity and UI source identities."""
-import argparse,hashlib,json,os,shutil,subprocess,tarfile,tempfile,tomllib,sys
+import sys,argparse,hashlib,json,os,shutil,subprocess,tarfile,tempfile,tomllib
 from urllib.parse import urlsplit
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
