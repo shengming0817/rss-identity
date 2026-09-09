@@ -69,25 +69,19 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
             .fetch_one(&f.owner)
             .await?;
     for (time, acr) in [
-        (None, Some("2")),
-        (Some(now - 1000), Some("2")),
-        (Some(now + 1000), Some("2")),
-        (Some(now), Some("1")),
+        (None, "unspecified"),
+        (Some(now - 1000), "mfa"),
+        (Some(now + 1000), "mfa"),
+        (Some(now), "unspecified"),
     ] {
-        *upstream.assurance.lock().unwrap() =
-            Some(Assurance::from_verified_oidc(time, acr, vec![], true)?);
+        *upstream.assurance.lock().unwrap() = Some(Assurance::new(time, acr, vec![])?);
         let token = step_begin(&f, &s, &p, &old).await?;
         assert!(step_finish(&s, token, &old, "alice").await.is_err());
         f.store
             .inspect_session(f.key.tenant, secret(&old), deadline())
             .await?;
     }
-    *upstream.assurance.lock().unwrap() = Some(Assurance::from_verified_oidc(
-        Some(now),
-        Some("2"),
-        vec![],
-        true,
-    )?);
+    *upstream.assurance.lock().unwrap() = Some(Assurance::new(Some(now), "mfa", vec![])?);
     let token = step_begin(&f, &s, &p, &old).await?;
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.accounts")
         .fetch_one(&f.owner)

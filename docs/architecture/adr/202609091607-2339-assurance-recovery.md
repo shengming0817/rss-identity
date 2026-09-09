@@ -12,7 +12,7 @@ openidconnect 先验证签名、issuer、audience、nonce；adapter 仅从已验
 
 step-up 复用 Login purpose、replacement_session 和唯一 callback，必须当前会话、Origin/CSRF、同一已关联主体；不 JIT、不 linking。回调重检会话、账户/member epoch、provider 版本，原子消费事务、轮换 session、写 stepped_up 事件。CommitUnknown 不返回新 cookie。不增加管理操作门禁。
 
-会话创建时刻继续拥有 idle/absolute lifetime，认证时间独立存在 auth_facts 中。共用 session lookup 解码事实，下游及 Hydra 从同一事实投影，Rust client 接受闭合的 `unspecified/mfa` 和已知 AMR。新会话不会提升指向旧 session 的 grant；产品仍需在线验证并自行决定动作要求和认证新鲜度。
+会话创建时刻继续拥有 idle/absolute lifetime，认证时间独立存在 auth_facts 中。共用 session lookup 解码事实，在线下游从同一事实投影，Rust client 接受闭合的 `unspecified/mfa` 和已知 AMR。Keycloak ACR 2 的请求/响应映射由 OIDC adapter 单独持有，core 只验证规范化事实。Hydra v26.2.0 login accept 不接受上游 auth_time；标准 ID Token 固定 unspecified/无上游 AMR，避免把 Hydra 当前时间与旧 MFA 强度组合。完整 assurance 只从在线 validate/Rust client 消费（ref: ory/hydra v26.2.0 oauth2/handler.go:1315–1322）。新会话不会提升指向旧 session 的 grant；产品仍需在线验证并自行决定动作要求和认证新鲜度。
 
 ## 恢复与轮换
 

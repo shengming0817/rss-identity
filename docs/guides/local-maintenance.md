@@ -1,6 +1,6 @@
 # 本机维护：开发库安装与不确定结果核实
 
-适用 #2358/#2334/#2335 的可丢弃专属开发库（当前初始安装为 schema version 6）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin recover`，下列账户/事件查询只有只读用途。
+适用 #2358/#2334/#2335 的可丢弃专属开发库（当前初始安装为 schema version 7）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin recover`，下列账户/事件查询只有只读用途。
 
 ## 安装与凭据
 
@@ -9,7 +9,7 @@
 Owner 只读核实非秘密安装身份：
 
 ```sql
-SELECT version FROM identity_authority.schema_version; -- 恰好一行，6
+SELECT version FROM identity_authority.schema_version; -- 恰好一行，7
 SELECT authority_id,bootstrap_tenant FROM identity_authority.deployment; -- 恰好一行，记录 authority_id；tenant 为 NULL
 SELECT encode(target,'hex'),encode(lineage,'hex') FROM rss_transactional_messaging.storage_lineage;
 SELECT tenant_id,epoch FROM rss_transactional_messaging.tenant_epoch;

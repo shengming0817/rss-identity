@@ -26,6 +26,8 @@ body 与正常联合登录相同：`{"client_id":"identity-ui","return_target":"
 
 普通联合登录若未提供认证时间，低强度结果沿用中央会话建立时间；只有 MFA 或显式重新认证必须具有上游时间。会话续期不刷新认证时间。产品按动作判断允许强度和新鲜度，仍必须逐请求在线验证；旧 grant 不会自动升级为新 session 的 MFA。
 
+Hydra v26.2.0 的标准 ID Token 中 `auth_time` 由 Hydra 登录处理时刻持有，不能作为上游 MFA 新鲜度。其标准 `acr` 固定为 `unspecified`，不投影上游 AMR；完整 `acr/amr/auth_time` 仅由上述在线入口从同一中央会话返回。产品需要 MFA 或新鲜度时消费在线结果，不从 ID Token 时间推断。
+
 首版交付后端 API/T2 和本指南，中央前端按钮与展示由 rss-web [#2368](https://dev.azure.com/shengming0923/rss/_workitems/edit/2368) 持有。
 
-验证：`make test-federated` 包含真实 password/TOTP、浏览器降级和换用户拒绝；`make test-downstream` 检查实际 Hydra ID Token 及在线 client 的强度/认证时间；`make test-pg` 覆盖配置/撤销竞态、事件和未知提交。
+验证：`make test-federated` 包含真实 password/TOTP、浏览器降级和换用户拒绝；`make test-downstream` 验证延迟复用 MFA 会话时 Hydra ID Token 不宣称 MFA、在线 client 保留真实强度/认证时间；`make test-pg` 覆盖配置/撤销竞态、事件和未知提交。

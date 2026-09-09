@@ -263,7 +263,7 @@ impl Downstream {
             sqlx::query("UPDATE identity_authority.downstream_grants SET principal_id=$3,session_id=$4,subject=$5,horizon=created_at+$6 WHERE tenant_id=$1::uuid AND grant_id=$2")
                 .bind(t.to_string()).bind(id).bind(loaded.state.key().principal.as_uuid()).bind(loaded.view.id.as_uuid()).bind(&subject).bind(life.horizon()).execute(&mut*c).await?;
             db::state(c,t,&g,FlowState::LoginAccepting,loaded.now).await?;
-            Ok((LoginDecision{grant_id:id.to_string(),subject,amr:loaded.assurance.amr().to_vec(),acr:loaded.assurance.acr().into()},vec![event(t,id,"login_claimed")]))
+            Ok((LoginDecision{grant_id:id.to_string(),subject},vec![event(t,id,"login_claimed")]))
         })).await?;
         let result = self
             .remote(&b, self.protocol.accept_login(&challenge, decision))

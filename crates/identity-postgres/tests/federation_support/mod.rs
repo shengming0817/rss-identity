@@ -92,16 +92,15 @@ impl UpstreamOidc for ScriptedOidc {
                 email_verified: self.email_verified.load(Ordering::SeqCst),
                 groups: self.groups.lock().unwrap().clone(),
                 assurance: self.assurance.lock().unwrap().clone().unwrap_or(
-                    rss_identity_core::assurance::Assurance::from_verified_oidc(
+                    rss_identity_core::assurance::Assurance::new(
                         Some(
                             SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap()
                                 .as_secs() as i64,
                         ),
-                        None,
+                        "unspecified",
                         vec![],
-                        false,
                     )?,
                 ),
             })

@@ -1,6 +1,7 @@
 //! Tenant-bound OIDC adapter. One deployment approval binds credentials to their exact AS/client.
 //! ref: openidconnect-rs src/verification/mod.rs @ b639b5d39eac6903238867aeb2b29326502e6b26.
 #![deny(missing_docs)]
+mod assurance;
 pub use ipnet::IpNet;
 use openidconnect::{
     AsyncHttpClient, AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
@@ -8,10 +9,7 @@ use openidconnect::{
     Scope, TokenResponse, core::*,
 };
 use reqwest::Url;
-use rss_identity_core::{
-    assurance::{Assurance, AuthenticationMode},
-    federation::*,
-};
+use rss_identity_core::{assurance::AuthenticationMode, federation::*};
 use rss_request_context::TenantId;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -497,9 +495,10 @@ impl UpstreamOidc for HttpOidc {
                     .set_max_age(Duration::ZERO);
             }
             if mode == AuthenticationMode::StepUp {
-                request = request.add_auth_context_value(
-                    openidconnect::AuthenticationContextClass::new("2".into()),
-                );
+                request =
+                    request.add_auth_context_value(openidconnect::AuthenticationContextClass::new(
+                        assurance::KEYCLOAK_TOTP_ACR.into(),
+                    ));
             }
 
             Ok(request.url().0.to_string())
@@ -587,7 +586,7 @@ impl UpstreamOidc for HttpOidc {
                 email_verified: c.claims().email.as_deref() == Some("email")
                     && claims.email_verified() == Some(true),
                 groups,
-                assurance: Assurance::from_verified_oidc(
+                assurance: assurance::normalize(
                     claims.auth_time().map(|v| v.timestamp()),
                     claims.auth_context_ref().map(|v| v.as_str()),
                     claims

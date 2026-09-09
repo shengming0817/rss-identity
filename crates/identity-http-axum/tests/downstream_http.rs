@@ -252,6 +252,8 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
         sdk.validate(&old_token).await.is_err(),
         "old grant must not inherit elevated session"
     );
+    // Reusing a real MFA session later must not refresh its upstream authentication time.
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let (token, _, id_token) = flow(
         &c,
         origin,
@@ -276,13 +278,14 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(id_token.split('.').nth(1).unwrap())?;
     let id_claims: Value = serde_json::from_slice(&payload)?;
-    assert_eq!(id_claims["acr"], "mfa");
+    assert_eq!(id_claims["acr"], "unspecified");
+    assert!(id_claims["auth_time"].as_i64().unwrap() > proof.auth_time());
     let methods: Vec<String> = id_claims
         .get("amr")
         .map(|v| serde_json::from_value(v.clone()))
         .transpose()?
         .unwrap_or_default();
-    assert_eq!(methods, proof.amr());
+    assert!(methods.is_empty());
     federation
         .enable_provider(
             session_actor(&f.store, f.candidate().await?).await?,

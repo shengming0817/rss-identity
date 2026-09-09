@@ -97,3 +97,5 @@ OIDC callback 的失败现在统一 303 到固定同源 `/auth/error?reason=canc
 ## 显式 step-up（I09）
 
 `POST /api/v1/tenants/{tenant}/oidc/{provider}/step-up` 使用当前 session、Origin、CSRF 和 `X-Identity-Request: 1`；body 为既有 `client_id/return_target`，响应为 `authorization_url`。请求模式持久化，回调复用唯一 OIDC callback、原子轮换会话并返回既有目标，不增加回跳参数。仅提升同一已关联主体；缺 MFA/新鲜时间、配置漂移、退出、重放、换主体均拒绝，不 JIT 或 linking。管理权限不增加门禁；完整语义见 [assurance 指南](../guides/assurance.md)。
+
+MFA 强度与新鲜度以本在线响应的同源 `acr/amr/auth_time` 为准。Hydra 标准 ID Token 的时间是 Hydra 登录时间，`acr=unspecified` 且不投影上游 AMR，不提供上游 MFA 新鲜度。

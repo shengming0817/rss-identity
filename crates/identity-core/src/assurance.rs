@@ -59,33 +59,15 @@ impl TryFrom<Input> for Assurance {
     }
 }
 impl Assurance {
-    /// Interpret already signature/issuer/audience/nonce-verified OIDC claims.
-    /// `keycloak_totp` is an immutable deployment approval, never tenant/browser input.
-    pub fn from_verified_oidc(
+    /// Construct normalized facts; provider interpretation belongs to the upstream adapter.
+    pub fn new(
         auth_time: Option<i64>,
-        acr: Option<&str>,
-        mut amr: Vec<String>,
-        keycloak_totp: bool,
+        acr: &str,
+        amr: Vec<String>,
     ) -> Result<Self, FederationError> {
-        if acr.is_some_and(|s| s.is_empty() || s.len() > 256 || s.chars().any(char::is_control))
-            || amr.len() > 16
-            || amr
-                .iter()
-                .any(|s| s.is_empty() || s.len() > 64 || s.chars().any(char::is_control))
-        {
-            return Err(FederationError::Claims);
-        }
-        amr.retain(|m| keycloak_totp && matches!(m.as_str(), "pwd" | "otp" | "mfa"));
-        amr.sort();
-        amr.dedup();
         Input {
             auth_time,
-            acr: if keycloak_totp && acr == Some("2") && auth_time.is_some() {
-                "mfa"
-            } else {
-                "unspecified"
-            }
-            .into(),
+            acr: acr.into(),
             amr,
         }
         .try_into()
