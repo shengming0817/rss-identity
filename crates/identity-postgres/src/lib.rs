@@ -13,12 +13,15 @@ pub use federation::{
 };
 mod maintenance;
 mod operations;
+pub use operations::{AccountPage, AccountView, LocalAccountRole};
 mod session_storage;
 mod sessions;
 mod storage;
 mod transaction;
 mod types;
-pub use sessions::{AuthenticatedSession, IssuedSession, SessionPage, SessionView};
+pub use sessions::{
+    AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
+};
 pub use types::*;
 pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_authority.sql");
 use rss_identity_core::account::{AccountChange, AccountKey, AccountState};

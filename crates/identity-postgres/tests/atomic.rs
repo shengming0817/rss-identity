@@ -1,5 +1,6 @@
 //! Canonical real PostgreSQL account scenarios; the provider runner owns the exact test set.
 use rss_identity_core::account::{AccountChange, AccountKey, AccountRuleError, AccountState};
+#[allow(dead_code)]
 mod support;
 use rss_identity_core::{
     PrincipalId,
@@ -56,7 +57,7 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
         successes += usize::from(job.await?.is_ok());
     }
     assert_eq!(successes, 1);
-    assert_eq!(f.events().await?, 1);
+    assert_eq!(f.account_events().await?, 1);
     assert_event(
         &f,
         "initialized",
@@ -108,12 +109,11 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     );
     let member = f
         .store
-        .create_account(
+        .create_local_account(
             f.actor().await?,
             login("member"),
             password(),
-            false,
-            false,
+            rss_identity_postgres::LocalAccountRole::Member,
             deadline(),
         )
         .await?;
@@ -126,32 +126,30 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     );
     let emergency = f
         .store
-        .create_account(
+        .create_local_account(
             f.actor().await?,
             login("emergency"),
             password(),
-            true,
-            true,
+            rss_identity_postgres::LocalAccountRole::Emergency,
             deadline(),
         )
         .await?;
-    f.store
-        .change_account(
-            f.actor().await?,
-            emergency.key(),
-            AccountChange::Enabled(false),
-            deadline(),
-        )
-        .await?;
-    let inactive = f
-        .store
-        .change_account(
-            f.actor().await?,
-            emergency.key(),
-            AccountChange::Membership(false),
-            deadline(),
-        )
-        .await?;
+    support::apply_change(
+        &f.store,
+        f.actor().await?,
+        emergency.key(),
+        AccountChange::Enabled(false),
+        deadline(),
+    )
+    .await?;
+    let inactive = support::apply_change(
+        &f.store,
+        f.actor().await?,
+        emergency.key(),
+        AccountChange::Membership(false),
+        deadline(),
+    )
+    .await?;
     let recovered = f
         .maintenance
         .recover_administrator(emergency.key(), password(), deadline())
@@ -208,10 +206,15 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     };
     assert_event(&f, "administrator_recovered", f.key, None, 3, Some(state)).await?;
     assert_eq!(
-        f.store
-            .change_account(old, f.key, AccountChange::Password(password()), deadline())
-            .await
-            .unwrap_err(),
+        support::apply_change(
+            &f.store,
+            old,
+            f.key,
+            AccountChange::Password(password()),
+            deadline()
+        )
+        .await
+        .unwrap_err(),
         AuthorityError::Rejected
     );
     assert!(
@@ -249,28 +252,33 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let second = f
         .store
-        .create_account(
+        .create_local_account(
             f.actor().await?,
             login("second"),
             password(),
-            true,
-            false,
+            rss_identity_postgres::LocalAccountRole::Administrator,
             deadline(),
         )
         .await?;
     let old = f.actor().await?;
     let actor = f.actor().await?;
-    f.store
-        .change_account(
-            actor,
-            f.key,
-            AccountChange::Password(password()),
-            deadline(),
-        )
-        .await?;
+    support::apply_change(
+        &f.store,
+        actor,
+        f.key,
+        AccountChange::Password(password()),
+        deadline(),
+    )
+    .await?;
     assert!(
         f.store
-            .create_account(old, login("stale"), password(), false, false, deadline())
+            .create_local_account(
+                old,
+                login("stale"),
+                password(),
+                rss_identity_postgres::LocalAccountRole::Member,
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -281,12 +289,11 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
         let name = format!("race-{i}");
         let victim = f
             .store
-            .create_account(
+            .create_local_account(
                 f.actor().await?,
                 login(&name),
                 password(),
-                true,
-                false,
+                rss_identity_postgres::LocalAccountRole::Administrator,
                 deadline(),
             )
             .await?;
@@ -301,20 +308,18 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
                     )
                     .await
             } else {
-                f.store
-                    .change_account(
-                        actor,
-                        victim.key(),
-                        if *mode == "disable" {
-                            AccountChange::Enabled(false)
-                        } else {
-                            AccountChange::Password(Password::new(
-                                "a newly changed password".into(),
-                            )?)
-                        },
-                        deadline(),
-                    )
-                    .await
+                support::apply_change(
+                    &f.store,
+                    actor,
+                    victim.key(),
+                    if *mode == "disable" {
+                        AccountChange::Enabled(false)
+                    } else {
+                        AccountChange::Password(Password::new("a newly changed password".into())?)
+                    },
+                    deadline(),
+                )
+                .await
             }
         };
         let (verified, changed) = tokio::join!(
@@ -326,24 +331,19 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
         if let Ok(candidate) = verified {
             assert!(
                 f.store
-                    .change_account(
-                        candidate,
-                        victim.key(),
-                        AccountChange::Password(password()),
-                        deadline()
-                    )
+                    .create_session(candidate, None, deadline())
                     .await
                     .is_err()
             );
         }
-        f.store
-            .change_account(
-                f.actor().await?,
-                victim.key(),
-                AccountChange::Enabled(false),
-                deadline(),
-            )
-            .await?;
+        support::apply_change(
+            &f.store,
+            f.actor().await?,
+            victim.key(),
+            AccountChange::Enabled(false),
+            deadline(),
+        )
+        .await?;
     }
     f.reset_attempts().await?;
     let a = f.actor().await?;
@@ -357,11 +357,22 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
             deadline(),
         )
         .await?;
+    let b = support::session_actor(&f.store, b).await?;
     let (ra, rb) = tokio::join!(
-        f.store
-            .change_account(a, f.key, AccountChange::Enabled(false), deadline()),
-        f.store
-            .change_account(b, second.key(), AccountChange::Enabled(false), deadline())
+        support::apply_change(
+            &f.store,
+            a,
+            f.key,
+            AccountChange::Enabled(false),
+            deadline()
+        ),
+        support::apply_change(
+            &f.store,
+            b,
+            second.key(),
+            AccountChange::Enabled(false),
+            deadline()
+        )
     );
     assert_eq!(usize::from(ra.is_ok()) + usize::from(rb.is_ok()), 1);
     let n: i64 = sqlx::query_scalar(
@@ -410,11 +421,17 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
             deadline(),
         )
         .await?;
+    let other_actor = support::session_actor(&f.store, other_actor).await?;
     assert!(
-        f.store
-            .change_account(other_actor, f.key, AccountChange::Enabled(true), deadline())
-            .await
-            .is_err()
+        support::apply_change(
+            &f.store,
+            other_actor,
+            f.key,
+            AccountChange::Enabled(true),
+            deadline()
+        )
+        .await
+        .is_err()
     );
     let before: i64 = sqlx::query_scalar(
         "SELECT auth_epoch FROM identity_authority.accounts WHERE tenant_id=$1::uuid",
@@ -495,24 +512,23 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
 async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let before = f.events().await?;
+    let before = f.account_events().await?;
     let actor = f.actor().await?;
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     assert!(matches!(
         f.store
-            .create_account(
+            .create_local_account(
                 actor,
                 login("unknown-commit"),
                 password(),
-                false,
-                false,
+                rss_identity_postgres::LocalAccountRole::Member,
                 deadline()
             )
             .await,
         Err(AuthorityError::CommitUnknown(_))
     ));
-    assert_eq!(f.events().await?, before + 1);
+    assert_eq!(f.account_events().await?, before + 1);
     let n: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM identity_authority.local_credentials WHERE login_key='unknown-commit'",
     )
@@ -524,12 +540,11 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     let actor = f.actor().await?;
     let result = f
         .store
-        .create_account(
+        .create_local_account(
             actor,
             login("rollback"),
             password(),
-            false,
-            false,
+            rss_identity_postgres::LocalAccountRole::Member,
             deadline(),
         )
         .await;
@@ -541,18 +556,17 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     .fetch_one(&f.owner)
     .await?;
     assert_eq!(n, 0);
-    assert_eq!(f.events().await?, before + 1);
+    assert_eq!(f.account_events().await?, before + 1);
     let actor = f.actor().await?;
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::RollbackFailedAfterAck);
     assert!(matches!(
         f.store
-            .create_account(
+            .create_local_account(
                 actor,
                 login("rollback-failed"),
                 password(),
-                false,
-                false,
+                rss_identity_postgres::LocalAccountRole::Member,
                 deadline()
             )
             .await,
@@ -566,12 +580,11 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     f.reset_attempts().await?;
     assert!(
         f.store
-            .create_account(
+            .create_local_account(
                 f.actor().await?,
                 login("duplicate-event"),
                 password(),
-                false,
-                false,
+                rss_identity_postgres::LocalAccountRole::Member,
                 deadline()
             )
             .await
@@ -583,7 +596,7 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     .fetch_one(&f.owner)
     .await?;
     assert_eq!(n, 0);
-    assert_eq!(f.events().await?, before + 1);
+    assert_eq!(f.account_events().await?, before + 1);
     sqlx::query("DROP TRIGGER reject_event ON rss_transactional_messaging.outbox")
         .execute(&f.owner)
         .await?;
@@ -591,12 +604,11 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     let actor = f.actor().await?;
     assert!(
         f.store
-            .create_account(
+            .create_local_account(
                 actor,
                 login("expired"),
                 password(),
-                false,
-                false,
+                rss_identity_postgres::LocalAccountRole::Member,
                 rss_transactional_messaging::policy::OperationDeadline::from_remaining(
                     Duration::ZERO
                 )
@@ -604,7 +616,7 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
             .await
             .is_err()
     );
-    assert_eq!(f.events().await?, before + 1);
+    assert_eq!(f.account_events().await?, before + 1);
     let foreign = AccountKey {
         tenant: TenantId::parse(B)?,
         principal: PrincipalId::generate(),
@@ -842,16 +854,15 @@ async fn fencing_and_generation_overflow() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     f.store
-        .create_account(
+        .create_local_account(
             f.actor().await?,
             login("spare"),
             password(),
-            true,
-            false,
+            rss_identity_postgres::LocalAccountRole::Administrator,
             deadline(),
         )
         .await?;
-    let before = f.events().await?;
+    let before = f.account_events().await?;
     for (setup, change) in [
         (
             "UPDATE identity_authority.accounts SET auth_epoch=9223372036854775807",
@@ -866,8 +877,7 @@ async fn fencing_and_generation_overflow() -> anyhow::Result<()> {
         sqlx::raw_sql(setup).execute(&f.owner).await?;
         let before_rows:String=sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(a) ORDER BY principal_id)::text FROM identity_authority.accounts a").fetch_one(&f.owner).await?;
         assert_eq!(
-            f.store
-                .change_account(f.actor().await?, f.key, change, deadline())
+            support::apply_change(&f.store, f.actor().await?, f.key, change, deadline())
                 .await
                 .unwrap_err(),
             AuthorityError::RuleRejected(AccountRuleError::EpochExhausted)
@@ -875,7 +885,7 @@ async fn fencing_and_generation_overflow() -> anyhow::Result<()> {
         let after_rows:String=sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(a) ORDER BY principal_id)::text FROM identity_authority.accounts a").fetch_one(&f.owner).await?;
         // Avoid assertion formatting of stored credential data on failure.
         assert!(before_rows == after_rows);
-        assert_eq!(f.events().await?, before);
+        assert_eq!(f.account_events().await?, before);
         sqlx::raw_sql("UPDATE identity_authority.accounts SET auth_epoch=1; UPDATE identity_authority.memberships SET epoch=1;").execute(&f.owner).await?;
     }
     f.reset_attempts().await?;
@@ -884,13 +894,18 @@ async fn fencing_and_generation_overflow() -> anyhow::Result<()> {
         .execute(&f.owner)
         .await?;
     assert_eq!(
-        f.store
-            .change_account(actor, f.key, AccountChange::Enabled(false), deadline())
-            .await
-            .unwrap_err(),
+        support::apply_change(
+            &f.store,
+            actor,
+            f.key,
+            AccountChange::Enabled(false),
+            deadline()
+        )
+        .await
+        .unwrap_err(),
         AuthorityError::Fenced
     );
-    assert_eq!(f.events().await?, before);
+    assert_eq!(f.account_events().await?, before);
     f.close().await;
     Ok(())
 }
@@ -978,39 +993,37 @@ async fn account_transition_matrix_and_events() -> anyhow::Result<()> {
         AccountChange::Membership(false),
         AccountChange::Enabled(false),
     ] {
-        let before = f.events().await?;
+        let before = f.account_events().await?;
         assert_eq!(
-            f.store
-                .change_account(f.actor().await?, f.key, change, deadline())
+            support::apply_change(&f.store, f.actor().await?, f.key, change, deadline())
                 .await
                 .unwrap_err(),
             AuthorityError::RuleRejected(AccountRuleError::LastAdministrator)
         );
-        assert_eq!(f.events().await?, before);
+        assert_eq!(f.account_events().await?, before);
     }
     let actor = f.actor().await?;
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::RollbackFailedAfterAck);
     assert!(matches!(
-        f.store
-            .change_account(
-                actor,
-                f.key,
-                AccountChange::Administrator(false),
-                deadline()
-            )
-            .await,
+        support::apply_change(
+            &f.store,
+            actor,
+            f.key,
+            AccountChange::Administrator(false),
+            deadline()
+        )
+        .await,
         Err(AuthorityError::RollbackFailed(_))
     ));
     f.reset_attempts().await?;
     let member = f
         .store
-        .create_account(
+        .create_local_account(
             f.actor().await?,
             login("member"),
             password(),
-            false,
-            false,
+            rss_identity_postgres::LocalAccountRole::Member,
             deadline(),
         )
         .await?;
@@ -1062,10 +1075,9 @@ async fn account_transition_matrix_and_events() -> anyhow::Result<()> {
             )
             .await
             .ok();
-        let next = f
-            .store
-            .change_account(f.actor().await?, member.key(), change, deadline())
-            .await?;
+        let next =
+            support::apply_change(&f.store, f.actor().await?, member.key(), change, deadline())
+                .await?;
         assert_eq!(next.epoch(), expected.epoch() + 1);
         assert_eq!(
             next.membership_epoch(),
@@ -1082,22 +1094,17 @@ async fn account_transition_matrix_and_events() -> anyhow::Result<()> {
             Some(next),
         )
         .await?;
-        let before = f.events().await?;
+        let before = f.account_events().await?;
         if let Some(old) = old {
             assert_eq!(
                 f.store
-                    .change_account(
-                        old,
-                        member.key(),
-                        AccountChange::Password(password()),
-                        deadline()
-                    )
+                    .create_session(old, None, deadline())
                     .await
                     .unwrap_err(),
                 AuthorityError::Rejected
             );
         }
-        assert_eq!(f.events().await?, before);
+        assert_eq!(f.account_events().await?, before);
         assert_eq!(
             f.store
                 .verify_password(
@@ -1114,15 +1121,14 @@ async fn account_transition_matrix_and_events() -> anyhow::Result<()> {
         expected = next;
     }
     f.reset_attempts().await?;
-    let disabled = f
-        .store
-        .change_account(
-            f.actor().await?,
-            member.key(),
-            AccountChange::Enabled(false),
-            deadline(),
-        )
-        .await?;
+    let disabled = support::apply_change(
+        &f.store,
+        f.actor().await?,
+        member.key(),
+        AccountChange::Enabled(false),
+        deadline(),
+    )
+    .await?;
     assert_event(
         &f,
         "account_disabled",
@@ -1132,15 +1138,14 @@ async fn account_transition_matrix_and_events() -> anyhow::Result<()> {
         Some(disabled),
     )
     .await?;
-    let enabled = f
-        .store
-        .change_account(
-            f.actor().await?,
-            member.key(),
-            AccountChange::Enabled(true),
-            deadline(),
-        )
-        .await?;
+    let enabled = support::apply_change(
+        &f.store,
+        f.actor().await?,
+        member.key(),
+        AccountChange::Enabled(true),
+        deadline(),
+    )
+    .await?;
     assert_event(
         &f,
         "account_enabled",
@@ -1175,12 +1180,11 @@ async fn maintenance_races_preserve_current_state() -> anyhow::Result<()> {
             let name = format!("race-{maintenance_first}-{i}");
             let target = f
                 .store
-                .create_account(
+                .create_local_account(
                     f.actor().await?,
                     login(&name),
                     password(),
-                    true,
-                    true,
+                    rss_identity_postgres::LocalAccountRole::Emergency,
                     deadline(),
                 )
                 .await?;
@@ -1215,7 +1219,7 @@ async fn maintenance_races_preserve_current_state() -> anyhow::Result<()> {
             let maintenance = f.maintenance.clone();
             let key = target.key();
             let runtime_write =
-                async move { store.change_account(actor, key, change, deadline()).await };
+                async move { support::apply_change(&store, actor, key, change, deadline()).await };
             let maintenance_write = async move {
                 maintenance
                     .recover_administrator(
@@ -1485,7 +1489,7 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
             .await
             .is_err()
     );
-    assert_eq!(f.events().await?, 0);
+    assert_eq!(f.account_events().await?, 0);
     f.bootstrap().await?;
     assert!(
         f.maintenance
@@ -1510,7 +1514,7 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
                 .unwrap_err(),
             AuthorityError::RuleRejected(AccountRuleError::EpochExhausted)
         );
-        assert_eq!(f.events().await?, 1);
+        assert_eq!(f.account_events().await?, 1);
         sqlx::raw_sql("UPDATE identity_authority.accounts SET auth_epoch=1")
             .execute(&f.owner)
             .await?;
@@ -1532,7 +1536,7 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
             .unwrap_err(),
         AuthorityError::Fenced
     );
-    assert_eq!(f.events().await?, 1);
+    assert_eq!(f.account_events().await?, 1);
     f.close().await;
     Ok(())
 }

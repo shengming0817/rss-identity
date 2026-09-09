@@ -39,6 +39,10 @@ pub enum AccountRuleError {
     InvalidState,
     #[error("account operation rejected")]
     Rejected,
+    #[error("administrator privilege required")]
+    InsufficientPrivilege,
+    #[error("local login already exists in this tenant")]
+    AlreadyExists,
     #[error("last local administrator must remain available")]
     LastAdministrator,
     #[error("account generation exhausted")]
@@ -156,7 +160,7 @@ impl AccountState {
     }
     pub fn authorize_administration(self, tenant: TenantId) -> Result<(), AccountRuleError> {
         if self.key.tenant != tenant || !self.available_administrator() {
-            return Err(AccountRuleError::Rejected);
+            return Err(AccountRuleError::InsufficientPrivilege);
         }
         Ok(())
     }

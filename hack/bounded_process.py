@@ -3,7 +3,7 @@ import os
 import signal
 import subprocess
 
-def run(command, *, timeout, **kwargs):
+def run(command, *, timeout, termination_grace=5, **kwargs):
     check=kwargs.pop('check',False)
     capture=kwargs.pop('capture_output',False)
     if capture: kwargs.update(stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -13,11 +13,11 @@ def run(command, *, timeout, **kwargs):
         # Descendants can hold pipes after the direct child exits; always address the owned group.
         try:os.killpg(process.pid,signal.SIGTERM)
         except ProcessLookupError:pass
-        try:process.communicate(timeout=5)
+        try:process.communicate(timeout=termination_grace)
         except subprocess.TimeoutExpired:
             try:os.killpg(process.pid,signal.SIGKILL)
             except ProcessLookupError:pass
-            process.communicate(timeout=5)
+            process.communicate(timeout=termination_grace)
     previous=signal.getsignal(signal.SIGTERM)
     def terminate(signum,_frame):
         stop()

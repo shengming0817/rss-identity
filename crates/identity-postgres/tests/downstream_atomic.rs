@@ -249,7 +249,7 @@ async fn downstream_readonly_rotation_and_revocation() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let s = f
         .store
-        .create_session(f.actor().await?, None, deadline())
+        .create_session(f.candidate().await?, None, deadline())
         .await?;
     let p = Arc::new(Protocol::new());
     let d = service(&f, p.clone());
@@ -416,7 +416,7 @@ async fn downstream_unknown_commit_and_single_accept() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let s = f
         .store
-        .create_session(f.actor().await?, None, deadline())
+        .create_session(f.candidate().await?, None, deadline())
         .await?;
     let p = Arc::new(Protocol::new());
     let d = service(&f, p.clone());
@@ -450,7 +450,7 @@ async fn downstream_remote_unknown_never_returns_authority() -> anyhow::Result<(
     f.bootstrap().await?;
     let s = f
         .store
-        .create_session(f.actor().await?, None, deadline())
+        .create_session(f.candidate().await?, None, deadline())
         .await?;
     let p = Arc::new(Protocol::new());
     let d = service(&f, p.clone());
@@ -493,7 +493,7 @@ async fn downstream_accept_rechecks_revocation_and_final_commit() -> anyhow::Res
         f.bootstrap().await?;
         let session = f
             .store
-            .create_session(f.actor().await?, None, deadline())
+            .create_session(f.candidate().await?, None, deadline())
             .await?;
         let p = Arc::new(Protocol::new());
         let d = service(&f, p.clone());
@@ -540,7 +540,7 @@ async fn downstream_claim_and_event_roll_back_together() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let session = f
         .store
-        .create_session(f.actor().await?, None, deadline())
+        .create_session(f.candidate().await?, None, deadline())
         .await?;
     let p = Arc::new(Protocol::new());
     let d = service(&f, p.clone());
@@ -594,8 +594,7 @@ async fn downstream_federated_provider_revocation() -> anyhow::Result<()> {
             .amr()
             .is_empty()
     );
-    let disabled = f
-        .store
+    let disabled = federation
         .enable_provider(
             federation_fixture::actor(&f).await?,
             provider.id,
@@ -609,7 +608,7 @@ async fn downstream_federated_provider_revocation() -> anyhow::Result<()> {
             .await,
         Err(AuthorityError::Downstream(DownstreamError::Inactive))
     ));
-    f.store
+    federation
         .enable_provider(
             federation_fixture::actor(&f).await?,
             provider.id,
@@ -795,7 +794,7 @@ async fn downstream_cleanup_failure_concurrency_and_unknown_settlement() -> anyh
         f.bootstrap().await?;
         let session = f
             .store
-            .create_session(f.actor().await?, None, deadline())
+            .create_session(f.candidate().await?, None, deadline())
             .await?;
         let p = Arc::new(Protocol::new());
         let d = service(&f, p.clone());
@@ -877,7 +876,7 @@ async fn downstream_cleanup_claim_rollback_and_final_unknown() -> anyhow::Result
     f.bootstrap().await?;
     let session = f
         .store
-        .create_session(f.actor().await?, None, deadline())
+        .create_session(f.candidate().await?, None, deadline())
         .await?;
     let p = Arc::new(Protocol::new());
     let d = service(&f, p.clone());

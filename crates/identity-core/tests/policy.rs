@@ -87,7 +87,7 @@ fn transition_state_and_last_administrator_matrix() {
         );
         assert_eq!(
             admin.change(&member, change, 2).unwrap_err(),
-            AccountRuleError::Rejected
+            AccountRuleError::InsufficientPrivilege
         );
     }
 }

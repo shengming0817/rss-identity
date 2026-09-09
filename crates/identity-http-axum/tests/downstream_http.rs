@@ -548,12 +548,11 @@ async fn real_downstream_code_pkce_and_online_validation() -> anyhow::Result<()>
         let login_name = format!("downstream-member-{index}");
         let key = f
             .store
-            .create_account(
+            .create_local_account(
                 f.actor().await?,
                 support::login(&login_name),
                 password(),
-                false,
-                false,
+                rss_identity_postgres::LocalAccountRole::Member,
                 deadline(),
             )
             .await?;
@@ -593,8 +592,7 @@ async fn real_downstream_code_pkce_and_online_validation() -> anyhow::Result<()>
                 "disabled" => AccountChange::Enabled(false),
                 _ => AccountChange::Membership(false),
             };
-            f.store
-                .change_account(f.actor().await?, key.key(), mutation, deadline())
+            support::apply_change(&f.store, f.actor().await?, key.key(), mutation, deadline())
                 .await?;
         }
         assert!(

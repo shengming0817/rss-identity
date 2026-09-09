@@ -83,6 +83,37 @@ impl Federation {
             .await?;
         Ok(FederatedRedirect { url })
     }
+    /// End a bound upstream rejection without contacting the token endpoint.
+    pub async fn cancel(
+        &self,
+        state: String,
+        browser: String,
+        response_issuer: String,
+        session: Option<SessionSecret>,
+        deadline: OperationDeadline,
+    ) -> Result<(), AuthorityError> {
+        check_browser(&browser)?;
+        let locator = self.signer.verify(&state)?;
+        let tenant = locator.tenant();
+        let session = session.map(|s| s.digest());
+        self.authority
+            .read_sql(tenant, deadline, move |c| {
+                Box::pin(async move {
+                    lock_guard(c, tenant).await?;
+                    let (attempt, _) = db::attempt(c, &locator, &state, &browser, false).await?;
+                    let view = db::provider(c, tenant, attempt.provider).await?;
+                    db::exact(&view, attempt.version)?;
+                    if view.settings.issuer().as_str() != response_issuer {
+                        return Err(FederationError::Claims.into());
+                    }
+                    check_actor(c, tenant, &attempt, session).await?;
+                    db::consume(c, &locator).await?;
+                    Ok(())
+                })
+            })
+            .await
+    }
+
     pub async fn complete(
         &self,
         state: String,

@@ -1,6 +1,6 @@
 # RSS Identity 协作说明
 
-rss-identity 是本地认证、租户联合身份接入与服务端会话产品仓。产品需求由 [PRD](docs/product/rss-identity-prd.md) 持有；当前具有 I01/I02 协议与工程接缝及 I03 本地账户/本机管理机制；I04 提供中央会话；I05 提供租户 IdP、持久 OIDC/JIT/关联及可挂载 HTTP Router；I06 提供 Hydra 下游 bridge、在线验证与最小 client；UI 与产品服务仍由后续实施项交付。
+rss-identity 是本地认证、租户联合身份接入与服务端会话产品仓。产品需求由 [PRD](docs/product/rss-identity-prd.md) 持有；当前具有 I01/I02 协议与工程接缝及 I03 本地账户/本机管理机制；I04 提供中央会话；I05 提供租户 IdP、持久 OIDC/JIT/关联及可挂载 HTTP Router；I06 提供 Hydra 下游 bridge、在线验证与最小 client；I07 的日常管理仅使用中央会话 API，UI 源码由 rss-web apps/identity 持有；产品服务仍由 I08 交付。
 
 ## 工作方式
 
@@ -31,3 +31,7 @@ RSS 通过同一仓库 URL 与固定完整 Git commit 消费，提交独立 Carg
 产品 T3 必须独立 Issue、独立 PR、独立必要性评估，不混入实现 PR。已登记 Issue 索引在 [实施计划](docs/architecture/implementation-plan.md)；本地编号映射到真实 Azure work item ID，实时状态以看板为准。
 
 文档维护遵循 [文档规则](docs/rules/documentation.md)。
+
+## I07 管理边界
+
+日常管理仅接受 AuthenticatedSession 并在事务内重检；AuthenticationCandidate 只用于登录发会话与密码再认证。identity-admin 仅持有 Maintenance initialize/recover。唯一协议 callback 为 /api/v1/oidc/callback，不新增兼容入口。当前决定见 docs/architecture/adr/202609090801-2337-central-management-ui.md。

@@ -20,19 +20,17 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
     let mut next = settings().input();
     next.jit = false;
     assert!(
-        s.authority()
-            .update_provider(
-                actor(&f).await?,
-                p.id,
-                1,
-                next.clone().try_into()?,
-                deadline()
-            )
-            .await
-            .is_err()
+        s.update_provider(
+            actor(&f).await?,
+            p.id,
+            1,
+            next.clone().try_into()?,
+            deadline()
+        )
+        .await
+        .is_err()
     );
     let updated = s
-        .authority()
         .update_provider(
             actor(&f).await?,
             p.id,
@@ -42,33 +40,9 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
         )
         .await?;
     assert_eq!(updated.version, p.version + 1);
-    f.store
-        .test_provider(
-            actor(&f).await?,
-            p.id,
-            {
-                let upstream = upstream.clone();
-                move |tenant, c| Box::pin(async move { upstream.test(tenant, &c).await })
-            },
-            deadline(),
-        )
-        .await?;
-    let report = f
-        .store
-        .test_provider(
-            actor(&f).await?,
-            p.id,
-            move |_, _| {
-                Box::pin(async {
-                    Err(FederationError::provider(
-                        ProviderStage::Jwks,
-                        ProviderReason::Unavailable,
-                    ))
-                })
-            },
-            deadline(),
-        )
-        .await;
+    s.test_provider(actor(&f).await?, p.id, deadline()).await?;
+    upstream.fail.store(true, Ordering::SeqCst);
+    let report = s.test_provider(actor(&f).await?, p.id, deadline()).await;
     assert!(matches!(
         report,
         Err(AuthorityError::Federation(FederationError::Provider(
@@ -78,6 +52,33 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
             }
         )))
     ));
+    upstream.fail.store(false, Ordering::SeqCst);
+    *upstream.hook.lock().unwrap() = Some(Box::new(|| Box::pin(std::future::pending())));
+    let timed = s
+        .test_provider(
+            actor(&f).await?,
+            p.id,
+            rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+                std::time::Duration::from_secs(2),
+            ),
+        )
+        .await;
+    assert!(matches!(
+        timed,
+        Err(AuthorityError::Federation(FederationError::Unavailable))
+    ));
+    let timed_events = events(&f).await?;
+    assert_eq!(
+        timed_events.last().unwrap()["action"],
+        "provider_test_failed"
+    );
+    assert_eq!(
+        timed_events.last().unwrap()["diagnostic"]["reason"],
+        "timeout"
+    );
+    upstream.fail.store(true, Ordering::SeqCst);
+    let _ = s.test_provider(actor(&f).await?, p.id, deadline()).await;
+    upstream.fail.store(false, Ordering::SeqCst);
     let audits = events(&f).await?;
     let last = audits.last().unwrap();
     assert_eq!(last["action"], "provider_test_failed");
@@ -87,33 +88,28 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
         serde_json::json!({"stage":"jwks","reason":"unavailable"})
     );
     assert_eq!(
-        f.store
-            .list_providers(actor(&f).await?, deadline())
-            .await?
-            .len(),
+        s.list_providers(actor(&f).await?, deadline()).await?.len(),
         1
     );
     let mut invalid = settings().input();
     invalid.issuer = "https://different.test".into();
     assert!(
-        s.authority()
-            .update_provider(
-                actor(&f).await?,
-                p.id,
-                updated.version,
-                invalid.try_into()?,
-                deadline()
-            )
-            .await
-            .is_err()
+        s.update_provider(
+            actor(&f).await?,
+            p.id,
+            updated.version,
+            invalid.try_into()?,
+            deadline()
+        )
+        .await
+        .is_err()
     );
     f.store
-        .create_account(
+        .create_local_account(
             actor(&f).await?,
             login("member"),
             password(),
-            false,
-            false,
+            rss_identity_postgres::LocalAccountRole::Member,
             deadline(),
         )
         .await?;
@@ -128,10 +124,13 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
         )
         .await?;
     assert!(
-        s.authority()
-            .create_provider(member, settings(), deadline())
-            .await
-            .is_err()
+        s.create_provider(
+            support::session_actor(&f.store, member).await?,
+            settings(),
+            deadline()
+        )
+        .await
+        .is_err()
     );
     f.close().await;
     Ok(())
@@ -183,12 +182,11 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
     let s = service(&f, ScriptedOidc::new());
     let p = enabled(&f, &s).await?;
     f.store
-        .create_account(
+        .create_local_account(
             actor(&f).await?,
             login("same@example.test"),
             password(),
-            false,
-            false,
+            rss_identity_postgres::LocalAccountRole::Member,
             deadline(),
         )
         .await?;
@@ -223,17 +221,25 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
         .store
         .verify_password(tenant_b, login("admin"), password(), source(), deadline())
         .await?;
-    let provider_b = f
-        .store
-        .create_provider(admin_b, settings(), deadline())
+    let provider_b = s
+        .create_provider(
+            support::session_actor(&f.store, admin_b).await?,
+            settings(),
+            deadline(),
+        )
         .await?;
     let admin_b = f
         .store
         .verify_password(tenant_b, login("admin"), password(), source(), deadline())
         .await?;
-    let provider_b = f
-        .store
-        .enable_provider(admin_b, provider_b.id, provider_b.version, true, deadline())
+    let provider_b = s
+        .enable_provider(
+            support::session_actor(&f.store, admin_b).await?,
+            provider_b.id,
+            provider_b.version,
+            true,
+            deadline(),
+        )
         .await?;
     let pending_b = state(
         s.begin_login(
@@ -266,19 +272,18 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
     .await?;
     assert_eq!(creds, 0);
     let akey = a.account();
-    f.store
-        .change_account(
-            actor(&f).await?,
-            akey,
-            rss_identity_core::account::AccountChange::Membership(false),
-            deadline(),
-        )
-        .await?;
+    support::apply_change(
+        &f.store,
+        actor(&f).await?,
+        akey,
+        rss_identity_core::account::AccountChange::Membership(false),
+        deadline(),
+    )
+    .await?;
     assert!(finish(&s, begin(&f, &s, &p).await?, "alice").await.is_err());
     let mut off = p.settings.input();
     off.jit = false;
     let p = s
-        .authority()
         .update_provider(
             actor(&f).await?,
             p.id,
@@ -327,7 +332,6 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
     assert_ne!(unverified_proof.account(), fed_proof.account());
     let pending = begin(&f, &s, &p).await?;
     let edited = s
-        .authority()
         .update_provider(
             actor(&f).await?,
             p.id,
@@ -378,8 +382,7 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
     let version = edited.version;
     *upstream.hook.lock().unwrap() = Some(Box::new(move || {
         Box::pin(async move {
-            next.authority()
-                .enable_provider(admin_proof, id, version, false, deadline())
+            next.enable_provider(admin_proof, id, version, false, deadline())
                 .await
                 .map_err(|_| FederationError::Unavailable)?;
             Ok(())
@@ -399,7 +402,6 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
             .is_err()
     );
     let reenabled = s
-        .authority()
         .enable_provider(actor(&f).await?, p.id, version + 1, true, deadline())
         .await?;
     assert!(
@@ -430,6 +432,10 @@ async fn federation_atomic_events_and_unknown_commit() -> anyhow::Result<()> {
     let upstream = ScriptedOidc::new();
     let s = service(&f, upstream.clone());
     let p = enabled(&f, &s).await?;
+    let management_sessions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
+            .fetch_one(&f.owner)
+            .await?;
     let pending = begin(&f, &s, &p).await?;
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
@@ -453,7 +459,7 @@ async fn federation_atomic_events_and_unknown_commit() -> anyhow::Result<()> {
     ));
     assert!(finish(&s, pending, "alice").await.is_err());
     let persisted:(i64,i64,i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM identity_authority.accounts),(SELECT count(*) FROM identity_authority.memberships),(SELECT count(*) FROM identity_authority.external_identities),(SELECT count(*) FROM identity_authority.sessions),(SELECT count(*) FROM identity_authority.local_credentials)").fetch_one(&f.owner).await?;
-    assert_eq!(persisted, (2, 2, 1, 1, 1));
+    assert_eq!(persisted, (2, 2, 1, management_sessions + 1, 1));
     let committed = events(&f).await?;
     let pair = &committed[committed.len() - 2..];
     assert_eq!(pair[0]["action"], "jit_created");
@@ -837,7 +843,8 @@ async fn federation_concurrent_jit_rls_and_schema_drift() -> anyhow::Result<()> 
     assert_eq!(
         committed
             .iter()
-            .filter(|v| v["action"] == "created")
+            .filter(|v| v["action"] == "created"
+                && v["principal"] != f.key.principal.as_uuid().to_string())
             .count(),
         2
     );
@@ -912,12 +919,11 @@ async fn federation_concurrent_linking_keeps_one_owner() -> anyhow::Result<()> {
     let s = service(&f, upstream.clone());
     let p = enabled(&f, &s).await?;
     f.store
-        .create_account(
+        .create_local_account(
             actor(&f).await?,
             login("member"),
             password(),
-            false,
-            false,
+            rss_identity_postgres::LocalAccountRole::Member,
             deadline(),
         )
         .await?;

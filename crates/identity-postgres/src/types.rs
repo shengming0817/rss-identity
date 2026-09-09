@@ -51,6 +51,8 @@ pub enum AuthorityError {
     Federation(#[from] rss_identity_core::federation::FederationError),
     #[error("authentication or operation rejected")]
     Rejected,
+    #[error("current password rejected")]
+    ReauthenticationFailed,
     #[error("transaction rolled back: {0}")]
     RuleRejected(rss_identity_core::account::AccountRuleError),
     #[error("attempt budget exhausted")]

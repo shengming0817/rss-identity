@@ -30,7 +30,7 @@ fn issued(value: IssuedSession) -> Result<Response> {
         .parse()
         .map_err(|_| HttpError::from(AuthorityError::Unavailable))?;
     let mut response =
-        Json(serde_json::json!({"session":value.view(),"csrf_token":value.secret().csrf()}))
+        Json(serde_json::json!({"identity":value.identity(),"session":value.view(),"csrf_token":value.secret().csrf()}))
             .into_response();
     response.headers_mut().insert(header::SET_COOKIE, header);
     Ok(response)
@@ -102,7 +102,10 @@ pub(crate) async fn current(
         .authority
         .inspect_session(tenant(&raw)?, secret, budget.remaining())
         .await?;
-    Ok(Json(serde_json::json!({"session":proof.view(),"csrf_token":csrf})).into_response())
+    Ok(Json(
+        serde_json::json!({"identity":proof.identity(),"session":proof.view(),"csrf_token":csrf}),
+    )
+    .into_response())
 }
 pub(crate) async fn refresh(
     State(state): State<AppState>,

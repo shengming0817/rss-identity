@@ -425,6 +425,13 @@ fn verify<'a>(
 }
 
 impl UpstreamOidc for HttpOidc {
+    fn approve_configuration(
+        &self,
+        tenant: TenantId,
+        c: &ProviderSettings,
+    ) -> Result<(), FederationError> {
+        approved(&self.bindings, tenant, c, self.loopback).map(|_| ())
+    }
     fn validate(&self, tenant: TenantId, c: &ProviderSettings) -> Result<(), FederationError> {
         approved(&self.bindings, tenant, c, self.loopback)?;
         if !self.secrets.contains_key(c.secret_ref()) {

@@ -58,15 +58,7 @@ owner shengming。仅 rss-identity-oidc 0.1.0 → openidconnect 4.0.1 → rsa 0.
 
 ### 日常操作
 
-日常身份属于 `identity_account_runtime`，仍须验证操作者账户口令。以下参数中的密码均为文件路径：
-
-```text
-identity-admin RUNTIME_CONFIG create ACTOR_LOGIN ACTOR_PASSWORD_FILE LOGIN NEW_PASSWORD_FILE member|admin|emergency
-identity-admin RUNTIME_CONFIG password ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID NEW_PASSWORD_FILE
-identity-admin RUNTIME_CONFIG enable|disable|grant-admin|revoke-admin|enable-membership|disable-membership ACTOR_LOGIN ACTOR_PASSWORD_FILE PRINCIPAL_UUID
-```
-
-日常改密：用户持当前口令对自己执行 password，或同租户管理员协助重置。普通用户忘记密码：联系可用管理员；自助邮件找回尚未实现。管理员无法登录：走独立维护身份的管理员密码恢复。密码恢复不自动启用账户或成员；停用状态仍由正常管理规则处置，不允许恢复命令扩大权限。
+日常账户与 IdP 管理由同源 Identity UI/HTTP 完成，使用中央会话与 CSRF；操作和恢复边界见 [管理指南](management.md)。本人改密须验证当前口令；忘记口令请联系管理员。维护恢复不自动启用账户或恢复成员、管理员权限。
 
 ### 初始化与管理员密码恢复
 
@@ -101,14 +93,14 @@ identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 | 部署身份数 | 2 | 2 |
 | 文件交付失败 | 重签、重新交付 | 无授权文件交付环节 |
 
-日常管理 API/UI 尚未交付，CLI 仍是当前必要入口，不建立第二份业务规则。`make test-pg` 执行维护初始化/恢复、权限隔离、并发和 settlement 故障及密码文件接缝；runner 核对完整测试名与执行计数。`cargo test` 默认忽略真实 provider 测试，不能代替该证据。真实 binary/config/TLS PG 装配仍归 #2341/T32 的独立 PR。
+日常管理统一使用[中央管理 HTTP/UI](management.md)，旧日常 CLI 已退出。`make test-pg` 执行维护初始化/恢复、权限隔离、并发和 settlement 故障及密码文件接缝；runner 核对完整测试名与执行计数。`cargo test` 默认忽略真实 provider 测试，不能代替该证据。真实 binary/config/TLS PG 装配仍归 #2341/T32 的独立 PR。
 
 
 ## 中央会话 HTTP 接入
 
 `rss_identity_http_axum::router(authority, HttpConfig::new(origin, timeout)?)?` 返回 Router（构造时拒绝 Maintenance authority）；authority 必须使用 Runtime 数据库身份。origin 是显式 canonical HTTPS origin（无尾斜线、路径、userinfo、query、fragment），timeout 为非零且不超过 60 秒。使用真实连接的 `ConnectInfo<SocketAddr>` 提供登录尝试来源；反向代理的可信客户端地址接缝归装配方，不直接接受 X-Forwarded-For。不能给 Router 添加跨源凭据开放。
 
-[会话 wire](../architecture/identity-wire-v1.md#中央会话-httpi04) 定义 cookie、Origin、CSRF 和分页。日志/反代不能记录 Cookie、Set-Cookie、口令 body 或 CSRF；不把 session 响应缓存为新请求认证。新增 PG+Router 测试由 make test-pg 运行，界面与生产 listener/TLS 仍由后续 owner 提供；I06 的 Hydra 下游验证见下游指南，真实 MDM 接入独立。
+[会话 wire](../architecture/identity-wire-v1.md#中央会话-httpi04) 定义 cookie、Origin、CSRF 和分页。日志/反代不能记录 Cookie、Set-Cookie、口令 body 或 CSRF；不把 session 响应缓存为新请求认证。新增 PG+Router 测试由 make test-pg 运行，界面由 rss-web apps/identity 提供，生产 listener/TLS 仍由 I08 提供；I06 的 Hydra 下游验证见下游指南，真实 MDM 接入独立。
 
 HTTP 外部错误保持模糊；宿主可从 response extensions 读取 `HttpFailure`，区分内部 AuthorityError（含 CommitUnknown/RollbackFailed/Fenced）与 RequestTimeout。该分类不含 SQL/provider 原文，不作为自动重试许可。body 读取受 HTTP timeout 限制；下游操作接收原截止点的剩余预算，由 Authority/RSS 完成有界结算。宿主不应再用同截止点的通用 timeout 包住会话 Router，否则取消写 future 会丢失 CommitUnknown/RollbackFailed 分类；取消本身不证明回滚。
 
@@ -119,4 +111,4 @@ GET/HEAD 会话查询不续期。客户端在有效用户活动期间通过受 O
 
 新增 `make test-federated`：固定 Keycloak HTTPS + PostgreSQL + in-process Axum，验证真实 JIT、本地/纯联合账户关联、TLS、浏览器绑定与 Cookie 释放；它已纳入 make ci。此接缝不替代生产 binary/域名/反代/MDM 的 T3。
 
-[联合身份指南](federation.md) 持有 CLI 和部署注入参数。[I05 ADR](../architecture/adr/202609082050-2335-federated-identity.md) 持有单行配置/version、state HMAC、单次领取、原子事件、provider epoch 和无兼容退出。更新 schema 时通过 `python3 hack/schema_signature.py` 取得新安装结构摘要，再同步受控 `schema-signature.sha256`；不从现有业务库自动接受漂移。
+[联合身份指南](federation.md) 持有管理 HTTP 与部署注入参数。[I05 ADR](../architecture/adr/202609082050-2335-federated-identity.md) 持有单行配置/version、state HMAC、单次领取、原子事件、provider epoch 和无兼容退出。更新 schema 时通过 `python3 hack/schema_signature.py` 取得新安装结构摘要，再同步受控 `schema-signature.sha256`；不从现有业务库自动接受漂移。

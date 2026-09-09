@@ -54,6 +54,7 @@ pub struct Fixture {
     pub store: Authority,
     pub maintenance: Authority,
     pub key: AccountKey,
+    management_cookie: tokio::sync::Mutex<Option<String>>,
 }
 impl Fixture {
     pub async fn new() -> anyhow::Result<Self> {
@@ -152,6 +153,7 @@ impl Fixture {
         )
         .await?;
         Ok(Self {
+            management_cookie: tokio::sync::Mutex::new(None),
             owner,
             admin,
             database: db,
@@ -212,7 +214,42 @@ impl Fixture {
             .await?;
         Ok(())
     }
-    pub async fn actor(&self) -> anyhow::Result<AuthenticationCandidate> {
+    pub async fn actor(&self) -> anyhow::Result<AuthenticatedSession> {
+        use rss_identity_core::session::SessionSecret;
+        let mut cookie = self.management_cookie.lock().await;
+        if let Some(value) = cookie.as_ref() {
+            match self
+                .store
+                .inspect_session(
+                    self.key.tenant,
+                    SessionSecret::parse(value.clone())?,
+                    deadline(),
+                )
+                .await
+            {
+                Ok(proof) => return Ok(proof),
+                Err(AuthorityError::Rejected) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let issued = self
+            .store
+            .create_session(self.candidate().await?, None, deadline())
+            .await?;
+        *cookie = Some(issued.secret().expose().into());
+        Ok(self
+            .store
+            .inspect_session(
+                self.key.tenant,
+                SessionSecret::parse(issued.secret().expose().into())?,
+                deadline(),
+            )
+            .await?)
+    }
+    pub async fn account_events(&self) -> anyhow::Result<i64> {
+        Ok(sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox WHERE envelope->>'contract'='identity.account.security'").fetch_one(&self.owner).await?)
+    }
+    pub async fn candidate(&self) -> anyhow::Result<AuthenticationCandidate> {
         Ok(self
             .store
             .verify_password(
@@ -257,4 +294,49 @@ impl Fixture {
         .unwrap();
         self.admin.close().await;
     }
+}
+
+// Exercise the concrete session APIs while sharing the existing account transition matrix.
+pub async fn apply_change(
+    store: &Authority,
+    actor: AuthenticatedSession,
+    target: rss_identity_core::account::AccountKey,
+    change: rss_identity_core::account::AccountChange,
+    deadline: rss_transactional_messaging::policy::OperationDeadline,
+) -> Result<rss_identity_core::account::AccountState, AuthorityError> {
+    use rss_identity_core::account::AccountChange;
+    match change {
+        AccountChange::Enabled(v) => store.set_account_enabled(actor, target, v, deadline).await,
+        AccountChange::Administrator(v) => {
+            store
+                .set_account_administrator(actor, target, v, deadline)
+                .await
+        }
+        AccountChange::Membership(v) => {
+            store
+                .set_account_membership(actor, target, v, deadline)
+                .await
+        }
+        AccountChange::Password(v) if actor.account() == target => {
+            store
+                .change_own_password(actor, password(), v, source(), deadline)
+                .await
+        }
+        AccountChange::Password(v) => store.reset_local_password(actor, target, v, deadline).await,
+    }
+}
+
+pub async fn session_actor(
+    store: &Authority,
+    candidate: AuthenticationCandidate,
+) -> anyhow::Result<AuthenticatedSession> {
+    let tenant = candidate.account().tenant;
+    let issued = store.create_session(candidate, None, deadline()).await?;
+    Ok(store
+        .inspect_session(
+            tenant,
+            rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
+            deadline(),
+        )
+        .await?)
 }
