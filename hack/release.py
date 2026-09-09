@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build immutable candidate archives from clean, fixed Identity and UI source identities."""
-import argparse,hashlib,json,os,shutil,subprocess,tarfile,tempfile,tomllib
+import sys,argparse,hashlib,json,os,shutil,subprocess,tarfile,tempfile,tomllib
 from urllib.parse import urlsplit
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
@@ -45,7 +45,7 @@ def build(out,ui_source,ui_dist):
  if any('@sha256:' not in v for v in images.values()):raise ValueError('unlocked provider')
  build_env={k:v for k,v in os.environ.items() if k not in {'SYSTEM_ACCESSTOKEN','IDENTITY_GIT_AUTH_HEADER_FILE'} and not k.startswith('GIT_CONFIG_')}
  build_env['CARGO_NET_OFFLINE']='true'
- subprocess.run(['python3','hack/check_dependencies.py'],cwd=ROOT,env=build_env,check=True)
+ subprocess.run([sys.executable,'hack/check_dependencies.py'],cwd=ROOT,env=build_env,check=True)
  out.mkdir(parents=True)
  with tempfile.TemporaryDirectory(prefix='identity-candidate-') as temp:
   context=Path(temp);(context/'source').mkdir()
@@ -74,7 +74,7 @@ def build(out,ui_source,ui_dist):
     result['migrations']=json.loads(run(['docker','run','--rm','--network','none','--platform','linux/amd64',name,'--describe']))
     if result['migrations']['identity_sql_sha256']!=result['migration_sha256']:raise ValueError('embedded migration identity mismatch')
    if target=='gateway':
-    script="""test "$(id -u)" = 10001; printf 'pid /tmp/smoke.pid; error_log stderr crit; events {} http { access_log off; error_log stderr crit; client_body_temp_path /tmp/client; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi; server { listen 127.0.0.1:8080; root /usr/share/nginx/html; } }' > /tmp/smoke.conf; nginx -e stderr -c /tmp/smoke.conf; trap 'nginx -e stderr -c /tmp/smoke.conf -s quit' EXIT; test -s /usr/share/nginx/html/index.html; curl --fail --silent --max-time 5 http://127.0.0.1:8080/identity-build.json"""
+    script="""test "$(id -u)" = 10001; printf 'pid /tmp/smoke.pid; error_log stderr crit; events {} http { access_log off; error_log stderr crit; client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi; server { listen 127.0.0.1:8080; root /usr/share/nginx/html; } }' > /tmp/smoke.conf; nginx -e stderr -c /tmp/smoke.conf; trap 'nginx -e stderr -c /tmp/smoke.conf -s quit' EXIT; test -s /usr/share/nginx/html/index.html; curl --fail --silent --max-time 5 http://127.0.0.1:8080/identity-build.json"""
     observed=json.loads(run(['docker','run','--rm','--network','none','--platform','linux/amd64','--entrypoint','sh',name,'-ec',script]))
     if observed!={'revision':ui['revision']}:raise ValueError('gateway UI artifact mismatch')
    if target=='operator':result['identity_schema']=result['migrations']['schema_version']

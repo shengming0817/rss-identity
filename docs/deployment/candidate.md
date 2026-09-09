@@ -8,3 +8,6 @@
 candidate.json绑定Identity版本/SHA/lock、RSS Git来源与版本、实际Linux编译feature、UI源码/lock/dist摘要、迁移摘要、provider镜像摘要及OCI manifest/归档/二进制摘要。它证明候选构建身份，不表示registry已发布，也不证明生产T3。
 
 azure-candidate.yml提供手动流水线：需要部署管理员配置只读GitHub service connection（默认名称rss-web-read），并允许job token读取RSS Git。该配置不是已运行流水线的证据。实际输出通过Pipeline Artifact发布，不要求镜像registry。
+
+候选构建在原生 build platform 上交叉编译 linux/amd64；Dockerfile 显式安装目标 libc 开发头文件，避免 ARM 主机把宿主头文件用于 x86_64。release 的 Python 子进程使用当前解释器，最低 Python 3.11，避免 Make 的 PATH 改写选择旧解释器。#2377 仅修复构建入口，不改变应用与 SDK 契约。
+非 root gateway 冒烟将全部 NGINX 临时目录指向可写 /tmp，包括 proxy_temp_path，保持与交付镜像 UID 10001 一致。
