@@ -26,9 +26,11 @@ def docker(*args):
     return subprocess.check_output(["docker", *args], text=True, stderr=subprocess.PIPE, timeout=180).strip()
 
 @contextlib.contextmanager
-def container(image, ports, env=(), args=(), mounts=()):
+def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=()):
     name = "identity-t2-" + uuid.uuid4().hex
     command = ["run", "-d", "--name", name]
+    if user is not None: command += ["--user", user]
+    for value in sysctls: command += ["--sysctl", value]
     for port in ports:
         host = ports[port] if isinstance(ports, dict) else ""
         command += ["-p", f"127.0.0.1:{host}:{port}"]

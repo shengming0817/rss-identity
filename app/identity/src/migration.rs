@@ -2,7 +2,7 @@
 use crate::{AppError, assembly, config::MigrationConfig, read_secret};
 use sqlx::{Connection, Executor, PgConnection};
 use std::path::Path;
-const RELAY: &str = "DO $$ BEGIN IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='rss_tmsg_relay') THEN CREATE ROLE rss_tmsg_relay NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION; ELSIF EXISTS(SELECT FROM pg_roles WHERE rolname='rss_tmsg_relay' AND (rolcanlogin OR rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls OR rolreplication)) OR EXISTS(SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member WHERE r.rolname='rss_tmsg_relay') THEN RAISE EXCEPTION 'unsafe relay role'; END IF; END $$;";
+const RELAY: &str = "DO $$ BEGIN IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='rss_tmsg_relay') THEN CREATE ROLE rss_tmsg_relay NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION; ELSIF EXISTS(SELECT FROM pg_roles WHERE rolname='rss_tmsg_relay' AND (rolcanlogin OR rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls OR rolreplication)) OR EXISTS(SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member OR r.oid=m.roleid WHERE r.rolname='rss_tmsg_relay') THEN RAISE EXCEPTION 'unsafe relay role'; END IF; END $$;";
 const GRANTS: &str = include_str!("grants.sql");
 fn literal(value: &str) -> Result<String, AppError> {
     if value.is_empty() || value.len() > 4096 || value.contains(['\0', '\n', '\r']) {
@@ -49,6 +49,8 @@ pub async fn install(c: MigrationConfig) -> Result<(), AppError> {
             sqlx::query("INSERT INTO rss_transactional_messaging.storage_lineage VALUES(true,$1,$2)").bind(c.storage.target.as_slice()).bind(c.storage.lineage.as_slice()).execute(&mut *tx).await.map_err(|_|AppError::Migration)?;
             for tenant in &c.storage.tenants {sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,$2)").bind(&tenant.tenant_id).bind(tenant.epoch).execute(&mut *tx).await.map_err(|_|AppError::Migration)?;}
         }
+        let relay_safe:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_roles r WHERE r.rolname='rss_tmsg_relay' AND NOT r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolbypassrls AND NOT r.rolreplication AND NOT EXISTS(SELECT FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid))").fetch_one(&mut *tx).await.map_err(|_|AppError::Migration)?;
+        if !relay_safe {return Err(AppError::Migration);}
         // Existing installations never take a mutation/repair branch.
         let version:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *tx).await.map_err(|_|AppError::Migration)?;
         if version!=[6]{return Err(AppError::Migration);}

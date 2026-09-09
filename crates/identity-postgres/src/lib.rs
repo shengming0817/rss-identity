@@ -25,6 +25,7 @@ pub use sessions::{
     AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
 };
 pub use types::*;
+pub const SCHEMA_VERSION: i32 = 6;
 pub const SCHEMA_SIGNATURE_SQL: &str = include_str!("schema-signature.sql");
 pub const SCHEMA_SIGNATURE: &str = include_str!("schema-signature.sha256");
 pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_authority.sql");
@@ -87,7 +88,7 @@ impl Authority {
                                 return Ok(Some(inventory));
                             }
                             let versions:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *c).await?;
-                            if versions != [6] {return Ok(Some("schema-version".into()));}
+                            if versions != [SCHEMA_VERSION] {return Ok(Some("schema-version".into()));}
                             let signature:String=sqlx::query_scalar(include_str!("schema-signature.sql")).fetch_one(&mut *c).await?;
                             if signature != include_str!("schema-signature.sha256").trim() { return Ok(Some("schema-contract".into())); }
                             let identity_matches: bool = sqlx::query_scalar("SELECT count(*)=1 AND coalesce(bool_and(environment_id=$1 AND identity_config_version=$2 AND identity_public_origin=$3 AND product_public_origin=$4),false) FROM identity_authority.deployment")

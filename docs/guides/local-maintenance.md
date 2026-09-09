@@ -15,7 +15,7 @@ SELECT encode(target,'hex'),encode(lineage,'hex') FROM rss_transactional_messagi
 SELECT tenant_id,epoch FROM rss_transactional_messaging.tenant_epoch;
 SELECT rolname,rolcanlogin,rolsuper,rolbypassrls FROM pg_roles
 WHERE rolname IN ('identity_runtime','identity_maintenance','identity_account_runtime','identity_account_maintenance');
-SELECT NOT EXISTS(SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member
+SELECT NOT EXISTS(SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member OR r.oid=m.roleid
  WHERE r.rolname='rss_tmsg_relay') AS relay_has_no_parent_roles; -- 必须为 true
 ```
 

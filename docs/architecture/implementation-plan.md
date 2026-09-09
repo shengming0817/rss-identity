@@ -104,7 +104,7 @@ I03–I05 必须在各自实现时闭合安全事件，不能最后另加一个�
 
 ## #2359 工程身份更名
 
-[更名工作项 #2359](https://dev.azure.com/shengming0923/rss/_workitems/edit/2359) 将 `rss-access` 原地更名为 `rss-identity`；Azure repository ID 保持 `e1257122-3ec2-4a42-a134-67e73e574e61`。库统一位于 `crates/identity-*`，可执行入口位于 `app/identity-admin`；不保留独立 `adapters/` 层。Cargo package 为 `rss-identity-*`，管理命令为 `identity-admin`。
+[更名工作项 #2359](https://dev.azure.com/shengming0923/rss/_workitems/edit/2359) 将 `rss-access` 原地更名为 `rss-identity`；Azure repository ID 保持 `e1257122-3ec2-4a42-a134-67e73e574e61`。库统一位于 `crates/identity-*`，可执行入口位于 `app/identity`；不保留独立 `adapters/` 层。Cargo package 为 `rss-identity-*`，管理命令为 `identity-admin`。
 
 仅有可重建测试数据且没有外部事件消费者：初始安装使用 `identity_authority`、`identity_account_runtime` / `identity_account_maintenance`，事件使用 `identity.security` / `identity.account.security`。没有旧入口别名、升级迁移、双读或旧事件桥接；已有开发库及 Outbox 须停用后重建，数据库角色属于集群对象，须单独核实依赖再清理。该一次性切换不进入产品启动逻辑。
 

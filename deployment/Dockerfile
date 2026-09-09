@@ -2,7 +2,11 @@
 ARG RUST_IMAGE
 ARG RUNTIME_IMAGE
 ARG NGINX_IMAGE
-FROM ${RUST_IMAGE} AS build
+FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS build
+RUN apt-get update && apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu=4:12.2.0-3 && rm -rf /var/lib/apt/lists/*
+RUN rustup target add x86_64-unknown-linux-gnu
+ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
+RUN rustc -vV > /toolchain.txt && x86_64-linux-gnu-gcc -dumpfullversion >> /toolchain.txt
 WORKDIR /build
 COPY source/ .
 # Git authentication is only available to fetch, never build scripts or runtime layers.
@@ -19,25 +23,26 @@ RUN --network=none cargo metadata --offline --locked --format-version=1 > /build
 FROM ${RUNTIME_IMAGE} AS server
 ARG IDENTITY_REVISION
 LABEL org.opencontainers.image.revision=${IDENTITY_REVISION}
-COPY --from=build /build/target/release/identity-server /usr/local/bin/identity-server
+COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-server /usr/local/bin/identity-server
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/identity-server"]
 FROM ${RUNTIME_IMAGE} AS operator
 ARG IDENTITY_REVISION
 LABEL org.opencontainers.image.revision=${IDENTITY_REVISION}
-COPY --from=build /build/target/release/identity-admin /usr/local/bin/identity-admin
-COPY --from=build /build/target/release/identity-migrate /usr/local/bin/identity-migrate
+COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-admin /usr/local/bin/identity-admin
+COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-migrate /usr/local/bin/identity-migrate
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/identity-migrate"]
 FROM scratch AS evidence
+COPY --from=build /toolchain.txt /toolchain.txt
 COPY --from=build /build/artifacts.json /artifacts.json
 COPY --from=build /build/metadata.json /metadata.json
-COPY --from=build /build/target/release/identity-server /identity-server
-COPY --from=build /build/target/release/identity-admin /identity-admin
-COPY --from=build /build/target/release/identity-migrate /identity-migrate
+COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-server /identity-server
+COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-admin /identity-admin
+COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-migrate /identity-migrate
 FROM ${NGINX_IMAGE} AS gateway
 ARG IDENTITY_REVISION
 LABEL org.opencontainers.image.revision=${IDENTITY_REVISION}
 COPY ui/ /usr/share/nginx/html/
 USER 10001:10001
-ENTRYPOINT ["nginx","-g","daemon off;"]
+ENTRYPOINT ["nginx","-e","stderr","-g","daemon off;"]

@@ -108,10 +108,20 @@ async fn ready(State(h): State<Arc<Health>>) -> StatusCode {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
     let result = tokio::time::timeout(Duration::from_secs(10), async {
-        assembly::authority(&h.config, h.pool.clone(), h.kdf.clone()).await?;
-        h.hydra.ready().await.map_err(|_| AppError::Provider)
+        if let Err(error) = assembly::authority(&h.config, h.pool.clone(), h.kdf.clone()).await {
+            eprintln!("component=postgres readiness=failed reason={error}");
+            return Err(error);
+        }
+        if h.hydra.ready().await.is_err() {
+            eprintln!("component=hydra readiness=unavailable");
+            return Err(AppError::Provider);
+        }
+        Ok(())
     })
     .await;
+    if result.is_err() {
+        eprintln!("component=readiness reason=timeout");
+    }
     if matches!(result, Ok(Ok(()))) {
         StatusCode::OK
     } else {

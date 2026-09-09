@@ -40,11 +40,19 @@ steps:
       npm install --prefix "$AGENT_TEMPDIRECTORY/pnpm" pnpm@11.4.0
       export PATH="$AGENT_TEMPDIRECTORY/pnpm/node_modules/.bin:$PATH"
       pnpm install --frozen-lockfile
+      python3 - <<'PY_VERIFY_UI'
+      import os,re,subprocess
+      expected=os.environ['EXPECTED_UI_REVISION']
+      if not re.fullmatch('[0-9a-f]{40}',expected):raise SystemExit('full UI SHA required')
+      if subprocess.check_output(['/usr/bin/git','rev-parse','HEAD'],text=True).strip()!=expected:raise SystemExit('UI checkout mismatch')
+      PY_VERIFY_UI
       export RSS_IDENTITY_WEB_REVISION=$(/usr/bin/git rev-parse HEAD)
       pnpm --filter @rss/identity-app build
       pnpm check:identity-app:build
     workingDirectory: $(Pipeline.Workspace)/identity-ui
     displayName: Build fixed Identity UI
+    env:
+      EXPECTED_UI_REVISION: ${{ parameters.uiRevision }}
   - bash: |
       set -euo pipefail
       python3 hack/release.py --output "$BUILD_ARTIFACTSTAGINGDIRECTORY/candidate" --ui-source "$PIPELINE_WORKSPACE/identity-ui" --ui-dist "$PIPELINE_WORKSPACE/identity-ui/apps/identity/dist"

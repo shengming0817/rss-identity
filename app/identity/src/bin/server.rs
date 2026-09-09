@@ -2,12 +2,20 @@ use rss_identity_app::{AppError, config::RuntimeConfig, lifecycle};
 fn main() {
     std::panic::set_hook(Box::new(|_| eprintln!("identity process panic")));
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.len() == 2 && args[0] == "--probe" {
+        let healthy = args[1]
+            .parse()
+            .is_ok_and(rss_identity_app::transport::probe);
+        std::process::exit(if healthy { 0 } else { 1 });
+    }
     if args == ["--version"] {
         println!("identity-server {}", env!("CARGO_PKG_VERSION"));
         return;
     }
     if args == ["--help"] {
-        println!("identity-server --config FILE\nidentity-server --version");
+        println!(
+            "identity-server --config FILE\nidentity-server --version\nidentity-server --probe LOOPBACK:PORT"
+        );
         return;
     }
     let result = (|| {

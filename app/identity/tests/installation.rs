@@ -30,9 +30,27 @@ async fn installation_configuration_and_rollback_are_verified() -> anyhow::Resul
     sqlx::raw_sql("DROP ROLE identity_account_runtime")
         .execute(&mut owner)
         .await?;
+    // A pre-existing member of the SECURITY DEFINER owner must not inherit future relay powers.
+    sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN; CREATE ROLE untrusted_member NOLOGIN; GRANT rss_tmsg_relay TO untrusted_member").execute(&mut owner).await?;
+    assert!(migration::install(config()).await.is_err());
+    let absent: bool =
+        sqlx::query_scalar("SELECT to_regnamespace('rss_transactional_messaging') IS NULL")
+            .fetch_one(&mut owner)
+            .await?;
+    assert!(absent);
+    sqlx::raw_sql("REVOKE rss_tmsg_relay FROM untrusted_member")
+        .execute(&mut owner)
+        .await?;
     let (first, second) = tokio::join!(migration::install(config()), migration::install(config()));
     first?;
     second?;
+    sqlx::raw_sql("GRANT rss_tmsg_relay TO untrusted_member")
+        .execute(&mut owner)
+        .await?;
+    assert!(migration::install(config()).await.is_err());
+    sqlx::raw_sql("REVOKE rss_tmsg_relay FROM untrusted_member; DROP ROLE untrusted_member")
+        .execute(&mut owner)
+        .await?;
     let mut wrong = config();
     wrong.identity_origin = DeploymentIdentity::new(
         "other-env".into(),

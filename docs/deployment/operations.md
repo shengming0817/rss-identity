@@ -10,7 +10,7 @@
 
 所有秘密为普通 0600 文件，无尾部换行：runtime/maintenance PG 密码彼此独立且至少32字节；每个产品的 validation secret、OIDC secret独立且至少32字节；OIDC state_key_file 是64位十六进制（32字节、非零）；Hydra gateway service secret和Keycloak DB密码使用32–256字符 base64url；Hydra system secret至少32字节。秘密不得传命令行值或提交到Git。
 
-参考容器以 UID/GID 10001 运行。部署文件须对该 UID 可读且组/其它无权限；仅给各服务挂载其所需文件。named volume 的初始目录须预置为10001所有。可以在空卷上运行受控的一次性 root 初始化任务，仅调整该新卷目录权限；不要递归修改既有未知数据。维护秘密只在维护任务中挂载，日常服务无 owner/maintenance mount。
+Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定上游镜像的1000:0，以支持其启动时augmentation。渲染器由root执行，按唯一服务owner交付配置并核验权限；其它调用者明确拒绝。私钥和秘密按消费服务UID/GID准备（Keycloak私钥1000:0，其它容器秘密10001:10001），均0600；公共CA/证书须对消费用户可读；仅给各服务挂载其所需文件。安装前执行下文volume-init任务，为空卷固定目录设置10001所有权；有内容且属主不匹配的旧卷明确拒绝，不递归修改。维护秘密只在维护任务中挂载，日常服务无 owner/maintenance mount。
 
 准备独立 consumer Docker network，与 MDM 所在网络连接。private-gateway 在此网络以 Identity hostname 提供 TLS 443；容器专属网络命名空间允许非root绑定该端口，消费方保持同一个 Identity origin，不能改 issuer。公网只发布 public-gateway 的443。后端网段和协议网段必须是不冲突的独立 /24，网关地址与输入精确一致。
 
@@ -18,12 +18,13 @@
 
 在仓库使用 `python3 hack/deploy.py --input /private/deployment.json --output /private/rendered --candidate /artifacts/candidate.json`；候选目录可直接使用其中 deploy.py。输出目录必须尚不存在，包含秘密的生成配置，权限700；运行时宜位于受控私有磁盘或tmpfs，不进入日志/备份通用收集器。
 
+0. `docker compose -f /private/rendered/compose.json run --rm volume-init`。仅初始化空卷固定目录权限：PG为10001:10001、Keycloak为1000:0；nocopy防止镜像copy-up覆盖属主。
 1. `docker compose -f /private/rendered/compose.json up -d postgres`。首次 PG 初始化建立独立 hydra/keycloak数据库；已有卷不会重放初始化 SQL。
 2. `docker compose -f /private/rendered/compose.json run --rm migrate`。该命令内嵌 RSS/Identity SQL，执行单库安装并核验实际 runtime/maintenance 权限；旧版本、身份错配、角色碰撞和权限漂移拒绝。
 3. `docker compose -f /private/rendered/compose.json run --rm hydra-migrate`。Hydra 独立执行官方迁移，不受 Identity 事务回滚保护。
 4. 启动 Hydra、hydra-admin和Keycloak，按 clients.json 用受控私有 admin API静态注册下游 client（authorization_code/code/openid/client_secret_basic、精确redirect、S256、opaque token）；必须与 hydra.json期限一致。初次Keycloak导入批准realm/client，既有realm变化须经其管理员显式更新，不通过重复导入修复漂移。
 5. 通过独立维护任务初始化首个管理员：`docker compose ... run --rm -v /private/new-password:/run/input/new-password:ro maintenance initialize <principal-uuid> <login> /run/input/new-password`。tenant来自维护配置；初始化只能成功一次，重启不能再次夺取authority。
-6. 启动 Identity、公私网网关。内部直接探测 /livez 与 /readyz，确认后开放外部流量；不存在启动即自动DDL或自动初始化管理员。
+6. 启动 Identity；使用 `docker compose ... exec identity identity-server --probe 127.0.0.1:8080` 执行固定内部探针，Compose healthcheck使用同一命令。公私网网关依赖Identity healthy后才启动并开放端口；不存在启动即自动DDL或自动初始化管理员。
 
 默认维护配置选择声明的第一个tenant；其它tenant维护必须用显式、受审查的维护配置，不根据浏览器输入切换。Keycloak 本身管理员建立/用户生命周期由其部署 owner 负责，本参考不提供默认管理员或密码。
 
@@ -42,3 +43,5 @@ SIGTERM关闭admission并有界等待请求/响应、worker、实际KDF和PG。C
 回退仅限支持同一schema和同一身份配置的应用artifact；不得回退DB撤销状态。v5开发库只能由owner确认可丢弃后重建；不自动down migration。首版禁止同库改变environment/origin/config代际，修改配置会明确拒绝；需要保留数据的origin迁移属于后续专门交付。
 
 维护恢复继续使用 identity-admin recover，详见[维护指南](../guides/local-maintenance.md)。MFA、备份恢复、凭据轮换演练属于 I09。
+
+Hydra admin实际仅监听其网络命名空间的127.0.0.1:4445，认证TLS侧车共享该命名空间；其它protocol网络成员不能直连4445。provider版本始终从candidate.json的providers读取，不随执行脚本旁的新checkout改变。
