@@ -49,3 +49,5 @@ Hydra admin实际仅监听其网络命名空间的127.0.0.1:4445，认证TLS侧�
 Identity runtime/maintenance 只使用 RSS producer 连接入口：业务变更与 Outbox 同事务提交，
 保留 check_execution fencing；不给 Inbox 访问或 claim/lease/settle 执行权限。重复安装与启动
 会拒绝这些额外权限。实际消息投递由独立 relay owner 承担，不由 Identity 进程代行。
+
+Compose 中的 volume-init 命令由渲染器将 shell dollar 转义为 `$$`，以保留容器内的参数展开；直接使用渲染输出，不手工展开或替换该命令。#2421 的真实 Compose 解析回归守护此边界。
