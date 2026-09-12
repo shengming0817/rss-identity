@@ -4,6 +4,7 @@
 
 - [首次安装与运维](operations.md)
 - [候选构建](candidate.md)
+- [本地认证候选 T3（#2341）](../../t3/access-local-auth/README.md)
 - [停机备份、恢复、轮换与测量](recovery.md)
 - [I08 架构决定](../architecture/adr/202609091100-2338-production-assembly.md)
 

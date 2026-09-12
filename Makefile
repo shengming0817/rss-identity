@@ -63,3 +63,13 @@ test-recovery:
 
 measure-capacity:
 	$(PYTHON) hack/downstream.py --measure
+
+.PHONY: test-t3-local-auth check-t3-local-auth
+check-t3-local-auth:
+	$(PYTHON) -m unittest discover -s t3/access-local-auth -p 'test_*.py'
+	pnpm --dir t3/access-local-auth install --frozen-lockfile --ignore-scripts
+	pnpm --dir t3/access-local-auth test
+	pnpm --dir t3/access-local-auth audit
+
+test-t3-local-auth:
+	$(PYTHON) t3/access-local-auth/run.py --candidate "$(IDENTITY_T3_CANDIDATE)" --record "$(IDENTITY_T3_RECORD)"

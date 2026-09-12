@@ -1,0 +1,29 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { retainedProbe, checkFacts } from './consumer.mjs'
+
+test('a retained credential is verified online after its browser session was removed', async () => {
+  const entries = new Map([['handle', { token: 'private-token', subject: 's', expires: Date.now() / 1000 + 60 }]])
+  let calls = 0
+  const result = await retainedProbe(entries, 'handle', async (entry) => {
+    calls++
+    assert.equal(entry.token, 'private-token')
+    return { status: 403, online: true }
+  })
+  assert.equal(calls, 1)
+  assert.equal(result.online, true)
+  assert.equal(result.status, 403)
+  assert.ok(result.remaining > 0)
+  await assert.rejects(retainedProbe(entries, 'missing', async () => assert.fail()))
+})
+
+test('consumer rejects a successful HTTP response with wrong or expired identity facts', () => {
+  const expected = { tenant: 't', client_id: 'c', audience: 'a', identity_origin: 'https://identity.test' }
+  const facts = { tenant_id: 't', client_id: 'c', audience: 'a', issuer: 'https://identity.test/oidc',
+    subject: 's', session_id: '11111111-1111-4111-8111-111111111111', expires_at: 200 }
+  checkFacts(facts, expected, 's', 100)
+  for (const key of ['tenant_id', 'client_id', 'audience', 'issuer', 'subject', 'session_id']) {
+    assert.throws(() => checkFacts({ ...facts, [key]: 'wrong' }, expected, 's', 100))
+  }
+  assert.throws(() => checkFacts(facts, expected, 's', 200))
+})

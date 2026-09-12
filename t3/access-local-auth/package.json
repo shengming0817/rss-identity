@@ -1,0 +1,7 @@
+{
+  "name": "identity-local-auth-t3",
+  "private": true,
+  "type": "module",
+  "scripts": {"test": "node --test consumer.test.mjs"},
+  "dependencies": {"openid-client": "6.8.8", "@playwright/test": "1.60.0"}
+}
