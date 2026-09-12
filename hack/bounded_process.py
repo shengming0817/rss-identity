@@ -2,6 +2,28 @@
 import os
 import signal
 import subprocess
+import time
+
+
+def reap_process_group(process, *, grace=2):
+    """Success requires both a waited child and disappearance of its owned PGID."""
+    for sig in (None, signal.SIGTERM, signal.SIGKILL):
+        deadline = time.monotonic() + grace
+        try:
+            if sig is not None:
+                try: os.killpg(process.pid, sig)
+                except ProcessLookupError: pass
+            process.communicate(timeout=max(0, deadline - time.monotonic()))
+            while True:
+                try: os.killpg(process.pid, 0)
+                except ProcessLookupError: return True
+                except PermissionError: pass  # A disappearing group can transiently return EPERM on macOS.
+                left = deadline - time.monotonic()
+                if left <= 0: break
+                time.sleep(min(.02, left))
+        except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
+            continue
+    return False
 
 def run(command, *, timeout, termination_grace=5, **kwargs):
     check=kwargs.pop('check',False)
@@ -10,14 +32,8 @@ def run(command, *, timeout, termination_grace=5, **kwargs):
     data=kwargs.pop('input',None)
     process=subprocess.Popen(command,start_new_session=True,**kwargs)
     def stop():
-        # Descendants can hold pipes after the direct child exits; always address the owned group.
-        try:os.killpg(process.pid,signal.SIGTERM)
-        except ProcessLookupError:pass
-        try:process.communicate(timeout=termination_grace)
-        except subprocess.TimeoutExpired:
-            try:os.killpg(process.pid,signal.SIGKILL)
-            except ProcessLookupError:pass
-            process.communicate(timeout=termination_grace)
+        if not reap_process_group(process, grace=termination_grace):
+            raise subprocess.TimeoutExpired("process_group_cleanup", 3 * termination_grace)
     previous=signal.getsignal(signal.SIGTERM)
     def terminate(signum,_frame):
         stop()

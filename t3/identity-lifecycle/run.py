@@ -4,6 +4,7 @@ import argparse
 from contextlib import contextmanager
 import hashlib
 import json
+import re
 from pathlib import Path
 import signal
 import shutil
@@ -36,9 +37,69 @@ def sha(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def candidate_contract(value, lock):
+    # Validate every producer field at the load boundary, before archive or Docker work.
+    def fields(obj, names):
+        require(type(obj) is dict and set(obj) == set(names.split()), "candidate_format_fields")
+    def text(value, pattern=r"[^\x00]+"):
+        require(type(value) is str and re.fullmatch(pattern, value) is not None, "candidate_format_value")
+    digest = r"[a-f0-9]{64}"
+    image = r"[A-Za-z0-9_./:-]+@sha256:" + digest
+    fields(lock, "manifest_sha256 files")
+    text(lock["manifest_sha256"], digest)
+    fields(lock["files"], "deploy.py deployment/example.json deployment/providers.lock.json")
+    for item in lock["files"].values(): text(item, digest)
+    fields(value, "format_version revision version platform cargo_lock_sha256 rust ui providers migration_sha256 images archives rss migrations identity_schema toolchain production_features binaries")
+    for key, expected in (("format_version", 1), ("identity_schema", 7)):
+        require(type(value[key]) is int and value[key] == expected, "candidate_format_version")
+    text(value["revision"], r"[a-f0-9]{40}")
+    require(value["platform"] == "linux/amd64", "candidate_format_platform")
+    for key in ("version", "rust", "toolchain"): text(value[key])
+    for key in ("cargo_lock_sha256", "migration_sha256"): text(value[key], digest)
+    fields(value["ui"], "repository revision lock_sha256 dist_sha256")
+    text(value["ui"]["repository"], r"https://[^\s]+")
+    text(value["ui"]["revision"], r"[a-f0-9]{40}")
+    for key in ("lock_sha256", "dist_sha256"): text(value["ui"][key], digest)
+    fields(value["providers"], "postgres keycloak hydra nginx rust runtime")
+    fields(value["images"], "server operator gateway")
+    for item in (*value["providers"].values(), *value["images"].values()): text(item, image)
+    fields(value["archives"], "server operator gateway")
+    for name, item in value["archives"].items():
+        fields(item, "file sha256 manifest_digest")
+        require(item["file"] == name + ".oci.tar", "candidate_format_archive_path")
+        text(item["sha256"], digest)
+        text(item["manifest_digest"], "sha256:" + digest)
+    fields(value["binaries"], "identity-server identity-admin identity-migrate identity-clients")
+    for item in value["binaries"].values(): text(item, digest)
+    fields(value["migrations"], "identity_sql_sha256 rss_sql_sha256 schema_contract schema_version")
+    require(type(value["migrations"]["schema_version"]) is int
+            and value["migrations"]["schema_version"] == 7, "candidate_format_schema")
+    for key in ("identity_sql_sha256", "rss_sql_sha256", "schema_contract"):
+        text(value["migrations"][key], digest)
+    require(value["migration_sha256"] == value["migrations"]["identity_sql_sha256"], "candidate_format_migration")
+    require(type(value["rss"]) is list and bool(value["rss"]), "candidate_format_rss")
+    packages = set()
+    for item in value["rss"]:
+        fields(item, "package version source")
+        text(item["package"], r"rss-[a-z0-9-]+")
+        text(item["version"])
+        text(item["source"], r"git\+https://[^\s]+\?rev=([a-f0-9]{40})#\1")
+        require(item["package"] not in packages, "candidate_format_duplicate_package")
+        packages.add(item["package"])
+    require(type(value["production_features"]) is dict
+            and set(value["production_features"]) == packages, "candidate_format_features")
+    for features in value["production_features"].values():
+        require(type(features) is list, "candidate_format_features")
+        for feature in features: text(feature, r"[a-z0-9_-]+")
+
+
 def load_candidate(directory, lock):
+    try:
+        value = json.loads((directory / "candidate.json").read_text())
+    except (ValueError, UnicodeError):
+        raise Failure("candidate_format_json") from None
+    candidate_contract(value, lock)
     require(sha(directory / "candidate.json") == lock["manifest_sha256"], "candidate_digest")
-    value = json.loads((directory / "candidate.json").read_text())
     require(value["format_version"] == 1 and value["identity_schema"] == 7
             and value["platform"] == "linux/amd64", "candidate_format")
     require(set(value["images"]) == set(value["archives"]) == {"server", "operator", "gateway"},
@@ -128,6 +189,11 @@ def finalize(result, fixture, output, harness_files, *, root=ROOT,
     previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
     cleanup_ok = False
     try:
+        if fixture and hasattr(fixture, "diagnostics"):
+            try:
+                result.data["diagnostics"] = fixture.diagnostics()
+            except BaseException as error:
+                result.data["diagnostics"] = {"complete": False, "error": type(error).__name__}
         try:
             cleanup_ok = fixture.cleanup() if fixture else True
         except BaseException as error:
@@ -155,8 +221,12 @@ def finalize(result, fixture, output, harness_files, *, root=ROOT,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidate", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
+    def nonempty_path(value):
+        if not value.strip():
+            raise argparse.ArgumentTypeError("empty path")
+        return Path(value)
+    parser.add_argument("--candidate", required=True, type=nonempty_path)
+    parser.add_argument("--output", required=True, type=nonempty_path)
     args = parser.parse_args()
     output = args.output.resolve()
     require(not output.exists(), "output_already_exists")
@@ -190,8 +260,6 @@ def main():
                 getattr(scenarios, name)(fixture, observed)
     except BaseException as error:
         result.data["failure"] = str(error) if isinstance(error, Failure) else type(error).__name__
-        if fixture:
-            result.data["containers"] = fixture.diagnostics()
     finally:
         try:
             passed = finalize(result, fixture, output, harness_files,

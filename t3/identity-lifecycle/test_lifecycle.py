@@ -36,7 +36,17 @@ class CandidateTests(unittest.TestCase):
         value = {
             "format_version": 1, "revision": revision, "identity_schema": 7,
             "platform": "linux/amd64", "images": {}, "archives": {}, "binaries": {},
-            "migrations": {"schema_version": 7}, "providers": {"rust": "rust@sha256:" + "b" * 64},
+            "migrations": {"schema_version": 7, "identity_sql_sha256": "b" * 64,
+                           "rss_sql_sha256": "b" * 64, "schema_contract": "b" * 64},
+            "providers": {key: key + "@sha256:" + "b" * 64 for key in
+                          ("postgres", "keycloak", "hydra", "nginx", "rust", "runtime")},
+            "version": "0.1.0", "rust": "1.96.0", "toolchain": "rustc 1.96.0",
+            "cargo_lock_sha256": "b" * 64, "migration_sha256": "b" * 64,
+            "ui": {"repository": "https://example.test/ui.git", "revision": revision,
+                   "lock_sha256": "b" * 64, "dist_sha256": "b" * 64},
+            "rss": [{"package": "rss-runtime", "version": "0.1.0",
+                     "source": "git+https://example.test/rss?rev=" + revision + "#" + revision}],
+            "production_features": {"rss-runtime": []},
         }
         for name in ("server", "operator", "gateway"):
             config = json.dumps({"os": "linux", "architecture": "amd64", "config": {
@@ -64,7 +74,46 @@ class CandidateTests(unittest.TestCase):
         (root / "candidate.json").write_text(json.dumps(value))
         lock = {"manifest_sha256": digest((root / "candidate.json").read_bytes()),
                 "files": {"deploy.py": digest((root / "deploy.py").read_bytes())}}
+        (root / "deployment").mkdir()
+        for name in ("deployment/example.json", "deployment/providers.lock.json"):
+            (root / name).write_text("{}")
+            lock["files"][name] = digest(b"{}")
         return value, lock
+
+    def test_complete_input_contract_precedes_artifact_reads(self):
+        import copy
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            value, lock = self.candidate(root)
+            mutations = [((), key) for key in value]
+            mutations += [((key,), child) for key in ("ui", "migrations", "providers", "archives", "binaries") for child in value[key]]
+            for parents, key in mutations:
+                for bad in ("missing", None, [], True):
+                    with self.subTest(parents=parents, key=key, bad=bad):
+                        changed = copy.deepcopy(value)
+                        target = changed
+                        for parent in parents:
+                            target = target[parent]
+                        if bad == "missing":
+                            del target[key]
+                        else:
+                            target[key] = bad
+                        (root / "candidate.json").write_text(json.dumps(changed))
+                        lock["manifest_sha256"] = digest((root / "candidate.json").read_bytes())
+                        with patch("run.tarfile.open", side_effect=AssertionError("late validation")):
+                            with self.assertRaisesRegex(Failure, "candidate_format"):
+                                load_candidate(root, lock)
+
+    def test_empty_cli_paths_are_explicit(self):
+        import subprocess
+        for option in ("candidate", "output"):
+            args = {"candidate": "/unused", "output": "/unused"}
+            args[option] = ""
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name("run.py")),
+                                     "--candidate", args["candidate"], "--output", args["output"]],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--" + option + ": empty path", result.stderr)
 
     def test_approved_artifacts_are_read_without_building(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -91,6 +140,36 @@ class CandidateTests(unittest.TestCase):
             source.symlink_to(root / "other.tar")
             with self.assertRaises(Failure):
                 load_candidate(root, lock)
+
+
+class AuthenticationTests(unittest.TestCase):
+    def test_same_401_cannot_hide_missing_service_authentication(self):
+        from scenarios import authentication_boundaries
+        from unittest.mock import Mock
+        fixture = Mock(info={"tenant": "tenant"})
+        fixture.http.return_value = {"status": 401, "json": {"code": "invalid_credential"}}
+        with self.assertRaisesRegex(Failure, "private_authentication_missing"):
+            authentication_boundaries(fixture)
+        fixture.http.side_effect = [{"status": 401, "json": {"code": code}} for code in
+                                    ("invalid_client", "invalid_client", "invalid_credential")]
+        observed = authentication_boundaries(fixture)
+        self.assertEqual(observed["correct"]["code"], "invalid_credential")
+
+    def test_private_gateway_auth_modes_preserve_destination(self):
+        import base64
+        from fixture import Fixture
+        f = Fixture(Path("/unused"), {}, Path("/unused"))
+        f.mount = "/run/fixture"
+        f.info = {"private_ip": "10.0.0.3", "public_ip": "10.0.0.2"}
+        with patch.object(f, "helper_python", return_value="secret"), patch.object(f, "helper_call") as call:
+            for mode in ("missing", "wrong", "correct"):
+                f.http("/internal/v1/identity/validate", private=True, service_auth=mode)
+                data = call.call_args.args[1]
+                self.assertEqual(data["address"], "10.0.0.3")
+                if mode == "missing": self.assertNotIn("Authorization", data["headers"])
+                else:
+                    decoded = base64.b64decode(data["headers"]["Authorization"][6:]).decode()
+                    self.assertEqual(decoded == "mdm:secret", mode == "correct")
 
 
 class ResultTests(unittest.TestCase):
@@ -160,6 +239,64 @@ class ProcessAndCleanupTests(unittest.TestCase):
                 os.killpg(process.pid, signal.SIGKILL)
                 process.communicate(timeout=5)
 
+    def test_parent_exit_with_detached_streams_still_reaps_group(self):
+        import os, signal, subprocess, time
+        from scenarios import reap_processes
+        from bounded_process import run as bounded_run
+        for runner in ("drain", "bounded"):
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as directory:
+                ready = Path(directory) / "ready"
+                child = ("import os,signal,time,pathlib; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                         "pathlib.Path(" + repr(str(ready)) + ").write_text(str(os.getpid())); time.sleep(30)")
+                parent = ("import subprocess,sys,time,pathlib; subprocess.Popen([sys.executable,'-c'," + repr(child) +
+                          "],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+                          "p=pathlib.Path(" + repr(str(ready)) + ")\nwhile not p.exists(): time.sleep(.01)")
+                process = None
+                try:
+                    if runner == "drain":
+                        process = subprocess.Popen([sys.executable, "-c", parent], start_new_session=True,
+                                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        process.communicate(timeout=5)
+                        self.assertTrue(reap_processes((process,), grace=.2))
+                    else:
+                        bounded_run([sys.executable, "-c", parent], timeout=5, termination_grace=.2)
+                    pid = int(ready.read_text())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pid, 0)
+                finally:
+                    if ready.exists():
+                        try: os.kill(int(ready.read_text()), signal.SIGKILL)
+                        except ProcessLookupError: pass
+                    if process is not None: process.wait(timeout=5)
+
+    def test_diagnostics_are_private_and_independent_before_cleanup(self):
+        import subprocess
+        from fixture import Fixture
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = Fixture(root, {}, root)
+            calls = []
+            def docker(*args, **kwargs):
+                calls.append(args)
+                if args[0] == "ps":
+                    return subprocess.CompletedProcess(args, 0, "a\nb\n", "")
+                if args[:2] == ("inspect", "a"):
+                    raise subprocess.TimeoutExpired("secret-sentinel", 1)
+                return subprocess.CompletedProcess(args, 0, "secret-sentinel", "private-error")
+            with patch.object(fixture, "docker", side_effect=docker), patch.object(fixture, "cleanup", return_value=True) as cleanup:
+                self.assertTrue(finalize(RunResult(()), fixture, root, {}, root=root))
+                cleanup.assert_called_once()
+            for cid in ("a", "b"):
+                self.assertTrue(any(c[0] == "logs" and c[-1] == cid for c in calls))
+            recorded = (root / "result.json").read_text()
+            self.assertNotIn("secret-sentinel", recorded)
+            self.assertNotIn("private-error", recorded)
+            self.assertFalse(json.loads(recorded)["diagnostics"]["complete"])
+            files = list(root.glob("*.private.*"))
+            self.assertTrue(files)
+            self.assertTrue(all(p.stat().st_mode & 0o777 == 0o600 for p in files))
+            self.assertTrue(any("secret-sentinel" in p.read_text() for p in files))
+
     def test_reaper_failure_still_attempts_later_processes(self):
         import subprocess
         from unittest.mock import Mock
@@ -167,7 +304,7 @@ class ProcessAndCleanupTests(unittest.TestCase):
         stuck, later = Mock(pid=99999), Mock(pid=99998)
         stuck.communicate.side_effect = subprocess.TimeoutExpired("synthetic", 1)
         later.communicate.return_value = ("", "")
-        with patch("scenarios.os.killpg"):
+        with patch("bounded_process.os.killpg", side_effect=lambda pid, sig: None if pid == 99999 else (_ for _ in ()).throw(ProcessLookupError())):
             self.assertFalse(reap_processes((stuck, later), grace=.01))
         later.communicate.assert_called_once()
 

@@ -12,7 +12,7 @@
 make test-lifecycle LIFECYCLE_CANDIDATE=/absolute/fixed-candidate LIFECYCLE_OUTPUT=/absolute/new-result
 ```
 
-载体 checkout 必须是干净提交；输出目录必须不存在。`candidate.lock.json` 固定整个 manifest 与三个部署文件的 SHA-256；预检继续核对三份 OCI、四份二进制、镜像 revision/user/platform。已锁定文件复制到本次 0700 目录下的只读快照，重新校验后只从快照加载镜像和执行 renderer；结束时再次复核快照及载体代码/锁文件摘要。换候选必须审查并更新锁文件，重新执行完整序列，不支持跳过阶段、历史配置适配或旧 schema 自动修复。
+载体 checkout 必须是干净提交；输出目录必须不存在，空 candidate/output 参数由 CLI 明确拒绝。候选清单、锁文件及所有嵌套必需字段/类型在任何 Docker 操作前集中校验。`candidate.lock.json` 固定整个 manifest 与三个部署文件的 SHA-256；预检继续核对三份 OCI、四份二进制、镜像 revision/user/platform。已锁定文件复制到本次 0700 目录下的只读快照，重新校验后只从快照加载镜像和执行 renderer；结束时再次复核快照及载体代码/锁文件摘要。换候选必须审查并更新锁文件，重新执行完整序列，不支持跳过阶段、历史配置适配或旧 schema 自动修复。
 
 ```sh
 python3 -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
@@ -25,7 +25,7 @@ python3 -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
 | 阶段 | 必须观察到的行为 |
 | --- | --- |
 | candidate / prepare | 完整摘要匹配；真实 daemon 文件系统保留 UID/GID/权限；独立 Compose 项目、网络和卷 |
-| install / healthy | 新卷安装 schema v7；内嵌迁移摘要一致；管理员只初始化一次；公布的 HTTPS 端口提供对应 UI；本地登录、Hydra 验证拒绝无效凭据、Keycloak provider test 通过 |
+| install / healthy | 新卷安装 schema v7；内嵌迁移摘要一致；管理员只初始化一次；公布的 HTTPS 端口提供对应 UI；本地登录、经真实私网网关分别断言缺失/错误服务密钥为 401 invalid_client、正确服务密钥配错误业务凭据为 401 invalid_credential；Keycloak provider test 通过 |
 | cold_dependencies | PG 不可用拒绝启动；Hydra 认证 admin 停止时 live 但不 ready，实际网关启动被 health 依赖拒绝；Keycloak 不可用仍 ready，provider test 失败；各自恢复 |
 | running_dependencies | PG 故障拒绝业务；Hydra 故障拒绝在线验证而本地登录可用；Keycloak 故障只影响对应 provider；Identity 不重启即可恢复 |
 | partial_start | 在 PG 已装配后制造监听 bind 失败，非零退出并释放 runtime PG 连接 |
@@ -50,3 +50,7 @@ python3 -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
 未覆盖：完整本地账户矩阵（#2341）、完整 SSO/MFA/恢复矩阵（#2342/I09）、消息 relay/Inbox 或完整 Outbox 故障矩阵、真实 MDM 授权接入、生产 DNS/证书/容量/SLO、备份 RPO/RTO 与多副本。
 
 参考源码：CPython v3.11.13 `Lib/subprocess.py`、[Modules/fcntlmodule.c](https://github.com/python/cpython/blob/v3.11.13/Modules/fcntlmodule.c)；docker/compose v5.5.1 `pkg/compose/stop.go`、[cmd/compose/create.go](https://github.com/docker/compose/blob/v5.5.1/cmd/compose/create.go)。复用本仓 `hack/bounded_process.py` 的进程组预算；最终拓扑由候选 renderer 持有。
+
+进程回收由 `hack/bounded_process.py` 统一执行：有界等待后按组发送 TERM/KILL，直接父进程退出后仍探测 PGID，只有直接子进程已等待且进程组消失才报告成功；探测无法确认时失败。轻量回归覆盖父进程先退出、后代关闭标准流并忽略 TERM 的情形。参考 [CPython subprocess 实现](https://github.com/python/cpython/blob/3.14/Lib/subprocess.py) 的独立会话和有界 communicate；组消失判定为本载体补充的 Unix 资源边界。
+
+结束路径在清理前按本次 Compose/fixture ownership label 采集全部仍存在容器（含 helper 和一次性容器）的 inspect 与最多 200 行日志尾部。采集总预算 60 秒、单命令至多 5 秒，输出创建即为 0600 私密文件；单项超时、权限或写入失败继续其它采集，独立清理预算不受其阻断。公开结果只含采集完整性、文件名与布尔状态，不含原始日志/inspect/异常文本；私密文件不提交。已由 `--rm` 删除的一次性容器无法事后采集，不宣称恢复已删除日志。

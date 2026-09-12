@@ -1,11 +1,11 @@
 """The ordered T31 join hazards; assertions use the candidate's real boundaries."""
 import json
-import os
 import signal
 import subprocess
 import time
 
 from fixture import eventually
+from bounded_process import reap_process_group
 from run import Failure, require
 
 
@@ -43,9 +43,7 @@ def healthy(f, observed):
     f.login()
     observed["local_login"] = 200
     observed["identity"] = f.state("identity")
-    response = validate(f)
-    require(response["status"] == 401, "healthy_invalid_credential")
-    observed["invalid_credential"] = response["status"]
+    observed["private_authentication"] = authentication_boundaries(f)
     settings = {"issuer": "https://sso.t31.test/realms/identity", "client_id": "identity-rp",
                 "secret_ref": "identity-rp@1", "jit": False,
                 "redirect_uri": "https://identity.t31.test/api/v1/oidc/callback",
@@ -62,8 +60,19 @@ def base(f):
     return "/api/v1/tenants/" + f.info["tenant"]
 
 
-def validate(f):
-    return f.http("/internal/v1/identity/validate", method="POST", private=True,
+def authentication_boundaries(f):
+    observed = {}
+    for mode, code in (("missing", "invalid_client"), ("wrong", "invalid_client"),
+                       ("correct", "invalid_credential")):
+        response = validate(f, service_auth=mode)
+        require(response["status"] == 401 and isinstance(response["json"], dict)
+                and response["json"].get("code") == code, "private_authentication_" + mode)
+        observed[mode] = {"status": 401, "code": code}
+    return observed
+
+
+def validate(f, *, service_auth="correct"):
+    return f.http("/internal/v1/identity/validate", method="POST", private=True, service_auth=service_auth,
                   body={"tenant_id": f.info["tenant"], "audience": "mdm", "credential": "t31-invalid-opaque-credential"})
 
 
@@ -193,19 +202,7 @@ def reap_processes(processes, *, grace=2):
     for process in processes:
         if process is None:
             continue
-        reaped = False
-        for sig in (None, signal.SIGTERM, signal.SIGKILL):
-            try:
-                if sig is not None:
-                    try:
-                        os.killpg(process.pid, sig)
-                    except ProcessLookupError:
-                        pass
-                process.communicate(timeout=grace)
-                reaped = True
-                break
-            except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
-                continue
+        reaped = reap_process_group(process, grace=grace)
         complete = complete and reaped
     return complete
 

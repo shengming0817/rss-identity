@@ -331,13 +331,16 @@ class Fixture:
                        "address": address, "port": 443, "path": "/"})["status"] == 404,
                        timeout=30, code="private_listener_not_ready")
 
-    def http(self, path, *, method="GET", body=None, private=False, session=False, host=None, timeout=25):
+    def http(self, path, *, method="GET", body=None, private=False, session=False, host=None, timeout=25, service_auth="correct"):
         headers = {"Origin": "https://identity.t31.test", "X-Identity-Request": "1", "Content-Type": "application/json"}
         if session:
             headers.update(Cookie=self.cookie, **{"X-CSRF-Token": self.csrf})
-        if private:
+        require(service_auth in ("correct", "missing", "wrong"), "service_auth_mode")
+        if private and service_auth != "missing":
             raw = self.helper_python("import json,pathlib,sys; d=json.load(sys.stdin); print(pathlib.Path(d).read_text())",
                                      self.mount + "/input/mdm-validation-secret").strip()
+            if service_auth == "wrong":
+                raw += "-invalid"
             headers["Authorization"] = "Basic " + base64.b64encode(("mdm:" + raw).encode()).decode()
         data = {"ca": self.mount + "/input/ca.pem", "address": self.info["private_ip" if private else "public_ip"],
                 "port": 443, "host": host or "identity.t31.test", "path": path,
@@ -372,15 +375,45 @@ class Fixture:
         self.cookie = next(value for key, value in response["headers"].items() if key.lower() == "set-cookie").split(";", 1)[0]
         self.csrf = response["json"]["csrf_token"]
 
-    def diagnostics(self):
-        result = {}
-        if self.compose_file.exists():
-            for service in ("postgres", "hydra", "hydra-admin", "keycloak", "identity", "public-gateway", "private-gateway"):
-                try:
-                    result[service] = self.state(service)
-                except Exception:
-                    result[service] = {"status": "unavailable"}
-        return result
+    def diagnostics(self, *, budget=60):
+        # Inventory uses this run's ownership, including partial setup and one-off containers.
+        deadline = time.monotonic() + budget
+        summary = {"complete": True, "inventory_complete": True, "containers": [],
+                   "budget_seconds": budget, "budget_exhausted": False}
+        def collect(args, name):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                summary.update(complete=False, budget_exhausted=True)
+                return None
+            try:
+                result = self.docker(*args, check=False, timeout=min(5, left / 4),
+                                     termination_grace=min(.5, left / 4))
+                descriptor = os.open(self.output / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "w") as target:
+                    target.write(result.stdout + "\n" + result.stderr)
+                if result.returncode:
+                    summary["complete"] = False
+                    return None
+                return result.stdout
+            except BaseException:
+                summary["complete"] = False
+                return None
+        ids = set()
+        for index, label in enumerate(("com.docker.compose.project=", "rss.t31=")):
+            output = collect(("ps", "--all", "--filter", "label=" + label + self.project,
+                              "--format", "{{.ID}}"), f"inventory-{index}.private.log")
+            if output is None:
+                summary["inventory_complete"] = False
+            else:
+                ids.update(output.split())
+        for index, cid in enumerate(sorted(ids)):
+            item = {}
+            for kind, args in (("inspect", ("inspect", cid)),
+                               ("logs", ("logs", "--timestamps", "--tail", "200", cid))):
+                name = f"container-{index}-{kind}.private.log"
+                item[kind] = {"file": name, "collected": collect(args, name) is not None}
+            summary["containers"].append(item)
+        return summary
 
     def cleanup(self, *, budget=120):
         # Direct Engine ownership labels remain usable after a Compose parse failure.
