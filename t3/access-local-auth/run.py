@@ -273,7 +273,7 @@ def main():
                 instance = json.loads(docker('inspect', cid))[0]
                 image_config = json.loads(docker('image', 'inspect', instance['Image']))[0]
                 evidence.require(instance['Config']['Image'] == services[name]['image'], 'running_image_mismatch')
-                if name in ('consumer'):
+                if name == 'consumer':
                     evidence.require(instance['Image'] == image, 'controller_image_mismatch')
                 observed[name] = {'reference': instance['Config']['Image'], 'image_id': instance['Image'],
                                   'architecture': image_config['Architecture'], 'user': instance['Config']['User']}
