@@ -34,6 +34,13 @@ def host(origin):
  u=urlsplit(origin);require(u.scheme=='https' and u.hostname and not u.username and not u.password and not u.path and not u.query and not u.fragment and u.port in (None,443),'invalid HTTPS origin')
  require(re.fullmatch(r'[a-z0-9.-]+',u.hostname),'invalid DNS hostname');return u.hostname
 def sql_literal(value):return "'"+value.replace("'","''")+"'"
+def compose_literals(value):
+ # Compose interpolates every string value, including shell and bind source paths.
+ # ref: compose-spec/compose-go interpolation/interpolation.go @ v2.9.1
+ if isinstance(value,str):return value.replace('$','$$')
+ if isinstance(value,list):return [compose_literals(item) for item in value]
+ if isinstance(value,dict):return {key:compose_literals(item) for key,item in value.items()}
+ return value
 def render(data,out,candidate):
  images=candidate['providers'];artifacts=candidate['images']
  require(set(images)==set(IMAGES) and set(artifacts)=={'server','operator','gateway'},'incomplete candidate images')
@@ -108,7 +115,7 @@ def render(data,out,candidate):
  def nginx(servers):return 'pid /tmp/nginx.pid;\nerror_log stderr crit;\nevents {}\nhttp { access_log off; error_log stderr crit; client_body_temp_path /tmp/client; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi; proxy_temp_path /tmp/proxy; include /etc/nginx/mime.types; proxy_next_upstream off; proxy_read_timeout 70s; proxy_send_timeout 70s; client_max_body_size 32k; '+servers+'}\n'
  tls=f'ssl_certificate {cert}; ssl_certificate_key {key}; ssl_protocols TLSv1.2 TLSv1.3;'
  proxy=f'proxy_bind {pub}; proxy_http_version 1.1; proxy_set_header X-Forwarded-For $remote_addr; proxy_set_header Forwarded ""; proxy_set_header Host {ih}; proxy_ignore_client_abort on;'
- write('public.conf',nginx(f'server {{ listen 8443 ssl; server_name {ih}; {tls} location ^~ /internal/ {{ return 404; }} location = /livez {{ return 404; }} location = /readyz {{ return 404; }} location ^~ /api/ {{ {proxy} proxy_pass http://{app}:8080; }} location /oidc/ {{ proxy_set_header Host {ih}; proxy_set_header X-Forwarded-Proto https; proxy_pass http://hydra:4444/; }} location / {{ root /usr/share/nginx/html; try_files $uri $uri/ /index.html; add_header Referrer-Policy no-referrer always; }} }} server {{ listen 8443 ssl; server_name {idph}; {tls} location / {{ proxy_ssl_verify on; proxy_ssl_trusted_certificate /run/input/oidc-ca; proxy_ssl_server_name on; proxy_ssl_name keycloak; proxy_set_header Host {idph}; proxy_pass https://keycloak:8443; }} }}'))
+ write('public.conf',nginx(f'server {{ listen 443 ssl; server_name {ih}; {tls} location ^~ /internal/ {{ return 404; }} location = /livez {{ return 404; }} location = /readyz {{ return 404; }} location ^~ /api/ {{ {proxy} proxy_pass http://{app}:8080; }} location /oidc/ {{ proxy_set_header Host {ih}; proxy_set_header X-Forwarded-Proto https; proxy_pass http://{proto.network_address+5}:4444/; }} location / {{ root /usr/share/nginx/html; try_files $uri $uri/ /index.html; add_header Referrer-Policy no-referrer always; }} }} server {{ listen 443 ssl; server_name {idph}; {tls} location / {{ proxy_ssl_verify on; proxy_ssl_trusted_certificate /run/input/oidc-ca; proxy_ssl_server_name on; proxy_ssl_name keycloak; proxy_set_header Host {idph}; proxy_pass https://{proto.network_address+6}:8443; }} }}'))
  write('private.conf',nginx(f'server {{ listen 443 ssl; server_name {ih}; {tls} location = /internal/v1/identity/validate {{ proxy_bind {priv}; proxy_set_header X-Forwarded-For $remote_addr; proxy_set_header Forwarded ""; proxy_http_version 1.1; proxy_pass http://{app}:8080; }} location / {{ return 404; }} }}'))
  write('hydra-admin.conf',nginx(f'server {{ listen 8443 ssl; server_name hydra-admin; ssl_certificate {hc}; ssl_certificate_key {hk}; if ($http_authorization != "Bearer {service}") {{ return 403; }} location / {{ proxy_set_header Authorization ""; proxy_pass http://127.0.0.1:4445; }} }}'))
  def service(image,files,nets,command=None):
@@ -125,10 +132,10 @@ def render(data,out,candidate):
  sv['hydra']=service(images['hydra'],common,{'protocol':{'ipv4_address':str(proto.network_address+5),'aliases':['hydra-admin']}},['serve','all','--config','/run/config/hydra.json']);sv['hydra']['restart']='unless-stopped';sv['hydra']['healthcheck']={'test':['CMD','wget','-q','-T','3','-O','/dev/null','http://127.0.0.1:4445/health/ready'],'interval':'2s','timeout':'4s','start_period':'10s','retries':30}
  sv['hydra-clients']=service(artifacts['operator'],['runtime.json']+['client-oidc-'+str(n) for n in range(len(c['hydra']['clients']))],[],['--config','/run/config/runtime.json']);sv['hydra-clients'].pop('networks');sv['hydra-clients'].update(entrypoint=['identity-clients'],network_mode='service:hydra',profiles=['install'],depends_on={'hydra':{'condition':'service_healthy'}})
  kfiles=['keycloak.conf','keycloak-cert','keycloak-key','runtime-ca']+['realm-'+r+'.json' for r in realms]
- sv['keycloak']=service(images['keycloak'],kfiles,['protocol'],['--config-file=/run/config/keycloak.conf','start','--import-realm']);sv['keycloak']['user']=str(KEYCLOAK_UID)+':'+str(KEYCLOAK_GID);sv['keycloak']['read_only']=False;sv['keycloak']['volumes'] += [{'type':'volume','source':'keycloak','target':'/opt/keycloak/data','volume':{'nocopy':True}}];sv['keycloak']['restart']='unless-stopped'
+ sv['keycloak']=service(images['keycloak'],kfiles,{'protocol':{'ipv4_address':str(proto.network_address+6)}},['--config-file=/run/config/keycloak.conf','start','--import-realm']);sv['keycloak']['user']=str(KEYCLOAK_UID)+':'+str(KEYCLOAK_GID);sv['keycloak']['read_only']=False;sv['keycloak']['volumes'] += [{'type':'volume','source':'keycloak','target':'/opt/keycloak/data','volume':{'nocopy':True}}];sv['keycloak']['restart']='unless-stopped'
  for mount in sv['keycloak']['volumes']:
   if isinstance(mount,dict) and Path(mount['source']).name.startswith('realm-'):mount['target']='/opt/keycloak/data/import/'+Path(mount['source']).name
- sv['public-gateway']=service(artifacts['gateway'],['public.conf','public-cert','public-key','oidc-ca'],{'backend':{'ipv4_address':pub},'protocol':{'ipv4_address':str(proto.network_address+2),'aliases':[ih,idph]}},['-c','/run/config/public.conf']);sv['public-gateway']['ports']=['443:8443']
+ sv['public-gateway']=service(artifacts['gateway'],['public.conf','public-cert','public-key','oidc-ca'],{'public':{},'backend':{'ipv4_address':pub},'protocol':{'ipv4_address':str(proto.network_address+2),'aliases':[ih,idph]}},['-c','/run/config/public.conf']);sv['public-gateway']['ports']=['443:443'];sv['public-gateway']['sysctls']={'net.ipv4.ip_unprivileged_port_start':'0'}
  sv['private-gateway']=service(artifacts['gateway'],['private.conf','public-cert','public-key'],{'backend':{'ipv4_address':priv},'consumer':{'aliases':[ih]}},['-c','/run/config/private.conf'])
  sv['private-gateway']['sysctls']={'net.ipv4.ip_unprivileged_port_start':'0'}
  sv['hydra-admin']=service(images['nginx'],['hydra-admin.conf','hydra-cert','hydra-key'],{'protocol':{'ipv4_address':str(proto.network_address+5)}},['nginx','-e','stderr','-c','/run/config/hydra-admin.conf','-g','daemon off;']);sv['hydra-admin']['entrypoint']=[]
@@ -138,8 +145,8 @@ def render(data,out,candidate):
  sv['hydra-admin'].pop('networks');sv['hydra-admin']['network_mode']='service:hydra';sv['hydra-admin']['depends_on']=['hydra']
  sv['volume-init']={'image':images['runtime'],'user':'0:0','network_mode':'none','profiles':['install'],'entrypoint':['sh','-ec'],'command':['for spec in /volumes/pg:10001:10001 /volumes/keycloak:1000:0; do d="${spec%%:*}"; owner="${spec#*:}"; if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit)" ]; then test "$(stat -c %u:%g "$d")" = "$owner" || exit 1; else chown "$owner" "$d"; chmod 700 "$d"; fi; done'],'volumes':[{'type':'volume','source':n,'target':'/volumes/'+n,'volume':{'nocopy':True}} for n in ['pg','keycloak']]}
 
- networks={'backend':{'internal':True,'ipam':{'config':[{'subnet':str(back)}]}},'protocol':{'internal':True,'ipam':{'config':[{'subnet':str(proto)}]}},'consumer':{'external':True,'name':data['consumer_network']}}
- write('compose.json',json.dumps({'name':'rss-identity','services':sv,'networks':networks,'volumes':{'pg':{},'keycloak':{}}},indent=2))
+ networks={'public':{},'backend':{'internal':True,'ipam':{'config':[{'subnet':str(back),'ip_range':str(back.network_address+128)+'/25'}]}},'protocol':{'internal':True,'ipam':{'config':[{'subnet':str(proto),'ip_range':str(proto.network_address+128)+'/25'}]}},'consumer':{'external':True,'name':data['consumer_network']}}
+ write('compose.json',json.dumps(compose_literals({'name':'rss-identity','services':sv,'networks':networks,'volumes':{'pg':{},'keycloak':{}}}),indent=2))
  return out/'compose.json'
 def main():
  p=argparse.ArgumentParser();p.add_argument('--input',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--candidate',type=Path,required=True);a=p.parse_args()
