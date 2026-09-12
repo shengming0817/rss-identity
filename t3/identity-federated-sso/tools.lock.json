@@ -1,0 +1,4 @@
+{
+  "browser": "mcr.microsoft.com/playwright:v1.60.0-noble@sha256:9bd26ad900bb5e0f4dee75839e957a89ae89c2b7ab1e76050e559790e946b948",
+  "ui_revision": "37b7fb356aa7e436cc708caa1593427e6d553d30"
+}

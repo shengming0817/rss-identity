@@ -8,3 +8,5 @@
 - [I08 架构决定](../architecture/adr/202609091100-2338-production-assembly.md)
 
 生产输入必须由部署 owner 提供真实域名、证书、存储身份和秘密。deployment/example.json 是字段示例；其中 example.test、UUID 与字节数组均不是生产默认。禁止将渲染目录或秘密作为 artifact 发布。
+
+- [#2342 联合 SSO 独立 T3](../../t3/identity-federated-sso/README.md)：固定候选、浏览器、下游验证与撤销清理；运行结论由 PR 证据持有。
