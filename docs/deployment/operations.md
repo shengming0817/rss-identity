@@ -51,3 +51,5 @@ Identity runtime/maintenance 只使用 RSS producer 连接入口：业务变更�
 会拒绝这些额外权限。实际消息投递由独立 relay owner 承担，不由 Identity 进程代行。
 
 Compose 中的 volume-init 命令由渲染器将 shell dollar 转义为 `$$`，以保留容器内的参数展开；直接使用渲染输出，不手工展开或替换该命令。#2421 的真实 Compose 解析回归守护此边界。
+
+backend/protocol 的动态地址池固定使用各自 /24 的上半段 /25，网关与协议 authority 的固定地址位于下半段。这样数据库等服务先启动时也不会占用后续网关的地址；不依赖服务启动顺序预留 IP。既有旧网络须按停机流程重建网络并保留数据卷，再启动新渲染配置。

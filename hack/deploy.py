@@ -138,7 +138,7 @@ def render(data,out,candidate):
  sv['hydra-admin'].pop('networks');sv['hydra-admin']['network_mode']='service:hydra';sv['hydra-admin']['depends_on']=['hydra']
  sv['volume-init']={'image':images['runtime'],'user':'0:0','network_mode':'none','profiles':['install'],'entrypoint':['sh','-ec'],'command':['for spec in /volumes/pg:10001:10001 /volumes/keycloak:1000:0; do d="${spec%%:*}"; owner="${spec#*:}"; if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit)" ]; then test "$(stat -c %u:%g "$d")" = "$owner" || exit 1; else chown "$owner" "$d"; chmod 700 "$d"; fi; done'.replace('$','$$')],'volumes':[{'type':'volume','source':n,'target':'/volumes/'+n,'volume':{'nocopy':True}} for n in ['pg','keycloak']]}
 
- networks={'backend':{'internal':True,'ipam':{'config':[{'subnet':str(back)}]}},'protocol':{'internal':True,'ipam':{'config':[{'subnet':str(proto)}]}},'consumer':{'external':True,'name':data['consumer_network']}}
+ networks={'backend':{'internal':True,'ipam':{'config':[{'subnet':str(back),'ip_range':str(list(back.subnets(new_prefix=25))[1])}]}},'protocol':{'internal':True,'ipam':{'config':[{'subnet':str(proto),'ip_range':str(list(proto.subnets(new_prefix=25))[1])}]}},'consumer':{'external':True,'name':data['consumer_network']}}
  write('compose.json',json.dumps({'name':'rss-identity','services':sv,'networks':networks,'volumes':{'pg':{},'keycloak':{}}},indent=2))
  return out/'compose.json'
 def main():
