@@ -267,7 +267,7 @@ class Fixture:
         return {"status": state["State"]["Status"], "exit_code": state["State"]["ExitCode"],
                 "oom": state["State"]["OOMKilled"], "started": state["State"]["StartedAt"],
                 "finished": state["State"]["FinishedAt"], "restarts": state["RestartCount"],
-                "image": state["Image"]}
+                "image": state["Image"], "health": state["State"].get("Health", {}).get("Status")}
 
     def sql(self, statement, *, check=True):
         return self.compose("exec", "-T", "postgres", "psql", "-X", "-A", "-t", "-U", "postgres",
@@ -278,7 +278,9 @@ class Fixture:
                             check=False, timeout=20).returncode == 0
 
     def ready(self):
-        eventually(self.probe, timeout=180, code="identity_not_ready")
+        # Compose consumes its cached health state, which may lag the explicit probe.
+        eventually(lambda: self.probe() and self.state("identity")["health"] == "healthy",
+                   timeout=180, code="identity_not_ready")
 
     def up(self, *services):
         self.compose("up", "-d", "--pull", "never", *services, timeout=300)
