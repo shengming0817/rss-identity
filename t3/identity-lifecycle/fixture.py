@@ -283,7 +283,7 @@ class Fixture:
         self.compose_file.chmod(0o600)
         self.config = value
         # Compose owns both network definitions; reserve them before releasing allocation.
-        self.compose("create", "--no-deps", "identity")
+        self.compose("create", "identity")
         return {"docker": engine["Version"], "compose": self.docker("compose", "version", "--short").stdout.strip(),
                 "engine_platform": "linux/" + self.engine_arch, "product_platform": "linux/amd64",
                 "emulated": self.engine_arch != "amd64", "images": actual,
