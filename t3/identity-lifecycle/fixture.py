@@ -5,6 +5,8 @@ The candidate renderer remains the sole owner of the product topology.
 """
 import base64
 import copy
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import http.client
 import ipaddress
@@ -16,6 +18,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -160,6 +163,25 @@ def isolate_public_port(service):
     service["ports"] = [{"target": 443, "host_ip": "127.0.0.1", "protocol": "tcp"}]
 
 
+@contextmanager
+def network_allocation(engine, *, directory=Path(tempfile.gettempdir()), timeout=60):
+    key = hashlib.sha256(engine.encode()).hexdigest()[:16]
+    path = directory / f"identity-t31-network-{os.getuid()}-{key}.lock"
+    # Keep the lock inode: unlinking it allows two waiters to lock different files.
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "a") as lock:
+        require(os.fstat(lock.fileno()).st_uid == os.getuid(), "network_lock_owner")
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                require(time.monotonic() < deadline, "network_allocation_busy")
+                time.sleep(0.05)
+        yield
+
+
 class Fixture:
     def __init__(self, candidate_dir, candidate, output):
         self.candidate_dir, self.candidate, self.output = candidate_dir, candidate, output
@@ -215,6 +237,12 @@ class Fixture:
             info = json.loads(self.docker("image", "inspect", "--platform", platform, image).stdout)[0]
             require(info["Architecture"] == platform.split("/")[1] and info["Os"] == "linux", "provider_platform")
             actual[name] = {"id": info["Id"], "platform": info["Os"] + "/" + info["Architecture"]}
+        engine_id = self.docker("info", "--format", "{{.ID}}").stdout.strip()
+        require(bool(engine_id), "docker_engine_identity")
+        with network_allocation(engine_id):
+            return self.prepare_topology(engine, actual)
+
+    def prepare_topology(self, engine, actual):
         networks = self.docker("network", "ls", "--format", "{{.ID}}").stdout.split()
         allocated = []
         for network in networks:
@@ -254,6 +282,8 @@ class Fixture:
         self.compose_file.write_text(json.dumps(value, indent=2))
         self.compose_file.chmod(0o600)
         self.config = value
+        # Compose owns both network definitions; reserve them before releasing allocation.
+        self.compose("create", "--no-deps", "identity")
         return {"docker": engine["Version"], "compose": self.docker("compose", "version", "--short").stdout.strip(),
                 "engine_platform": "linux/" + self.engine_arch, "product_platform": "linux/amd64",
                 "emulated": self.engine_arch != "amd64", "images": actual,
@@ -345,7 +375,7 @@ class Fixture:
     def diagnostics(self):
         result = {}
         if self.compose_file.exists():
-            for service in ("postgres", "hydra", "hydra-admin", "keycloak", "identity", "public-gateway"):
+            for service in ("postgres", "hydra", "hydra-admin", "keycloak", "identity", "public-gateway", "private-gateway"):
                 try:
                     result[service] = self.state(service)
                 except Exception:

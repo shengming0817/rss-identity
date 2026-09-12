@@ -130,6 +130,47 @@ class ResultTests(unittest.TestCase):
 
 
 class ProcessAndCleanupTests(unittest.TestCase):
+    def test_network_allocation_excludes_another_process_and_releases(self):
+        import subprocess
+        from fixture import network_allocation
+        with tempfile.TemporaryDirectory() as directory:
+            code = ("from fixture import network_allocation; from pathlib import Path; "
+                    "import sys\nwith network_allocation('engine', directory=Path(sys.argv[1]), timeout=.1): pass")
+            args = [sys.executable, "-c", code, directory]
+            with network_allocation("engine", directory=Path(directory)):
+                result = subprocess.run(args, cwd=Path(__file__).parent, capture_output=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"network_allocation_busy", result.stderr)
+            self.assertEqual(subprocess.run(args, cwd=Path(__file__).parent, capture_output=True, timeout=5).returncode, 0)
+
+    def test_reaper_kills_descendants_that_ignore_term(self):
+        import subprocess
+        from scenarios import reap_processes
+        code = ("import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                "os.fork(); print('ready',flush=True); time.sleep(30)")
+        process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), "ready")
+            self.assertTrue(reap_processes((process,), grace=.1))
+            self.assertIsNotNone(process.returncode)
+        finally:
+            if process.poll() is None:
+                import os, signal
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=5)
+
+    def test_reaper_failure_still_attempts_later_processes(self):
+        import subprocess
+        from unittest.mock import Mock
+        from scenarios import reap_processes
+        stuck, later = Mock(pid=99999), Mock(pid=99998)
+        stuck.communicate.side_effect = subprocess.TimeoutExpired("synthetic", 1)
+        later.communicate.return_value = ("", "")
+        with patch("scenarios.os.killpg"):
+            self.assertFalse(reap_processes((stuck, later), grace=.01))
+        later.communicate.assert_called_once()
+
     def test_port_isolation_rejects_a_broken_renderer_port(self):
         from fixture import isolate_public_port
         for ports in (None, [], ["443:8443"]):

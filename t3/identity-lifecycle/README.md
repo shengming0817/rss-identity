@@ -6,7 +6,7 @@
 
 ## 执行
 
-需要 Python 3.11+、Docker Engine、Compose 和足够的本地容器资源。候选三份 OCI 为 Linux amd64；ARM64 Engine 使用仿真运行产品镜像，固定 provider 多架构摘要按 Engine 原生架构解析。结果逐项记录实际镜像 ID/架构；该环境不提供性能或容量结论。
+需要 Unix 主机、Python 3.11+、本地 Docker Engine、Compose 和足够的本地容器资源。候选三份 OCI 为 Linux amd64；ARM64 Engine 使用仿真运行产品镜像，固定 provider 多架构摘要按 Engine 原生架构解析。结果逐项记录实际镜像 ID/架构；该环境不提供性能或容量结论。
 
 ```sh
 make test-lifecycle LIFECYCLE_CANDIDATE=/absolute/fixed-candidate LIFECYCLE_OUTPUT=/absolute/new-result
@@ -40,6 +40,8 @@ python3 -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
 随机租户、主体、存储身份、管理员口令及服务秘密仅属于一次运行。合成 CA/证书与秘密在专用 Docker 卷生成；root 准备器按产品要求交付 0600/指定 owner，不放宽产品权限验证。公网端口仅发布到主机 loopback，consumer 使用独立网络；不连接开发数据库，不读取用户产品秘密。
 
 隔离变换仅设置项目名、镜像运行平台/禁止拉取和随机 loopback 主机端口。变换前必须确认 renderer 公网端口为 `443:443`，容器端口保持 443；原始及隔离后 Compose 摘要均入结果，不修正候选的产品拓扑。
+
+同一主机用户按 Docker Engine ID 互斥分配子网，直到 Compose 实际创建网络再释放；锁等待上限 60 秒。系统临时目录保留无内容的 0600 锁文件，以免删文件造成不同 inode 的并发锁。排空故障的三个子进程组分别以 wait/TERM/KILL 回收，每次等待上限 2 秒；某组失败仍继续其余组，失败结果不能通过。
 
 清理有独立 120 秒总预算（超时进程组另有最多两次 2 秒终止宽限），二次中断记录为状态并继续回收；超时/失败报告剩余资源数量与枚举是否完整。清理按本次唯一 Compose / fixture ownership label 枚举资源，即使 Compose 解析或 Docker 创建半途失败也执行。`result.json` 只有在全序列依次通过且清理成功时才标 passed；失败保留阶段、非秘密状态和未运行项。清理失败也必须失败。正常完成移除本次容器、网络及所有卷，不删除其它项目资源或共享镜像。
 

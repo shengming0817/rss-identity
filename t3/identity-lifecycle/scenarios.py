@@ -188,6 +188,28 @@ def timeout_drain(f, observed):
     drain(f, observed, release=False)
 
 
+def reap_processes(processes, *, grace=2):
+    complete = True
+    for process in processes:
+        if process is None:
+            continue
+        reaped = False
+        for sig in (None, signal.SIGTERM, signal.SIGKILL):
+            try:
+                if sig is not None:
+                    try:
+                        os.killpg(process.pid, sig)
+                    except ProcessLookupError:
+                        pass
+                process.communicate(timeout=grace)
+                reaped = True
+                break
+            except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
+                continue
+        complete = complete and reaped
+    return complete
+
+
 def drain(f, observed, *, release):
     # A retained psql transaction, rather than a timer, controls the actual SQL wait.
     compose = ["docker", "compose", "-p", f.project, "-f", str(f.compose_file)]
@@ -239,25 +261,11 @@ def drain(f, observed, *, release):
     finally:
         if lock.poll() is None:
             try:
-                lock.communicate("ROLLBACK;\n\\q\n", timeout=5)
-            except (subprocess.TimeoutExpired, BrokenPipeError):
-                lock.kill()
-                lock.communicate(timeout=5)
-        for process in (lock, request, stop):
-            if process:
-                if process.poll() is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                try:
-                    process.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.communicate(timeout=5)
+                lock.communicate("ROLLBACK;\n\\q\n", timeout=2)
+            except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
+                pass
+        observed["process_cleanup"] = reap_processes((lock, request, stop))
+    require(observed["process_cleanup"], "drain_process_cleanup")
     f.up("identity")
     f.ready()
 
