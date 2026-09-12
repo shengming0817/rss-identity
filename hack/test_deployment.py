@@ -91,6 +91,24 @@ class Deployment(unittest.TestCase):
    finally:
     subprocess.run([*cli,'down','--volumes'],env=environment,text=True,capture_output=True,timeout=30,check=True)
 
+ def test_dynamic_addresses_exclude_all_fixed_service_addresses(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);path=deploy.render(self.data(root),root/'rendered',self.candidate())
+   compose=json.loads(path.read_text())
+   for name in ['backend','protocol']:
+    with self.subTest(network=name):
+     pool=compose['networks'][name]['ipam']['config'][0]
+     subnet=ipaddress.ip_network(pool['subnet']);dynamic=ipaddress.ip_network(pool['ip_range'])
+     self.assertTrue(dynamic.subnet_of(subnet))
+     addresses=[]
+     for service in compose['services'].values():
+      networks=service.get('networks',{})
+      if isinstance(networks,dict) and (address:=networks.get(name,{}).get('ipv4_address')):
+       addresses.append(address)
+       self.assertIn(ipaddress.ip_address(address),subnet)
+       self.assertNotIn(ipaddress.ip_address(address),dynamic)
+     self.assertTrue(addresses)
+
  def test_dynamic_allocation_leaves_gateway_addresses_available(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);path=deploy.render(self.data(root),root/'rendered',self.candidate())

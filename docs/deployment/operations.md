@@ -14,6 +14,8 @@ Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定�
 
 准备独立 consumer Docker network，与 MDM 所在网络连接。private-gateway 在此网络以 Identity hostname 提供 TLS 443；容器专属网络命名空间允许非root绑定该端口，消费方保持同一个 Identity origin，不能改 issuer。公网只发布 public-gateway 的443；该网关独占 public 网络，保证主机端口实际发布，数据库与协议服务仍只接内部网络。后端网段和协议网段必须是不冲突的独立 /24，网关地址与输入精确一致。每个网段的后半段 /25 用于动态分配，避免先启动的 provider 占用固定服务地址。public-gateway 在主机和容器内均监听 443；协议侧 Hydra 固定为 .5、Keycloak 固定为 .6。网关按这些部署内地址连接 provider，TLS 仍校验 Keycloak 名称和 CA；provider 离线不会因启动时 DNS 解析而阻止本地登录网关启动。
 
+旧拓扑升级须在维护窗口停止使用旧网络的服务、重建网络，再以新渲染配置启动；保留 PostgreSQL 和 Keycloak 数据卷，不使用 `down --volumes`。已有网络不会自动应用新的 IPAM 地址池。
+
 ## 渲染和安装
 
 在仓库使用 `python3 hack/deploy.py --input /private/deployment.json --output /private/rendered --candidate /artifacts/candidate.json`；候选目录可直接使用其中 deploy.py。输出目录必须尚不存在，包含秘密的生成配置，权限700；运行时宜位于受控私有磁盘或tmpfs，不进入日志/备份通用收集器。
