@@ -142,7 +142,7 @@
         },
         "consumption": "verified_readonly_snapshot"
       },
-      "elapsed_seconds": 0.186
+      "elapsed_seconds": 0.178
     },
     {
       "name": "prepare",
@@ -191,12 +191,12 @@
             "platform": "linux/arm64"
           }
         },
-        "deployment_sha256": "703af53a7cfb0c46d30a68e86f0347aecf21a6ea776631c5f6f224acd19bd798",
-        "compose_sha256": "13f62d85e00671a13038eeeda967d8ffdb67bd3396fd6f5a8ee06c6341d18b3f",
-        "renderer_compose_sha256": "8a637e3bdba52b7ee6a23350749716c7e9b2a4af965299dd484bcb41fcee324b",
+        "deployment_sha256": "952408f5fbc433abd905136b70ba5fd914b7e1f33c9a058d92331e9718229e44",
+        "compose_sha256": "7701233f08158ce8b33e6f315d4f2ebe4f66142215659f4208d60bfec85d9f42",
+        "renderer_compose_sha256": "237c5a92a1db6686b45f0e33bd5c70cabbfb279991a6a8348f68d18294bc9794",
         "daemon_native_bind": true
       },
-      "elapsed_seconds": 3.33
+      "elapsed_seconds": 8.517
     },
     {
       "name": "install",
@@ -212,23 +212,23 @@
         "initial": {
           "deployment": {
             "singleton": true,
-            "authority_id": "6918bda7-5567-4f81-8021-7d38d35fc634",
-            "bootstrap_tenant": "2d1c807a-eb71-4a4e-bd6e-8610cb819338",
-            "environment_id": "identity-t31-983e0b0d758b",
+            "authority_id": "c8c19e0b-bc40-499b-9651-d606e17ee6ee",
+            "bootstrap_tenant": "0551a4b8-7a46-443a-a03f-fdf2c0ae4609",
+            "environment_id": "identity-t31-3e244bf4918b",
             "identity_config_version": 1,
             "identity_public_origin": "https://identity.t31.test",
             "product_public_origin": "https://mdm.t31.test"
           },
           "storage": {
             "singleton": true,
-            "target": "\\xc273f590c94e2d9ef0232e15203a4db1",
-            "lineage": "\\x6d995005180c377c5f3bd041bf0bbc0b"
+            "target": "\\x04d17b63f2e9e95337987866319bb567",
+            "lineage": "\\x558669d88431fd76693410908c3ad641"
           },
           "outbox_count": 1,
           "outbox_max": 1
         }
       },
-      "elapsed_seconds": 14.921
+      "elapsed_seconds": 14.386
     },
     {
       "name": "healthy",
@@ -240,16 +240,29 @@
           "status": "running",
           "exit_code": 0,
           "oom": false,
-          "started": "2026-09-12T08:25:01.053659172Z",
+          "started": "2026-09-12T23:48:25.480529052Z",
           "finished": "0001-01-01T00:00:00Z",
           "restarts": 0,
           "image": "sha256:3e196282f104129120421bd5dde4a3b49f1387eed7aca1068c53cefd50f66fae",
           "health": "healthy"
         },
-        "invalid_credential": 401,
+        "private_authentication": {
+          "missing": {
+            "status": 401,
+            "code": "invalid_client"
+          },
+          "wrong": {
+            "status": 401,
+            "code": "invalid_client"
+          },
+          "correct": {
+            "status": 401,
+            "code": "invalid_credential"
+          }
+        },
         "provider_passed": true
       },
-      "elapsed_seconds": 8.403
+      "elapsed_seconds": 9.066
     },
     {
       "name": "cold_dependencies",
@@ -270,7 +283,7 @@
           "provider_passed": false
         }
       },
-      "elapsed_seconds": 78.939
+      "elapsed_seconds": 87.354
     },
     {
       "name": "running_dependencies",
@@ -294,7 +307,7 @@
           "recovered": true
         }
       },
-      "elapsed_seconds": 33.205
+      "elapsed_seconds": 32.253
     },
     {
       "name": "partial_start",
@@ -303,7 +316,7 @@
         "exit_code": 1,
         "runtime_connections": 0
       },
-      "elapsed_seconds": 7.27
+      "elapsed_seconds": 6.868
     },
     {
       "name": "clean_drain",
@@ -314,14 +327,14 @@
         ],
         "rejected_status": 502,
         "exit_code": 0,
-        "elapsed_seconds": 1.073,
+        "elapsed_seconds": 0.61,
         "new_admission": false,
         "external_grace_seconds": 40,
         "resource_seconds": 8,
         "drain_seconds": 25,
         "process_cleanup": true
       },
-      "elapsed_seconds": 7.949
+      "elapsed_seconds": 7.132
     },
     {
       "name": "timeout_drain",
@@ -332,14 +345,14 @@
         ],
         "rejected_status": 502,
         "exit_code": 1,
-        "elapsed_seconds": 19.824,
+        "elapsed_seconds": 19.735,
         "new_admission": false,
         "external_grace_seconds": 40,
         "resource_seconds": 8,
         "drain_seconds": 25,
         "process_cleanup": true
       },
-      "elapsed_seconds": 26.516
+      "elapsed_seconds": 26.174
     },
     {
       "name": "persistent_restart",
@@ -351,7 +364,7 @@
         "session": 200,
         "repeated_initialize": 1
       },
-      "elapsed_seconds": 35.01
+      "elapsed_seconds": 30.809
     },
     {
       "name": "mismatch",
@@ -362,20 +375,108 @@
         "automatic_repair": false,
         "recovered": true
       },
-      "elapsed_seconds": 10.592
+      "elapsed_seconds": 10.243
     }
   ],
   "cleanup": true,
   "harness_files": {
-    "t3/identity-lifecycle/scenarios.py": "3ef851b8ea2a2416e512c0c483f1f3902802a7712521eef999345b19a5b5669d",
-    "t3/identity-lifecycle/fixture.py": "67c908af7db0372aa27c141745c379baba10eaa82073de0b92adc3d7236234d3",
-    "t3/identity-lifecycle/run.py": "bc8252cc0204bb96bcf8abb5c8178b657e22a98387a5e556199f38427e6f2a85",
-    "t3/identity-lifecycle/test_lifecycle.py": "55f91f31f266add35c68bd3b88ee10334f49e5d6ef0d3b1afd0f15e45696e2fc",
+    "t3/identity-lifecycle/scenarios.py": "3e7001f35c53d2c70cc131d306359fbdca2b13de599fc62dfa617f80b5a0ded9",
+    "t3/identity-lifecycle/fixture.py": "69067f245c9ccae7f5273f2810f227f5295f0885c30952ba50e5686d102d5526",
+    "t3/identity-lifecycle/run.py": "3e4c1c85f3151ba2c281fff269073ca9db356a45cff6091b33916ff160bfb06a",
+    "t3/identity-lifecycle/test_lifecycle.py": "4b1b9c1296257d0083f8555ca677fa78deb35b1a8dffa5545e251396c8d0f646",
     "t3/identity-lifecycle/candidate.lock.json": "238cacb1931bd60eeed2635bf3f37b02616d9ba00f356a4e5eeb4f284f7f1c28",
-    "hack/bounded_process.py": "e30b6b789a30864b857aa21655537defbf396021b0e789113e8f1822a3077b3a"
+    "hack/bounded_process.py": "855a7e1edb6634406e8e7af2d75b29525da7a5ae94199b275db0e65f12693b0a"
   },
-  "harness_revision": "c5138b915b9c59bab67a9593f41e911b332fd9a8",
+  "harness_revision": "3ff0cb5ef93ee7e97acff20615d955a81fc6b8e8",
   "harness_dirty": false,
+  "diagnostics": {
+    "complete": true,
+    "inventory_complete": true,
+    "containers": [
+      {
+        "inspect": {
+          "file": "container-0-inspect.private.log",
+          "collected": true
+        },
+        "logs": {
+          "file": "container-0-logs.private.log",
+          "collected": true
+        }
+      },
+      {
+        "inspect": {
+          "file": "container-1-inspect.private.log",
+          "collected": true
+        },
+        "logs": {
+          "file": "container-1-logs.private.log",
+          "collected": true
+        }
+      },
+      {
+        "inspect": {
+          "file": "container-2-inspect.private.log",
+          "collected": true
+        },
+        "logs": {
+          "file": "container-2-logs.private.log",
+          "collected": true
+        }
+      },
+      {
+        "inspect": {
+          "file": "container-3-inspect.private.log",
+          "collected": true
+        },
+        "logs": {
+          "file": "container-3-logs.private.log",
+          "collected": true
+        }
+      },
+      {
+        "inspect": {
+          "file": "container-4-inspect.private.log",
+          "collected": true
+        },
+        "logs": {
+          "file": "container-4-logs.private.log",
+          "collected": true
+        }
+      },
+      {
+        "inspect": {
+          "file": "container-5-inspect.private.log",
+          "collected": true
+        },
+        "logs": {
+          "file": "container-5-logs.private.log",
+          "collected": true
+        }
+      },
+      {
+        "inspect": {
+          "file": "container-6-inspect.private.log",
+          "collected": true
+        },
+        "logs": {
+          "file": "container-6-logs.private.log",
+          "collected": true
+        }
+      },
+      {
+        "inspect": {
+          "file": "container-7-inspect.private.log",
+          "collected": true
+        },
+        "logs": {
+          "file": "container-7-logs.private.log",
+          "collected": true
+        }
+      }
+    ],
+    "budget_seconds": 60,
+    "budget_exhausted": false
+  },
   "cleanup_details": {
     "budget_seconds": 120,
     "budget_exhausted": false,
