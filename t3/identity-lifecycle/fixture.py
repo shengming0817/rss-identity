@@ -284,6 +284,15 @@ class Fixture:
 
     def up(self, *services):
         self.compose("up", "-d", "--pull", "never", *services, timeout=300)
+        # `up -d` acknowledges process creation before NGINX has bound its sockets.
+        if "public-gateway" in services:
+            eventually(lambda: self.published()["status"] == 200, timeout=30, code="public_listener_not_ready")
+        if "private-gateway" in services:
+            info = json.loads(self.docker("inspect", self.cid("private-gateway")).stdout)[0]
+            address = info["NetworkSettings"]["Networks"][self.consumer]["IPAddress"]
+            eventually(lambda: self.helper_call("http", {"ca": self.mount + "/input/ca.pem",
+                       "address": address, "port": 443, "path": "/"})["status"] == 404,
+                       timeout=30, code="private_listener_not_ready")
 
     def http(self, path, *, method="GET", body=None, private=False, session=False, host=None, timeout=25):
         headers = {"Origin": "https://identity.t31.test", "X-Identity-Request": "1", "Content-Type": "application/json"}
