@@ -181,6 +181,8 @@ try {
     await create('fault-user')
     const actor = await handoff(await login('fault-user'))
     const before = await sequence()
+    const failuresBefore = await rpc('cleanup_failures')
+    let failedAttempts = 0
     await rpc('fault', { service: 'hydra', action: 'pause' })
     try {
       const unavailable = await probe(actor.handle)
@@ -194,14 +196,16 @@ try {
       for (let i = 0; i < 24; i++) {
         const events = await rpc('events')
         assert.equal(events.filter(e => e.seq > before && e.action === 'cleaned' && e.grant_id === actor.grant).length, 0)
-        if (events.some(e => e.seq > before && e.action === 'revoking' && e.grant_id === actor.grant)) { revoking = true; break }
+        if (events.some(e => e.seq > before && e.action === 'revoking' && e.grant_id === actor.grant)) revoking = true
+        failedAttempts = (await rpc('cleanup_failures')) - failuresBefore
+        if (revoking && failedAttempts > 0) break
         await sleep(5000)
       }
-      assert.ok(revoking)
+      assert.ok(revoking && failedAttempts > 0)
     } finally { await rpc('fault', { service: 'hydra', action: 'unpause' }) }
     const result = await denied(actor, control)
     cleanupCheckpoint = { before, grant: actor.grant }
-    return result
+    return { ...result, count: failedAttempts }
   })
   await run('logout', async () => {
     await member.page.goto(`${origin}/tenants/${config.tenant}/sessions`)

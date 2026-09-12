@@ -308,6 +308,14 @@ def main():
                     answer = {}
                 elif operation == 'events':
                     answer = query()
+                elif operation == 'cleanup_failures':
+                    # Read only this owned process; no provider log text crosses the RPC/evidence boundary.
+                    result = bounded_run(['docker', 'logs', dc('ps', '-q', 'identity')],
+                                         capture_output=True, text=True, timeout=30)
+                    if result.returncode:
+                        raise CommandFailed('cleanup_failure_observation', result.returncode, result.stderr)
+                    answer = sum(line == 'component=downstream_cleanup result=unavailable'
+                                 for line in (result.stdout + result.stderr).splitlines())
                 elif operation == 'fault':
                     service, action = message['service'], message['action']
                     evidence.require(service in ('postgres', 'hydra') and action in ('pause', 'unpause'), 'invalid_fault')
