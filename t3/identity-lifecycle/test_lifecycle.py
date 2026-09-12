@@ -1,0 +1,147 @@
+"""Offline tests for false-positive and artifact-substitution failure modes."""
+import hashlib
+import io
+import json
+from pathlib import Path
+import tarfile
+import tempfile
+import unittest
+import sys
+from unittest.mock import patch
+
+from run import Failure, RunResult, load_candidate
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+class CandidateTests(unittest.TestCase):
+    def candidate(self, root):
+        revision = "a" * 40
+        value = {
+            "format_version": 1, "revision": revision, "identity_schema": 7,
+            "platform": "linux/amd64", "images": {}, "archives": {}, "binaries": {},
+            "migrations": {"schema_version": 7}, "providers": {"rust": "rust@sha256:" + "b" * 64},
+        }
+        for name in ("server", "operator", "gateway"):
+            config = json.dumps({"os": "linux", "architecture": "amd64", "config": {
+                "User": "10001:10001", "Labels": {"org.opencontainers.image.revision": revision},
+            }}).encode()
+            manifest = json.dumps({"config": {"digest": "sha256:" + digest(config)}}).encode()
+            image_digest = "sha256:" + digest(manifest)
+            index = json.dumps({"manifests": [{"digest": image_digest,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json"}]}).encode()
+            archive = root / (name + ".oci.tar")
+            with tarfile.open(archive, "w") as output:
+                for path, data in {"index.json": index, "blobs/sha256/" + digest(manifest): manifest,
+                                   "blobs/sha256/" + digest(config): config}.items():
+                    item = tarfile.TarInfo(path)
+                    item.size = len(data)
+                    output.addfile(item, io.BytesIO(data))
+            value["images"][name] = "identity/" + name + "@" + image_digest
+            value["archives"][name] = {"file": archive.name, "sha256": digest(archive.read_bytes()),
+                                       "manifest_digest": image_digest}
+        (root / "binaries").mkdir()
+        for name in ("identity-server", "identity-migrate", "identity-admin", "identity-clients"):
+            (root / "binaries" / name).write_bytes(name.encode())
+            value["binaries"][name] = digest(name.encode())
+        (root / "deploy.py").write_text("# approved renderer\n")
+        (root / "candidate.json").write_text(json.dumps(value))
+        lock = {"manifest_sha256": digest((root / "candidate.json").read_bytes()),
+                "files": {"deploy.py": digest((root / "deploy.py").read_bytes())}}
+        return value, lock
+
+    def test_approved_artifacts_are_read_without_building(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected, lock = self.candidate(root)
+            self.assertEqual(load_candidate(root, lock), expected)
+
+    def test_corrupt_artifact_or_renderer_is_rejected(self):
+        for name in ("candidate.json", "server.oci.tar", "binaries/identity-server", "deploy.py"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _, lock = self.candidate(root)
+                with (root / name).open("ab") as output:
+                    output.write(b"corruption")
+                with self.assertRaises(Failure):
+                    load_candidate(root, lock)
+
+    def test_symlink_cannot_substitute_an_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, lock = self.candidate(root)
+            source = root / "server.oci.tar"
+            source.rename(root / "other.tar")
+            source.symlink_to(root / "other.tar")
+            with self.assertRaises(Failure):
+                load_candidate(root, lock)
+
+
+class ResultTests(unittest.TestCase):
+    def test_missing_or_failed_phase_cannot_pass(self):
+        result = RunResult(("first", "second"))
+        with result.phase("first"):
+            pass
+        self.assertFalse(result.finish(cleanup_ok=True))
+        with self.assertRaises(Failure), result.phase("second"):
+            raise Failure("synthetic_failure")
+        self.assertFalse(result.finish(cleanup_ok=True))
+
+    def test_cleanup_failure_cannot_pass_a_successful_suite(self):
+        result = RunResult(("first",))
+        with result.phase("first"):
+            pass
+        self.assertFalse(result.finish(cleanup_ok=False))
+
+    def test_unexpected_errors_do_not_publish_secret_values(self):
+        result = RunResult(("first",))
+        with self.assertRaises(ValueError), result.phase("first"):
+            raise ValueError("sentinel-password-token")
+        result.finish(cleanup_ok=True)
+        self.assertNotIn("sentinel-password-token", json.dumps(result.data))
+
+    def test_pass_requires_the_whole_ordered_suite(self):
+        result = RunResult(("first", "second"))
+        for name in ("first", "second"):
+            with result.phase(name):
+                pass
+        self.assertTrue(result.finish(cleanup_ok=True))
+        reversed_result = RunResult(("first", "second"))
+        for name in ("second", "first"):
+            with reversed_result.phase(name):
+                pass
+        self.assertFalse(reversed_result.finish(cleanup_ok=True))
+
+
+class ProcessAndCleanupTests(unittest.TestCase):
+    def test_helper_receives_input_through_the_owned_pipe(self):
+        from fixture import command
+        result = command([sys.executable, "-c", "import sys; print(sys.stdin.read())"], input="fixture-input")
+        self.assertEqual(result.stdout.strip(), "fixture-input")
+
+    def test_partial_prepare_cleanup_does_not_depend_on_compose_parsing(self):
+        from fixture import Fixture
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = Fixture(root, {}, root)
+            removed = []
+            def docker(*args, **kwargs):
+                if "--filter" in args:
+                    self.assertIn(args[args.index("--filter") + 1],
+                                  ["label=" + key + fixture.project for key in ("com.docker.compose.project=", "rss.t31=")])
+                    name = ""
+                    if "label=rss.t31=" + fixture.project in args:
+                        name = fixture.helper if args[0] == "ps" else fixture.control if args[0] == "volume" else ""
+                    return subprocess.CompletedProcess(args, 0, name, "")
+                removed.append(args)
+                return subprocess.CompletedProcess(args, 0, "", "")
+            with patch.object(fixture, "docker", side_effect=docker):
+                self.assertTrue(fixture.cleanup())
+            self.assertEqual(removed, [("rm", "--force", fixture.helper), ("volume", "rm", fixture.control)])
+
+
+if __name__ == "__main__":
+    unittest.main()

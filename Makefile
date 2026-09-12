@@ -14,6 +14,7 @@ check:
 
 test:
 	$(PYTHON) -m unittest discover -s hack -p 'test_*.py'
+	$(PYTHON) -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
 	cargo test --locked --workspace
 
 dependencies:
@@ -63,3 +64,7 @@ test-recovery:
 
 measure-capacity:
 	$(PYTHON) hack/downstream.py --measure
+
+.PHONY: test-lifecycle
+test-lifecycle:
+	$(PYTHON) t3/identity-lifecycle/run.py --candidate "$(LIFECYCLE_CANDIDATE)" --output "$(LIFECYCLE_OUTPUT)"

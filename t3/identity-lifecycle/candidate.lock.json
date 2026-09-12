@@ -1,0 +1,8 @@
+{
+  "manifest_sha256": "01429fb94beed6e361749c1342f8f93389f18de47862a82a861c73a407ddd568",
+  "files": {
+    "deploy.py": "d7e7cda7b78b6e9bf3fb15baaabd9aeae01d36c29610399c757a3d45023b3c39",
+    "deployment/example.json": "3b6f9d0720f9d226f29c6f28f0a50d7c90b579ae2b7d9fd61e4bb315020727a8",
+    "deployment/providers.lock.json": "4ad480f2850718a817c5c62d1bd66df413e0998dbdc590b56862791272398cdd"
+  }
+}
