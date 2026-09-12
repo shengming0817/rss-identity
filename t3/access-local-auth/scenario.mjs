@@ -17,7 +17,7 @@ const origin = config.identity_origin, product = config.product_origin
 const base = `${origin}/api/v1/tenants/${config.tenant}`
 const passwords = Object.fromEntries(['admin-password', 'member-password', 'new-password'].map(name => [name, readFileSync('/run/test/' + name, 'utf8')]))
 const steps = {}, contexts = []
-let stage = 'login', browser, admin
+let stage = 'login', browser, admin, cleanupCheckpoint
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function probe(handle, binding) {
   return new Promise((resolve, reject) => {
@@ -177,6 +177,32 @@ try {
   })
   await create('control')
   let control = await handoff(await login('control'))
+  await run('cleanup_failure', async () => {
+    await create('fault-user')
+    const actor = await handoff(await login('fault-user'))
+    const before = await sequence()
+    await rpc('fault', { service: 'hydra', action: 'pause' })
+    try {
+      const unavailable = await probe(actor.handle)
+      assert.equal(unavailable.status, 503)
+      assert.equal(unavailable.identity_status, 503)
+      assert.equal(unavailable.online, true)
+      assert.equal((await api(actor, 'session/logout', {}, actor.session.csrf_token)).status(), 204)
+      await event('revoked', 'session_id', actor.session.session.id, before)
+      // This runs before other revocations, so a failed remote call cannot starve this grant behind older work.
+      let revoking = false
+      for (let i = 0; i < 24; i++) {
+        const events = await rpc('events')
+        assert.equal(events.filter(e => e.seq > before && e.action === 'cleaned' && e.grant_id === actor.grant).length, 0)
+        if (events.some(e => e.seq > before && e.action === 'revoking' && e.grant_id === actor.grant)) { revoking = true; break }
+        await sleep(5000)
+      }
+      assert.ok(revoking)
+    } finally { await rpc('fault', { service: 'hydra', action: 'unpause' }) }
+    const result = await denied(actor, control)
+    cleanupCheckpoint = { before, grant: actor.grant }
+    return result
+  })
   await run('logout', async () => {
     await member.page.goto(`${origin}/tenants/${config.tenant}/sessions`)
     await member.page.getByRole('button', { name: '退出当前会话', exact: true }).click()
@@ -237,37 +263,15 @@ try {
     } finally { await rpc('fault', { service: 'postgres', action: 'unpause' }) }
     assert.equal((await probe(actor.handle)).status, 200)
   })
-  await run('cleanup_failure', async () => {
-    await create('fault-user')
-    const actor = await handoff(await login('fault-user'))
-    control = await handoff(await login('control'))
-    const before = await sequence()
-    await rpc('fault', { service: 'hydra', action: 'pause' })
-    try {
-      const unavailable = await probe(actor.handle)
-      assert.equal(unavailable.status, 503)
-      assert.equal(unavailable.identity_status, 503)
-      assert.equal(unavailable.online, true)
-      assert.equal((await api(actor, 'session/logout', {}, actor.session.csrf_token)).status(), 204)
-      await event('revoked', 'session_id', actor.session.session.id, before)
-      // Wait for the production worker's actual pass; no internal test hooks.
-      await sleep(45000)
-      const events = await rpc('events')
-      assert.ok(events.some(e => e.seq > before && e.action === 'revoking' && e.grant_id === actor.grant))
-      assert.equal(events.filter(e => e.seq > before && e.action === 'cleaned' && e.grant_id === actor.grant).length, 0)
-    } finally { await rpc('fault', { service: 'hydra', action: 'unpause' }) }
-    const result = await denied(actor, control)
+  await run('events', async () => {
     let cleaned = false
     // Durable grant removal deliberately waits until the full protocol safety horizon.
     for (let i = 0; i < Math.ceil((config.grant_horizon_seconds + 90) / 5); i++) {
       const events = await rpc('events')
-      if (events.some(e => e.seq > before && e.action === 'cleaned' && e.grant_id === actor.grant)) { cleaned = true; break }
+      if (events.some(e => e.seq > cleanupCheckpoint.before && e.action === 'cleaned' && e.grant_id === cleanupCheckpoint.grant)) { cleaned = true; break }
       await sleep(5000)
     }
     assert.ok(cleaned)
-    return result
-  })
-  await run('events', async () => {
     const events = await rpc('events')
     for (const action of ['initialized', 'account_created', 'created', 'refreshed', 'revoked', 'all_revoked',
       'password_changed', 'account_disabled', 'account_enabled', 'active', 'revoking', 'cleaned']) {

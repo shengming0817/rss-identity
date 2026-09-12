@@ -106,9 +106,16 @@ def clean_owned(project, volume, control, network, tag, process):
         for identifier in ids:
             if kind == 'container':
                 def remove_container():
-                    if json.loads(docker('inspect', identifier))[0]['State'].get('Paused'):
-                        docker('unpause', identifier, timeout=20)
-                    docker('rm', '-f', identifier)
+                    try:
+                        if json.loads(docker('inspect', identifier))[0]['State'].get('Paused'):
+                            docker('unpause', identifier, timeout=20)
+                        docker('rm', '-f', identifier)
+                    except CommandFailed:
+                        # A --rm one-shot can disappear after enumeration; verify absence before accepting it.
+                        result = bounded_run(['docker', 'container', 'inspect', identifier], capture_output=True, text=True, timeout=30)
+                        if result.returncode and any(v in result.stderr.lower() for v in ('no such', 'not found')):
+                            return
+                        raise
                 attempt(kind, identifier, 'remove', remove_container)
             else:
                 attempt(kind, identifier, 'remove', lambda: docker(kind, 'rm', identifier))
