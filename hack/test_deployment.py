@@ -1,4 +1,4 @@
-import copy,json,tempfile,unittest,os,subprocess
+import copy,json,tempfile,unittest,os,subprocess,ipaddress
 from unittest.mock import patch
 from pathlib import Path
 import deploy
@@ -30,6 +30,20 @@ class Deployment(unittest.TestCase):
    self.assertIn('owner="$${spec#*:}"',command)
    self.assertIn('$$(find "$$d"',command)
    self.assertIn('chown "$$owner" "$$d"',command)
+
+ def test_dynamic_addresses_cannot_occupy_reserved_gateway_or_authority_addresses(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);path=deploy.render(self.data(root),root/'rendered',self.candidate())
+   compose=json.loads(path.read_text())
+   for name in ['backend','protocol']:
+    pool=compose['networks'][name]['ipam']['config'][0]
+    subnet=ipaddress.ip_network(pool['subnet']);dynamic=ipaddress.ip_network(pool['ip_range'])
+    self.assertTrue(dynamic.subnet_of(subnet))
+    for service in compose['services'].values():
+     networks=service.get('networks',{})
+     if isinstance(networks,dict) and (address:=networks.get(name,{}).get('ipv4_address')):
+      self.assertIn(ipaddress.ip_address(address),subnet)
+      self.assertNotIn(ipaddress.ip_address(address),dynamic)
 
  def test_configuration_diagnostics_are_actionable_without_input_values(self):
   with tempfile.TemporaryDirectory() as tmp:
