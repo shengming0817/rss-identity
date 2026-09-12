@@ -49,4 +49,4 @@ python3 -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
 
 未覆盖：完整本地账户矩阵（#2341）、完整 SSO/MFA/恢复矩阵（#2342/I09）、消息 relay/Inbox 或完整 Outbox 故障矩阵、真实 MDM 授权接入、生产 DNS/证书/容量/SLO、备份 RPO/RTO 与多副本。
 
-参考源码：CPython v3.11.13 `Lib/subprocess.py`；docker/compose v5.5.1 `pkg/compose/stop.go`。复用本仓 `hack/bounded_process.py` 的进程组预算；最终拓扑由候选 renderer 持有。
+参考源码：CPython v3.11.13 `Lib/subprocess.py`、[Modules/fcntlmodule.c](https://github.com/python/cpython/blob/v3.11.13/Modules/fcntlmodule.c)；docker/compose v5.5.1 `pkg/compose/stop.go`、[cmd/compose/create.go](https://github.com/docker/compose/blob/v5.5.1/cmd/compose/create.go)。复用本仓 `hack/bounded_process.py` 的进程组预算；最终拓扑由候选 renderer 持有。

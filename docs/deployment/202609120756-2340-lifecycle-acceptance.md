@@ -34,4 +34,26 @@ make candidate CANDIDATE_OUTPUT=/absolute/new-candidate IDENTITY_UI_SOURCE=/abso
 
 ## T31 实际结果
 
-最终固定候选完整运行正在执行；在经检查的结果提交前，本记录不表示 T31 已通过。
+2026-09-12 UTC，以干净载体提交 `c5138b915b9c59bab67a9593f41e911b332fd9a8` 执行完整序列，命令退出 0；[原始结构化结果](../../t3/identity-lifecycle/evidence/20260912-result.json)记录 11 阶段全部 passed、`not_run=[]`、`cleanup=true`，容器/网络/卷剩余数量均为 0。记录提交只新增证据与文档，执行代码及锁文件逐项摘要与记录一致。
+
+```sh
+make test-lifecycle LIFECYCLE_CANDIDATE=/Users/shengming/Documents/code/rss/rss-identity/.local-ci-runs/2419-candidate LIFECYCLE_OUTPUT=/Users/shengming/Documents/code/rss/rss-identity/.local-ci-runs/2340-lifecycle-fixed-09
+```
+
+环境为 Python 3.14.6、Docker 29.7.2 / Compose 5.5.1；Engine `linux/arm64`，三份产品镜像仿真 `linux/amd64`，固定多架构 provider 使用原生 ARM64。具体解析后的镜像 ID/平台、原始与隔离后 Compose 摘要均在结果中。
+
+| 实测场景 | 观察结果 |
+| --- | --- |
+| 候选与安装 | 只消费摘要匹配的只读快照；真实文件 UID/GID/权限；schema v7 与内嵌迁移身份匹配；首次管理员初始化成功 |
+| 健康基线 | 公布的 HTTPS 端口返回固定 UI revision；本地登录 200；Hydra 拒绝无效凭据 401；Keycloak provider test 通过 |
+| 冷启动故障 | PG 停止时 server 退出 1；Hydra authenticated admin 停止时 live 200 / 不 ready，实际 Compose 网关启动被拒绝、端口未开放；Keycloak 停止不影响 readiness，provider test 失败 |
+| 运行中故障 | PG 故障时会话 503；Hydra 故障时在线验证 identity_unavailable、本地登录可用；Keycloak 故障时 provider 失败、本地登录可用；三者恢复均无需重启 Identity |
+| 部分启动 | 已接入 PG 后监听 bind 失败，退出 1，runtime PG 连接数归零 |
+| 正常排空 | PG 锁确认已有请求入库；SIGTERM 后新请求未进入 SQL，原请求完成；退出 0，实测 1.073 秒；子进程组已回收 |
+| 超时排空 | 保留 PG 锁，内部预算耗尽后退出 1，实测 19.824 秒；非 OOM，早于外部 40 秒强杀；子进程组已回收 |
+| 保留卷重启 | 部署身份、storage lineage、已提交 Outbox 记录保留，原会话 200；重复 initialize 退出 1 |
+| 错配拒绝与恢复 | schema 版本缺失、config identity 代际错误均拒绝 migrate/server；不自动修复；恢复正确输入后可启动 |
+
+19 项载体单测通过，覆盖摘要/快照替换、阶段/清理误报、dirty/changed harness、异常结果写入、二次中断、进程组回收与真实跨进程分配互斥。完整产品 `make ci` 结果由 PR 交接评论另行记录，不能以此替代本 T3 实测。
+
+合成 CA、秘密和故障预算仅用于本次验收；原始私密诊断未提交。本记录不提供性能/容量、生产 DNS/证书/SLO、备份 RPO/RTO、多副本、完整本地账户/SSO/MFA/恢复矩阵、完整 Outbox/relay/Inbox 或真实 MDM 授权证明。

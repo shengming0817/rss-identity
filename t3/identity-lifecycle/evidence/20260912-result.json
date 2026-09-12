@@ -1,0 +1,391 @@
+{
+  "issue": 2340,
+  "status": "passed",
+  "phases": [
+    {
+      "name": "candidate",
+      "status": "passed",
+      "observations": {
+        "manifest_sha256": "01429fb94beed6e361749c1342f8f93389f18de47862a82a861c73a407ddd568",
+        "metadata": {
+          "format_version": 1,
+          "revision": "06d4e85498281a874eff9898a3b77fc19705e8b1",
+          "version": "0.1.0",
+          "platform": "linux/amd64",
+          "cargo_lock_sha256": "eb358659e12155d878b8db74fc134df0b30806c7cf4b722ebf2841837e597e4a",
+          "rust": "1.96.0",
+          "ui": {
+            "repository": "https://github.com/shengming0817/rss-web.git",
+            "revision": "37b7fb356aa7e436cc708caa1593427e6d553d30",
+            "lock_sha256": "83740dc4c49b44d5298bece9ceb67536599facafa3f3c7837e227b7c008c06d3",
+            "dist_sha256": "074055e9978964d1fd38cf88b70cba6aa93797e6eaba20a5d8abe80e26654c15"
+          },
+          "providers": {
+            "postgres": "postgres:17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929",
+            "keycloak": "quay.io/keycloak/keycloak:26.7.3@sha256:ff4257d0d64efbe99ed1ddfaf07765cc3c36dc7518bf8324d41961327f441c54",
+            "hydra": "oryd/hydra:v26.2.0@sha256:ff67c7fb5f95074fa53374d41151713554960504b340cd3f95b09e65deaea2a9",
+            "nginx": "nginx:1.30.4@sha256:d5792f71a9496b833bc08ea834a758c46e2b6a6306c10f4be926f38a656cdc1c",
+            "rust": "rust:1.96.0-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc",
+            "runtime": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171"
+          },
+          "migration_sha256": "feb1dc5c7fcbdbc862370edd7144a4514e8b06141e7f9ac3ad0e208313a9100d",
+          "images": {
+            "server": "rss-identity/server:06d4e85498281a874eff9898a3b77fc19705e8b1@sha256:3e196282f104129120421bd5dde4a3b49f1387eed7aca1068c53cefd50f66fae",
+            "operator": "rss-identity/operator:06d4e85498281a874eff9898a3b77fc19705e8b1@sha256:0559066445f10e35195573fb4095651ebcdc17a1629bab00d8abb2b6bb1d2dba",
+            "gateway": "rss-identity/gateway:06d4e85498281a874eff9898a3b77fc19705e8b1@sha256:b1fe47500d1b41c96ba62d02802c643a56aa18d11cfb1113ba99179cf7754c28"
+          },
+          "archives": {
+            "server": {
+              "file": "server.oci.tar",
+              "sha256": "3b8c5797c186ac769631e5a1bedaf27fa053aeeb32cceb811a55f3bfc7609465",
+              "manifest_digest": "sha256:3e196282f104129120421bd5dde4a3b49f1387eed7aca1068c53cefd50f66fae"
+            },
+            "operator": {
+              "file": "operator.oci.tar",
+              "sha256": "68c47c5800cdbb2ca50251fc6b51c6432edf4338656a24695866c183adec3c69",
+              "manifest_digest": "sha256:0559066445f10e35195573fb4095651ebcdc17a1629bab00d8abb2b6bb1d2dba"
+            },
+            "gateway": {
+              "file": "gateway.oci.tar",
+              "sha256": "05de1c56c7dd9b5e1e04049afbe151080531130d3dff677ea1454fd331a4e723",
+              "manifest_digest": "sha256:b1fe47500d1b41c96ba62d02802c643a56aa18d11cfb1113ba99179cf7754c28"
+            }
+          },
+          "rss": [
+            {
+              "package": "rss-axum",
+              "version": "0.1.0",
+              "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+            },
+            {
+              "package": "rss-contract",
+              "version": "0.1.0",
+              "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+            },
+            {
+              "package": "rss-diag-context",
+              "version": "0.1.0",
+              "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+            },
+            {
+              "package": "rss-redact",
+              "version": "0.1.0",
+              "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+            },
+            {
+              "package": "rss-request-context",
+              "version": "0.1.0",
+              "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+            },
+            {
+              "package": "rss-runtime",
+              "version": "0.1.0",
+              "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+            },
+            {
+              "package": "rss-transactional-messaging",
+              "version": "0.2.0",
+              "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+            },
+            {
+              "package": "rss-transactional-messaging-postgres",
+              "version": "0.1.0",
+              "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+            }
+          ],
+          "migrations": {
+            "identity_sql_sha256": "feb1dc5c7fcbdbc862370edd7144a4514e8b06141e7f9ac3ad0e208313a9100d",
+            "rss_sql_sha256": "687273def9ec9b5e8cb6fa1586b992b1991fb24c0c1ab1985235ac444e14ba73",
+            "schema_contract": "e475556231e942de3a8a1615b811b480d72b56ae0e6536246deecd64c6914f07",
+            "schema_version": 7
+          },
+          "identity_schema": 7,
+          "toolchain": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: aarch64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 22.1.2\n12.2.0\nlibc6-amd64-cross\t2.36-8cross1\nlibc6-dev-amd64-cross\t2.36-8cross1\nlinux-libc-dev-amd64-cross\t6.1.4-1cross1\n",
+          "production_features": {
+            "rss-request-context": [
+              "default"
+            ],
+            "rss-contract": [
+              "default"
+            ],
+            "rss-redact": [
+              "default"
+            ],
+            "rss-diag-context": [
+              "default"
+            ],
+            "rss-transactional-messaging": [
+              "consumer",
+              "default",
+              "producer"
+            ],
+            "rss-axum": [
+              "http1",
+              "managed-server"
+            ],
+            "rss-runtime": [
+              "default"
+            ],
+            "rss-transactional-messaging-postgres": []
+          },
+          "binaries": {
+            "identity-admin": "69147accf1da03cd2a88dec88fe7012aa2a92e7178e34e9b842b29365ef8e0e7",
+            "identity-clients": "0a1dc09da7adbb2ab9e0a0860835fb7b78ad8e1d5d00391afd4678879e867438",
+            "identity-server": "809388e583e178dc20cdd6263df8800df3bea08ffe4ed7206d98609828c4affe",
+            "identity-migrate": "ec8a87d38ab2d20fc8ad4406265ed1043f0dece29c3391dac65125e97475b1fe"
+          }
+        },
+        "deployment_files": {
+          "deploy.py": "d7e7cda7b78b6e9bf3fb15baaabd9aeae01d36c29610399c757a3d45023b3c39",
+          "deployment/example.json": "3b6f9d0720f9d226f29c6f28f0a50d7c90b579ae2b7d9fd61e4bb315020727a8",
+          "deployment/providers.lock.json": "4ad480f2850718a817c5c62d1bd66df413e0998dbdc590b56862791272398cdd"
+        },
+        "consumption": "verified_readonly_snapshot"
+      },
+      "elapsed_seconds": 0.186
+    },
+    {
+      "name": "prepare",
+      "status": "passed",
+      "observations": {
+        "docker": "29.7.2",
+        "compose": "5.5.1",
+        "engine_platform": "linux/arm64",
+        "product_platform": "linux/amd64",
+        "emulated": true,
+        "images": {
+          "server": {
+            "id": "sha256:3e196282f104129120421bd5dde4a3b49f1387eed7aca1068c53cefd50f66fae",
+            "platform": "linux/amd64"
+          },
+          "operator": {
+            "id": "sha256:0559066445f10e35195573fb4095651ebcdc17a1629bab00d8abb2b6bb1d2dba",
+            "platform": "linux/amd64"
+          },
+          "gateway": {
+            "id": "sha256:b1fe47500d1b41c96ba62d02802c643a56aa18d11cfb1113ba99179cf7754c28",
+            "platform": "linux/amd64"
+          },
+          "postgres": {
+            "id": "sha256:ac74e8c63c516b1f81fbaaede0663981399f80e42369431136b2455557f8547b",
+            "platform": "linux/arm64"
+          },
+          "keycloak": {
+            "id": "sha256:a9a5820e4daea7dec93adfb631fc386c93cb57d6572cddd5eb06d4acd629794b",
+            "platform": "linux/arm64"
+          },
+          "hydra": {
+            "id": "sha256:7a4626d20bcec1e90c69bdbe4f9de50a2d4374656ca6b285f9228862efb5fce7",
+            "platform": "linux/arm64"
+          },
+          "nginx": {
+            "id": "sha256:904893011cacba398983b122a2dd1acace032b419931f9da0add898e03a9ff47",
+            "platform": "linux/arm64"
+          },
+          "rust": {
+            "id": "sha256:05f85ef6eb0f2600ac62e9d779642b5b362d5be2ed67b80e162fae6e28b66524",
+            "platform": "linux/arm64"
+          },
+          "runtime": {
+            "id": "sha256:6bd27d44e6c32a66bbd72d7cb2b76a8ae3497ec2e5274a81abd1b37f6013fa1f",
+            "platform": "linux/arm64"
+          }
+        },
+        "deployment_sha256": "703af53a7cfb0c46d30a68e86f0347aecf21a6ea776631c5f6f224acd19bd798",
+        "compose_sha256": "13f62d85e00671a13038eeeda967d8ffdb67bd3396fd6f5a8ee06c6341d18b3f",
+        "renderer_compose_sha256": "8a637e3bdba52b7ee6a23350749716c7e9b2a4af965299dd484bcb41fcee324b",
+        "daemon_native_bind": true
+      },
+      "elapsed_seconds": 3.33
+    },
+    {
+      "name": "install",
+      "status": "passed",
+      "observations": {
+        "schema": 7,
+        "migrations": {
+          "identity_sql_sha256": "feb1dc5c7fcbdbc862370edd7144a4514e8b06141e7f9ac3ad0e208313a9100d",
+          "rss_sql_sha256": "687273def9ec9b5e8cb6fa1586b992b1991fb24c0c1ab1985235ac444e14ba73",
+          "schema_contract": "e475556231e942de3a8a1615b811b480d72b56ae0e6536246deecd64c6914f07",
+          "schema_version": 7
+        },
+        "initial": {
+          "deployment": {
+            "singleton": true,
+            "authority_id": "6918bda7-5567-4f81-8021-7d38d35fc634",
+            "bootstrap_tenant": "2d1c807a-eb71-4a4e-bd6e-8610cb819338",
+            "environment_id": "identity-t31-983e0b0d758b",
+            "identity_config_version": 1,
+            "identity_public_origin": "https://identity.t31.test",
+            "product_public_origin": "https://mdm.t31.test"
+          },
+          "storage": {
+            "singleton": true,
+            "target": "\\xc273f590c94e2d9ef0232e15203a4db1",
+            "lineage": "\\x6d995005180c377c5f3bd041bf0bbc0b"
+          },
+          "outbox_count": 1,
+          "outbox_max": 1
+        }
+      },
+      "elapsed_seconds": 14.921
+    },
+    {
+      "name": "healthy",
+      "status": "passed",
+      "observations": {
+        "published_https": 200,
+        "local_login": 200,
+        "identity": {
+          "status": "running",
+          "exit_code": 0,
+          "oom": false,
+          "started": "2026-09-12T08:25:01.053659172Z",
+          "finished": "0001-01-01T00:00:00Z",
+          "restarts": 0,
+          "image": "sha256:3e196282f104129120421bd5dde4a3b49f1387eed7aca1068c53cefd50f66fae",
+          "health": "healthy"
+        },
+        "invalid_credential": 401,
+        "provider_passed": true
+      },
+      "elapsed_seconds": 8.403
+    },
+    {
+      "name": "cold_dependencies",
+      "status": "passed",
+      "observations": {
+        "postgres": {
+          "exit_code": 1
+        },
+        "hydra": {
+          "live": 200,
+          "ready": false,
+          "gateway_start_exit": 1,
+          "gateway_open": false,
+          "fault": "authenticated_admin_stopped"
+        },
+        "keycloak": {
+          "ready": true,
+          "provider_passed": false
+        }
+      },
+      "elapsed_seconds": 78.939
+    },
+    {
+      "name": "running_dependencies",
+      "status": "passed",
+      "observations": {
+        "postgres": {
+          "ready": false,
+          "session": 503,
+          "recovered": true
+        },
+        "hydra": {
+          "ready": false,
+          "validation": "identity_unavailable",
+          "local_login": 200,
+          "recovered": true
+        },
+        "keycloak": {
+          "ready": true,
+          "provider_passed": false,
+          "local_login": 200,
+          "recovered": true
+        }
+      },
+      "elapsed_seconds": 33.205
+    },
+    {
+      "name": "partial_start",
+      "status": "passed",
+      "observations": {
+        "exit_code": 1,
+        "runtime_connections": 0
+      },
+      "elapsed_seconds": 7.27
+    },
+    {
+      "name": "clean_drain",
+      "status": "passed",
+      "observations": {
+        "admission_probe_statuses": [
+          502
+        ],
+        "rejected_status": 502,
+        "exit_code": 0,
+        "elapsed_seconds": 1.073,
+        "new_admission": false,
+        "external_grace_seconds": 40,
+        "resource_seconds": 8,
+        "drain_seconds": 25,
+        "process_cleanup": true
+      },
+      "elapsed_seconds": 7.949
+    },
+    {
+      "name": "timeout_drain",
+      "status": "passed",
+      "observations": {
+        "admission_probe_statuses": [
+          502
+        ],
+        "rejected_status": 502,
+        "exit_code": 1,
+        "elapsed_seconds": 19.824,
+        "new_admission": false,
+        "external_grace_seconds": 40,
+        "resource_seconds": 8,
+        "drain_seconds": 25,
+        "process_cleanup": true
+      },
+      "elapsed_seconds": 26.516
+    },
+    {
+      "name": "persistent_restart",
+      "status": "passed",
+      "observations": {
+        "deployment_unchanged": true,
+        "storage_unchanged": true,
+        "retained_outbox": 1,
+        "session": 200,
+        "repeated_initialize": 1
+      },
+      "elapsed_seconds": 35.01
+    },
+    {
+      "name": "mismatch",
+      "status": "passed",
+      "observations": {
+        "schema_mismatch_rejected": true,
+        "identity_mismatch_rejected": true,
+        "automatic_repair": false,
+        "recovered": true
+      },
+      "elapsed_seconds": 10.592
+    }
+  ],
+  "cleanup": true,
+  "harness_files": {
+    "t3/identity-lifecycle/scenarios.py": "3ef851b8ea2a2416e512c0c483f1f3902802a7712521eef999345b19a5b5669d",
+    "t3/identity-lifecycle/fixture.py": "67c908af7db0372aa27c141745c379baba10eaa82073de0b92adc3d7236234d3",
+    "t3/identity-lifecycle/run.py": "bc8252cc0204bb96bcf8abb5c8178b657e22a98387a5e556199f38427e6f2a85",
+    "t3/identity-lifecycle/test_lifecycle.py": "55f91f31f266add35c68bd3b88ee10334f49e5d6ef0d3b1afd0f15e45696e2fc",
+    "t3/identity-lifecycle/candidate.lock.json": "238cacb1931bd60eeed2635bf3f37b02616d9ba00f356a4e5eeb4f284f7f1c28",
+    "hack/bounded_process.py": "e30b6b789a30864b857aa21655537defbf396021b0e789113e8f1822a3077b3a"
+  },
+  "harness_revision": "c5138b915b9c59bab67a9593f41e911b332fd9a8",
+  "harness_dirty": false,
+  "cleanup_details": {
+    "budget_seconds": 120,
+    "budget_exhausted": false,
+    "inventory_complete": true,
+    "interrupted": false,
+    "remaining": {
+      "container": 0,
+      "network": 0,
+      "volume": 0
+    }
+  },
+  "not_run": []
+}
