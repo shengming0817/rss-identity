@@ -12,11 +12,15 @@
 
 Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定上游镜像的1000:0，以支持其启动时augmentation。渲染器由root执行，按唯一服务owner交付配置并核验权限；其它调用者明确拒绝。私钥和秘密按消费服务UID/GID准备（Keycloak私钥1000:0，其它容器秘密10001:10001），均0600；公共CA/证书须对消费用户可读；仅给各服务挂载其所需文件。安装前执行下文volume-init任务，为空卷固定目录设置10001所有权；有内容且属主不匹配的旧卷明确拒绝，不递归修改。维护秘密只在维护任务中挂载，日常服务无 owner/maintenance mount。
 
-准备独立 consumer Docker network，与 MDM 所在网络连接。private-gateway 在此网络以 Identity hostname 提供 TLS 443；容器专属网络命名空间允许非root绑定该端口，消费方保持同一个 Identity origin，不能改 issuer。公网只发布 public-gateway 的443。后端网段和协议网段必须是不冲突的独立 /24，网关地址与输入精确一致。
+准备独立 consumer Docker network，与 MDM 所在网络连接。private-gateway 在此网络以 Identity hostname 提供 TLS 443；容器专属网络命名空间允许非root绑定该端口，消费方保持同一个 Identity origin，不能改 issuer。公网只发布 public-gateway 的443；该网关独占 public 网络，保证主机端口实际发布，数据库与协议服务仍只接内部网络。后端网段和协议网段必须是不冲突的独立 /24，网关地址与输入精确一致。每个网段的后半段 /25 用于动态分配，避免先启动的 provider 占用固定服务地址。public-gateway 在主机和容器内均监听 443；协议侧 Hydra 固定为 .5、Keycloak 固定为 .6。网关按这些部署内地址连接 provider，TLS 仍校验 Keycloak 名称和 CA；provider 离线不会因启动时 DNS 解析而阻止本地登录网关启动。
+
+旧拓扑升级须在维护窗口停止使用旧网络的服务、重建网络，再以新渲染配置启动；保留 PostgreSQL 和 Keycloak 数据卷，不使用 `down --volumes`。已有网络不会自动应用新的 IPAM 地址池。
 
 ## 渲染和安装
 
 在仓库使用 `python3 hack/deploy.py --input /private/deployment.json --output /private/rendered --candidate /artifacts/candidate.json`；候选目录可直接使用其中 deploy.py。输出目录必须尚不存在，包含秘密的生成配置，权限700；运行时宜位于受控私有磁盘或tmpfs，不进入日志/备份通用收集器。
+
+渲染的 Compose 文件已对所有字面量值转义 `$`，包括安装 shell 和挂载路径；由 Compose 解析后恢复原值。不要对输出再运行 envsubst 或手工取消转义。部署回归使用真实 `docker compose config` 验证该消费边界。
 
 0. `docker compose -f /private/rendered/compose.json run --rm volume-init`。仅初始化空卷固定目录权限：PG为10001:10001、Keycloak为1000:0；nocopy防止镜像copy-up覆盖属主。
 1. `docker compose -f /private/rendered/compose.json up -d postgres`。首次 PG 初始化建立独立 hydra/keycloak数据库；已有卷不会重放初始化 SQL。
@@ -49,7 +53,3 @@ Hydra admin实际仅监听其网络命名空间的127.0.0.1:4445，认证TLS侧�
 Identity runtime/maintenance 只使用 RSS producer 连接入口：业务变更与 Outbox 同事务提交，
 保留 check_execution fencing；不给 Inbox 访问或 claim/lease/settle 执行权限。重复安装与启动
 会拒绝这些额外权限。实际消息投递由独立 relay owner 承担，不由 Identity 进程代行。
-
-Compose 中的 volume-init 命令由渲染器将 shell dollar 转义为 `$$`，以保留容器内的参数展开；直接使用渲染输出，不手工展开或替换该命令。#2421 的真实 Compose 解析回归守护此边界。
-
-backend/protocol 的动态地址池固定使用各自 /24 的上半段 /25，网关与协议 authority 的固定地址位于下半段。这样数据库等服务先启动时也不会占用后续网关的地址；不依赖服务启动顺序预留 IP。既有旧网络须按停机流程重建网络并保留数据卷，再启动新渲染配置。
