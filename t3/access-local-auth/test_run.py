@@ -56,6 +56,26 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(failures[0]['id'], 'bad')
         self.assertTrue(all(f['error_code'] == 'TimeoutExpired' for f in failures[1:]))
 
+    def test_command_timeout_keeps_operation_and_deadline_without_raw_output(self):
+        with patch.object(runner, 'bounded_run', side_effect=subprocess.TimeoutExpired('private command', 7, stderr='private')):
+            with self.assertRaises(runner.CommandFailed) as captured:
+                runner.execute(['docker', 'test'], operation='outbox_query', timeout=7)
+        self.assertEqual(captured.exception.facts['operation'], 'outbox_query')
+        self.assertEqual(captured.exception.facts['timeout_seconds'], 7)
+        self.assertEqual(captured.exception.facts['diagnostic'], 'timed_out')
+        self.assertNotIn('private', json.dumps(captured.exception.facts))
+
+    def test_untracked_receipt_cannot_enter_carrier_source_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            carrier = root / 't3/access-local-auth'
+            carrier.mkdir(parents=True)
+            (carrier / 'run.py').write_text('source')
+            (carrier / 'record.json').write_text('{}')
+            with patch.object(runner, 'execute', return_value='t3/access-local-auth/run.py'), patch.object(runner.subprocess, 'check_output', return_value=b'source'):
+                sources = runner.carrier_sources(root, 'revision')
+            self.assertEqual(sources, {'t3/access-local-auth/run.py': b'source'})
+
     def test_command_diagnostics_cannot_include_raw_secret(self):
         failure = runner.CommandFailed('volume_initialize', 1, 'invalid interpolation format secret=private-credential')
         self.assertEqual(failure.facts['diagnostic'], 'invalid_interpolation_format')

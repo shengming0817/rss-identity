@@ -37,10 +37,26 @@ class CommandFailed(evidence.Refused):
 
 def execute(args, *, timeout=120, input=None, operation=None):
     operation = operation or '_'.join(Path(a).name for a in args[:2])
-    result = bounded_run(args, timeout=timeout, input=input, capture_output=True, text=True)
+    try:
+        result = bounded_run(args, timeout=timeout, input=input, capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        error = CommandFailed(operation, None, 'timed out')
+        error.facts['timeout_seconds'] = timeout
+        raise error from None
     if result.returncode:
         raise CommandFailed(operation, result.returncode, result.stderr)
     return result.stdout.strip()
+
+
+def carrier_sources(repository, revision):
+    paths = execute(['/usr/bin/git', '-C', str(repository), 'ls-tree', '-r', '--name-only', revision,
+                     't3/access-local-auth', 'hack/bounded_process.py']).splitlines()
+    sources = {}
+    for name in paths:
+        raw = subprocess.check_output(['/usr/bin/git', '-C', str(repository), 'show', revision + ':' + name])
+        evidence.check_source(repository / name, raw)
+        sources[name] = raw
+    return sources
 
 
 def write_record(path, record):
@@ -137,11 +153,10 @@ def main():
         source = args.candidate.resolve(strict=True)
         data = evidence.candidate(source, REPO)
         revision = execute(['/usr/bin/git', '-C', str(REPO), 'rev-parse', 'HEAD'])
-        helper = REPO / 'hack/bounded_process.py'
-        evidence.check_source(helper, subprocess.check_output(['/usr/bin/git', '-C', str(REPO), 'show', revision + ':hack/bounded_process.py']))
+        sources = carrier_sources(REPO, revision)
         record.update(candidate_manifest_sha256=evidence.sha(source / 'candidate.json'), candidate=data,
                       carrier_revision=revision,
-                      carrier_files={p.relative_to(REPO).as_posix(): evidence.sha(p) for p in [*HERE.iterdir(), helper] if p.is_file()})
+                      carrier_files={name: hashlib.sha256(raw).hexdigest() for name, raw in sources.items()})
         schemas = {contract: 'sha256:' + hashlib.sha256(subprocess.check_output(
             ['/usr/bin/git', '-C', str(REPO), 'show', data['revision'] + ':crates/identity-postgres/src/' + filename])).hexdigest()
             for contract, (_, filename) in evidence.EVENT_SCHEMAS.items()}
@@ -151,7 +166,12 @@ def main():
         for item in data['archives'].values():
             docker('load', '-i', str(source / item['file']), timeout=300)
         stage = 'controller_build'
-        docker('build', '-t', tag, str(HERE), timeout=1200)
+        # Build from frozen Git bytes, never the live worktree or an output receipt.
+        with tempfile.TemporaryDirectory(prefix=project + '-build-') as build:
+            for name, raw in sources.items():
+                if name.startswith('t3/access-local-auth/'):
+                    (Path(build) / Path(name).name).write_bytes(raw)
+            docker('build', '-t', tag, build, timeout=1200)
         image = json.loads(docker('image', 'inspect', tag))[0]['Id']
         record['controller_image'] = image
         stage = 'fixture_prepare'
