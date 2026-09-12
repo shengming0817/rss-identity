@@ -74,6 +74,8 @@ I03–I05 必须在各自实现时闭合安全事件，不能最后另加一个�
 | T32：ACCESS-LOCAL-AUTH | 浏览器/cookie/路由 + 本地 authority + 持久化 + 产品交接 + 事件连通 | I03/04/06/07/08；真实登录→会话→消费→刷新→退出/禁用→拒绝→安全事件；不重复哈希算法或 PG repository conformance |
 | T33：ACCESS-FEDERATED-SSO | tenant route + 外部 IdP + 浏览器事务 + callback + linking + session + downstream | I05/06/07/08；真实租户选择和 SSO、错误浏览器/租户/重放拒绝、产品接入与撤销；不重跑 JWT 算法矩阵 |
 
+T31 的执行载体为 [identity-lifecycle](../../t3/identity-lifecycle/README.md)，按固定顺序覆盖首次安装、冷/热依赖故障、部分启动、真实在途请求排空、保留卷重启和 schema/config 身份错配。部署缺陷在独立 [#2419](https://dev.azure.com/shengming0923/rss/_workitems/edit/2419) / [PR #1008](https://dev.azure.com/shengming0923/rss/_git/rss-identity/pullrequest/1008) 修复；换入修复候选后重新执行全矩阵，2026-09-12 的[实际记录](../deployment/202609120756-2340-lifecycle-acceptance.md)已完整通过。只消费候选自己的 renderer，不保留旧配置/schema 兼容分支；源码开发探针不能作为 T3 通过记录。
+
 每个 T3 登记时须单独保留必要性、固定 artifact、provider/config 矩阵、实际输入输出、故障和排除项。可复用已发布测试设施，不能共享实现 PR 混交付。T31–T33 不自动证明 I09 后新增的 MFA/恢复行为。
 
 ## M01：由 rss-mdm 拥有的独立接入项
