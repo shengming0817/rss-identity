@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Run the immutable Identity candidate's local-auth journey in owned Docker resources."""
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
 from pathlib import Path
 import select
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import uuid
 
 import evidence
@@ -20,12 +23,37 @@ sys.path.insert(0, str(REPO / 'hack'))
 from bounded_process import run as bounded_run
 
 
-def execute(args, *, timeout=120, input=None):
+class CommandFailed(evidence.Refused):
+    def __init__(self, operation, code, stderr):
+        super().__init__('command_failed')
+        # Keep only fixed diagnostics, never the command, provider logs or secret-bearing response.
+        categories = ('invalid interpolation format', 'invalid mount config', 'no matching manifest',
+                      'permission denied', 'network is unreachable', 'address already in use',
+                      'connection refused', 'unhealthy', 'pull access denied', 'no such file', 'timed out')
+        self.facts = {'operation': operation, 'exit_code': code,
+                      'diagnostic': next((v.replace(' ', '_') for v in categories if v in stderr.lower()), 'command_error'),
+                      'stderr_sha256': hashlib.sha256(stderr.encode()).hexdigest()}
+
+
+def execute(args, *, timeout=120, input=None, operation=None):
+    operation = operation or '_'.join(Path(a).name for a in args[:2])
     result = bounded_run(args, timeout=timeout, input=input, capture_output=True, text=True)
     if result.returncode:
-        print('Failed command: ' + ' '.join(args[:8]), flush=True)
-        raise evidence.Refused('command_failed_' + Path(args[0]).name + '_' + str(result.returncode))
+        raise CommandFailed(operation, result.returncode, result.stderr)
     return result.stdout.strip()
+
+
+def write_record(path, record):
+    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        with temporary.open('x') as stream:
+            os.chmod(temporary, 0o600)
+            json.dump(record, stream, indent=2)
+            stream.write('\n')
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
 
 
 def docker(*args, **kwargs):
@@ -35,12 +63,48 @@ def docker(*args, **kwargs):
 def allocation():
     ids = docker('network', 'ls', '-q').split()
     networks = json.loads(docker('network', 'inspect', *ids)) if ids else []
-    used = [ipaddress.ip_network(c['Subnet']) for n in networks for c in n['IPAM'].get('Config', []) if 'Subnet' in c]
+    used = [ipaddress.ip_network(c['Subnet']) for n in networks for c in (n['IPAM'].get('Config') or []) if 'Subnet' in c]
     for number in range(80, 220, 2):
-        pair = [ipaddress.ip_network(f'172.28.{i}.0/24') for i in (number, number + 1)]
+        pair = [ipaddress.ip_network(f'10.234.{i}.0/24') for i in (number, number + 1)]
         if not any(a.overlaps(b) for a in pair for b in used if b.version == 4):
-            return [f'172.28.{number}', f'172.28.{number+1}']
+            return [f'10.234.{number}', f'10.234.{number+1}']
     raise evidence.Refused('no_isolated_subnets')
+
+
+def clean_owned(project, volume, control, network, tag, process):
+    cleanup = []
+    def attempt(kind, identifier, operation, fn):
+        try:
+            fn()
+        except (Exception, SystemExit) as error:
+            cleanup.append({'kind': kind, 'id': identifier, 'operation': operation,
+                            'error_code': str(error) if isinstance(error, evidence.Refused) else type(error).__name__})
+    if process and process.poll() is None:
+        attempt('process', str(process.pid), 'kill', lambda: (process.kill(), process.wait(timeout=10)))
+    # Each resource is attempted independently; only owned labels/names are eligible.
+    for kind, args_list in [('container', ['ps', '-aq', '--filter', 'label=com.docker.compose.project=' + project]),
+                            ('network', ['network', 'ls', '-q', '--filter', 'label=com.docker.compose.project=' + project]),
+                            ('volume', ['volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=' + project])]:
+        ids = []
+        attempt(kind, project, 'list', lambda: ids.extend(docker(*args_list).split()))
+        for identifier in ids:
+            if kind == 'container':
+                def remove_container():
+                    if json.loads(docker('inspect', identifier))[0]['State'].get('Paused'):
+                        docker('unpause', identifier, timeout=20)
+                    docker('rm', '-f', identifier)
+                attempt(kind, identifier, 'remove', remove_container)
+            else:
+                attempt(kind, identifier, 'remove', lambda: docker(kind, 'rm', identifier))
+    for kind, name in [('network', network), ('volume', volume), ('volume', control), ('image', tag)]:
+        def remove_named():
+            result = bounded_run(['docker', kind, 'inspect', name], capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                docker(kind, 'rm', name, timeout=30)
+            elif not any(v in result.stderr.lower() for v in ('not found', 'no such')):
+                raise evidence.Refused('inspect_failed')
+        attempt(kind, name, 'remove', remove_named)
+    return cleanup
 
 
 def main():
@@ -48,26 +112,49 @@ def main():
     parser.add_argument('--candidate', type=Path, required=True)
     parser.add_argument('--record', type=Path, required=True)
     args = parser.parse_args()
-    source = args.candidate.resolve(strict=True)
-    evidence.require(not args.record.exists(), 'record_must_be_new')
-    data = evidence.candidate(source, REPO)
+    args.record.parent.mkdir(parents=True, exist_ok=True)
+    # Reserve the output before doing work; an existing receipt is never overwritten.
+    try:
+        with args.record.open('x') as output:
+            os.chmod(args.record, 0o600)
+            output.write('{}\n')
+    except FileExistsError:
+        print('T32 refused: record_must_be_new', flush=True)
+        return 2
     project = 'identity-t32-' + uuid.uuid4().hex[:12]
     volume, control, network = (project + suffix for suffix in ('-input', '-control', '-consumer'))
-    image = 'identity-local-auth-t3:' + evidence.sha(HERE / 'pnpm-lock.yaml')[:12]
-    record = {'issue': 2341, 'candidate_manifest_sha256': evidence.sha(source / 'candidate.json'),
-              'candidate': data, 'carrier_revision': execute(['/usr/bin/git', '-C', str(REPO), 'rev-parse', 'HEAD']),
-              'carrier_files': {p.name: evidence.sha(p) for p in HERE.iterdir() if p.is_file()},
+    tag = project + ':controller'
+    record = {'issue': 2341, 'project': project, 'steps': {},
               'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'passed': False}
     compose = None
     process = None
-    stage = 'environment'
-    args.record.parent.mkdir(parents=True, exist_ok=True)
+    stage = 'candidate_preflight'
+    started_resources = False
+    def interrupted(signum, _frame):
+        raise evidence.Refused('interrupted_' + str(signum))
+    previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
+        source = args.candidate.resolve(strict=True)
+        data = evidence.candidate(source, REPO)
+        revision = execute(['/usr/bin/git', '-C', str(REPO), 'rev-parse', 'HEAD'])
+        helper = REPO / 'hack/bounded_process.py'
+        evidence.check_source(helper, subprocess.check_output(['/usr/bin/git', '-C', str(REPO), 'show', revision + ':hack/bounded_process.py']))
+        record.update(candidate_manifest_sha256=evidence.sha(source / 'candidate.json'), candidate=data,
+                      carrier_revision=revision,
+                      carrier_files={p.relative_to(REPO).as_posix(): evidence.sha(p) for p in [*HERE.iterdir(), helper] if p.is_file()})
+        schemas = {contract: 'sha256:' + hashlib.sha256(subprocess.check_output(
+            ['/usr/bin/git', '-C', str(REPO), 'show', data['revision'] + ':crates/identity-postgres/src/' + filename])).hexdigest()
+            for contract, (_, filename) in evidence.EVENT_SCHEMAS.items()}
+        stage = 'candidate_load'
+        started_resources = True
         print('T32: verify candidate and build isolated test controller', flush=True)
         for item in data['archives'].values():
             docker('load', '-i', str(source / item['file']), timeout=300)
-        docker('build', '-t', image, str(HERE), timeout=1200)
-        record['controller_image'] = json.loads(docker('image', 'inspect', image))[0]['Id']
+        stage = 'controller_build'
+        docker('build', '-t', tag, str(HERE), timeout=1200)
+        image = json.loads(docker('image', 'inspect', tag))[0]['Id']
+        record['controller_image'] = image
+        stage = 'fixture_prepare'
         for name in (volume, control):
             docker('volume', 'create', '--label', 'identity.t32=' + project, name)
         docker('network', 'create', '--internal', '--label', 'identity.t32=' + project, network)
@@ -86,7 +173,7 @@ def main():
             configuration = json.loads(read_volume('public.json'))
             topology = json.loads(read_volume('rendered/compose.json'))
             record['configuration'] = configuration
-            record['rendered_topology_sha256'] = __import__('hashlib').sha256(json.dumps(topology, sort_keys=True).encode()).hexdigest()
+            record['rendered_topology_sha256'] = hashlib.sha256(json.dumps(topology, sort_keys=True).encode()).hexdigest()
             topology['name'] = project
             topology['volumes']['fixture'] = {'external': True, 'name': volume}
             topology['volumes']['control'] = {'external': True, 'name': control}
@@ -130,48 +217,47 @@ def main():
                 ['browser'], common + [(f'input/{name}', name) for name in ('admin-password', 'member-password', 'new-password')])
             services['browser']['volumes'].append({'type': 'volume', 'source': 'control', 'target': '/control'})
             services['browser']['profiles'] = ['test']
+            services['browser']['environment'] = {'NODE_EXTRA_CA_CERTS': '/run/test/ca.pem'}
             config_file = root / 'compose.json'
             config_file.write_text(json.dumps(topology))
             compose = ['docker', 'compose', '-p', project, '-f', str(config_file)]
 
             def dc(*command, timeout=120):
-                return execute(compose + list(command), timeout=timeout)
+                return execute(compose + list(command), timeout=timeout, operation='compose_' + '_'.join(command[:3]))
 
             def query():
-                sql = "BEGIN READ ONLY; SELECT COALESCE(json_agg(json_build_object('seq',seq,'contract',envelope->>'contract','version',envelope->'version','payload',envelope->'payload') ORDER BY seq),'[]'::json) FROM rss_transactional_messaging.outbox; COMMIT;"
+                sql = "BEGIN READ ONLY; SELECT COALESCE(json_agg(json_build_object('seq',seq,'contract',envelope->>'contract','version',envelope->'version','schema',envelope->>'schema','payload',envelope->'payload') ORDER BY seq),'[]'::json) FROM rss_transactional_messaging.outbox; COMMIT;"
                 raw = dc('exec', '-T', 'postgres', 'psql', '-U', 'postgres', '-d', 'identity', '-Atq', '-c', sql)
                 events = json.loads(raw)
-                # Reject extra payload fields before projecting the allowed evidence.
-                result = []
-                schemas = {'identity.account.security': {'action', 'tenant', 'principal', 'actor', 'epoch', 'state'},
-                           'identity.session.security': {'action', 'tenant', 'principal', 'session_id', 'replaced_session_id', 'epoch'},
-                           'identity.downstream.security': {'tenant', 'grant_id', 'action'}}
-                for event in events:
-                    payload = json.loads(bytes(event.pop('payload')))
-                    evidence.require(event['contract'] in schemas and isinstance(payload, dict)
-                                     and set(payload) == schemas[event['contract']], 'unsafe_event_payload')
-                    event.update({k: v for k, v in payload.items() if k in evidence.PUBLIC_FIELDS})
-                    result.append(event)
-                evidence.check_public(result)
-                return result
+                return [evidence.project_event(event, configuration['tenant'], schemas) for event in events]
 
             print('T32: install candidate providers, migrations and administrator', flush=True)
+            stage = 'volume_initialize'
             dc('run', '--rm', 'volume-init')
+            stage = 'postgres_start'
             dc('up', '-d', '--wait', 'postgres')
+            stage = 'identity_migrate'
             dc('run', '--rm', 'migrate')
+            stage = 'hydra_migrate'
             dc('run', '--rm', 'hydra-migrate')
+            stage = 'providers_start'
             dc('up', '-d', 'hydra', 'hydra-admin', 'keycloak')
+            stage = 'clients_initialize'
             dc('run', '--rm', 'hydra-clients')
             services['maintenance']['volumes'].append(mount('input/admin-password', '/run/input/new-password'))
             config_file.write_text(json.dumps(topology))
+            stage = 'administrator_initialize'
             dc('run', '--rm', 'maintenance', 'initialize', configuration['admin_principal'], 'admin', '/run/input/new-password')
+            stage = 'services_start'
             dc('up', '-d', '--wait', 'identity', 'public-gateway', 'private-gateway', 'consumer', 'ingress', timeout=180)
             observed = {}
-            for name in ('identity', 'public-gateway', 'private-gateway', 'postgres', 'hydra', 'keycloak', 'consumer'):
+            for name in ('identity', 'public-gateway', 'private-gateway', 'postgres', 'hydra', 'keycloak', 'consumer', 'ingress'):
                 cid = dc('ps', '-q', name)
                 instance = json.loads(docker('inspect', cid))[0]
                 image_config = json.loads(docker('image', 'inspect', instance['Image']))[0]
                 evidence.require(instance['Config']['Image'] == services[name]['image'], 'running_image_mismatch')
+                if name in ('consumer', 'ingress'):
+                    evidence.require(instance['Image'] == image, 'controller_image_mismatch')
                 observed[name] = {'reference': instance['Config']['Image'], 'image_id': instance['Image'],
                                   'architecture': image_config['Architecture'], 'user': instance['Config']['User']}
             record['running_images'] = observed
@@ -188,6 +274,10 @@ def main():
                 message = json.loads(line)
                 operation = message.pop('operation')
                 if operation == 'stage':
+                    if 'browser_image' not in record:
+                        instance = json.loads(docker('inspect', project + '-browser'))[0]
+                        evidence.require(instance['Image'] == image, 'browser_image_mismatch')
+                        record['browser_image'] = instance['Image']
                     stage = message['stage']
                     evidence.require(stage in evidence.SCENARIOS, 'unknown_stage')
                     print('T32: ' + stage, flush=True)
@@ -199,7 +289,7 @@ def main():
                     evidence.require(service in ('postgres', 'hydra') and action in ('pause', 'unpause'), 'invalid_fault')
                     dc(action, service)
                     answer = {}
-                elif operation == 'result':
+                elif operation in ('progress', 'result'):
                     evidence.check_public(message)
                     if 'steps' in message:
                         record['steps'] = message['steps']
@@ -220,37 +310,27 @@ def main():
                     evidence.check_revocation(result, result['control_status'], result['remaining'])
             record['events'] = query()
             record['passed'] = True
-    except Exception as error:
+    except (Exception, KeyboardInterrupt, SystemExit) as error:
+        if isinstance(error, CommandFailed):
+            record['command_failure'] = error.facts
         record['failed_stage'] = stage
-        record['failure'] = str(error) if isinstance(error, evidence.Refused) else type(error).__name__
-        print('T32 failed: ' + record['failed_stage'] + '/' + record['failure'], flush=True)
+        record['failure'] = ('interrupted' if isinstance(error, (KeyboardInterrupt, SystemExit)) else
+                             str(error) if isinstance(error, evidence.Refused) else type(error).__name__)
+        frame = traceback.extract_tb(error.__traceback__)[-1]
+        record['failure_location'] = Path(frame.filename).name + ':' + str(frame.lineno)
+        print('T32 failed: ' + record['failed_stage'] + '/' + record['failure'] + ' at ' + record['failure_location'], flush=True)
     finally:
-        if process and process.poll() is None:
-            process.kill()
-            process.wait(timeout=10)
-        # Cleanup by project/explicit IDs only; never prune shared Docker resources.
-        cleanup = []
-        for kind, args_list in [('container', ['ps', '-aq', '--filter', 'label=com.docker.compose.project=' + project]),
-                                ('network', ['network', 'ls', '-q', '--filter', 'label=com.docker.compose.project=' + project]),
-                                ('volume', ['volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=' + project])]:
-            try:
-                ids = docker(*args_list).split()
-                for item in ids:
-                    if kind == 'container':
-                        execute(['docker', 'unpause', item], timeout=20) if json.loads(docker('inspect', item))[0]['State'].get('Paused') else None
-                        docker('rm', '-f', item)
-                    else:
-                        docker(kind, 'rm', item)
-            except Exception:
-                cleanup.append(kind)
-        for kind, name in [('network', network), ('volume', volume), ('volume', control)]:
-            result = subprocess.run(['docker', kind, 'rm', name], capture_output=True, timeout=30)
-            if result.returncode and b'not found' not in result.stderr and b'No such' not in result.stderr:
-                cleanup.append(kind)
+        # The first cancellation enters cleanup; repeated cancellation cannot strand paused providers.
+        for sig in previous:
+            signal.signal(sig, signal.SIG_IGN)
+        cleanup = clean_owned(project, volume, control, network, tag, process) if started_resources else []
+        record['cleanup_failures'] = cleanup
         record['cleanup_passed'] = not cleanup
         record['passed'] = record['passed'] and not cleanup
         record['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-        args.record.write_text(json.dumps(record, indent=2) + '\n')
+        write_record(args.record, record)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
     return 0 if record['passed'] else 1
 
 

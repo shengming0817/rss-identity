@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { retainedProbe, checkFacts } from './consumer.mjs'
+import { retainedProbe, checkFacts, validationResponse } from './consumer.mjs'
 
 test('a retained credential is verified online after its browser session was removed', async () => {
   const entries = new Map([['handle', { token: 'private-token', subject: 's', expires: Date.now() / 1000 + 60 }]])
@@ -26,4 +26,17 @@ test('consumer rejects a successful HTTP response with wrong or expired identity
     assert.throws(() => checkFacts({ ...facts, [key]: 'wrong' }, expected, 's', 100))
   }
   assert.throws(() => checkFacts(facts, expected, 's', 200))
+})
+
+
+test('only a valid received Identity response can prove provider unavailability', async () => {
+  const good = new Response(JSON.stringify({ code: 'identity_unavailable', correlation_id: '11111111-1111-4111-8111-111111111111' }), { status: 503, headers: { 'cache-control': 'no-store' } })
+  const result = await validationResponse(good, {}, {}, 0)
+  assert.equal(result.status, 503)
+  assert.equal(result.identity_status, 503)
+  for (const bad of [new Response('broken', { status: 503 }),
+    new Response('{}', { status: 503, headers: { 'cache-control': 'no-store' } }),
+    new Response('{}', { status: 200, headers: { 'cache-control': 'no-store' } })]) {
+    await assert.rejects(validationResponse(bad, {}, {}, 0))
+  }
 })

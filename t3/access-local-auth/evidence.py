@@ -11,7 +11,7 @@ SCENARIOS = ('login', 'protection', 'refresh', 'logout', 'logout_all', 'password
 PUBLIC_FIELDS = {'stage', 'status', 'passed', 'online', 'remaining', 'control_status',
                  'correlation_id', 'action', 'tenant', 'principal', 'session_id',
                  'grant_id', 'epoch', 'seq', 'contract', 'version', 'count', 'steps',
-                 'browser_version', 'events', 'failure', 'identity_status'}
+                 'browser_version', 'events', 'failure', 'identity_status', 'schema'}
 
 
 class Refused(ValueError):
@@ -31,6 +31,10 @@ def sha(path):
 def check_file(path, digest):
     require(re.fullmatch('[a-f0-9]{64}', digest) and not path.is_symlink()
             and path.is_file() and sha(path) == digest, 'artifact_digest_mismatch')
+
+
+def check_source(path, expected):
+    require(not path.is_symlink() and path.read_bytes() == expected, 'carrier_source_mismatch')
 
 
 def check_steps(steps):
@@ -61,6 +65,47 @@ def check_public(value):
                 'unsafe_evidence_value')
     else:
         require(value is None or type(value) in (int, bool, float), 'unsafe_evidence_type')
+
+
+EVENT_SCHEMAS = {'identity.account.security': ('2.0.0', 'security-event-v2.json'),
+                 'identity.session.security': ('1.0.0', 'session-security-event-v1.json'),
+                 'identity.downstream.security': ('1.0.0', 'downstream-security-event-v1.json')}
+
+
+def project_event(event, tenant, schemas):
+    require(set(event) == {'seq', 'contract', 'version', 'schema', 'payload'}, 'unsafe_event_envelope')
+    contract = event['contract']
+    require(contract in EVENT_SCHEMAS and event['version'] == EVENT_SCHEMAS[contract][0]
+            and event['schema'] == schemas[contract], 'event_schema_mismatch')
+    payload = json.loads(bytes(event['payload']))
+    fields = {'identity.account.security': {'action', 'tenant', 'principal', 'actor', 'epoch', 'state'},
+              'identity.session.security': {'action', 'tenant', 'principal', 'session_id', 'replaced_session_id', 'epoch'},
+              'identity.downstream.security': {'tenant', 'grant_id', 'action'}}
+    actions = {'identity.account.security': {'initialized', 'account_created', 'account_enabled', 'account_disabled',
+                                           'administrator_granted', 'administrator_revoked', 'membership_enabled',
+                                           'membership_disabled', 'password_changed', 'administrator_recovered'},
+               'identity.session.security': {'created', 'refreshed', 'revoked', 'all_revoked'},
+               'identity.downstream.security': {'prepared', 'login_claimed', 'login_accepted', 'consent_claimed', 'active', 'revoking', 'cleaned'}}
+    require(isinstance(payload, dict) and set(payload) == fields[contract]
+            and payload['action'] in actions[contract] and payload['tenant'] == tenant, 'unsafe_event_payload')
+    for key in ('tenant', 'principal', 'actor', 'session_id', 'replaced_session_id', 'grant_id'):
+        if key in payload:
+            value = payload[key]
+            require((value is None and key in ('actor', 'replaced_session_id')) or
+                    (isinstance(value, str) and re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', value)), 'unsafe_event_identity')
+    if 'epoch' in payload:
+        require(type(payload['epoch']) is int and payload['epoch'] > 0, 'unsafe_event_epoch')
+    if 'state' in payload:
+        state = payload['state']
+        flags = {'enabled', 'administrator', 'emergency', 'member_active'}
+        require(isinstance(state, dict) and set(state) == flags | {'membership_epoch'}
+                and all(type(state[k]) is bool for k in flags)
+                and type(state['membership_epoch']) is int and state['membership_epoch'] > 0, 'unsafe_event_state')
+    require(type(event['seq']) is int and event['seq'] > 0, 'unsafe_event_sequence')
+    result = {k: v for k, v in event.items() if k != 'payload'}
+    result.update({k: v for k, v in payload.items() if k in PUBLIC_FIELDS})
+    check_public(result)
+    return result
 
 
 def candidate(directory, repository):

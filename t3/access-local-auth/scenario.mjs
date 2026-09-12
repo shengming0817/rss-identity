@@ -113,6 +113,7 @@ async function run(name, fn) {
   await rpc('stage', { stage })
   const value = await fn()
   steps[name] = { passed: true, ...value }
+  await rpc('progress', { steps, browser_version: browser.version() })
 }
 
 try {
@@ -217,6 +218,7 @@ try {
     await admin.page.getByRole('alertdialog').getByRole('button', { name: '确认', exact: true }).click()
     await expect(row).toContainText('已启用')
     await event('account_enabled', 'principal', principal)
+    await login('disable-user')
     return denied(actor, control)
   })
   await run('storage_failure', async () => {
@@ -224,7 +226,10 @@ try {
     const actor = await handoff(await login('storage-user'))
     await rpc('fault', { service: 'postgres', action: 'pause' })
     try {
-      assert.equal((await probe(actor.handle)).status, 503)
+      const unavailable = await probe(actor.handle)
+      assert.equal(unavailable.status, 503)
+      assert.equal(unavailable.identity_status, 503)
+      assert.equal(unavailable.online, true)
       const fresh = await context()
       const response = await api(fresh, 'login', { login: 'storage-user', password: passwords['member-password'] })
       assert.equal(response.status(), 503)
@@ -239,7 +244,10 @@ try {
     const before = await sequence()
     await rpc('fault', { service: 'hydra', action: 'pause' })
     try {
-      assert.equal((await probe(actor.handle)).status, 503)
+      const unavailable = await probe(actor.handle)
+      assert.equal(unavailable.status, 503)
+      assert.equal(unavailable.identity_status, 503)
+      assert.equal(unavailable.online, true)
       assert.equal((await api(actor, 'session/logout', {}, actor.session.csrf_token)).status(), 204)
       await event('revoked', 'session_id', actor.session.session.id, before)
       // Wait for the production worker's actual pass; no internal test hooks.
@@ -269,7 +277,8 @@ try {
   })
   await rpc('result', { steps, browser_version: browser.version() })
 } catch (error) {
-  await rpc('result', { stage, failure: error?.name === 'TimeoutError' ? 'timeout' : 'assertion' })
+  const line = /scenario\.mjs:(\d+)/.exec(error?.stack ?? '')?.[1] ?? '0'
+  await rpc('result', { stage, failure: (error?.name === 'TimeoutError' ? 'timeout_' : 'assertion_') + line })
   process.exitCode = 1
 } finally {
   await browser?.close()

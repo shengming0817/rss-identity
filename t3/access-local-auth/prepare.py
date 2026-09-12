@@ -88,7 +88,7 @@ def main():
               'identity_origin': 'https://' + IDENTITY, 'product_origin': 'https://' + PRODUCT,
               'client_id': runtime['hydra']['clients'][0]['client_id'],
               'audience': runtime['hydra']['clients'][0]['audience'],
-              'grant_horizon_seconds': sum(runtime['hydra'][key] for key in
+              'grant_horizon_seconds': 60 + sum(runtime['hydra'][key] for key in
                   ('request_seconds', 'code_seconds', 'access_token_seconds', 'clock_skew_seconds')),
               'identity_origin_config': runtime['identity_origin'], 'storage': runtime['storage']}
     (ROOT / 'public.json').write_text(json.dumps(public))

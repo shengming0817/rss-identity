@@ -1,5 +1,6 @@
 """Prevent artifact substitution and empty or secret-bearing acceptance evidence."""
 import copy
+import json
 import pathlib
 import tempfile
 import unittest
@@ -8,6 +9,15 @@ import evidence
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_changed_execution_helper_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / 'helper.py').write_bytes(b'original')
+            evidence.check_source(root / 'helper.py', b'original')
+            (root / 'helper.py').write_bytes(b'changed')
+            with self.assertRaises(evidence.Refused):
+                evidence.check_source(root / 'helper.py', b'original')
+
     def test_archive_tampering_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             path = pathlib.Path(temp) / 'archive'
@@ -39,6 +49,21 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(evidence.Refused):
             evidence.check_revocation({'status': 403, 'online': True}, 200, 0)
         evidence.check_revocation({'status': 403, 'online': True}, 200, 60)
+
+    def test_nested_event_secrets_and_wrong_contract_versions_are_rejected(self):
+        tenant = '11111111-1111-4111-8111-111111111111'
+        payload = {'action': 'initialized', 'tenant': tenant, 'principal': tenant, 'actor': None, 'epoch': 1,
+                   'state': {'enabled': True, 'administrator': True, 'emergency': True, 'member_active': True, 'membership_epoch': 1}}
+        envelope = {'seq': 1, 'contract': 'identity.account.security', 'version': '2.0.0', 'schema': 'sha256:' + 'a' * 64,
+                    'payload': list(json.dumps(payload).encode())}
+        schemas = {envelope['contract']: envelope['schema']}
+        evidence.project_event(envelope, tenant, schemas)
+        payload['state']['password'] = 'private'
+        with self.assertRaises(evidence.Refused):
+            evidence.project_event({**envelope, 'payload': list(json.dumps(payload).encode())}, tenant, schemas)
+        for field, value in [('version', '1.0.0'), ('schema', 'sha256:' + 'b' * 64)]:
+            with self.assertRaises(evidence.Refused):
+                evidence.project_event({**envelope, field: value}, tenant, schemas)
 
     def test_secrets_and_unknown_evidence_fields_are_rejected(self):
         evidence.check_public({'stage': 'login', 'status': 200, 'passed': True})

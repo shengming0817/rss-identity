@@ -14,6 +14,21 @@ export function checkFacts(f, config, subject, now) {
       !uuid.test(f.session_id) || !Number.isSafeInteger(f.expires_at) || f.expires_at <= now) fail()
 }
 
+export async function validationResponse(res, config, entry, started) {
+  const data = await res.json()
+  if (res.headers.get('cache-control') !== 'no-store') fail()
+  if (res.status === 200) {
+    const now = Math.floor(Date.now() / 1000)
+    if (now < started) fail()
+    checkFacts(data, config, entry.subject, now)
+    return { status: 200, identity_status: 200, online: true, session_id: data.session_id }
+  }
+  const codes = { malformed_request: 400, invalid_client: 401, invalid_credential: 401,
+    identity_not_active: 403, rate_limited: 429, identity_unavailable: 503 }
+  if (codes[data.code] !== res.status || !uuid.test(data.correlation_id)) fail()
+  return { status: res.status, identity_status: res.status, online: true, correlation_id: data.correlation_id }
+}
+
 export async function retainedProbe(entries, handle, validate, binding) {
   const entry = entries.get(handle)
   if (!entry) fail()
@@ -70,27 +85,17 @@ async function main() {
 
   async function validate(entry, binding) {
     const started = Math.floor(Date.now() / 1000)
+    let res
     try {
       const wrong = binding === 'client'
-      const res = await request(config.identity_origin + '/internal/v1/identity/validate', {
+      res = await request(config.identity_origin + '/internal/v1/identity/validate', {
         method: 'POST', headers: { 'Content-Type': 'application/json',
           Authorization: 'Basic ' + Buffer.from(config.client_id + ':' + (wrong ? 'invalid-validation-secret-00000000' : validationSecret)).toString('base64') },
         body: JSON.stringify({ credential: entry.token,
           tenant_id: binding === 'tenant' ? '22222222-2222-4222-8222-222222222222' : config.tenant,
           audience: binding === 'audience' ? 'wrong-audience' : config.audience }) }, true)
-      const data = await res.json()
-      if (res.headers.get('cache-control') !== 'no-store') fail()
-      if (res.status === 200) {
-        const now = Math.floor(Date.now() / 1000)
-        if (now < started) fail()
-        checkFacts(data, config, entry.subject, now)
-        return { status: 200, online: true, session_id: data.session_id }
-      }
-      const codes = { malformed_request: 400, invalid_client: 401, invalid_credential: 401,
-        identity_not_active: 403, rate_limited: 429, identity_unavailable: 503 }
-      if (codes[data.code] !== res.status || !uuid.test(data.correlation_id)) fail()
-      return { status: res.status, online: true, correlation_id: data.correlation_id }
-    } catch { return { status: 503, online: true } }
+    } catch { return { status: 503, identity_status: null, online: false } }
+    return validationResponse(res, config, entry, started)
   }
 
   const server = https.createServer({ key: readFileSync('/run/test/product.key'), cert: readFileSync('/run/test/product.pem') }, async (req, res) => {
