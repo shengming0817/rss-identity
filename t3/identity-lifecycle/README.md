@@ -2,6 +2,8 @@
 
 本载体消费固定候选，验证 binary、配置/秘密、TLS、PG、Hydra、Keycloak、RSS producer 和监听器在启停中的组合边界。它不构建产品，也不从执行 checkout 读取部署模板：renderer、字段示例、镜像、二进制和迁移身份均来自候选。产品缺陷由独立实现项 #2419 / PR #1008 修复。
 
+固定版本、原件位置和重建边界见[本次验收记录](../../docs/deployment/202609120756-2340-lifecycle-acceptance.md)。
+
 ## 执行
 
 需要 Python 3.11+、Docker Engine、Compose 和足够的本地容器资源。候选三份 OCI 为 Linux amd64；ARM64 Engine 使用仿真运行产品镜像，固定 provider 多架构摘要按 Engine 原生架构解析。结果逐项记录实际镜像 ID/架构；该环境不提供性能或容量结论。
@@ -24,7 +26,7 @@ python3 -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
 | --- | --- |
 | candidate / prepare | 完整摘要匹配；真实 daemon 文件系统保留 UID/GID/权限；独立 Compose 项目、网络和卷 |
 | install / healthy | 新卷安装 schema v7；内嵌迁移摘要一致；管理员只初始化一次；公布的 HTTPS 端口提供对应 UI；本地登录、Hydra 验证拒绝无效凭据、Keycloak provider test 通过 |
-| cold_dependencies | PG 不可用拒绝启动；Hydra 不可用 live 但不 ready/不开网关；Keycloak 不可用仍 ready，provider test 失败；各自恢复 |
+| cold_dependencies | PG 不可用拒绝启动；Hydra 认证 admin 停止时 live 但不 ready，实际网关启动被 health 依赖拒绝；Keycloak 不可用仍 ready，provider test 失败；各自恢复 |
 | running_dependencies | PG 故障拒绝业务；Hydra 故障拒绝在线验证而本地登录可用；Keycloak 故障只影响对应 provider；Identity 不重启即可恢复 |
 | partial_start | 在 PG 已装配后制造监听 bind 失败，非零退出并释放 runtime PG 连接 |
 | clean_drain / timeout_drain | PG 锁确认真实请求已进入数据库；SIGTERM 后新请求不能进入该 SQL；及时释放锁时已有请求完成并退出 0，保留锁时资源预算耗尽、非零退出且不是 OOM/外部强杀 |

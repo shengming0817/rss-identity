@@ -75,9 +75,9 @@ def cold_dependencies(f, observed):
     for dependency in ("postgres", "hydra", "keycloak"):
         f.compose("stop", "--timeout", "40", "public-gateway", "private-gateway", "identity", timeout=90)
         if dependency == "hydra":
-            # Keep the process unavailable while Compose tries the real dependency graph.
-            # A stopped provider would simply be restarted by `up gateway`.
-            f.compose("pause", "hydra")
+            # The authenticated admin endpoint is Identity's actual Hydra dependency.
+            # `up gateway` does not repair this sidecar, unlike a stopped Hydra process.
+            f.compose("stop", "--timeout", "40", "hydra-admin")
         else:
             f.compose("stop", "--timeout", "40", dependency, timeout=90)
         if dependency == "postgres":
@@ -96,7 +96,8 @@ def cold_dependencies(f, observed):
                     require(f.state(gateway)["status"] in ("created", "exited"), "cold_gateway_open")
                 require(not f.public_port_open(), "cold_gateway_published_port")
                 observed[dependency] = {"live": 200, "ready": False, "gateway_start_exit": attempt.returncode, "gateway_open": False}
-                f.compose("unpause", "hydra")
+                require(f.state("hydra-admin")["status"] == "exited", "cold_fault_was_repaired")
+                observed[dependency]["fault"] = "authenticated_admin_stopped"
             else:
                 f.ready()
                 f.up("public-gateway", "private-gateway")
