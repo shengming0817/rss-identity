@@ -97,6 +97,24 @@ class FederatedProof(unittest.TestCase):
         self.assertEqual(len(value.containers), 1)
         self.assertTrue(value.containers[0].startswith('owned-stage-'))
 
+    def test_failed_administrator_setup_never_opens_runtime_ingress(self):
+        value = stack.Stack.__new__(stack.Stack)
+        value.name, value.admins, value.containers = 'owned', ['admin-a', 'admin-b'], []
+        value.candidate = {'images': {'operator': 'fixed-operator'}}
+        value.config = {
+            'services': {'maintenance': {'volumes': [
+                {'source': name, 'target': '/run/' + name} for name in ['config', 'input']]}},
+            'volumes': {name: {'name': 'owned-' + name} for name in ['config', 'input']},
+        }
+        value.compose, value.root = Mock(), Mock()
+        with patch.object(stack, 'docker', side_effect=RuntimeError('maintenance rejected')):
+            with self.assertRaisesRegex(RuntimeError, 'maintenance rejected'):
+                value.initialize()
+        started = [call.args[2:] for call in value.compose.call_args_list
+                   if call.args[:2] == ('up', '-d')]
+        for forbidden in ['identity', 'public-gateway', 'private-gateway', 't33-front', 't33-consumer']:
+            self.assertFalse(any(forbidden in services for services in started), forbidden)
+
     def test_signal_and_daemon_failure_keep_cleanup_and_failure_receipt(self):
         for cause in ['signal', 'daemon']:
             with self.subTest(cause=cause), tempfile.TemporaryDirectory() as tmp:

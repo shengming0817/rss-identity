@@ -295,7 +295,6 @@ server { listen 443 ssl; server_name @PRODUCT@; location / { proxy_set_header Ho
         self.compose('run', '--rm', 'hydra-migrate')
         self.compose('up', '-d', 'hydra', 'hydra-admin', 'keycloak')
         self.compose('run', '--rm', 'hydra-clients')
-        self.compose('up', '-d', 'identity', 'public-gateway', 'private-gateway')
         # Keep the original tenant-scoped maintenance command and permission profile.
         for tenant, principal in zip(TENANTS, self.admins):
             cid = self.name + '-maintenance-' + tenant[:4]
@@ -315,6 +314,7 @@ server { listen 443 ssl; server_name @PRODUCT@; location / { proxy_set_header Ho
             docker('run', '--rm', '--pull', 'never', '--name', cid, '--platform', 'linux/amd64', '--user', '10001:10001',
                    '--network', self.name + '_protocol', '--entrypoint', 'identity-admin', *mounts,
                    self.candidate['images']['operator'], '/run/config/maintenance.json', 'initialize', principal, 'admin', '/run/input/init-password')
+        self.compose('up', '-d', 'identity', 'public-gateway', 'private-gateway')
         self.compose('up', '-d', 't33-front')
         wait(lambda: self.compose('exec', '-T', 't33-front', 'curl', '--fail', '--silent', '--max-time', '3', '--cacert', '/run/input/ca.crt', '--resolve', HOST + ':443:127.0.0.1', ORIGIN + '/oidc/.well-known/openid-configuration') != '', 'public OIDC ingress')
         self.compose('up', '-d', 't33-consumer')
