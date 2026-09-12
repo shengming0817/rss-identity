@@ -77,8 +77,8 @@ I03–I05 必须在各自实现时闭合安全事件，不能最后另加一个�
 每个 T3 登记时须单独保留必要性、固定 artifact、provider/config 矩阵、实际输入输出、故障和排除项。可复用已发布测试设施，不能共享实现 PR 混交付。T31–T33 不自动证明 I09 后新增的 MFA/恢复行为。
 
 T32 的独立执行载体见 [本地认证候选验收](../../t3/access-local-auth/README.md)，入口为
-`make test-t3-local-auth`，消费已有固定候选。测试代码存在不表示实际验收已通过；结果绑定本项 PR
-中的实际运行记录。事件连通截止到持久 Outbox；测试消费者不持有 MDM 业务授权。
+`make test-t3-local-auth`，消费已有固定候选。固定候选 `06d4e854...` 的 10 场景实跑通过，见[原则复核与运行记录](../reviews/202609120745-2341-local-auth-t3.md)；
+该结论绑定记录中的 artifact/config/provider，不自动外推到其它版本。事件连通截止到持久 Outbox；测试消费者不持有 MDM 业务授权。
 
 ## M01：由 rss-mdm 拥有的独立接入项
 
