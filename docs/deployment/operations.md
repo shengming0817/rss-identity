@@ -12,7 +12,7 @@
 
 Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定上游镜像的1000:0，以支持其启动时augmentation。渲染器由root执行，按唯一服务owner交付配置并核验权限；其它调用者明确拒绝。私钥和秘密按消费服务UID/GID准备（Keycloak私钥1000:0，其它容器秘密10001:10001），均0600；公共CA/证书须对消费用户可读；仅给各服务挂载其所需文件。安装前执行下文volume-init任务，为空卷固定目录设置10001所有权；有内容且属主不匹配的旧卷明确拒绝，不递归修改。维护秘密只在维护任务中挂载，日常服务无 owner/maintenance mount。
 
-准备独立 consumer Docker network，与 MDM 所在网络连接。private-gateway 在此网络以 Identity hostname 提供 TLS 443；容器专属网络命名空间允许非root绑定该端口，消费方保持同一个 Identity origin，不能改 issuer。公网只发布 public-gateway 的443。后端网段和协议网段必须是不冲突的独立 /24，网关地址与输入精确一致。
+准备独立 consumer Docker network，与 MDM 所在网络连接。private-gateway 在此网络以 Identity hostname 提供 TLS 443；容器专属网络命名空间允许非root绑定该端口，消费方保持同一个 Identity origin，不能改 issuer。公网只发布 public-gateway 的443；该网关独占 public 网络，保证主机端口实际发布，数据库与协议服务仍只接内部网络。后端网段和协议网段必须是不冲突的独立 /24，网关地址与输入精确一致。每个网段的后半段 /25 用于动态分配，避免先启动的 provider 占用固定服务地址。public-gateway 在主机和容器内均监听 443；协议侧 Hydra 固定为 .5、Keycloak 固定为 .6。网关按这些部署内地址连接 provider，TLS 仍校验 Keycloak 名称和 CA；provider 离线不会因启动时 DNS 解析而阻止本地登录网关启动。
 
 ## 渲染和安装
 
