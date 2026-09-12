@@ -196,11 +196,11 @@ print(Path('/srv/t33/rendered/compose.json').read_text())
         services['private-gateway']['networks']['consumer']['aliases'].append('validation.t33.test')
         # One test-only public ingress gives the real gateway its external port-443 mapping.
         # It never routes Identity API requests directly to the application.
-        front_config = '''pid /tmp/nginx.pid; error_log stderr crit; events {} http { access_log off; error_log stderr crit;
+        front_config = '''pid /tmp/nginx.pid; error_log stderr crit; events {} http { access_log off; error_log stderr crit; resolver 127.0.0.11 ipv6=off;
 client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi;
 ssl_certificate /run/input/tls.crt; ssl_certificate_key /run/input/tls.key; ssl_protocols TLSv1.2 TLSv1.3;
 server { listen 443 ssl; server_name identity.t33.test sso.t33.test; location / { proxy_ssl_verify on; proxy_ssl_trusted_certificate /run/input/ca.crt; proxy_ssl_server_name on; proxy_ssl_name $host; proxy_set_header Host $host; proxy_pass https://public-gateway:8443; } }
-server { listen 443 ssl; server_name product.t33.test; location / { proxy_set_header Host $host; proxy_pass http://t33-consumer:8080; } } }
+server { listen 443 ssl; server_name product.t33.test; location / { proxy_set_header Host $host; set $consumer t33-consumer:8080; proxy_pass http://$consumer; } } }
 '''
         consumer_config = {'listen': '0.0.0.0:8080', 'product_origin': PRODUCT, 'issuer': ORIGIN + '/oidc',
             'validation_origin': VALIDATION, 'public_address': str(self.front[10]) + ':443',
@@ -287,7 +287,9 @@ server { listen 443 ssl; server_name product.t33.test; location / { proxy_set_he
             docker('run', '--rm', '--name', cid, '--platform', 'linux/amd64', '--user', '10001:10001',
                    '--network', self.name + '_protocol', '--entrypoint', 'identity-admin', *mounts,
                    self.candidate['images']['operator'], '/run/config/maintenance.json', 'initialize', principal, 'admin', '/run/input/init-password')
-        self.compose('up', '-d', 't33-consumer', 't33-front')
+        self.compose('up', '-d', 't33-front')
+        wait(lambda: self.compose('exec', '-T', 't33-front', 'curl', '--fail', '--silent', '--max-time', '3', '--cacert', '/run/input/ca.crt', '--resolve', 'identity.t33.test:443:127.0.0.1', ORIGIN + '/oidc/.well-known/openid-configuration') != '', 'public OIDC ingress')
+        self.compose('up', '-d', 't33-consumer')
         wait(lambda: 'running' in self.compose('ps', 't33-consumer', '--format', '{{.State}}'), 'consumer')
 
     def sql(self, sql):
