@@ -4,6 +4,9 @@ import { chromium, expect } from '@playwright/test'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import process from 'node:process'
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
+const playwrightVersion = require('@playwright/test/package.json').version
 
 const config = JSON.parse(readFileSync('/input/browser.json', 'utf8'))
 const { origin, idp, product, tenants, password } = config
@@ -24,6 +27,7 @@ function pass(name, observations = {}) {
   write('progress', { stage: name, result: 'passed' })
 }
 async function control(action, extra = {}) {
+  step = 'control'
   const id = ++sequence
   write('request', { id, action, ...extra })
   const end = Date.now() + 180000
@@ -31,7 +35,7 @@ async function control(action, extra = {}) {
     if (existsSync('/out/response.json')) {
       const response = JSON.parse(readFileSync('/out/response.json', 'utf8'))
       if (response.id === id) {
-        if (response.error) throw new Error('control failed')
+        if (response.error) throw new Error('control failed: ' + response.action)
         return response.value
       }
     }
@@ -47,11 +51,13 @@ async function context() {
   return ctx
 }
 async function current(ctx, index) {
+  step = 'central_session'
   const response = await ctx.request.get(`${origin}/api/v1/tenants/${tenants[index]}/session`)
   expect(response.status()).toBe(200)
   return response.json()
 }
 async function api(ctx, index, suffix, data, method = 'POST', status = 200) {
+  step = 'identity_api'
   const headers = { Origin: origin, 'X-Identity-Request': '1' }
   if (suffix !== 'login') {
     const session = await ctx.request.get(`${origin}/api/v1/tenants/${tenants[index]}/session`)
@@ -77,12 +83,14 @@ async function enabled(index, value) {
     { expected_version: p.version, enabled: value })
 }
 async function keycloak(page, user) {
+  step = 'keycloak_form'
   await expect(page.locator('#username')).toBeVisible()
   await page.locator('#username').fill(user)
   await page.locator('#password').fill(password)
   await page.locator('#kc-login').click()
 }
 async function tenantSso(ctx, index, user = 'alice') {
+  step = 'tenant_ui'
   const page = await ctx.newPage()
   await page.goto(`${origin}/tenants/${tenants[index]}/login`)
   await page.getByRole('button').filter({ hasText: config.providers[index].client_id }).click()
@@ -91,6 +99,7 @@ async function tenantSso(ctx, index, user = 'alice') {
   return { page, session: await current(ctx, index) }
 }
 async function consumer(ctx, index, user = 'alice') {
+  step = 'consumer_flow'
   const response = await ctx.request.post(`${product}/auth/login`, {
     headers: { Origin: product, 'X-T33-Request': '1' }, data: { client_id: config.clients[index].client_id },
   })
@@ -122,6 +131,7 @@ async function begin(ctx, index, suffix = 'login', fields = {}) {
     { client_id: 'identity-ui', return_target: 'resume', ...fields })
 }
 async function capture(ctx, authorization, user = 'alice') {
+  step = 'callback_capture'
   const page = await ctx.newPage()
   let callback
   await page.route(`${origin}/api/v1/oidc/callback?**`, async route => {
@@ -135,6 +145,7 @@ async function capture(ctx, authorization, user = 'alice') {
   return callback
 }
 async function deliver(ctx, callback, success) {
+  step = 'callback_delivery'
   const before = (await ctx.cookies(origin)).find(v => v.name === '__Host-identity-session')?.value
   const response = await ctx.request.get(callback, { maxRedirects: 0 })
   expect(response.status()).toBe(303)
@@ -148,6 +159,7 @@ async function deliver(ctx, callback, success) {
   }
 }
 async function productStatus(ctx, status) {
+  step = 'product_session'
   const response = await ctx.request.get(`${product}/session`)
   expect(response.status()).toBe(status)
   return response
@@ -169,7 +181,8 @@ try {
     catch { return false }
   }, { timeout: 180000, intervals: [1000] }).toBe(true)
   const build = await preflight.request.get(`${origin}/identity-build.json`)
-  expect((await build.json()).revision).toBe('37b7fb356aa7e436cc708caa1593427e6d553d30')
+  expect((await build.json()).revision).toBe(config.ui_revision)
+  expect(playwrightVersion).toBe(config.playwright)
   for (let index = 0; index < 2; ++index) {
     step = `provider_${index}`
     const admin = await context(); admins.push(admin)
@@ -342,7 +355,7 @@ try {
   expect(events.some(e => e.action === 'jit_created' && e.principal === joined.session.identity.principal_id && e.provider_id === providers[0].id)).toBe(true)
   expect(events.some(e => e.action === 'linked' && e.principal === localAccount.principal_id)).toBe(true)
   pass(stage, { actions: [...new Set(events.map(e => e.action))].sort(), count: events.length })
-  write('result', { result: 'passed', checks, browser: browser.version(), playwright: '1.60.0',
+  write('result', { result: 'passed', checks, browser: browser.version(), playwright: playwrightVersion,
     providers: providers.map(p => ({ id: p.id, version: p.version, enabled: p.enabled })) })
 } catch (error) {
   write('result', { result: 'failed', stage, step, failure: error?.name === 'TimeoutError' ? 'timeout' : 'assertion', checks })

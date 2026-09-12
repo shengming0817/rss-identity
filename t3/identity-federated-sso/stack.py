@@ -2,6 +2,8 @@
 import ipaddress
 import json
 import os
+import re
+from urllib.parse import urlsplit
 from pathlib import Path
 import secrets
 import shutil
@@ -15,12 +17,23 @@ ORIGIN = 'https://identity.t33.test'
 IDP = 'https://sso.t33.test'
 PRODUCT = 'https://product.t33.test'
 VALIDATION = 'https://validation.t33.test'
+HOST, IDP_HOST, PRODUCT_HOST, VALIDATION_HOST = [urlsplit(v).hostname for v in (ORIGIN, IDP, PRODUCT, VALIDATION)]
+SENSITIVE = set()
+
+def redact(value):
+    for secret in sorted(SENSITIVE, key=len, reverse=True):
+        if secret:
+            value = value.replace(secret, '<redacted>')
+    value = re.sub(r'(https?://[^\s?]+)\?[^\s]+', r'\1?<redacted>', value)
+    value = re.sub(r'(?i)(authorization|password|cookie|token|verifier|secret)(\s*[:=]\s*)[^\n]+', r'\1\2<redacted>', value)
+    return value[-4096:]
+
 
 
 def command(args, *, timeout=180, input=None, cwd=None):
     result = subprocess.run(args, input=input, text=True, capture_output=True, timeout=timeout, cwd=cwd)
     if result.returncode:
-        raise RuntimeError('T33 command failed: ' + ' '.join(str(v) for v in args[:3]) + ' exit=' + str(result.returncode))
+        raise RuntimeError('T33 command failed: ' + ' '.join(str(v) for v in args[:3]) + ' exit=' + str(result.returncode) + ': ' + redact(result.stderr))
     return result.stdout.strip()
 
 
@@ -30,14 +43,15 @@ def docker(*args, **kwargs):
 
 def wait(check, stage, seconds=180):
     end = time.monotonic() + seconds
+    last = 'not ready'
     while time.monotonic() < end:
         try:
             if check():
                 return
-        except (RuntimeError, subprocess.SubprocessError, ValueError):
-            pass
+        except (RuntimeError, subprocess.SubprocessError, ValueError) as error:
+            last = redact(str(error))
         time.sleep(1)
-    raise RuntimeError('T33 readiness failed: ' + stage)
+    raise RuntimeError('T33 readiness failed: ' + stage + ': ' + last)
 
 
 class Stack:
@@ -78,6 +92,7 @@ class Stack:
     def ephemeral_secret(self, name):
         value = secrets.token_urlsafe(36)
         self.secrets.append(value)
+        SENSITIVE.add(value)
         return self.write(name, value)
 
     def certificate(self, name, names):
@@ -87,6 +102,8 @@ class Stack:
         ext.write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=' + ','.join('DNS:' + n for n in names) + '\n')
         command(['openssl', 'x509', '-req', '-in', str(csr), '-CA', str(self.inputs / 'ca.crt'), '-CAkey', str(self.inputs / 'ca.key'), '-CAcreateserial', '-days', '1', '-extfile', str(ext), '-out', str(crt)])
         key.chmod(0o600)
+        SENSITIVE.add(key.read_text())
+        self.secrets.append(key.read_text())
         return '/srv/t33/input/' + crt.name, '/srv/t33/input/' + key.name
 
     def subnets(self):
@@ -126,7 +143,9 @@ class Stack:
                               'tenants': [{'tenant_id': t, 'epoch': 1} for t in TENANTS]}
         runtime['public_gateway'], runtime['private_gateway'] = str(back[2]), str(back[3])
         runtime['hydra']['addresses'] = [str(proto[5]) + '/32']
-        runtime['oidc']['state_key_file'] = self.write('state-key-hex', secrets.token_hex(32))
+        state_key = secrets.token_hex(32)
+        SENSITIVE.add(state_key); self.secrets.append(state_key)
+        runtime['oidc']['state_key_file'] = self.write('state-key-hex', state_key)
         runtime['oidc']['providers'] = []
         runtime['hydra']['clients'] = []
         for index, tenant in enumerate(TENANTS):
@@ -146,18 +165,20 @@ class Stack:
         runtime['database']['ca_file'] = ca
         runtime['oidc']['ca_file'] = ca
         runtime['hydra']['ca_file'] = ca
-        for key, names in [('tls', ['identity.t33.test', 'sso.t33.test', 'product.t33.test', 'validation.t33.test']),
+        for key, names in [('tls', [HOST, IDP_HOST, PRODUCT_HOST, VALIDATION_HOST]),
                            ('keycloak', ['keycloak']), ('hydra_admin', ['hydra-admin']), ('postgres', ['postgres'])]:
             data[key + '_certificate_file'], data[key + '_key_file'] = self.certificate(key, names)
         password = 'T33-only-' + secrets.token_urlsafe(24)
         self.secrets.append(password)
+        SENSITIVE.add(password)
         self.write('user-password', password)
         self.admins = [str(uuid.uuid5(uuid.NAMESPACE_URL, self.name + t)) for t in TENANTS]
         self.data = data
         self.write('deployment.json', data)
         self.browser_config = {'origin': ORIGIN, 'idp': IDP, 'product': PRODUCT, 'tenants': TENANTS,
             'admins': self.admins, 'password': password, 'providers': runtime['oidc']['providers'],
-            'clients': runtime['hydra']['clients'], 'ca_file': '/input/ca.crt'}
+            'clients': runtime['hydra']['clients'], 'ca_file': '/input/ca.crt',
+            'ui_revision': self.record['ui_revision'], 'playwright': self.record['browser']['playwright']}
         # Browser input contains fixture secrets only and is never copied to the public receipt.
         self.write('browser.json', self.browser_config)
         self.public_config = {'identity_origin': runtime['identity_origin'],
@@ -168,7 +189,7 @@ class Stack:
     def root(self, script, *, volumes=(), input=None):
         name = self.name + '-stage-' + uuid.uuid4().hex[:8]
         self.containers.append(name)
-        return docker('run', '--rm', '--name', name, '--user', '0:0', '--network', 'none', '--entrypoint', 'python3',
+        return docker('run', '-i', '--rm', '--pull', 'never', '--name', name, '--user', '0:0', '--network', 'none', '--entrypoint', 'python3',
                       '-v', self.work + ':/srv/t33', '-v', str(self.artifacts) + ':/artifacts:ro',
                       *[v for mount in volumes for v in ['-v', mount]], self.image, '-c', script, input=input)
 
@@ -178,7 +199,7 @@ class Stack:
 from pathlib import Path
 shutil.copytree('/staging','/srv/t33/input')
 for p in Path('/srv/t33/input').iterdir():
- os.chmod(p,0o600);os.chown(p,10001,10001)
+ os.chmod(p,0o644 if p.suffix=='.crt' else 0o600);os.chown(p,10001,10001)
 os.chown('/srv/t33/input/keycloak.key',1000,0)
 subprocess.run(['python3','/artifacts/candidate/deploy.py','--input','/srv/t33/input/deployment.json','--output','/srv/t33/rendered','--candidate','/artifacts/candidate/candidate.json'],check=True)
 pw=Path('/srv/t33/input/user-password').read_text()
@@ -193,15 +214,15 @@ print(Path('/srv/t33/rendered/compose.json').read_text())
         services['public-gateway'].pop('ports')
         services['public-gateway']['networks']['front'] = {'ipv4_address': str(self.front[11])}
         config['networks']['front'] = {'internal': True, 'ipam': {'config': [{'subnet': str(self.front)}]}}
-        services['private-gateway']['networks']['consumer']['aliases'].append('validation.t33.test')
+        services['private-gateway']['networks']['consumer']['aliases'].append(VALIDATION_HOST)
         # One test-only public ingress gives the real gateway its external port-443 mapping.
         # It never routes Identity API requests directly to the application.
         front_config = '''pid /tmp/nginx.pid; error_log stderr crit; events {} http { access_log off; error_log stderr crit; resolver 127.0.0.11 ipv6=off;
 client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi;
 ssl_certificate /run/input/tls.crt; ssl_certificate_key /run/input/tls.key; ssl_protocols TLSv1.2 TLSv1.3;
-server { listen 443 ssl; server_name identity.t33.test sso.t33.test; location / { proxy_ssl_verify on; proxy_ssl_trusted_certificate /run/input/ca.crt; proxy_ssl_server_name on; proxy_ssl_name $host; proxy_set_header Host $host; proxy_pass https://public-gateway:8443; } }
-server { listen 443 ssl; server_name product.t33.test; location / { proxy_set_header Host $host; set $consumer t33-consumer:8080; proxy_pass http://$consumer; } } }
-'''
+server { listen 443 ssl; server_name @IDENTITY@ @IDP@; location / { proxy_ssl_verify on; proxy_ssl_trusted_certificate /run/input/ca.crt; proxy_ssl_server_name on; proxy_ssl_name $host; proxy_set_header Host $host; proxy_pass https://public-gateway:8443; } }
+server { listen 443 ssl; server_name @PRODUCT@; location / { proxy_set_header Host $host; set $consumer t33-consumer:8080; proxy_pass http://$consumer; } } }
+'''.replace('@IDENTITY@', HOST).replace('@IDP@', IDP_HOST).replace('@PRODUCT@', PRODUCT_HOST)
         consumer_config = {'listen': '0.0.0.0:8080', 'product_origin': PRODUCT, 'issuer': ORIGIN + '/oidc',
             'validation_origin': VALIDATION, 'public_address': str(self.front[10]) + ':443',
             'ca_file': '/run/input/ca.crt', 'clients': [{**c,
@@ -227,7 +248,7 @@ server { listen 443 ssl; server_name product.t33.test; location / { proxy_set_he
             'entrypoint': ['nginx', '-e', 'stderr', '-c', '/run/config/front.conf', '-g', 'daemon off;'],
             'volumes': [bind('/srv/t33/input/' + n, '/run/input/' + n) for n in ['tls.crt', 'tls.key', 'ca.crt']] +
                        [bind('/srv/t33/input/front.conf', '/run/config/front.conf')],
-            'networks': {'front': {'ipv4_address': str(self.front[10]), 'aliases': ['identity.t33.test', 'sso.t33.test', 'product.t33.test']}}}
+            'networks': {'front': {'ipv4_address': str(self.front[10]), 'aliases': [HOST, IDP_HOST, PRODUCT_HOST]}}}
         # Docker Desktop cannot bind the renderer's Linux-owned files directly from macOS.
         # Deliver each service's exact declared files through separate read-only volumes;
         # a service never receives another service's credential files.
@@ -251,8 +272,15 @@ server { listen 443 ssl; server_name product.t33.test; location / { proxy_set_he
             self.root("import json,sys,shutil,os\nfrom pathlib import Path\nfor m in json.load(sys.stdin):\n p=Path('/delivery')/Path(m['target']).name;shutil.copy2(m['source'],p);s=Path(m['source']).stat();os.chown(p,s.st_uid,s.st_gid)",
                       volumes=[volume + ':/delivery'], input=json.dumps(mounts))
         for service in services.values():
+            service['pull_policy'] = 'never'
             if service['image'] in self.candidate['images'].values():
                 service['platform'] = 'linux/amd64'
+            else:
+                for item in self.record['providers'].values():
+                    if service['image'] == item['source']:
+                        service['image'] = item['image_id']
+                        service['platform'] = item['platform']
+                        break
         self.compose_path.write_text(json.dumps(config))
         self.compose_path.chmod(0o600)
         self.network_created = True
@@ -284,13 +312,13 @@ server { listen 443 ssl; server_name product.t33.test; location / { proxy_set_he
                       volumes=[config_volume + ':/delivery'], input=tenant)
             input_volume = next(self.config['volumes'][v['source']]['name'] for v in service['volumes'] if v['target'] == '/run/input')
             self.root("import shutil,os;shutil.copy2('/srv/t33/input/user-password','/delivery/init-password');os.chown('/delivery/init-password',10001,10001)", volumes=[input_volume + ':/delivery'])
-            docker('run', '--rm', '--name', cid, '--platform', 'linux/amd64', '--user', '10001:10001',
+            docker('run', '--rm', '--pull', 'never', '--name', cid, '--platform', 'linux/amd64', '--user', '10001:10001',
                    '--network', self.name + '_protocol', '--entrypoint', 'identity-admin', *mounts,
                    self.candidate['images']['operator'], '/run/config/maintenance.json', 'initialize', principal, 'admin', '/run/input/init-password')
         self.compose('up', '-d', 't33-front')
-        wait(lambda: self.compose('exec', '-T', 't33-front', 'curl', '--fail', '--silent', '--max-time', '3', '--cacert', '/run/input/ca.crt', '--resolve', 'identity.t33.test:443:127.0.0.1', ORIGIN + '/oidc/.well-known/openid-configuration') != '', 'public OIDC ingress')
+        wait(lambda: self.compose('exec', '-T', 't33-front', 'curl', '--fail', '--silent', '--max-time', '3', '--cacert', '/run/input/ca.crt', '--resolve', HOST + ':443:127.0.0.1', ORIGIN + '/oidc/.well-known/openid-configuration') != '', 'public OIDC ingress')
         self.compose('up', '-d', 't33-consumer')
-        wait(lambda: 'running' in self.compose('ps', 't33-consumer', '--format', '{{.State}}'), 'consumer')
+        wait(lambda: self.compose('exec', '-T', 't33-front', 'curl', '--silent', '--max-time', '3', '--output', '/dev/null', '--write-out', '%{http_code}', '--cacert', '/run/input/ca.crt', '--resolve', PRODUCT_HOST + ':443:127.0.0.1', PRODUCT + '/ready') == '204', 'consumer HTTPS readiness')
 
     def sql(self, sql):
         return self.compose('exec', '-T', 'postgres', 'psql', '-X', '-U', 'postgres', '-d', 'identity', '-At', '-v', 'ON_ERROR_STOP=1', '-c', sql)
@@ -324,50 +352,67 @@ server { listen 443 ssl; server_name product.t33.test; location / { proxy_set_he
         raise ValueError('unknown T33 control action')
 
     def run_browser(self):
-        browser_input = self.runtime / 'browser-input'
-        browser_input.mkdir(mode=0o700)
-        for name in ['browser.json', 'ca.crt']:
-            shutil.copy2(self.inputs / name, browser_input / name)
+        input_volume = self.volume(self.name + '-browser-input')
+        channel_volume = self.volume(self.name + '-channel')
+        self.root("import shutil,os\nfor n in ['browser.json','ca.crt']:\n shutil.copy2('/srv/t33/input/'+n,'/input/'+n);os.chown('/input/'+n,10001,10001)\nos.chown('/channel',10001,10001);os.chmod('/channel',0o700)",
+                  volumes=[input_volume + ':/input', channel_volume + ':/channel'])
+        control = self.name + '-control'
         browser = self.name + '-browser'
+        flags = ['--pull', 'never', '--user', '10001:10001', '--read-only', '--cap-drop', 'ALL',
+                 '--security-opt', 'no-new-privileges:true', '--tmpfs', '/tmp:rw,nosuid,size=1g']
+        self.containers.append(control)
+        docker('run', '-d', '--name', control, *flags, '--network', 'none', '-v', channel_volume + ':/channel',
+               '--entrypoint', 'sleep', self.image, 'infinity')
         self.containers.append(browser)
-        docker('run', '-d', '--name', browser, '--label', 'rss.t33.run=' + self.name,
-               '--network', self.name + '_front', '--user', str(os.getuid()) + ':' + str(os.getgid()),
-               '--shm-size', '1g', '-e', 'NODE_EXTRA_CA_CERTS=/input/ca.crt', '-v', str(self.channel) + ':/out',
-               '-v', str(browser_input) + ':/input:ro', self.image)
+        docker('run', '-d', '--name', browser, '--label', 'rss.t33.run=' + self.name, *flags,
+               '--network', self.name + '_front', '--shm-size', '1g', '-e', 'NODE_EXTRA_CA_CERTS=/input/ca.crt',
+               '-v', channel_volume + ':/out', '-v', input_volume + ':/input:ro', self.image)
         end = time.monotonic() + 2400
-        processed = None
-        progress = None
+        processed = progress = None
         while time.monotonic() < end:
-            progress_file = self.channel / 'progress.json'
-            if progress_file.exists():
-                current = json.loads(progress_file.read_text()).get('stage')
-                if current in proof.SCENARIOS and current != progress:
-                    progress = current
-                    print('T33 check passed: ' + current, flush=True)
-            result = self.channel / 'result.json'
-            if result.exists():
-                value = json.loads(result.read_text())
+            observed = json.loads(docker('exec', control, 'python3', '-B', '-c',
+                "import json;from pathlib import Path;print(json.dumps({n:json.loads(p.read_text()) for n in ['progress','request','result'] if (p:=Path('/channel')/(n+'.json')).exists()}))"))
+            current = observed.get('progress', {}).get('stage')
+            if current in proof.SCENARIOS and current != progress:
+                progress = current
+                print('T33 check passed: ' + current, flush=True)
+            if 'result' in observed:
+                value = observed['result']
                 proof.assert_safe(value, self.secrets)
                 wait(lambda: docker('inspect', '--format', '{{.State.Running}}', browser) == 'false', 'browser exit', seconds=30)
                 if docker('inspect', '--format', '{{.State.ExitCode}}', browser) != '0':
                     value['result'] = 'failed'
                 return value
-            request = self.channel / 'request.json'
-            if request.exists():
-                value = json.loads(request.read_text())
-                if value['id'] != processed:
-                    processed = value['id']
-                    try:
-                        response = {'id': processed, 'value': self.control(value)}
-                    except (RuntimeError, ValueError, subprocess.SubprocessError):
-                        response = {'id': processed, 'error': 'control_failed'}
-                    tmp = self.channel / 'response.tmp'
-                    tmp.write_text(json.dumps(response));tmp.chmod(0o600)
-                    tmp.replace(self.channel / 'response.json')
+            request = observed.get('request')
+            if request and request['id'] != processed:
+                processed = request['id']
+                try:
+                    response = {'id': processed, 'value': self.control(request)}
+                except (RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                    response = {'id': processed, 'error': 'control_failed', 'action': request.get('action'), 'diagnostic': redact(str(error))}
+                docker('exec', '-i', control, 'python3', '-B', '-c',
+                    "import sys,os;from pathlib import Path;p=Path('/channel/response.tmp');p.write_text(sys.stdin.read());p.chmod(0o600);os.replace(p,'/channel/response.json')",
+                    input=json.dumps(response))
             if docker('inspect', '--format', '{{.State.Running}}', browser) != 'true':
-                raise RuntimeError('T33 browser exited without a result')
+                raise RuntimeError('T33 browser exited without a result: ' + redact(docker('logs', '--tail', '30', browser)))
             time.sleep(.5)
         raise RuntimeError('T33 browser deadline exceeded')
+
+    def diagnostics(self):
+        results = []
+        try:
+            ids = self.compose('ps', '-a', '-q').split() if self.compose_created else []
+            for cid in ids:
+                value = json.loads(docker('inspect', cid))[0]
+                state = value['State']
+                logs = subprocess.run(['docker', 'logs', '--tail', '15', cid], capture_output=True, text=True, timeout=10)
+                results.append({'service': value['Config']['Labels'].get('com.docker.compose.service', 'unknown'),
+                    'state': state['Status'], 'exit_code': state['ExitCode'],
+                    'health': state.get('Health', {}).get('Status'),
+                    'summary': redact(logs.stdout + logs.stderr)})
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+            results.append({'state': 'diagnostic_unavailable', 'summary': redact(str(error))})
+        return results
 
     def cleanup(self):
         failures = []

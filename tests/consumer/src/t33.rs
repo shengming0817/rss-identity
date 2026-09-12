@@ -1,5 +1,6 @@
 //! Fixed, disposable browser consumer; not an MDM implementation or production BFF.
 //! ref: axum axum-v0.8.9 axum/src/serve/mod.rs.
+use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Query, RawQuery, State},
@@ -217,8 +218,9 @@ async fn execute() -> anyhow::Result<()> {
     let path = std::env::args()
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("configuration required"))?;
-    let config: Config = serde_json::from_str(&secret(&path)?)?;
-    let ca = std::fs::read(&config.ca_file)?;
+    let config: Config = serde_json::from_str(&secret(&path).context("private configuration")?)
+        .context("configuration format")?;
+    let ca = std::fs::read(&config.ca_file).context("CA file")?;
     let issuer = reqwest::Url::parse(&config.issuer)?;
     let http = reqwest::Client::builder()
         .no_proxy()
@@ -249,7 +251,8 @@ async fn execute() -> anyhow::Result<()> {
             },
             http.clone(),
         )
-        .await?;
+        .await
+        .context("OIDC discovery and client configuration")?;
         anyhow::ensure!(products.insert(id, p).is_none(), "duplicate client");
     }
     anyhow::ensure!(!products.is_empty(), "no clients");
@@ -279,14 +282,16 @@ async fn execute() -> anyhow::Result<()> {
             },
         ))
         .with_state(app);
-    let listener = tokio::net::TcpListener::bind(&config.listen).await?;
+    let listener = tokio::net::TcpListener::bind(&config.listen)
+        .await
+        .context("consumer listener bind")?;
     axum::serve(listener, router).await?;
     Ok(())
 }
 #[tokio::main]
 async fn main() {
-    if execute().await.is_err() {
-        eprintln!("T33 consumer unavailable");
+    if let Err(error) = execute().await {
+        eprintln!("T33 consumer unavailable: {error:#}");
         std::process::exit(1);
     }
 }

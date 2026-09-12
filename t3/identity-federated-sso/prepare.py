@@ -76,9 +76,27 @@ def prepare(out, ui_source, ui_dist):
         (out / 'runner').mkdir()
         shutil.copy(browser_source / 'browser.mjs', out / 'runner/browser.mjs')
         c = json.loads((out / 'candidate/candidate.json').read_text())
+        provider_artifacts = {}
+        (out / 'providers').mkdir()
+        for key in sorted(proof.PROVIDERS):
+            image = providers[key]
+            subprocess.run(['docker', 'pull', image], check=True)
+            inspected_provider = json.loads(run(['docker', 'image', 'inspect', image]))[0]
+            if not any(v.endswith('@' + image.split('@')[1]) for v in inspected_provider.get('RepoDigests', [])):
+                raise ValueError('provider registry identity mismatch')
+            provider_archive = out / 'providers' / (key + '.tar')
+            subprocess.run(['docker', 'save', '-o', str(provider_archive), inspected_provider['Id']], check=True)
+            provider_artifacts[key] = {'source': image, 'image_id': inspected_provider['Id'],
+                'platform': inspected_provider['Os'] + '/' + inspected_provider['Architecture'],
+                'archive_sha256': proof.sha(provider_archive)}
+        lock = json.loads((browser_source / 'package-lock.json').read_text())
+        playwright = lock['packages']['node_modules/@playwright/test']['version']
+        if playwright != lock['packages']['node_modules/playwright']['version'] or ':' + 'v' + playwright + '-noble@' not in tools['browser']:
+            raise ValueError('browser tool lock mismatch')
         record = {
             'format_version': 1, 'revision': revision, 'ui_revision': proof.UI_REVISION,
             'candidate_sha256': proof.sha(out / 'candidate/candidate.json'),
+            'providers': provider_artifacts,
             'consumer': {'revision': revision, 'target': 'x86_64-unknown-linux-gnu',
                          'sha256': proof.sha(out / 'consumer/identity-federated-t3-consumer'),
                          'lock_sha256': proof.sha(source / 'tests/consumer/Cargo.lock'),
@@ -87,7 +105,7 @@ def prepare(out, ui_source, ui_dist):
                          'toolchain': (out / 'consumer/toolchain.txt').read_text()},
             'browser': {'image': browser_name, 'image_id': inspected['Id'],
                         'platform': inspected['Os'] + '/' + inspected['Architecture'],
-                        'base': tools['browser'], 'archive_sha256': proof.sha(browser_archive),
+                        'base': tools['browser'], 'playwright': playwright, 'archive_sha256': proof.sha(browser_archive),
                         'lock_sha256': proof.sha(browser_source / 'package-lock.json')},
             'files': {name: proof.sha(out / name) for name in [
                 'runner/browser.mjs', 'candidate/deploy.py', 'candidate/deployment/providers.lock.json',
@@ -96,7 +114,9 @@ def prepare(out, ui_source, ui_dist):
         if identity() != revision or c['revision'] != revision:
             raise ValueError('source changed during T33 preparation')
         (out / 't33.json').write_text(json.dumps(record, indent=2) + '\n')
-        proof.load_artifacts(out, revision)
+        digest = proof.sha(out / 't33.json')
+        proof.load_artifacts(out, revision, digest)
+        print('T33_ARTIFACTS_SHA256=' + digest, flush=True)
         print('T33 immutable artifacts prepared: ' + revision)
 
 

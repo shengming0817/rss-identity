@@ -4,7 +4,9 @@ import json
 import re
 from pathlib import Path
 
-UI_REVISION = '37b7fb356aa7e436cc708caa1593427e6d553d30'
+TOOLS = json.loads((Path(__file__).resolve().parent / 'tools.lock.json').read_text())
+UI_REVISION = TOOLS['ui_revision']
+PROVIDERS = {'postgres', 'keycloak', 'hydra', 'nginx', 'runtime'}
 SCENARIOS = (
     'tenant_sso', 'consumer_sso', 'browser_binding', 'tenant_binding', 'callback_replay',
     'return_target', 'configuration_version', 'configuration_disabled', 'jit_disabled',
@@ -66,15 +68,19 @@ def assert_safe(value, secrets):
                 raise ValueError('sensitive T33 field')
             for child in item.values():
                 visit(child)
+        elif isinstance(item, str) and any(s and s in item for s in secrets):
+            raise ValueError('sensitive T33 evidence')
         elif isinstance(item, list):
             for child in item:
                 visit(child)
     visit(value)
 
 
-def load_artifacts(root, revision):
+def load_artifacts(root, revision, expected_sha256):
+    if not isinstance(expected_sha256, str) or not re.fullmatch('[0-9a-f]{64}', expected_sha256):
+        raise ValueError('T33_ARTIFACTS_SHA256 must be externally pinned')
     root = Path(root).resolve(strict=True)
-    record = json.loads((root / 't33.json').read_text())
+    record = json.loads(verify_file(root, 't33.json', expected_sha256).read_text())
     verify_identity(record, revision)
     for name, digest in record['files'].items():
         verify_file(root, name, digest)
@@ -96,4 +102,10 @@ def load_artifacts(root, revision):
     if set(record['files']) != {'runner/browser.mjs', 'candidate/deploy.py', 'candidate/deployment/providers.lock.json',
                                'candidate/deployment/example.json', 'candidate/deployment/keycloak-totp.json'}:
         raise ValueError('T33 file identities incomplete')
+    if set(record['providers']) != PROVIDERS:
+        raise ValueError('runtime provider closure incomplete')
+    for key, item in record['providers'].items():
+        if item['source'] != candidate['providers'][key] or not re.fullmatch('sha256:[0-9a-f]{64}', item['image_id']):
+            raise ValueError('runtime provider identity mismatch')
+        verify_file(root, 'providers/' + key + '.tar', item['archive_sha256'])
     return record, candidate

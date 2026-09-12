@@ -3,7 +3,8 @@ import importlib.util
 import json
 import sys
 import subprocess
-from unittest.mock import patch
+import signal
+from unittest.mock import patch, Mock
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,6 +16,9 @@ sys.modules[SPEC.name] = proof
 SPEC.loader.exec_module(proof)
 sys.path.insert(0, str(PATH.parent))
 import stack
+RUN_SPEC = importlib.util.spec_from_file_location('t33_run', PATH.parent / 'run.py')
+runner = importlib.util.module_from_spec(RUN_SPEC)
+RUN_SPEC.loader.exec_module(runner)
 
 
 class FederatedProof(unittest.TestCase):
@@ -34,6 +38,19 @@ class FederatedProof(unittest.TestCase):
             (root / 'link').symlink_to(artifact)
             with self.assertRaises(ValueError):
                 proof.verify_file(root, 'link', proof.sha(artifact))
+
+    def test_manifest_and_artifact_replacement_cannot_change_the_pinned_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / 't33.json'
+            artifact = root / 'consumer'
+            artifact.write_bytes(b'approved executable')
+            manifest.write_text(json.dumps({'revision': 'a' * 40, 'sha256': proof.sha(artifact)}))
+            expected = proof.sha(manifest)
+            artifact.write_bytes(b'substituted executable')
+            manifest.write_text(json.dumps({'revision': 'a' * 40, 'sha256': proof.sha(artifact)}))
+            with self.assertRaises(ValueError):
+                proof.load_artifacts(root, 'a' * 40, expected)
 
     def test_all_scenarios_must_execute_exactly_once_and_pass(self):
         checks = [{'name': name, 'result': 'passed'} for name in proof.SCENARIOS]
@@ -79,6 +96,52 @@ class FederatedProof(unittest.TestCase):
                 value.root('pass')
         self.assertEqual(len(value.containers), 1)
         self.assertTrue(value.containers[0].startswith('owned-stage-'))
+
+    def test_signal_and_daemon_failure_keep_cleanup_and_failure_receipt(self):
+        for cause in ['signal', 'daemon']:
+            with self.subTest(cause=cause), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                fake = Mock()
+                fake.secrets = []
+                fake.public_config = {}
+                fake.diagnostics.return_value = []
+                fake.cleanup.return_value = cause == 'signal'
+                if cause == 'signal':
+                    fake.configure.side_effect = lambda: signal.raise_signal(signal.SIGTERM)
+                record = {'consumer': {}, 'browser': {'image': 'tool', 'image_id': 'image'}, 'providers': {}}
+                command = lambda args, **kw: 'a' * 40 if 'rev-parse' in args else ''
+                with patch.object(runner, 'Stack', return_value=fake), \
+                        patch.object(runner.proof, 'load_artifacts', return_value=(record, {'archives': {}})), \
+                        patch.object(runner, 'command', side_effect=command), \
+                        patch.object(runner, 'docker', return_value='image', side_effect=RuntimeError('daemon unavailable') if cause == 'daemon' else None):
+                    with self.assertRaises(ValueError), runner.cancellation():
+                        runner.execute(root / 'artifacts', root / 'result', 'b' * 64)
+                fake.cleanup.assert_called_once()
+                result = json.loads((root / 'result/result.json').read_text())
+                self.assertEqual(result['observations']['result'], 'failed')
+                self.assertIn('SIGTERM' if cause == 'signal' else 'daemon', result['observations']['diagnostic'])
+
+    def test_root_caller_cannot_start_a_privileged_browser(self):
+        value = stack.Stack.__new__(stack.Stack)
+        value.name, value.image = 'owned', 'fixed-image'
+        value.containers, value.secrets = [], []
+        value.volume = lambda name: name
+        value.root = Mock()
+        def docker(*args, **kwargs):
+            if args[0] == 'exec':
+                return json.dumps({'result': {'result': 'passed', 'checks': []}})
+            if '{{.State.Running}}' in args:
+                return 'false'
+            if '{{.State.ExitCode}}' in args:
+                return '0'
+            return 'container'
+        with patch.object(stack.os, 'getuid', return_value=0), patch.object(stack, 'docker', side_effect=docker) as call:
+            value.run_browser()
+        browser = next(c.args for c in call.call_args_list if c.args[:4] == ('run', '-d', '--name', 'owned-browser'))
+        self.assertEqual(browser[browser.index('--user') + 1], '10001:10001')
+        self.assertIn('--read-only', browser)
+        self.assertEqual(browser[browser.index('--cap-drop') + 1], 'ALL')
+        self.assertIn('no-new-privileges:true', browser)
 
     def test_input_identity_has_no_legacy_or_missing_value_fallback(self):
         revision = 'a' * 40

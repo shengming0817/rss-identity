@@ -10,10 +10,11 @@
 make prepare-t33 T33_ARTIFACTS=/absolute/t33-artifacts \
   IDENTITY_UI_SOURCE=/absolute/fixed-rss-web \
   IDENTITY_UI_DIST=/absolute/fixed-rss-web/apps/identity/dist
-make test-t33 T33_ARTIFACTS=/absolute/t33-artifacts T33_OUTPUT=/absolute/new-t33-run
+make test-t33 T33_ARTIFACTS=/absolute/t33-artifacts \
+  T33_ARTIFACTS_SHA256="准备阶段输出并固定的64位摘要" T33_OUTPUT=/absolute/new-t33-run
 ```
 
-准备阶段调用正式 candidate builder；测试消费端从 Git archive 中以独立 Cargo.lock 构建 Linux amd64 binary，浏览器工具从固定 Playwright 1.60.0 镜像与 npm lock 构建。准备记录二进制、OCI、源码、UI、锁和工具链身份。运行只加载这些产物，不动态构建、下载源码、回退旧格式或猜选候选。
+准备阶段调用正式 candidate builder；测试消费端从 Git archive 中以独立 Cargo.lock 构建 Linux amd64 binary，浏览器工具从固定 Playwright 1.60.0 镜像与 npm lock 构建。准备记录二进制、OCI、源码、UI、锁和工具链身份，并导出全部五个运行 provider 的 Docker 归档。provider 归档按准备时核实的 registry digest→image ID/平台映射加载，Compose 只消费固定 image ID 且 pull_policy=never。准备输出的 T33_ARTIFACTS_SHA256 由调用方独立固定，运行前校验；不能在执行时从待验清单重新计算期望值。运行只加载这些产物，不动态构建、下载源码、回退旧格式或猜选候选。
 
 所需环境为 Docker Engine/Compose/buildx、Python >=3.11、Git、openssl、Cargo，以及候选构建需要的只读 RSS Git 凭据。秘密只提供给正式 BuildKit fetch。Linux amd64 产品与消费端可在 ARM Docker 主机仿真运行；实际架构记录在结果中，不据此宣称原生性能或容量。provider digest 只来自候选；浏览器工具锁与产品 provider 锁分开。
 
@@ -23,7 +24,7 @@ make test-t33 T33_ARTIFACTS=/absolute/t33-artifacts T33_OUTPUT=/absolute/new-t33
 
 测试 binary 仅提供 POST /auth/login、GET /auth/callback、GET /session，保存有界的临时事务及会话。每次 /session 都在线复核，协议凭据不进入浏览器。/session 的可选 client_id 仅选择另一个预注册测试 client，供跨租户/client 拒绝断言使用。它不是生产 BFF，不替代 MDM 或发布 SDK 验证。
 
-候选原始 deploy.py 在隔离 Linux 容器中执行，维持服务 UID、私有文件和网关路径。Docker Desktop 使用按服务、按挂载目标分组的只读 volume 交付渲染器声明的同一文件内容，不把全部部署秘密交给应用或浏览器。测试公共入口将外部 443 映射到真实 public-gateway；Identity API 始终经过候选网关。OIDC 公共解析与 private validation 分开，保留 TLS/SNI 校验。临时 CA 只进入隔离浏览器的 NSS 信任库及客户端，不修改宿主信任。
+候选原始 deploy.py 在隔离 Linux 容器中执行，维持服务 UID、私有文件和网关路径。Docker Desktop 使用按服务、按挂载目标分组的只读 volume 交付渲染器声明的同一文件内容，不把全部部署秘密交给应用或浏览器。测试公共入口将外部 443 映射到真实 public-gateway；Identity API 始终经过候选网关。OIDC 公共解析与 private validation 分开，保留 TLS/SNI 校验。临时 CA 只进入隔离浏览器的 NSS 信任库及客户端，不修改宿主信任。浏览器固定 UID 10001，控制通道采用专用 volume，文件系统只读、移除 capabilities 并禁止提权。
 
 ## 运行场景与结果
 
@@ -31,7 +32,7 @@ make test-t33 T33_ARTIFACTS=/absolute/t33-artifacts T33_OUTPUT=/absolute/new-t33
 
 撤销场景读取实际 grant horizon。只读观察产品 cleanup worker，在 horizon +120 秒以内确认 grant 删除及同一 grant 的 cleaned 事件；不修改业务记录、时间或直接调用内部清理接口。撤销提交后开始的在线复核必须拒绝，已验证的在途业务不追溯取消。上游退出、中央退出和产品会话退出不是全局退出承诺。
 
-唯一机器判定集合为 proof.py 的 SCENARIOS。缺少、重复、跳过或失败的场景不允许报告成功；浏览器异常退出或资源清理失败同样失败。公开 result.json 只记录固定身份、配置版本、HTTP 状态、安全错误类别、实际关联 ID 与断言。口令、cookie、code、verifier、token、callback query 和上游原文不进入结果。私有控制通道、证书及秘密在成功清理后删除。
+唯一机器判定集合为 proof.py 的 SCENARIOS。缺少、重复、跳过或失败的场景不允许报告成功；浏览器异常退出或资源清理失败同样失败。SIGTERM/SIGINT 转为受控失败并执行清理；不承诺捕获 SIGKILL。Docker 故障仍生成最低失败回执，诊断保留有界脱敏摘要。公开 result.json 只记录固定身份、配置版本、HTTP 状态、安全错误类别、实际关联 ID 与断言。口令、cookie、code、verifier、token、callback query 和上游原文不进入结果。私有控制通道、证书及秘密在成功清理后删除。
 
 T3 只证明事件连通及装配使用实际事务 owner；JWT 算法、完整 PG/CommitUnknown、并发 linking、完整清理重试矩阵引用原有 T1/T2。真实 MDM #2364、MFA #2366、恢复 #2367 保持独立。产品实现缺陷退回独立 owner PR 修复，更新候选后重验，不能缩减 T33 退出条件。
 
