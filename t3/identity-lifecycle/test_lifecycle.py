@@ -17,6 +17,20 @@ def digest(data):
 
 
 class CandidateTests(unittest.TestCase):
+    def test_verified_snapshot_survives_source_replacement(self):
+        from run import snapshot_candidate
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            expected, lock = self.candidate(source)
+            snapshot = root / "snapshot"
+            self.assertEqual(snapshot_candidate(source, snapshot, lock), expected)
+            (source / "deploy.py").write_text("# replaced after verification")
+            (source / "server.oci.tar").unlink()
+            self.assertEqual(load_candidate(snapshot, lock), expected)
+            self.assertEqual((snapshot / "deploy.py").stat().st_mode & 0o777, 0o400)
+
     def candidate(self, root):
         revision = "a" * 40
         value = {
@@ -116,6 +130,16 @@ class ResultTests(unittest.TestCase):
 
 
 class ProcessAndCleanupTests(unittest.TestCase):
+    def test_port_isolation_rejects_a_broken_renderer_port(self):
+        from fixture import isolate_public_port
+        for ports in (None, [], ["443:8443"]):
+            with self.subTest(ports=ports), self.assertRaisesRegex(Failure, "renderer_public_port"):
+                isolate_public_port({"ports": ports})
+        service = {"ports": ["443:443"], "networks": {"public": {}}}
+        isolate_public_port(service)
+        self.assertEqual(service, {"ports": [{"target": 443, "host_ip": "127.0.0.1", "protocol": "tcp"}],
+                                   "networks": {"public": {}}})
+
     def test_helper_receives_input_through_the_owned_pipe(self):
         from fixture import command
         result = command([sys.executable, "-c", "import sys; print(sys.stdin.read())"], input="fixture-input")
@@ -144,6 +168,19 @@ class ProcessAndCleanupTests(unittest.TestCase):
 
 
 class ProvenanceAndFinalizationTests(unittest.TestCase):
+    def test_changed_candidate_snapshot_cannot_pass_finalization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "snapshot"
+            snapshot.mkdir()
+            _, lock = CandidateTests().candidate(snapshot)
+            (snapshot / "deploy.py").write_text("# substituted")
+            self.assertFalse(finalize(RunResult(()), None, root, {}, root=root,
+                                      candidate_snapshot=snapshot, candidate_lock=lock))
+            recorded = json.loads((root / "result.json").read_text())
+            self.assertEqual(recorded["failure"], "candidate_changed_during_run")
+            self.assertTrue(recorded["cleanup"])
+
     def test_dirty_checkout_cannot_supply_a_harness_identity(self):
         import subprocess
         with tempfile.TemporaryDirectory() as directory:

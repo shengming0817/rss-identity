@@ -155,6 +155,11 @@ def eventually(probe, *, timeout=120, code="condition_timeout"):
     raise Failure(code)
 
 
+def isolate_public_port(service):
+    require(service.get("ports") == ["443:443"], "renderer_public_port")
+    service["ports"] = [{"target": 443, "host_ip": "127.0.0.1", "protocol": "tcp"}]
+
+
 class Fixture:
     def __init__(self, candidate_dir, candidate, output):
         self.candidate_dir, self.candidate, self.output = candidate_dir, candidate, output
@@ -239,12 +244,13 @@ class Fixture:
         self.docker("cp", self.helper + ":" + self.mount + "/rendered/compose.json", str(self.compose_file))
         self.public_ca = self.output / "public-ca.pem"
         self.docker("cp", self.helper + ":" + self.mount + "/input/ca.pem", str(self.public_ca))
+        renderer_compose_sha256 = sha(self.compose_file)
         value = json.loads(self.compose_file.read_text())
         value["name"] = self.project
         for service in value["services"].values():
             service["platform"] = "linux/amd64" if service["image"] in self.candidate["images"].values() else "linux/" + self.engine_arch
             service["pull_policy"] = "never"
-        value["services"]["public-gateway"]["ports"] = [{"target": 443, "host_ip": "127.0.0.1", "protocol": "tcp"}]
+        isolate_public_port(value["services"]["public-gateway"])
         self.compose_file.write_text(json.dumps(value, indent=2))
         self.compose_file.chmod(0o600)
         self.config = value
@@ -252,6 +258,7 @@ class Fixture:
                 "engine_platform": "linux/" + self.engine_arch, "product_platform": "linux/amd64",
                 "emulated": self.engine_arch != "amd64", "images": actual,
                 "deployment_sha256": self.info["deployment_sha256"], "compose_sha256": sha(self.compose_file),
+                "renderer_compose_sha256": renderer_compose_sha256,
                 "daemon_native_bind": True}
 
     def connect_helper(self):

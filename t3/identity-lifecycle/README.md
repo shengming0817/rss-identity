@@ -12,7 +12,7 @@
 make test-lifecycle LIFECYCLE_CANDIDATE=/absolute/fixed-candidate LIFECYCLE_OUTPUT=/absolute/new-result
 ```
 
-载体 checkout 必须是干净提交；输出目录必须不存在。`candidate.lock.json` 固定整个 manifest 与三个部署文件的 SHA-256；预检继续核对三份 OCI、四份二进制、镜像 revision/user/platform。换候选必须审查并更新锁文件，重新执行完整序列，不支持跳过阶段、历史配置适配或旧 schema 自动修复。
+载体 checkout 必须是干净提交；输出目录必须不存在。`candidate.lock.json` 固定整个 manifest 与三个部署文件的 SHA-256；预检继续核对三份 OCI、四份二进制、镜像 revision/user/platform。已锁定文件复制到本次 0700 目录下的只读快照，重新校验后只从快照加载镜像和执行 renderer；结束时再次复核快照及载体代码/锁文件摘要。换候选必须审查并更新锁文件，重新执行完整序列，不支持跳过阶段、历史配置适配或旧 schema 自动修复。
 
 ```sh
 python3 -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
@@ -38,6 +38,8 @@ python3 -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
 ## 隔离和证据
 
 随机租户、主体、存储身份、管理员口令及服务秘密仅属于一次运行。合成 CA/证书与秘密在专用 Docker 卷生成；root 准备器按产品要求交付 0600/指定 owner，不放宽产品权限验证。公网端口仅发布到主机 loopback，consumer 使用独立网络；不连接开发数据库，不读取用户产品秘密。
+
+隔离变换仅设置项目名、镜像运行平台/禁止拉取和随机 loopback 主机端口。变换前必须确认 renderer 公网端口为 `443:443`，容器端口保持 443；原始及隔离后 Compose 摘要均入结果，不修正候选的产品拓扑。
 
 清理有独立 120 秒总预算（超时进程组另有最多两次 2 秒终止宽限），二次中断记录为状态并继续回收；超时/失败报告剩余资源数量与枚举是否完整。清理按本次唯一 Compose / fixture ownership label 枚举资源，即使 Compose 解析或 Docker 创建半途失败也执行。`result.json` 只有在全序列依次通过且清理成功时才标 passed；失败保留阶段、非秘密状态和未运行项。清理失败也必须失败。正常完成移除本次容器、网络及所有卷，不删除其它项目资源或共享镜像。
 

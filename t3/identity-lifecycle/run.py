@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -66,6 +67,21 @@ def load_candidate(directory, lock):
     return value
 
 
+def snapshot_candidate(source, destination, lock):
+    value = load_candidate(source, lock)
+    destination.mkdir(mode=0o700)
+    names = ["candidate.json", *lock["files"],
+             *(item["file"] for item in value["archives"].values()),
+             *("binaries/" + name for name in value["binaries"])]
+    for name in names:
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copyfile(source / name, target)
+        target.chmod(0o400)
+    # Validate the copied bytes; all later Docker loads and renderer reads use this snapshot.
+    return load_candidate(destination, lock)
+
+
 class RunResult:
     def __init__(self, expected=PHASES):
         self.expected = expected
@@ -105,7 +121,8 @@ def harness_identity(root):
     return revision
 
 
-def finalize(result, fixture, output, harness_files, *, root=ROOT):
+def finalize(result, fixture, output, harness_files, *, root=ROOT,
+             candidate_snapshot=None, candidate_lock=None):
     def interrupted(_signal, _frame):
         result.data["cleanup_interrupted"] = True
     previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -123,6 +140,11 @@ def finalize(result, fixture, output, harness_files, *, root=ROOT):
             unchanged = False
         if not unchanged:
             result.data["failure"] = "harness_changed_during_run"
+        if candidate_snapshot is not None:
+            try:
+                load_candidate(candidate_snapshot, candidate_lock)
+            except (Failure, OSError, ValueError, KeyError, tarfile.TarError):
+                result.data["failure"] = "candidate_changed_during_run"
         passed = result.finish(cleanup_ok=cleanup_ok)
         (output / "result.json").write_text(json.dumps(result.data, indent=2) + "\n")
         return passed
@@ -141,7 +163,8 @@ def main():
     output.mkdir(parents=True, mode=0o700)
     result = RunResult()
     fixture = None
-    harness = [*HERE.glob("*.py"), ROOT / "hack/bounded_process.py"]
+    directory, lock = None, None
+    harness = [*HERE.glob("*.py"), HERE / "candidate.lock.json", ROOT / "hack/bounded_process.py"]
     harness_files = {str(p.relative_to(ROOT)): sha(p) for p in harness}
     result.data["harness_files"] = harness_files
     def interrupted(_signal, _frame):
@@ -149,11 +172,12 @@ def main():
     previous = signal.signal(signal.SIGTERM, interrupted)
     try:
         with result.phase("candidate") as observed:
-            directory = args.candidate.resolve()
             lock = json.loads((HERE / "candidate.lock.json").read_text())
-            candidate = load_candidate(directory, lock)
+            snapshot = output / "candidate"
+            candidate = snapshot_candidate(args.candidate.resolve(), snapshot, lock)
+            directory = snapshot
             observed.update(manifest_sha256=lock["manifest_sha256"], metadata=candidate,
-                            deployment_files=lock["files"])
+                            deployment_files=lock["files"], consumption="verified_readonly_snapshot")
             result.data["harness_revision"] = harness_identity(ROOT)
             result.data["harness_dirty"] = False
         from fixture import Fixture
@@ -170,7 +194,8 @@ def main():
             result.data["containers"] = fixture.diagnostics()
     finally:
         try:
-            passed = finalize(result, fixture, output, harness_files)
+            passed = finalize(result, fixture, output, harness_files,
+                              candidate_snapshot=directory, candidate_lock=lock)
         finally:
             signal.signal(signal.SIGTERM, previous)
     print("T31 " + result.data["status"], flush=True)
