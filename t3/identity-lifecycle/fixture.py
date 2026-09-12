@@ -60,7 +60,7 @@ def helper_prepare(data):
     ca = inputs / "ca.pem"
     ca_key = inputs / "ca.key"
     openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=identity-t31",
-            "-addext", "basicConstraints=critical,CA:TRUE", "-keyout", str(ca_key), "-out", str(ca))
+            "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-keyout", str(ca_key), "-out", str(ca))
     ca_key.chmod(0o600)
     for label, names, owner in [("tls", "DNS:identity.t31.test,DNS:sso.t31.test", (10001, 10001)),
                                ("postgres", "DNS:postgres", (10001, 10001)),
@@ -74,6 +74,7 @@ def helper_prepare(data):
                 "-keyout", str(key), "-out", str(csr))
         openssl("x509", "-req", "-in", str(csr), "-CA", str(ca), "-CAkey", str(ca_key),
                 "-CAcreateserial", "-days", "2", "-extfile", str(extension), "-out", str(certificate))
+        openssl("verify", "-x509_strict", "-purpose", "sslserver", "-CAfile", str(ca), str(certificate))
         key.chmod(0o600)
         os.chown(key, *owner)
         certificate.chmod(0o644)

@@ -108,6 +108,9 @@ def main():
     result = RunResult()
     fixture = None
     cleanup_ok = True
+    harness = [*HERE.glob("*.py"), ROOT / "hack/bounded_process.py"]
+    harness_files = {str(p.relative_to(ROOT)): sha(p) for p in harness}
+    result.data["harness_files"] = harness_files
     def interrupted(_signal, _frame):
         raise KeyboardInterrupt
     previous = signal.signal(signal.SIGTERM, interrupted)
@@ -138,6 +141,9 @@ def main():
         if fixture:
             cleanup_ok = fixture.cleanup()
         signal.signal(signal.SIGTERM, previous)
+        if any(sha(ROOT / name) != digest for name, digest in harness_files.items()):
+            result.data["failure"] = "harness_changed_during_run"
+            cleanup_ok = False
         passed = result.finish(cleanup_ok=cleanup_ok)
         (output / "result.json").write_text(json.dumps(result.data, indent=2) + "\n")
     print("T31 " + result.data["status"], flush=True)
