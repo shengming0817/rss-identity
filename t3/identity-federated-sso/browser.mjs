@@ -358,7 +358,14 @@ try {
   write('result', { result: 'passed', checks, browser: browser.version(), playwright: playwrightVersion,
     providers: providers.map(p => ({ id: p.id, version: p.version, enabled: p.enabled })) })
 } catch (error) {
-  write('result', { result: 'failed', stage, step, failure: error?.name === 'TimeoutError' ? 'timeout' : 'assertion', checks })
+  const location = String(error?.stack ?? '').match(/browser\.mjs:(\d+):(\d+)/)
+  const assertion = {}
+  for (const key of ['actual', 'expected']) {
+    const value = error?.matcherResult?.[key]
+    if (typeof value === 'number' || typeof value === 'boolean') assertion[key] = value
+  }
+  write('result', { result: 'failed', stage, step, failure: error?.name === 'TimeoutError' ? 'timeout' : 'assertion',
+    source_line: location ? Number(location[1]) : null, assertion, checks })
   process.exitCode = 1
 } finally {
   for (const ctx of contexts) await ctx.close().catch(() => {})

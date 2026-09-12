@@ -126,4 +126,6 @@ if __name__ == '__main__':
     parser.add_argument('--ui-source', required=True, type=Path)
     parser.add_argument('--ui-dist', required=True, type=Path)
     args = parser.parse_args()
-    prepare(args.output.resolve(), args.ui_source.resolve(), args.ui_dist.resolve())
+    from run import cancellation
+    with cancellation():
+        prepare(args.output.resolve(), args.ui_source.resolve(), args.ui_dist.resolve())

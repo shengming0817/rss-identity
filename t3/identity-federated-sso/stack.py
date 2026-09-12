@@ -409,6 +409,7 @@ server { listen 443 ssl; server_name @PRODUCT@; location / { proxy_set_header Ho
                 results.append({'service': value['Config']['Labels'].get('com.docker.compose.service', 'unknown'),
                     'state': state['Status'], 'exit_code': state['ExitCode'],
                     'health': state.get('Health', {}).get('Status'),
+                    'health_diagnostics': [redact(v.get('Output', '')) for v in state.get('Health', {}).get('Log', [])[-2:]],
                     'summary': redact(logs.stdout + logs.stderr)})
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
             results.append({'state': 'diagnostic_unavailable', 'summary': redact(str(error))})
