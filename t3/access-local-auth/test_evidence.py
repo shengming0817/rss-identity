@@ -54,14 +54,14 @@ class EvidenceTests(unittest.TestCase):
         tenant = '11111111-1111-4111-8111-111111111111'
         payload = {'action': 'initialized', 'tenant': tenant, 'principal': tenant, 'actor': None, 'epoch': 1,
                    'state': {'enabled': True, 'administrator': True, 'emergency': True, 'member_active': True, 'membership_epoch': 1}}
-        envelope = {'seq': 1, 'contract': 'identity.account.security', 'version': '2.0.0', 'schema': 'sha256:' + 'a' * 64,
+        envelope = {'seq': 1, 'contract': 'identity.account.security', 'version': 'v2', 'schema': 'sha256:' + 'a' * 64,
                     'payload': list(json.dumps(payload).encode())}
         schemas = {envelope['contract']: envelope['schema']}
         evidence.project_event(envelope, tenant, schemas)
         payload['state']['password'] = 'private'
         with self.assertRaises(evidence.Refused):
             evidence.project_event({**envelope, 'payload': list(json.dumps(payload).encode())}, tenant, schemas)
-        for field, value in [('version', '1.0.0'), ('schema', 'sha256:' + 'b' * 64)]:
+        for field, value in [('version', 'v1'), ('schema', 'sha256:' + 'b' * 64)]:
             with self.assertRaises(evidence.Refused):
                 evidence.project_event({**envelope, field: value}, tenant, schemas)
 

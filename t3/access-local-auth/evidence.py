@@ -67,9 +67,9 @@ def check_public(value):
         require(value is None or type(value) in (int, bool, float), 'unsafe_evidence_type')
 
 
-EVENT_SCHEMAS = {'identity.account.security': ('2.0.0', 'security-event-v2.json'),
-                 'identity.session.security': ('1.0.0', 'session-security-event-v1.json'),
-                 'identity.downstream.security': ('1.0.0', 'downstream-security-event-v1.json')}
+EVENT_SCHEMAS = {'identity.account.security': ('v2', 'security-event-v2.json'),
+                 'identity.session.security': ('v1', 'session-security-event-v1.json'),
+                 'identity.downstream.security': ('v1', 'downstream-security-event-v1.json')}
 
 
 def project_event(event, tenant, schemas):
