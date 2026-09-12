@@ -1,4 +1,4 @@
-import copy,json,tempfile,unittest,os
+import copy,json,tempfile,unittest,os,subprocess,uuid
 from unittest.mock import patch
 from pathlib import Path
 import deploy
@@ -64,6 +64,32 @@ class Deployment(unittest.TestCase):
    changed={**deploy.IMAGES,'postgres':'postgres:new@sha256:'+'b'*64}
    with patch.object(deploy,'IMAGES',changed):path=deploy.render(data,root/'rendered',candidate)
    self.assertEqual(json.loads(path.read_text())['services']['postgres']['image'],candidate['providers']['postgres'])
+
+ def test_compose_preserves_literal_shell_and_paths(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)/'literal-$IDENTITY_T31_SENTINEL';root.mkdir()
+   path=deploy.render(self.data(root),root/'rendered',self.candidate())
+   environment={**os.environ,'IDENTITY_T31_SENTINEL':'must-not-expand','d':'must-not-expand','owner':'must-not-expand'}
+   cli=['docker','compose','--profile','*','-p','identity-compose-test-'+uuid.uuid4().hex[:12],'-f',str(path)]
+   parsed=subprocess.run([*cli,'config','--format','json'],env=environment,text=True,capture_output=True,timeout=15,check=True)
+   services=json.loads(parsed.stdout)['services']
+   self.assertNotIn('must-not-expand',parsed.stdout)
+   mounts={v['target']:v['source'] for v in services['identity']['volumes']}
+   # `config` emits reusable Compose, so its serializer escapes dollars again.
+   self.assertEqual(mounts['/run/config/runtime.json'].replace('$$','$'),str((root/'rendered/runtime.json').resolve()))
+   try:
+    subprocess.run([*cli,'create','--no-build','--pull','never','volume-init'],env=environment,text=True,capture_output=True,timeout=30,check=True)
+    cid=subprocess.check_output([*cli,'ps','--all','--quiet','volume-init'],env=environment,text=True,timeout=15).strip()
+    inspected=json.loads(subprocess.check_output(['docker','inspect',cid],text=True,timeout=15))[0]
+    command=inspected['Config']['Cmd'][0]
+    self.assertIn('${spec%%:*}',command)
+    self.assertIn('"$owner"',command)
+    self.assertNotIn('$$',command)
+    subprocess.run(['docker','start','--attach',cid],text=True,capture_output=True,timeout=30,check=True)
+    state=json.loads(subprocess.check_output(['docker','inspect',cid],text=True,timeout=15))[0]['State']
+    self.assertEqual(state['ExitCode'],0)
+   finally:
+    subprocess.run([*cli,'down','--volumes'],env=environment,text=True,capture_output=True,timeout=30,check=True)
 
  def test_native_keyrings_and_approved_totp_profile(self):
   with tempfile.TemporaryDirectory() as tmp:

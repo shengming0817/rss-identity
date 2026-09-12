@@ -18,6 +18,8 @@ Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定�
 
 在仓库使用 `python3 hack/deploy.py --input /private/deployment.json --output /private/rendered --candidate /artifacts/candidate.json`；候选目录可直接使用其中 deploy.py。输出目录必须尚不存在，包含秘密的生成配置，权限700；运行时宜位于受控私有磁盘或tmpfs，不进入日志/备份通用收集器。
 
+渲染的 Compose 文件已对所有字面量值转义 `$`，包括安装 shell 和挂载路径；由 Compose 解析后恢复原值。不要对输出再运行 envsubst 或手工取消转义。部署回归使用真实 `docker compose config` 验证该消费边界。
+
 0. `docker compose -f /private/rendered/compose.json run --rm volume-init`。仅初始化空卷固定目录权限：PG为10001:10001、Keycloak为1000:0；nocopy防止镜像copy-up覆盖属主。
 1. `docker compose -f /private/rendered/compose.json up -d postgres`。首次 PG 初始化建立独立 hydra/keycloak数据库；已有卷不会重放初始化 SQL。
 2. `docker compose -f /private/rendered/compose.json run --rm migrate`。该命令内嵌 RSS/Identity SQL，执行单库安装并核验实际 runtime/maintenance 权限；旧版本、身份错配、角色碰撞和权限漂移拒绝。

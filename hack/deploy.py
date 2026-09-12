@@ -34,6 +34,13 @@ def host(origin):
  u=urlsplit(origin);require(u.scheme=='https' and u.hostname and not u.username and not u.password and not u.path and not u.query and not u.fragment and u.port in (None,443),'invalid HTTPS origin')
  require(re.fullmatch(r'[a-z0-9.-]+',u.hostname),'invalid DNS hostname');return u.hostname
 def sql_literal(value):return "'"+value.replace("'","''")+"'"
+def compose_literals(value):
+ # Compose interpolates every string value, including shell and bind source paths.
+ # ref: compose-spec/compose-go interpolation/interpolation.go @ v2.9.1
+ if isinstance(value,str):return value.replace('$','$$')
+ if isinstance(value,list):return [compose_literals(item) for item in value]
+ if isinstance(value,dict):return {key:compose_literals(item) for key,item in value.items()}
+ return value
 def render(data,out,candidate):
  images=candidate['providers'];artifacts=candidate['images']
  require(set(images)==set(IMAGES) and set(artifacts)=={'server','operator','gateway'},'incomplete candidate images')
@@ -139,7 +146,7 @@ def render(data,out,candidate):
  sv['volume-init']={'image':images['runtime'],'user':'0:0','network_mode':'none','profiles':['install'],'entrypoint':['sh','-ec'],'command':['for spec in /volumes/pg:10001:10001 /volumes/keycloak:1000:0; do d="${spec%%:*}"; owner="${spec#*:}"; if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit)" ]; then test "$(stat -c %u:%g "$d")" = "$owner" || exit 1; else chown "$owner" "$d"; chmod 700 "$d"; fi; done'],'volumes':[{'type':'volume','source':n,'target':'/volumes/'+n,'volume':{'nocopy':True}} for n in ['pg','keycloak']]}
 
  networks={'backend':{'internal':True,'ipam':{'config':[{'subnet':str(back)}]}},'protocol':{'internal':True,'ipam':{'config':[{'subnet':str(proto)}]}},'consumer':{'external':True,'name':data['consumer_network']}}
- write('compose.json',json.dumps({'name':'rss-identity','services':sv,'networks':networks,'volumes':{'pg':{},'keycloak':{}}},indent=2))
+ write('compose.json',json.dumps(compose_literals({'name':'rss-identity','services':sv,'networks':networks,'volumes':{'pg':{},'keycloak':{}}}),indent=2))
  return out/'compose.json'
 def main():
  p=argparse.ArgumentParser();p.add_argument('--input',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--candidate',type=Path,required=True);a=p.parse_args()
