@@ -91,10 +91,44 @@ class RunResult:
     def finish(self, *, cleanup_ok):
         self.data["cleanup"] = cleanup_ok
         passed = (tuple(p["name"] for p in self.data["phases"]) == self.expected
-                  and all(p["status"] == "passed" for p in self.data["phases"]) and cleanup_ok)
+                  and all(p["status"] == "passed" for p in self.data["phases"]) and cleanup_ok
+                  and "failure" not in self.data)
         self.data["status"] = "passed" if passed else "failed"
         self.data["not_run"] = [p for p in self.expected if p not in {v["name"] for v in self.data["phases"]}]
         return passed
+
+
+def harness_identity(root):
+    revision = subprocess.check_output(["/usr/bin/git", "rev-parse", "HEAD"], cwd=root, text=True, timeout=10).strip()
+    dirty = subprocess.check_output(["/usr/bin/git", "status", "--porcelain"], cwd=root, text=True, timeout=10).strip()
+    require(not dirty, "dirty_harness")
+    return revision
+
+
+def finalize(result, fixture, output, harness_files, *, root=ROOT):
+    def interrupted(_signal, _frame):
+        result.data["cleanup_interrupted"] = True
+    previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
+    cleanup_ok = False
+    try:
+        try:
+            cleanup_ok = fixture.cleanup() if fixture else True
+        except BaseException as error:
+            result.data["cleanup_error"] = type(error).__name__
+        if fixture and hasattr(fixture, "cleanup_details"):
+            result.data["cleanup_details"] = fixture.cleanup_details
+        try:
+            unchanged = all(sha(root / name) == digest for name, digest in harness_files.items())
+        except (Failure, OSError):
+            unchanged = False
+        if not unchanged:
+            result.data["failure"] = "harness_changed_during_run"
+        passed = result.finish(cleanup_ok=cleanup_ok)
+        (output / "result.json").write_text(json.dumps(result.data, indent=2) + "\n")
+        return passed
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def main():
@@ -107,7 +141,6 @@ def main():
     output.mkdir(parents=True, mode=0o700)
     result = RunResult()
     fixture = None
-    cleanup_ok = True
     harness = [*HERE.glob("*.py"), ROOT / "hack/bounded_process.py"]
     harness_files = {str(p.relative_to(ROOT)): sha(p) for p in harness}
     result.data["harness_files"] = harness_files
@@ -121,10 +154,8 @@ def main():
             candidate = load_candidate(directory, lock)
             observed.update(manifest_sha256=lock["manifest_sha256"], metadata=candidate,
                             deployment_files=lock["files"])
-            result.data["harness_revision"] = subprocess.check_output(
-                ["/usr/bin/git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-            result.data["harness_dirty"] = bool(subprocess.check_output(
-                ["/usr/bin/git", "status", "--porcelain"], cwd=ROOT, text=True).strip())
+            result.data["harness_revision"] = harness_identity(ROOT)
+            result.data["harness_dirty"] = False
         from fixture import Fixture
         import scenarios
         fixture = Fixture(directory, candidate, output)
@@ -138,14 +169,10 @@ def main():
         if fixture:
             result.data["containers"] = fixture.diagnostics()
     finally:
-        if fixture:
-            cleanup_ok = fixture.cleanup()
-        signal.signal(signal.SIGTERM, previous)
-        if any(sha(ROOT / name) != digest for name, digest in harness_files.items()):
-            result.data["failure"] = "harness_changed_during_run"
-            cleanup_ok = False
-        passed = result.finish(cleanup_ok=cleanup_ok)
-        (output / "result.json").write_text(json.dumps(result.data, indent=2) + "\n")
+        try:
+            passed = finalize(result, fixture, output, harness_files)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
     print("T31 " + result.data["status"], flush=True)
     return 0 if passed else 1
 

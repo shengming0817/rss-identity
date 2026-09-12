@@ -9,7 +9,7 @@ import unittest
 import sys
 from unittest.mock import patch
 
-from run import Failure, RunResult, load_candidate
+from run import Failure, RunResult, load_candidate, harness_identity, finalize
 
 
 def digest(data):
@@ -141,6 +141,69 @@ class ProcessAndCleanupTests(unittest.TestCase):
             with patch.object(fixture, "docker", side_effect=docker):
                 self.assertTrue(fixture.cleanup())
             self.assertEqual(removed, [("rm", "--force", fixture.helper), ("volume", "rm", fixture.control)])
+
+
+class ProvenanceAndFinalizationTests(unittest.TestCase):
+    def test_dirty_checkout_cannot_supply_a_harness_identity(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def git(*args):
+                return subprocess.check_output(["/usr/bin/git", "-c", "user.name=T31", "-c", "user.email=t31@example.test", *args], cwd=root)
+            git("init", "--quiet")
+            (root / "runner.py").write_text("# committed\n")
+            git("add", "runner.py")
+            git("commit", "--quiet", "-m", "fixture")
+            self.assertEqual(harness_identity(root), git("rev-parse", "HEAD").decode().strip())
+            (root / "runner.py").write_text("# uncommitted\n")
+            with self.assertRaisesRegex(Failure, "dirty_harness"):
+                harness_identity(root)
+
+    def test_removed_or_replaced_harness_always_writes_failed_evidence(self):
+        from run import sha
+        for removed in (True, False):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "runner.py"
+                path.write_text("# original")
+                hashes = {path.name: sha(path)}
+                path.unlink()
+                if not removed:
+                    (root / "replacement.py").write_text("# original")
+                    path.symlink_to(root / "replacement.py")
+                result = RunResult(())
+                self.assertFalse(finalize(result, None, root, hashes, root=root))
+                recorded = json.loads((root / "result.json").read_text())
+                self.assertEqual(recorded["failure"], "harness_changed_during_run")
+                self.assertTrue(recorded["cleanup"])
+
+    def test_second_interrupt_during_cleanup_does_not_lose_result(self):
+        import os, signal
+        class InterruptedCleanup:
+            def cleanup(self):
+                os.kill(os.getpid(), signal.SIGINT)
+                raise KeyboardInterrupt
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertFalse(finalize(RunResult(()), InterruptedCleanup(), root, {}, root=root))
+            recorded = json.loads((root / "result.json").read_text())
+            self.assertFalse(recorded["cleanup"])
+            self.assertEqual(recorded["status"], "failed")
+            self.assertEqual(recorded["cleanup_error"], "KeyboardInterrupt")
+
+    def test_cleanup_has_one_budget_and_reports_remaining_resources(self):
+        import subprocess
+        from fixture import Fixture
+        with tempfile.TemporaryDirectory() as directory:
+            f = Fixture(Path(directory), {}, Path(directory))
+            def docker(*args, **kwargs):
+                if args[0] == "ps":
+                    return subprocess.CompletedProcess(args, 0, "owned-container", "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+            with patch.object(f, "docker", side_effect=docker), patch("fixture.time.monotonic", side_effect=[0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]):
+                self.assertFalse(f.cleanup(budget=1))
+            self.assertTrue(f.cleanup_details["budget_exhausted"])
+            self.assertEqual(f.cleanup_details["remaining"]["container"], 1)
 
 
 if __name__ == "__main__":

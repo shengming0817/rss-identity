@@ -74,8 +74,12 @@ def provider_test(f):
 def cold_dependencies(f, observed):
     for dependency in ("postgres", "hydra", "keycloak"):
         f.compose("stop", "--timeout", "40", "public-gateway", "private-gateway", "identity", timeout=90)
-        stopped = ("hydra-admin", "hydra") if dependency == "hydra" else (dependency,)
-        f.compose("stop", "--timeout", "40", *stopped, timeout=90)
+        if dependency == "hydra":
+            # Keep the process unavailable while Compose tries the real dependency graph.
+            # A stopped provider would simply be restarted by `up gateway`.
+            f.compose("pause", "hydra")
+        else:
+            f.compose("stop", "--timeout", "40", dependency, timeout=90)
         if dependency == "postgres":
             result = f.compose("run", "--rm", "--no-deps", "identity", check=False, timeout=90)
             require(result.returncode == 1, "cold_pg_must_reject_start")
@@ -85,8 +89,14 @@ def cold_dependencies(f, observed):
             eventually(lambda: live(f) == 200, code="cold_process_not_live")
             if dependency == "hydra":
                 require(not f.probe(), "cold_hydra_must_not_be_ready")
-                require(f.state("public-gateway")["status"] == "exited", "cold_gateway_open")
-                observed[dependency] = {"live": 200, "ready": False, "gateway_open": False}
+                attempt = f.compose("up", "-d", "--pull", "never", "public-gateway", "private-gateway", check=False, timeout=100)
+                require(attempt.returncode != 0 and "unhealthy" in attempt.stderr
+                        and f.project + "-identity" in attempt.stderr, "cold_gateway_health_gate_bypassed")
+                for gateway in ("public-gateway", "private-gateway"):
+                    require(f.state(gateway)["status"] in ("created", "exited"), "cold_gateway_open")
+                require(not f.public_port_open(), "cold_gateway_published_port")
+                observed[dependency] = {"live": 200, "ready": False, "gateway_start_exit": attempt.returncode, "gateway_open": False}
+                f.compose("unpause", "hydra")
             else:
                 f.ready()
                 f.up("public-gateway", "private-gateway")
@@ -234,10 +244,11 @@ def drain(f, observed, *, release):
                 lock.communicate(timeout=5)
         for process in (lock, request, stop):
             if process:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
                 try:
                     process.communicate(timeout=5)
                 except subprocess.TimeoutExpired:

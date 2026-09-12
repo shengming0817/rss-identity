@@ -301,11 +301,19 @@ class Fixture:
     def published(self):
         mapping = self.compose("port", "public-gateway", "443").stdout.strip()
         require(mapping.startswith("127.0.0.1:"), "public_port_not_loopback")
+        self.public_port = int(mapping.rsplit(":", 1)[1])
         try:
             return helper_http({"ca": str(self.public_ca), "address": "127.0.0.1",
-                                "port": int(mapping.rsplit(":", 1)[1]), "path": "/identity-build.json"})
+                                "port": self.public_port, "path": "/identity-build.json"})
         except (OSError, http.client.HTTPException):
             raise Failure("published_endpoint_unavailable") from None
+
+    def public_port_open(self):
+        try:
+            with socket.create_connection(("127.0.0.1", self.public_port), timeout=0.5):
+                return True
+        except OSError:
+            return False
 
     def login(self):
         password = self.helper_python("import json,pathlib,sys; print(pathlib.Path(json.load(sys.stdin)).read_text())",
@@ -326,27 +334,47 @@ class Fixture:
                     result[service] = {"status": "unavailable"}
         return result
 
-    def cleanup(self):
-        # Engine ownership labels work even when Compose rejected the rendered file.
+    def cleanup(self, *, budget=120):
+        # Direct Engine ownership labels remain usable after a Compose parse failure.
+        deadline = time.monotonic() + budget
+        details = {"budget_seconds": budget, "budget_exhausted": False,
+                   "inventory_complete": True, "interrupted": False}
+        self.cleanup_details = details
+        remaining = {kind: set() for kind in ("container", "network", "volume")}
         ok = True
-        owned = []
+        def call(*args, timeout=10):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                details["budget_exhausted"] = True
+                raise Failure("cleanup_budget_exhausted")
+            return self.docker(*args, timeout=min(timeout, left), termination_grace=min(2, left))
+        def failed(error):
+            nonlocal ok
+            ok = False
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                details["interrupted"] = True
         for kind, listing in (("container", ("ps", "--all")), ("network", ("network", "ls")), ("volume", ("volume", "ls"))):
+            for label in ("com.docker.compose.project=", "rss.t31="):
+                try:
+                    ids = call(*listing, "--filter", "label=" + label + self.project,
+                               "--format", "{{.Names}}" if kind == "container" else "{{.ID}}" if kind == "network" else "{{.Name}}").stdout.split()
+                    remaining[kind].update(ids)
+                except BaseException as error:
+                    details["inventory_complete"] = False
+                    failed(error)
+        products = sorted(remaining["container"] - {self.helper})
+        if products:
             try:
-                for label in ("com.docker.compose.project=", "rss.t31="):
-                    ids = self.docker(*listing, "--filter", "label=" + label + self.project,
-                                      "--format", "{{.ID}}" if kind != "volume" else "{{.Name}}").stdout.split()
-                    owned.extend((kind, name) for name in ids)
-            except Exception:
-                ok = False
-        resources = sorted(owned, key=lambda item: {"container": 0, "network": 1, "volume": 2}[item[0]])
-        for kind, name in dict.fromkeys(resources):
-            try:
-                if kind == "container":
-                    if name != self.helper:
-                        self.docker("stop", "--timeout", "40", name, timeout=50)
-                    self.docker("rm", "--force", name)
-                else:
-                    self.docker(kind, "rm", name)
-            except Exception:
-                ok = False
+                # Engine stops this bounded set concurrently; do not spend 40s per service.
+                call("stop", "--timeout", "40", *products, timeout=45)
+            except BaseException as error:
+                failed(error)
+        for kind in ("container", "network", "volume"):
+            for name in sorted(remaining[kind]):
+                try:
+                    call(*(("rm", "--force", name) if kind == "container" else (kind, "rm", name)))
+                    remaining[kind].remove(name)
+                except BaseException as error:
+                    failed(error)
+        details["remaining"] = {kind: len(names) for kind, names in remaining.items()}
         return ok

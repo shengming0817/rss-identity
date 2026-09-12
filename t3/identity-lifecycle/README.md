@@ -10,7 +10,7 @@
 make test-lifecycle LIFECYCLE_CANDIDATE=/absolute/fixed-candidate LIFECYCLE_OUTPUT=/absolute/new-result
 ```
 
-输出目录必须不存在。`candidate.lock.json` 固定整个 manifest 与三个部署文件的 SHA-256；预检继续核对三份 OCI、四份二进制、镜像 revision/user/platform。换候选必须审查并更新锁文件，重新执行完整序列，不支持跳过阶段、历史配置适配或旧 schema 自动修复。
+载体 checkout 必须是干净提交；输出目录必须不存在。`candidate.lock.json` 固定整个 manifest 与三个部署文件的 SHA-256；预检继续核对三份 OCI、四份二进制、镜像 revision/user/platform。换候选必须审查并更新锁文件，重新执行完整序列，不支持跳过阶段、历史配置适配或旧 schema 自动修复。
 
 ```sh
 python3 -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
@@ -37,7 +37,7 @@ python3 -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
 
 随机租户、主体、存储身份、管理员口令及服务秘密仅属于一次运行。合成 CA/证书与秘密在专用 Docker 卷生成；root 准备器按产品要求交付 0600/指定 owner，不放宽产品权限验证。公网端口仅发布到主机 loopback，consumer 使用独立网络；不连接开发数据库，不读取用户产品秘密。
 
-清理按本次唯一 Compose / fixture ownership label 枚举资源，即使 Compose 解析或 Docker 创建半途失败也执行。`result.json` 只有在全序列依次通过且清理成功时才标 passed；失败保留阶段、非秘密状态和未运行项。清理失败也必须失败。正常完成移除本次容器、网络及所有卷，不删除其它项目资源或共享镜像。
+清理有独立 120 秒总预算（超时进程组另有最多两次 2 秒终止宽限），二次中断记录为状态并继续回收；超时/失败报告剩余资源数量与枚举是否完整。清理按本次唯一 Compose / fixture ownership label 枚举资源，即使 Compose 解析或 Docker 创建半途失败也执行。`result.json` 只有在全序列依次通过且清理成功时才标 passed；失败保留阶段、非秘密状态和未运行项。清理失败也必须失败。正常完成移除本次容器、网络及所有卷，不删除其它项目资源或共享镜像。
 
 `result.json`、公开 CA 和 Compose 路径/摘要不含秘密值。`diagnostics.private.log` 可能包含工具错误原文，仅在本地 0700 输出目录中按 0600 保存，不提交或上传。不要发布整个输出目录；验收记录只接纳经检查的 `result.json`。固定候选本身和本地运行目录均为可再生产物，唯一代码/验收记录必须提交 Git。
 
