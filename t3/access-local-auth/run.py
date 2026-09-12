@@ -198,7 +198,6 @@ def main():
             topology['volumes']['fixture'] = {'external': True, 'name': volume}
             topology['volumes']['control'] = {'external': True, 'name': control}
             topology['networks']['browser'] = {'internal': True}
-            topology['networks']['egress'] = {'internal': True}
             services = topology['services']
             for service in services.values():
                 if service.get('image') in data['images'].values():
@@ -207,8 +206,8 @@ def main():
                     if isinstance(mount, dict) and mount['type'] == 'bind':
                         relative = Path(mount['source']).relative_to('/run/t32').as_posix()
                         mount.update(type='volume', source='fixture', volume={'subpath': relative, 'nocopy': True})
-            services['public-gateway'].pop('ports')
-            services['public-gateway']['networks']['egress'] = {}
+            evidence.require(services['public-gateway'].pop('ports') == ['443:443'], 'unsupported_gateway_topology')
+            services['public-gateway']['networks']['browser'] = {'aliases': ['identity.t32.test', 'sso.t32.test']}
 
             def mount(path, target):
                 return {'type': 'volume', 'source': 'fixture', 'target': target,
@@ -224,13 +223,11 @@ def main():
 
             common = [('public.json', 'public.json'), ('input/ca.pem', 'ca.pem')]
             services['consumer'] = fixture(['node', '/carrier/consumer.mjs'],
-                {'consumer': {}, 'egress': {}, 'browser': {'aliases': ['product.t32.test']}},
+                {'consumer': {}, 'browser': {'aliases': ['product.t32.test']}},
                 common + [('input/mdm-validation-secret', 'validation-secret'), ('input/mdm-oidc-secret', 'oidc-secret'),
                           ('input/product.pem', 'product.pem'), ('input/product.key', 'product.key')])
+            services['consumer']['depends_on'] = ['public-gateway', 'private-gateway']
             services['consumer']['volumes'].append({'type': 'volume', 'source': 'control', 'target': '/control'})
-            # This is raw TCP forwarding: candidate TLS termination and all HTTP handling stay intact.
-            services['ingress'] = fixture(['node', '/carrier/ingress.mjs'],
-                {'browser': {'aliases': ['identity.t32.test', 'sso.t32.test']}, 'egress': {}}, [])
             services['browser'] = fixture(['sh', '-ec',
                 'mkdir -p /home/t32/.pki/nssdb; certutil -N -d sql:/home/t32/.pki/nssdb --empty-password; '
                 'certutil -A -d sql:/home/t32/.pki/nssdb -n t32 -t "C,," -i /run/test/ca.pem; node /carrier/scenario.mjs'],
@@ -269,14 +266,14 @@ def main():
             stage = 'administrator_initialize'
             dc('run', '--rm', 'maintenance', 'initialize', configuration['admin_principal'], 'admin', '/run/input/new-password')
             stage = 'services_start'
-            dc('up', '-d', '--wait', 'identity', 'public-gateway', 'private-gateway', 'consumer', 'ingress', timeout=180)
+            dc('up', '-d', '--wait', 'identity', 'public-gateway', 'private-gateway', 'consumer', timeout=180)
             observed = {}
-            for name in ('identity', 'public-gateway', 'private-gateway', 'postgres', 'hydra', 'keycloak', 'consumer', 'ingress'):
+            for name in ('identity', 'public-gateway', 'private-gateway', 'postgres', 'hydra', 'keycloak', 'consumer'):
                 cid = dc('ps', '-q', name)
                 instance = json.loads(docker('inspect', cid))[0]
                 image_config = json.loads(docker('image', 'inspect', instance['Image']))[0]
                 evidence.require(instance['Config']['Image'] == services[name]['image'], 'running_image_mismatch')
-                if name in ('consumer', 'ingress'):
+                if name in ('consumer'):
                     evidence.require(instance['Image'] == image, 'controller_image_mismatch')
                 observed[name] = {'reference': instance['Config']['Image'], 'image_id': instance['Image'],
                                   'architecture': image_config['Architecture'], 'user': instance['Config']['User']}

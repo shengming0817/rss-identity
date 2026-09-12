@@ -17,11 +17,12 @@ make test-t3-local-auth IDENTITY_T3_CANDIDATE=/absolute/candidate IDENTITY_T3_RE
 入口只接受当前 candidate.json format_version=1、linux/amd64 和完整 server/operator/gateway
 OCI 归档及 binaries。源提交必须在本仓 Git object database 中；候选部署脚本/模板绑定该提交，
 运行镜像与候选摘要一致。缺输入、格式错配、摘要错配及未执行场景均失败；不构建替代产品。
-候选构建及恢复方法见产品部署目录的 candidate.md。
+候选构建及恢复方法见产品部署目录的 candidate.md。入口要求 #2419 修复后的 443:443
+拓扑；旧候选的安装失败保留为证据，不提供旧端口或 Compose 插值补丁。
 
 每次创建独占 Compose project、网络和卷。秘密在私有卷中生成，按正式 UID/0600 规则逐文件挂载；
-不写入宿主环境变量或命令行。部署 renderer/operator 均来自候选。附加 TCP 入口保持产品 TLS
-和 HTTP 路由不变；浏览器只接入口网络，控制器的 CA 信任仅存在于容器。产品各服务的网络与
+不写入宿主环境变量或命令行。部署 renderer/operator 均来自候选，入口统一使用标准 HTTPS 443；浏览器只接候选公开 gateway
+的隔离网络，控制器的 CA 信任仅存在于容器。产品各服务的网络与
 配置保留正式约束。PG 查询只使用控制面只读事务。
 
 ## 消费者边界

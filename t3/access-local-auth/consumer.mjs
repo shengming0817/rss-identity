@@ -63,7 +63,7 @@ async function main() {
     if (logical.origin !== origin.origin || (privatePath ? logical.pathname !== '/internal/v1/identity/validate' : !logical.pathname.startsWith('/oidc/'))) fail()
     return new Promise((resolve, reject) => {
       const req = https.request({ hostname: privatePath ? 'private-gateway' : 'public-gateway',
-        port: privatePath ? 443 : 8443, servername: origin.hostname, ca,
+        port: 443, servername: origin.hostname, ca,
         path: logical.pathname + logical.search, method: options.method ?? 'GET',
         headers: { ...Object.fromEntries(new Headers(options.headers)), host: origin.host },
         signal: options.signal, timeout: 10000 }, async res => {
