@@ -1,4 +1,4 @@
-import copy,json,tempfile,unittest,os
+import copy,json,tempfile,unittest,os,subprocess
 from unittest.mock import patch
 from pathlib import Path
 import deploy
@@ -19,6 +19,18 @@ class Deployment(unittest.TestCase):
     p=root/Path(v).name;p.write_text('TestSecret_'+p.stem.replace('-','_')+'_'*64);p.chmod(0o600);return str(p)
    return v
   return files(source)
+ def test_compose_preserves_volume_initialization_shell_expansion(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);path=deploy.render(self.data(root),root/'rendered',self.candidate())
+   result=subprocess.run(['docker','compose','-f',str(path),'--profile','install','config','--format','json'],capture_output=True,text=True,timeout=30)
+   self.assertEqual(result.returncode,0,result.stderr)
+   # Compose serializes literal shell dollars as $$ so its output can be consumed again.
+   command=json.loads(result.stdout)['services']['volume-init']['command'][0]
+   self.assertIn('d="$${spec%%:*}"',command)
+   self.assertIn('owner="$${spec#*:}"',command)
+   self.assertIn('$$(find "$$d"',command)
+   self.assertIn('chown "$$owner" "$$d"',command)
+
  def test_configuration_diagnostics_are_actionable_without_input_values(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp)
