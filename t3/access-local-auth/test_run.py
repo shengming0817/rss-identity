@@ -45,14 +45,14 @@ class RunnerTests(unittest.TestCase):
     def test_external_binding_refuses_candidate_ipam_or_isolation_drift(self):
         prefixes = ['10.234.80', '10.234.81']
         original = {'services': {'identity': {'networks': {'backend': {'ipv4_address': prefixes[0] + '.4'}}}},
-                    'networks': {key: {'internal': True, 'ipam': {'config': [{'subnet': prefix + '.0/24'}]}}
+                    'networks': {key: {'internal': True, 'ipam': {'config': [{'subnet': prefix + '.0/24', 'ip_range': prefix + '.128/25'}]}}
                                  for key, prefix in zip(('backend', 'protocol'), prefixes)}}
         def observed(*args, **_):
             key = args[-1].split('-')[-1]
             prefix = prefixes[('backend', 'protocol').index(key)]
             return json.dumps([{'Internal': True, 'Driver': 'bridge', 'EnableIPv6': False,
                                 'Labels': {'identity.t32': 'owner'},
-                                'IPAM': {'Driver': 'default', 'Config': [{'Subnet': prefix + '.0/24', 'Gateway': prefix + '.1'}]}}])
+                                'IPAM': {'Driver': 'default', 'Config': [{'Subnet': prefix + '.0/24', 'IPRange': prefix + '.128/25', 'Gateway': prefix + '.1'}]}}])
         import copy
         with patch.object(runner, 'docker', side_effect=observed):
             for change in ('isolation', 'subnet', 'ip_range'):
@@ -60,7 +60,7 @@ class RunnerTests(unittest.TestCase):
                 definition = topology['networks']['backend']
                 if change == 'isolation': definition['internal'] = False
                 elif change == 'subnet': definition['ipam']['config'][0]['subnet'] = '10.99.0.0/24'
-                else: definition['ipam']['config'][0]['ip_range'] = prefixes[0] + '.128/25'
+                else: definition['ipam']['config'][0].pop('ip_range')
                 with self.assertRaises(runner.evidence.Refused):
                     runner.bind_reserved(topology, 'owner', prefixes)
             topology = copy.deepcopy(original)

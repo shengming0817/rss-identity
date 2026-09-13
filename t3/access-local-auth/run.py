@@ -84,7 +84,7 @@ def allocation(project):
         try:
             for key, prefix in zip(('backend', 'protocol'), prefixes):
                 owned.append(docker('network', 'create', '--driver', 'bridge', '--internal',
-                                    '--subnet', prefix + '.0/24', '--gateway', prefix + '.1',
+                                    '--subnet', prefix + '.0/24', '--ip-range', prefix + '.128/25', '--gateway', prefix + '.1',
                                     '--label', 'identity.t32=' + project, project + '-' + key))
             return prefixes
         except BaseException as error:
@@ -107,7 +107,7 @@ def allocation(project):
 def bind_reserved(topology, project, prefixes):
     # Fail on renderer drift BEFORE externalising: never erase IPAM/isolation errors.
     for key, prefix in zip(('backend', 'protocol'), prefixes):
-        expected = {'internal': True, 'ipam': {'config': [{'subnet': prefix + '.0/24'}]}}
+        expected = {'internal': True, 'ipam': {'config': [{'subnet': prefix + '.0/24', 'ip_range': prefix + '.128/25'}]}}
         evidence.require(topology['networks'][key] == expected, 'candidate_network_mismatch')
         name = project + '-' + key
         observed = json.loads(docker('network', 'inspect', name))[0]
@@ -115,7 +115,7 @@ def bind_reserved(topology, project, prefixes):
                          and observed['EnableIPv6'] is False
                          and observed['Labels'].get('identity.t32') == project
                          and observed['IPAM']['Driver'] == 'default'
-                         and observed['IPAM']['Config'] == [{'Subnet': prefix + '.0/24', 'Gateway': prefix + '.1'}],
+                         and observed['IPAM']['Config'] == [{'Subnet': prefix + '.0/24', 'IPRange': prefix + '.128/25', 'Gateway': prefix + '.1'}],
                          'reserved_network_mismatch')
     for key in ('backend', 'protocol'):
         topology['networks'][key] = {'external': True, 'name': project + '-' + key}
