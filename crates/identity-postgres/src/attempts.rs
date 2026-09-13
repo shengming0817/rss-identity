@@ -11,10 +11,29 @@ impl Authority {
         source: &AttemptSource,
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
-        let keys = [
-            (scope, 5_i32, 900_i32),
-            (format!("s:{}", source.value()), 30, 300),
-        ];
+        // Keep the shared database future out of composed authentication stack frames.
+        Box::pin(self.reserve_attempt(tenant, Some(scope), source, deadline)).await
+    }
+    /// Native codes are untrusted, high-cardinality input; only charge the transport source.
+    pub(crate) async fn reserve_source(
+        &self,
+        tenant: TenantId,
+        source: &AttemptSource,
+        deadline: OperationDeadline,
+    ) -> Result<(), AuthorityError> {
+        Box::pin(self.reserve_attempt(tenant, None, source, deadline)).await
+    }
+    async fn reserve_attempt(
+        &self,
+        tenant: TenantId,
+        scope: Option<String>,
+        source: &AttemptSource,
+        deadline: OperationDeadline,
+    ) -> Result<(), AuthorityError> {
+        let mut keys = vec![(format!("s:{}", source.value()), 30_i32, 300_i32)];
+        if let Some(scope) = scope {
+            keys.push((scope, 5, 900));
+        }
         let allowed=self.read(tenant,deadline,move|tx|Box::pin(async move {
             crate::transaction::connection(tx,move|c|Box::pin(async move {
                 guard(c,tenant).await?;
@@ -29,13 +48,12 @@ impl Authority {
                     values.push((key,limit,window,count));
                 }
                 if total+missing>10000 {return Ok(false);}
-                let mut allowed=true;
                 for (key,limit,window,count) in values {
-                    if count>=limit {allowed=false;continue;}
+                    if count>=limit {return Ok(false);}
                     sqlx::query(concat!("INSERT INTO identity_authority.attempts VALUES($1::uuid,$2,1,clock_timestamp()+m","ake_interval(secs=>$3)) ON CONFLICT(tenant_id,key) DO UPDATE SET count=$4,expire","s_at=CASE WHEN $4=1 THEN excluded.expires_at ELSE identity_authority.attempts.ex","pires_at END"))
                         .bind(tenant.to_string()).bind(key).bind(f64::from(window)).bind(count+1).execute(&mut *c).await?;
                 }
-                Ok(allowed)
+                Ok(true)
             })).await
         })).await?;
         if allowed {

@@ -14,7 +14,7 @@ pub(crate) async fn provider(
     id: ProviderId,
 ) -> Result<ProviderView, rss_transactional_messaging_postgres::PgError> {
     let r = sqlx::query(concat!(
-        "SELECT config_version,revocation_epoch,enabled,settings,deployment_approval FROM identity_authority.",
+        "SELECT config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version FROM identity_authority.",
         "providers WHERE tenant_id=$1::uuid AND provider_id=$2::uuid FOR UPDATE"
     ))
     .bind(tenant.to_string())
@@ -36,10 +36,11 @@ pub(crate) async fn provider(
         revocation_epoch: epoch,
         enabled: r.try_get("enabled")?,
         settings,
-        deployment_approval: r
-            .try_get::<Option<Vec<u8>>, _>("deployment_approval")?
-            .map(|v| v.try_into().map_err(|_| corrupt()))
-            .transpose()?,
+        assurance_profile: r
+            .try_get::<Vec<u8>, _>("assurance_profile")?
+            .try_into()
+            .map_err(|_| corrupt())?,
+        credential_version: r.try_get("credential_version")?,
     })
 }
 pub(crate) fn exact(view: &ProviderView, version: i64) -> Result<(), FederationError> {
@@ -143,6 +144,7 @@ pub(crate) async fn identity(
     ))
 }
 pub(crate) struct Attempt {
+    pub cli: Option<rss_identity_contracts::cli::CliLoginBinding>,
     pub mode: AuthenticationMode,
     pub browser: [u8; 32],
     pub provider: ProviderId,
@@ -189,6 +191,11 @@ pub(crate) async fn attempt(
     };
     Ok((
         Attempt {
+            cli: r
+                .try_get::<Option<serde_json::Value>, _>("cli_binding")?
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| corrupt())?,
             mode: AuthenticationMode::from_storage(r.try_get("authentication_mode")?)
                 .map_err(|_| corrupt())?,
             browser: digest(browser),
@@ -212,6 +219,7 @@ pub(crate) async fn attempt(
     ))
 }
 pub(crate) struct NewAttempt {
+    pub cli: Option<rss_identity_contracts::cli::CliLoginBinding>,
     pub mode: AuthenticationMode,
     pub locator: StateLocator,
     pub material: ProtocolMaterial,
@@ -267,8 +275,8 @@ pub(crate) async fn insert_attempt(
     sqlx::query(concat!(
         "INSERT INTO identity_authority.oidc_transactions(tenant_id,attempt_id,provider_i",
         "d,config_version,state_hash,browser_hash,purpose,nonce,verifier,created_at,expir",
-        "es_at,target_client,return_url,link_intent,replacement_session,authentication_mode) VALUES($1::uuid,",
-        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid,$16)"
+        "es_at,target_client,return_url,link_intent,replacement_session,authentication_mode,cli_binding) VALUES($1::uuid,",
+        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid,$16,$17)"
     ))
     .bind(tenant.to_string())
     .bind(input.locator.id().as_slice())
@@ -286,6 +294,7 @@ pub(crate) async fn insert_attempt(
     .bind(input.link)
     .bind(input.replacement.map(|v| v.to_string()))
     .bind(input.mode as i16)
+    .bind(input.cli.map(serde_json::to_value).transpose().map_err(|_|corrupt())?)
     .execute(c)
     .await?;
     Ok(())

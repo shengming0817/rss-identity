@@ -6,6 +6,7 @@ pub use downstream::{DownstreamDiagnostic, downstream_router};
 mod federation;
 mod handlers;
 mod management;
+mod platform;
 use axum::{
     Router, middleware,
     routing::{get, post},
@@ -13,6 +14,7 @@ use axum::{
 pub use boundary::{HttpConfig, HttpConfigError, HttpFailure};
 pub use federation::federated_router;
 pub use management::management_router;
+pub use platform::platform_router;
 use rss_identity_postgres::{Authority, AuthorityError};
 
 #[derive(Clone)]

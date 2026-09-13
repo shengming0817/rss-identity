@@ -167,7 +167,7 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
     assert!(proof(&f, &replacement).await.is_err());
     assert!(proof(&f, &second).await.is_ok());
     let restarted_runtime = f.additional_runtime().await?;
-    let restarted = Authority::connect(
+    let restarted = Authority::connect_runtime(
         restarted_runtime.clone(),
         std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
         deployment_identity(),
@@ -177,8 +177,8 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
             Duration::from_secs(5),
             Duration::from_secs(5),
         )?,
-        f.key.tenant,
-        AuthorityProfile::Runtime,
+        f.system_key.tenant,
+        support::runtime_configuration(f.port, &f.database),
         deadline(),
     )
     .await?;
@@ -332,9 +332,12 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
         Err(AuthorityError::CommitUnknown(_))
     ));
     assert_eq!(f.events().await?, before + 1);
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
-        .fetch_one(&f.owner)
-        .await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
+    )
+    .bind(A)
+    .fetch_one(&f.owner)
+    .await?;
     assert_eq!(count, 1);
     let live = issue(&f).await?;
     f.runtime
@@ -494,7 +497,7 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
         sqlx::raw_sql(break_it).execute(&f.owner).await?;
         if break_it.contains("PUBLIC") {
             assert!(
-                Authority::connect(
+                Authority::connect_maintenance(
                     f.maintenance_runtime.clone(),
                     std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
                     deployment_identity(),
@@ -504,8 +507,7 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
                         Duration::from_secs(5),
                         Duration::from_secs(5)
                     )?,
-                    f.key.tenant,
-                    AuthorityProfile::Maintenance,
+                    f.system_key.tenant,
                     deadline()
                 )
                 .await
@@ -615,6 +617,7 @@ async fn expect_session_event(
 async fn session_events_match_committed_operations() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
+    let baseline = f.events().await?;
     let first = issue(&f).await?;
     expect_session_event(&f, "created", first.view().id, None, 1).await?;
     let rotated = f
@@ -647,7 +650,7 @@ async fn session_events_match_committed_operations() -> anyhow::Result<()> {
         .revoke_all_sessions(proof(&f, &live).await?, deadline())
         .await?;
     expect_session_event(&f, "all_revoked", live.view().id, None, 2).await?;
-    assert_eq!(f.events().await?, 7);
+    assert_eq!(f.events().await?, baseline + 6);
     f.close().await;
     Ok(())
 }

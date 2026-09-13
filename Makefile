@@ -6,7 +6,7 @@ export PYTHONDONTWRITEBYTECODE := 1
 CARGO_TARGET_DIR ?= $(REPOSITORY_ROOT)/target
 export CARGO_TARGET_DIR
 .PHONY: ci check test test-pg test-oidc dependencies licenses
-ci: check test dependencies licenses test-pg test-oidc test-federated test-downstream test-assembly test-gateway test-clients test-recovery
+ci: check test dependencies licenses test-pg test-oidc test-federated test-downstream test-assembly test-gateway test-clients test-recovery test-platform
 check:
 	cargo fmt --all -- --check
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -14,6 +14,7 @@ check:
 
 test:
 	$(PYTHON) -m unittest discover -s hack -p 'test_*.py'
+	$(PYTHON) -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
 	cargo test --locked --workspace
 
 dependencies:
@@ -70,3 +71,23 @@ prepare-t33:
 
 test-t33:
 	$(PYTHON) t3/identity-federated-sso/run.py --artifacts "$(T33_ARTIFACTS)" --artifacts-sha256 "$(T33_ARTIFACTS_SHA256)" --output "$(T33_OUTPUT)"
+.PHONY: test-t3-local-auth check-t3-local-auth
+check-t3-local-auth:
+	$(PYTHON) -c "from pathlib import Path; [compile(p.read_bytes(), str(p), 'exec') for p in [*sorted(Path('t3/access-local-auth').glob('*.py')), Path('hack/bounded_process.py')]]"
+	@for script in t3/access-local-auth/*.mjs; do node --check "$$script" || exit; done
+	$(PYTHON) -m unittest discover -s t3/access-local-auth -p 'test_*.py'
+	pnpm --dir t3/access-local-auth install --frozen-lockfile --ignore-scripts
+	pnpm --dir t3/access-local-auth exec eslint .
+	pnpm --dir t3/access-local-auth test
+	pnpm --dir t3/access-local-auth audit
+
+test-t3-local-auth:
+	$(PYTHON) t3/access-local-auth/run.py --candidate "$(IDENTITY_T3_CANDIDATE)" --record "$(IDENTITY_T3_RECORD)"
+
+.PHONY: test-lifecycle
+test-lifecycle:
+	$(PYTHON) t3/identity-lifecycle/run.py --candidate "$(LIFECYCLE_CANDIDATE)" --output "$(LIFECYCLE_OUTPUT)"
+
+.PHONY: test-platform
+test-platform:
+	$(PYTHON) hack/platform_cli.py

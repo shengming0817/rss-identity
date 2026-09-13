@@ -4,9 +4,14 @@
 
 - [首次安装与运维](operations.md)
 - [候选构建](candidate.md)
+- [本地认证候选 T3（#2341）](../../t3/access-local-auth/README.md)
+
+- [#2340 生命周期验收记录](202609120756-2340-lifecycle-acceptance.md)
+- [固定候选生命周期 T3](../../t3/identity-lifecycle/README.md)：#2340 的执行入口、故障矩阵和证据边界。
 - [停机备份、恢复、轮换与测量](recovery.md)
 - [I08 架构决定](../architecture/adr/202609091100-2338-production-assembly.md)
 
 生产输入必须由部署 owner 提供真实域名、证书、存储身份和秘密。deployment/example.json 是字段示例；其中 example.test、UUID 与字节数组均不是生产默认。禁止将渲染目录或秘密作为 artifact 发布。
 
 - [#2342 联合 SSO 独立 T3](../../t3/identity-federated-sso/README.md)：固定候选、浏览器、下游验证与撤销清理；运行结论由 PR 证据持有。
+系统域、动态租户、IdP keyring 和 CLI 使用[平台指南](../guides/platform.md)，配置格式及安装见[运维步骤](operations.md)。

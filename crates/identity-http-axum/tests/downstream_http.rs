@@ -57,28 +57,26 @@ use downstream_support::*;
 #[ignore = "make test-downstream"]
 async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Result<()> {
     use rss_identity_core::federation::*;
-    use rss_identity_oidc::{ApprovedProvider, HttpOidc};
-    let f = Fixture::new().await?;
-    f.bootstrap().await?;
+    use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
     let issuer = std::env::var("IDENTITY_TEST_DOWNSTREAM_ISSUER")?;
     let origin = issuer.trim_end_matches('/');
+    let f = Fixture::with_identity(rss_identity_postgres::DeploymentIdentity::new(
+        "fixture".into(),
+        1,
+        origin.into(),
+        "https://product.example.test".into(),
+    )?)
+    .await?;
+    f.bootstrap().await?;
     let ca = std::fs::read(std::env::var("IDENTITY_TEST_DOWNSTREAM_CA")?)?;
     let upstream_issuer = std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?;
-    let upstream_ca = std::fs::read(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
     let callback = format!("{origin}/api/v1/oidc/callback");
-    let oidc = HttpOidc::new(
-        vec![ApprovedProvider {
-            tenant: f.key.tenant,
-            issuer: upstream_issuer.clone(),
-            client_id: "identity-test".into(),
-            redirect_uri: callback.clone(),
-            secret_ref: "fixture@1".into(),
-            addresses: vec!["127.0.0.0/8".parse()?],
-            keycloak_totp: true,
-        }],
-        BTreeMap::from([("fixture@1".into(), Zeroizing::new("fixture-secret".into()))]),
-        Some(&upstream_ca),
-    )?;
+    let oidc = HttpOidc::new(vec![TrustedAssuranceProfile {
+        tenant: f.key.tenant,
+        issuer: upstream_issuer.clone(),
+        client_id: "identity-test".into(),
+        keycloak_totp: true,
+    }])?;
     let federation = Federation::new(
         f.store.clone(),
         Arc::new(oidc),
@@ -91,7 +89,7 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
             ProviderSettingsInput {
                 issuer: upstream_issuer,
                 client_id: "identity-test".into(),
-                secret_ref: "fixture@1".into(),
+
                 redirect_uri: callback,
                 scopes: vec!["openid".into()],
                 claims: ClaimMapping {
@@ -101,6 +99,12 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
                 jit: true,
             }
             .try_into()?,
+            rss_identity_core::federation::ProviderCredentials::new(
+                "fixture-secret".into(),
+                Some(std::fs::read_to_string(std::env::var(
+                    "IDENTITY_TEST_FEDERATED_CA",
+                )?)?),
+            )?,
             deadline(),
         )
         .await?;

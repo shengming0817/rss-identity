@@ -57,6 +57,11 @@ impl LinkResult {
     }
 }
 pub enum FederatedOutcome {
+    /// Bound native flow failed after its browser/state transaction was verified.
+    CliFailure {
+        return_url: String,
+        error: AuthorityError,
+    },
     Redirect(FederatedRedirect),
     Session {
         issued: IssuedSession,
@@ -79,6 +84,7 @@ pub(crate) enum Action {
     AlreadyLinked,
     Reauthenticated,
     SteppedUp,
+    CliAuthorized,
 }
 #[derive(Serialize)]
 pub(crate) struct FederationEvent {
@@ -113,7 +119,7 @@ impl Federation {
         targets: BTreeMap<(String, String), String>,
     ) -> Result<Self, AuthorityError> {
         authority.require_runtime()?;
-        if targets.is_empty() || targets.len() > 128 {
+        if targets.len() > 128 {
             return Err(FederationError::Configuration.into());
         }
         for ((client, id), target) in &targets {
@@ -171,73 +177,34 @@ impl Authority {
         &self,
         actor: AuthenticatedSession,
         settings: ProviderSettings,
-        approval: [u8; 32],
+        credentials: ProviderCredentials,
+        profile: [u8; 32],
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
-        self.require_runtime()?;
+        self.require_administrator(&actor)?;
+        let keys = self.credential_keys()?;
         let tenant = actor.key.tenant;
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
-        self.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
-                    lock_guard(c, tenant).await?;
-                    crate::session_storage::recheck(c, &actor).await?.state.authorize_administration(tenant)?;
-                    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid")
-                        .bind(tenant.to_string()).fetch_one(&mut *c).await?;
-                    if count >= 100 { return Err(FederationError::ProviderLimitReached.into()); }
-                    let view = ProviderView {
-                        id: ProviderId::generate(),
-                        version: 1,
-                        enabled: false,
-                        revocation_epoch: 1,
-                        settings,
-                        deployment_approval: Some(approval),
-                    };
-                    sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,deployment_approval) VALUES($1::uuid,$2::uuid,1,1,false,$3,$4)")
-                        .bind(tenant.to_string())
-                        .bind(view.id.to_string())
-                        .bind(serde_json::to_value(&view.settings).map_err(|_| transaction::corrupt())?)
-                        .bind(approval.as_slice())
-                        .execute(c)
-                        .await?;
-                    let audit = event(
-                        tenant,
-                        Action::ProviderCreated,
-                        &view,
-                        Some(actor.key.principal),
-                    );
-                    Ok((view, vec![audit]))
-                }) }).await
-    }
-    pub(crate) async fn update_provider(
-        &self,
-        actor: AuthenticatedSession,
-        id: ProviderId,
-        expected_version: i64,
-        settings: ProviderSettings,
-        approval: [u8; 32],
-        deadline: OperationDeadline,
-    ) -> Result<ProviderView, AuthorityError> {
-        self.require_runtime()?;
-        self.edit_provider(
-            actor,
-            id,
-            expected_version,
-            Some((settings, approval)),
-            None,
-            deadline,
-        )
-        .await
+        self.write_sql(tenant,deadline,move|c|Box::pin(async move {
+            let loaded=crate::session_storage::recheck(c,&actor).await?;loaded.authorize_administration(tenant)?;
+            if loaded.system_domain && settings.jit(){return Err(FederationError::Configuration.into());}
+            let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
+            if count>=100{return Err(FederationError::ProviderLimitReached.into());}
+            let view=ProviderView{id:ProviderId::generate(),version:1,enabled:false,revocation_epoch:1,settings,assurance_profile:profile,credential_version:1};
+            sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) VALUES($1::uuid,$2::uuid,1,1,false,$3,$4,1)").bind(tenant.to_string()).bind(view.id.to_string()).bind(serde_json::to_value(&view.settings).map_err(|_|transaction::corrupt())?).bind(profile.as_slice()).execute(&mut *c).await?;
+            crate::credentials::write_credentials(c,&keys,tenant,view.id,1,&credentials).await?;
+            let audit=event(tenant,Action::ProviderCreated,&view,Some(actor.key.principal));
+            Ok((view,vec![audit]))
+        })).await
     }
     pub(crate) async fn enable_provider(
         &self,
         actor: AuthenticatedSession,
         id: ProviderId,
-        expected_version: i64,
+        expected: i64,
         enabled: bool,
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
-        self.require_runtime()?;
-        self.edit_provider(actor, id, expected_version, None, Some(enabled), deadline)
+        self.edit_provider(actor, id, expected, None, Some(enabled), deadline)
             .await
     }
     async fn edit_provider(
@@ -245,67 +212,37 @@ impl Authority {
         actor: AuthenticatedSession,
         id: ProviderId,
         expected: i64,
-        settings: Option<(ProviderSettings, [u8; 32])>,
+        settings: Option<(ProviderSettings, ProviderCredentials, [u8; 32])>,
         enabled: Option<bool>,
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
+        self.require_administrator(&actor)?;
+        let keys = if settings.is_some() {
+            Some(self.credential_keys()?)
+        } else {
+            None
+        };
         let tenant = actor.key.tenant;
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
-        self.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
-                    lock_guard(c, tenant).await?;
-                    crate::session_storage::recheck(c, &actor).await?.state.authorize_administration(tenant)?;
-                    let mut view = db::provider(c, tenant, id).await?;
-                    if view.version != expected {
-                        return Err(FederationError::StaleConfiguration.into());
-                    }
-                    let action = if let Some((settings, approval)) = settings {
-                        if settings.issuer() != view.settings.issuer() {
-                            return Err(FederationError::Configuration.into());
-                        }
-                        view.settings = settings;
-                        if view.deployment_approval != Some(approval) {
-                            view.revocation_epoch = view.revocation_epoch.checked_add(1).ok_or(FederationError::Rejected)?;
-                        }
-                        view.deployment_approval = Some(approval);
-                        Action::ProviderUpdated
-                    } else if let Some(enabled) = enabled {
-                        if enabled && view.deployment_approval.is_none() { return Err(FederationError::Configuration.into()); }
-                        if view.enabled && !enabled {
-                            view.revocation_epoch = view
-                                .revocation_epoch
-                                .checked_add(1)
-                                .ok_or(FederationError::Rejected)?;
-                        }
-                        view.enabled = enabled;
-                        if enabled {
-                            Action::ProviderEnabled
-                        } else {
-                            Action::ProviderDisabled
-                        }
-                    } else {
-                        return Err(reject().into());
-                    };
-                    view.version = view
-                        .version
-                        .checked_add(1)
-                        .ok_or(FederationError::Rejected)?;
-                    sqlx::query(concat!(
-                        "UPDATE identity_authority.providers SET settings=$3,config_version=$4,enabled=$5",
-                        ",revocation_epoch=$6,deployment_approval=$7 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid"
-                    ))
-                    .bind(tenant.to_string())
-                    .bind(id.to_string())
-                    .bind(serde_json::to_value(&view.settings).map_err(|_| transaction::corrupt())?)
-                    .bind(view.version)
-                    .bind(view.enabled)
-                    .bind(view.revocation_epoch)
-                    .bind(view.deployment_approval.map(|v| v.to_vec()))
-                    .execute(c)
-                    .await?;
-                    let audit = event(tenant, action, &view, Some(actor.key.principal));
-                    Ok((view, vec![audit]))
-                }) }).await
+        self.write_sql(tenant,deadline,move|c|Box::pin(async move {
+            let loaded=crate::session_storage::recheck(c,&actor).await?;loaded.authorize_administration(tenant)?;
+            let mut view=db::provider(c,tenant,id).await?;
+            if view.version!=expected{return Err(FederationError::StaleConfiguration.into());}
+            let action=if let Some((settings,credentials,profile))=settings {
+                if settings.issuer()!=view.settings.issuer() || (loaded.system_domain && settings.jit()){return Err(FederationError::Configuration.into());}
+                view.settings=settings;view.assurance_profile=profile;
+                view.credential_version=view.credential_version.checked_add(1).ok_or(FederationError::Rejected)?;
+                view.revocation_epoch=view.revocation_epoch.checked_add(1).ok_or(FederationError::Rejected)?;
+                crate::credentials::write_credentials(c,keys.as_deref().ok_or(FederationError::Unavailable)?,tenant,id,view.credential_version,&credentials).await?;
+                Action::ProviderUpdated
+            }else if let Some(enabled)=enabled{
+                if view.enabled!=enabled {view.revocation_epoch=view.revocation_epoch.checked_add(1).ok_or(FederationError::Rejected)?;}
+                view.enabled=enabled;
+                if enabled{Action::ProviderEnabled}else{Action::ProviderDisabled}
+            }else{return Err(reject().into());};
+            view.version=view.version.checked_add(1).ok_or(FederationError::Rejected)?;
+            sqlx::query("UPDATE identity_authority.providers SET settings=$3,config_version=$4,enabled=$5,revocation_epoch=$6,assurance_profile=$7,credential_version=$8 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(tenant.to_string()).bind(id.to_string()).bind(serde_json::to_value(&view.settings).map_err(|_|transaction::corrupt())?).bind(view.version).bind(view.enabled).bind(view.revocation_epoch).bind(view.assurance_profile.as_slice()).bind(view.credential_version).execute(c).await?;
+            let audit=event(tenant,action,&view,Some(actor.key.principal));Ok((view,vec![audit]))
+        })).await
     }
     pub(crate) async fn list_providers(
         &self,
@@ -318,7 +255,7 @@ impl Authority {
         budget.0 = budget.0.min(actor.expires);
         self.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
-                    crate::session_storage::recheck(c, &actor).await?.state.authorize_administration(tenant)?;
+                    crate::session_storage::recheck(c, &actor).await?.authorize_administration(tenant)?;
                     let ids: Vec<Uuid> = sqlx::query_scalar(concat!(
                         "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid OR",
                         "DER BY provider_id LIMIT 101"
@@ -351,7 +288,11 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<ConnectionReport, AuthorityError>
     where
-        F: FnOnce(TenantId, ProviderSettings) -> UpstreamFuture<'static, ConnectionReport>,
+        F: FnOnce(
+            TenantId,
+            ProviderSettings,
+            ProviderCredentials,
+        ) -> UpstreamFuture<'static, ConnectionReport>,
     {
         self.require_runtime()?;
         let tenant = actor.key.tenant;
@@ -363,7 +304,6 @@ impl Authority {
                     lock_guard(c, tenant).await?;
                     crate::session_storage::recheck(c, &actor)
                         .await?
-                        .state
                         .authorize_administration(tenant)?;
                     Ok((actor, db::provider(c, tenant, id).await?))
                 })
@@ -371,12 +311,15 @@ impl Authority {
             .await?;
         // Cancel upstream work before the shared deadline: permission/version checks and
         // the security event must settle before any report is released.
+        let credentials = self
+            .provider_credentials(tenant, id, view.credential_version, budget.remaining())
+            .await?;
         let remaining = budget.remaining().timeout();
         let reserve = (remaining / 4).min(std::time::Duration::from_secs(1));
         let upstream_deadline = budget.0 - reserve;
         let result = tokio::time::timeout_at(
             upstream_deadline.into(),
-            test(tenant, view.settings.clone()),
+            test(tenant, view.settings.clone(), credentials),
         )
         .await
         .unwrap_or(Err(FederationError::Unavailable));
@@ -387,7 +330,6 @@ impl Authority {
                 lock_guard(c, tenant).await?;
                 crate::session_storage::recheck(c, &actor)
                     .await?
-                    .state
                     .authorize_administration(tenant)?;
                 let current = db::provider(c, tenant, id).await?;
                 if current.version != view.version {
@@ -433,6 +375,7 @@ mod contract_tests {
             Action::AlreadyLinked,
             Action::Reauthenticated,
             Action::SteppedUp,
+            Action::CliAuthorized,
         ];
         let values: Vec<_> = actions
             .into_iter()
@@ -480,14 +423,20 @@ impl Federation {
         &self,
         actor: AuthenticatedSession,
         settings: ProviderSettings,
+        credentials: ProviderCredentials,
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.authority.require_administrator(&actor)?;
-        let approval = self
-            .oidc
-            .approve_configuration(actor.key.tenant, &settings)?;
+        if settings.redirect_uri()
+            != format!("{}/api/v1/oidc/callback", self.authority.identity_origin)
+        {
+            return Err(FederationError::Configuration.into());
+        }
+        self.oidc
+            .validate(actor.key.tenant, &settings, &credentials)?;
+        let profile = self.oidc.assurance_profile(actor.key.tenant, &settings);
         self.authority
-            .create_provider(actor, settings, approval, deadline)
+            .create_provider(actor, settings, credentials, profile, deadline)
             .await
     }
     pub async fn update_provider(
@@ -496,14 +445,27 @@ impl Federation {
         id: ProviderId,
         expected_version: i64,
         settings: ProviderSettings,
+        credentials: ProviderCredentials,
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.authority.require_administrator(&actor)?;
-        let approval = self
-            .oidc
-            .approve_configuration(actor.key.tenant, &settings)?;
+        if settings.redirect_uri()
+            != format!("{}/api/v1/oidc/callback", self.authority.identity_origin)
+        {
+            return Err(FederationError::Configuration.into());
+        }
+        self.oidc
+            .validate(actor.key.tenant, &settings, &credentials)?;
+        let profile = self.oidc.assurance_profile(actor.key.tenant, &settings);
         self.authority
-            .update_provider(actor, id, expected_version, settings, approval, deadline)
+            .edit_provider(
+                actor,
+                id,
+                expected_version,
+                Some((settings, credentials, profile)),
+                None,
+                deadline,
+            )
             .await
     }
     pub async fn enable_provider(
@@ -536,7 +498,9 @@ impl Federation {
             .test_provider(
                 actor,
                 id,
-                move |tenant, settings| Box::pin(async move { oidc.test(tenant, &settings).await }),
+                move |tenant, settings, credentials| {
+                    Box::pin(async move { oidc.test(tenant, &settings, &credentials).await })
+                },
                 deadline,
             )
             .await
@@ -564,21 +528,21 @@ pub struct LoginOption {
 }
 
 impl Federation {
-    pub(super) fn check_approval(
+    pub(super) fn check_assurance_profile(
         &self,
         tenant: TenantId,
         view: &ProviderView,
     ) -> Result<(), AuthorityError> {
-        let current = self.oidc.approve_configuration(tenant, &view.settings)?;
-        if view.deployment_approval != Some(current) {
+        let current = self.oidc.assurance_profile(tenant, &view.settings);
+        if view.assurance_profile != current {
             return Err(FederationError::StaleConfiguration.into());
         }
         Ok(())
     }
-    /// Apply the installed deployment approval before opening admission. Single-replica maintenance window.
+    /// Revoke old authentication facts when the host changes ACR/AMR interpretation. This never admits or disables an IdP.
     /// Existing provider versions fence attempts; epochs fence every session and downstream grant.
     /// ref: PostgreSQL 17 explicit-locking; reuse the same tenant/provider lock order as administration.
-    pub async fn synchronize_approvals(
+    pub async fn reconcile_assurance_profiles(
         &self,
         tenant: TenantId,
         deadline: OperationDeadline,
@@ -597,14 +561,13 @@ impl Federation {
             for id in ids {
                 let id=ProviderId::parse(&id.to_string())?;
                 let mut view=db::provider(c,tenant,id).await?;
-                let approval=oidc.approve_configuration(tenant,&view.settings).ok();
-                if approval==view.deployment_approval { continue; }
+                let profile=oidc.assurance_profile(tenant,&view.settings);
+                if profile==view.assurance_profile { continue; }
                 view.version=view.version.checked_add(1).ok_or(FederationError::Rejected)?;
                 view.revocation_epoch=view.revocation_epoch.checked_add(1).ok_or(FederationError::Rejected)?;
-                view.deployment_approval=approval;
-                view.enabled &= approval.is_some();
-                sqlx::query("UPDATE identity_authority.providers SET config_version=$3,revocation_epoch=$4,deployment_approval=$5,enabled=$6 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid")
-                    .bind(tenant.to_string()).bind(id.to_string()).bind(view.version).bind(view.revocation_epoch).bind(approval.map(|v|v.to_vec())).bind(view.enabled).execute(&mut *c).await?;
+                view.assurance_profile=profile;
+                sqlx::query("UPDATE identity_authority.providers SET config_version=$3,revocation_epoch=$4,assurance_profile=$5,enabled=$6 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid")
+                    .bind(tenant.to_string()).bind(id.to_string()).bind(view.version).bind(view.revocation_epoch).bind(profile.as_slice()).bind(view.enabled).execute(&mut *c).await?;
                 events.push(event(tenant,Action::ProviderUpdated,&view,None));
                 if events.len() == crate::transaction::MAX_MUTATION_EVENTS { return Ok((true, events)); }
             }

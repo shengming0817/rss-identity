@@ -17,7 +17,7 @@ make ci
 
 - `rss-identity-core` 持有账户、会话与下游协议策略；真实账户/member/session/source 判定归 PG authority，client 只在完成在线验证后返回可信上下文。旧绑定快照骨架已删除。
 - `rss-identity-postgres` 注入 RSS PgRuntime，具体账户操作与关闭的安全事件在同一事务提交；不再开放 I02 的任意 SQL/字节事件探针。明确保留回滚、回滚失败、提交不确定及 fencing。
-- `rss-identity-oidc` 通过 openidconnect 完成 discovery、Authorization Code + PKCE、state/nonce/ID token 校验，返回经过验证的上游 claims；I05 的 Federation 用例执行持久登录事务/JIT/关联及中央会话原子结算。出站由部署批准的 issuer origin/地址范围约束，DNS 解析后再次检查，禁隐式环境代理；后续端点保持 issuer 同源、禁止重定向、5 秒超时和 1 MiB 响应上限。生产配置必须 HTTPS，`test-support` 仅开放显式 loopback fixture 构造器。
+- `rss-identity-oidc` 通过 openidconnect 完成 discovery、Authorization Code + PKCE、state/nonce/ID token 校验，返回经过验证的上游 claims；I05 的 Federation 用例执行持久登录事务/JIT/关联及中央会话原子结算。出站不设部署/IP 范围准入，凭据按 tenant/provider/version 加密隔离，禁隐式环境代理；后续端点保持 issuer 同源、禁止重定向、5 秒超时和 1 MiB 响应上限。生产配置必须 HTTPS，`test-support` 仅开放显式 loopback fixture 构造器。
 
 真实 PG 测试覆盖正常提交、SQL 失败回滚、CommitUnknownAfterAck、重复事件、跨租户 RLS 与 outbox 绑定。真实 Keycloak 上游与 Hydra 下游测试覆盖发现、code exchange、S256、重放、错误 state/nonce/verifier/redirect 及 provider 不可用。补充签名 token 的 azp/issuer/audience/expiry 负例、外源 discovery/JWKS、禁止跳转、响应上限和容器清理失败测试。Hydra 下游测试运行真实 Identity bridge，见[下游接入](downstream.md)。
 
@@ -52,7 +52,7 @@ owner shengming。仅 rss-identity-oidc 0.1.0 → openidconnect 4.0.1 → rsa 0.
 
 构建 `cargo build --locked -p rss-identity-app`，离线参数说明用 `identity-admin --help`。工具不启动 HTTP，不自动迁移或清空数据库。
 
-维护配置 JSON 必填：`identity_origin`、`host`、`port`、`database`、`user`、`password_file`、`ca_file`、`tenant_id`、`storage_target`、`storage_lineage`、`storage_tenant_epoch`。后两个 identity 为非零 16 字节数组，epoch 为 RSS 存储 fencing 值。拒绝未知配置字段；生产连接始终 VerifyFull。RSS schema、lineage、tenant binding 和 Identity 安装 SQL 由部署 owner 先配置。
+维护配置 JSON 必填：`identity_origin`、`host`、`port`、`database`、`user`、`password_file`、`ca_file`、`system_domain_id`、`storage_target`、`storage_lineage`、`storage_generation`。后两个 identity 为非零 16 字节数组，epoch 为 RSS 存储 fencing 值。拒绝未知配置字段；生产连接始终 VerifyFull。RSS schema、lineage、tenant binding 和 Identity 安装 SQL 由部署 owner 先配置。
 
 配置/CA 只接受有界普通文件（16 KiB / 1 MiB）；数据库密码、当前口令和新口令从私有普通文件读取，拒绝末端 symlink、FIFO、group/other 权限和超长输入。密码按原字节读取，不自动去掉换行；不得将秘密放入命令参数、环境变量或日志。PG 关闭最多等 5 秒，关闭超时不改变已确认操作结果。
 
@@ -66,10 +66,10 @@ owner shengming。仅 rss-identity-oidc 0.1.0 → openidconnect 4.0.1 → rsa 0.
 
 ```text
 identity-admin MAINTENANCE_CONFIG initialize PRINCIPAL_UUID LOGIN PASSWORD_FILE
-identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
+identity-admin MAINTENANCE_CONFIG recover TENANT_UUID PRINCIPAL_UUID NEW_PASSWORD_FILE
 ```
 
-配置显式指定 tenant，命令显式指定 principal，不按登录名猜测管理员。初始化 UUID 由部署 owner 随机生成，成功后永久记录该 tenant；重复或跨租户再次初始化被拒绝。恢复只针对已有本地管理员，保留 enabled、administrator、emergency 和 membership，更新 `local_credentials` 中的密码哈希并推进 `auth_epoch`，使旧密码认证候选和既有会话失效。并发恢复按事务顺序执行，最后提交的密码生效。
+配置显式指定系统域，recover 命令显式指定 tenant/principal，不按登录名猜测管理员。初始化 UUID 由部署 owner 随机生成，成功后永久记录系统域并建立显式平台角色；重复初始化被拒绝。恢复只针对已有合格本地租户或平台管理员，保留 enabled、administrator、emergency 和 membership，更新 `local_credentials` 中的密码哈希并推进 `auth_epoch`，使旧密码认证候选和既有会话失效。并发恢复按事务顺序执行，最后提交的密码生效。
 
 成功仅输出主体/epoch。NotStarted 或确认回滚不表示提交成功；CommitUnknown/RollbackFailed 必须当作结果不确定，不自动重试或交付凭据。运维按 [只读核实与判定表](local-maintenance.md#不确定提交只读核实) 核实非秘密安全事件/状态与账户可用性，再决定是否执行新的恢复；不能根据失败退出码推断密码没变。输入密码文件由操作者管理，工具不创建或自动删除它。
 
@@ -77,11 +77,11 @@ identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 
 ### 开发库重建与兼容性
 
-#2334 再次确认只有可丢弃开发库，I05 初始安装 SQL 直接改为 schema version 4。旧库/旧角色/旧参数不兼容，不提供增量迁移、旧命令别名或运行时兼容开关。
+#2427 再次确认没有旧数据，初始安装 SQL 直接替换为 schema version 8。旧库/旧角色/旧参数不兼容，不提供增量迁移、旧命令别名或运行时兼容开关。
 
 具体 owner 连接、删除顺序、RSS 前置角色、固定八个 RSS 迁移、Identity 初始安装、lineage/epoch、登录身份及 GRANT 和验收命令见 [开发库重建与安装](local-maintenance.md#重建与安装)。安装 SQL 全批单事务执行；CLI 不自动清库，遇到未知角色依赖停止，不使用 CASCADE。
 
-安装遇到同名全局角色即失败，不静默复用。`Authority::connect` 检查当前完整结构摘要、十二张表、十张 tenant RLS 表及精确有效权限；运行角色无 deployment 写权限，维护角色无 attempts/session 和成员更新权限。权限漂移、旧 schema 和高权身份均拒绝连接。错误提供 schema 版本、角色不匹配、权限漂移和 schema/RLS 契约漂移四类安全诊断，底层 provider 故障仍保留 settlement。
+安装遇到同名全局角色即失败，不静默复用。`Authority::connect_runtime` / `connect_maintenance` 检查当前完整结构摘要、所有 tenant RLS 表及精确有效权限；运行角色无 deployment 写权限，维护角色无 attempts/session 和成员更新权限。权限漂移、旧 schema 和高权身份均拒绝连接。错误提供 schema 版本、角色不匹配、权限漂移和 schema/RLS 契约漂移四类安全诊断，底层 provider 故障仍保留 settlement。
 
 ### 简化结果与验证范围
 
@@ -93,7 +93,7 @@ identity-admin MAINTENANCE_CONFIG recover PRINCIPAL_UUID NEW_PASSWORD_FILE
 | 部署身份数 | 2 | 2 |
 | 文件交付失败 | 重签、重新交付 | 无授权文件交付环节 |
 
-日常管理统一使用[中央管理 HTTP/UI](management.md)，旧日常 CLI 已退出。`make test-pg` 执行维护初始化/恢复、权限隔离、并发和 settlement 故障及密码文件接缝；runner 核对完整测试名与执行计数。`cargo test` 默认忽略真实 provider 测试，不能代替该证据。真实 binary/config/TLS PG 装配仍归 #2341/T32 的独立 PR。
+日常管理统一使用[中央管理 HTTP/UI](management.md)，旧数据库日常 CLI 已退出；identity-platform 只通过 HTTP 执行平台操作。`make test-pg` 执行维护初始化/恢复、权限隔离、并发和 settlement 故障及密码文件接缝；runner 核对完整测试名与执行计数。`cargo test` 默认忽略真实 provider 测试，不能代替该证据。真实 binary/config/TLS PG 装配仍归 #2341/T32 的独立 PR。
 
 
 ## 中央会话 HTTP 接入
@@ -116,3 +116,5 @@ GET/HEAD 会话查询不续期。客户端在有效用户活动期间通过受 O
 ## I08 装配入口
 
 [部署文档](../deployment/README.md)持有统一应用、v7安装、生命周期和候选构建。make test-assembly验证真实TLS PG配置/安装/失败清理，make test-gateway验证真实NGINX TLS/来源覆盖/私有路径；两者均纳入make ci。KDF由应用创建唯一共享实例并注入Authority，关闭使用同一scope。实际peer与ClientAddress分开；测试宿主须显式提供受信客户端归因。
+
+Runtime 构造必须一次提供外部 RuntimeSource 和 CredentialKeys；不存在 connect 后注入 setter。`identity-contracts` 持有 CLI binding、平台及中央会话响应类型，CLI 的编译依赖禁止 core、PG、app 与 KDF。CLI 的 test-support 仅允许 T2 注入受控 browser launcher；候选构建拒绝该 feature。

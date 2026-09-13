@@ -17,7 +17,7 @@ pub const RETURN: &str = "https://identity.example.test/done";
 type Hook = Box<dyn FnOnce() -> UpstreamFuture<'static, ()> + Send>;
 pub struct ScriptedOidc {
     pub fail: AtomicBool,
-    pub approval: AtomicBool,
+    pub trusted_assurance: AtomicBool,
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
@@ -30,7 +30,7 @@ impl ScriptedOidc {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             fail: AtomicBool::new(false),
-            approval: AtomicBool::new(true),
+            trusted_assurance: AtomicBool::new(true),
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
@@ -42,20 +42,22 @@ impl ScriptedOidc {
     }
 }
 impl UpstreamOidc for ScriptedOidc {
-    fn approve_configuration(
+    fn assurance_profile(&self, _tenant: TenantId, _c: &ProviderSettings) -> [u8; 32] {
+        [u8::from(self.trusted_assurance.load(Ordering::SeqCst)); 32]
+    }
+    fn validate(
         &self,
         _tenant: TenantId,
         _c: &ProviderSettings,
-    ) -> Result<[u8; 32], FederationError> {
-        Ok([u8::from(self.approval.load(Ordering::SeqCst)); 32])
-    }
-    fn validate(&self, _tenant: TenantId, _c: &ProviderSettings) -> Result<(), FederationError> {
+        _: &ProviderCredentials,
+    ) -> Result<(), FederationError> {
         Ok(())
     }
     fn prepare<'a>(
         &'a self,
         _tenant: TenantId,
         _: &'a ProviderSettings,
+        _: &'a ProviderCredentials,
         m: &'a ProtocolMaterial,
         _: rss_identity_core::assurance::AuthenticationMode,
     ) -> UpstreamFuture<'a, String> {
@@ -70,6 +72,7 @@ impl UpstreamOidc for ScriptedOidc {
         &'a self,
         _tenant: TenantId,
         c: &'a ProviderSettings,
+        _: &'a ProviderCredentials,
         _: ProtocolMaterial,
         code: Zeroizing<String>,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
@@ -112,6 +115,7 @@ impl UpstreamOidc for ScriptedOidc {
         &'a self,
         _tenant: TenantId,
         _: &'a ProviderSettings,
+        _: &'a ProviderCredentials,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
             let hook = self.hook.lock().unwrap().take();
@@ -151,7 +155,7 @@ pub fn settings() -> ProviderSettings {
     (rss_identity_core::federation::ProviderSettingsInput {
         issuer: "https://idp.example.test".into(),
         client_id: "identity".into(),
-        secret_ref: "idp@1".into(),
+
         redirect_uri: "https://identity.example.test/api/v1/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
@@ -169,7 +173,13 @@ pub async fn actor(f: &Fixture) -> anyhow::Result<AuthenticatedSession> {
 }
 pub async fn enabled(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
     let p = s
-        .create_provider(actor(f).await?, settings(), deadline())
+        .create_provider(
+            actor(f).await?,
+            settings(),
+            rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
+            deadline(),
+        )
         .await?;
     Ok(
         s.enable_provider(actor(f).await?, p.id, p.version, true, deadline())

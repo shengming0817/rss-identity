@@ -16,7 +16,7 @@ class Deployment(unittest.TestCase):
    if isinstance(v,dict):return {k:files(x) for k,x in v.items()}
    if isinstance(v,list):return [files(x) for x in v]
    if isinstance(v,str) and v.startswith('/srv/rss-identity/input/'):
-    p=root/Path(v).name;p.write_text('TestSecret_'+p.stem.replace('-','_')+'_'*64);p.chmod(0o600);return str(p)
+    p=root/Path(v).name;p.write_text(json.dumps({'realm':'identity','enabled':True,'clients':[]}) if p.suffix=='.json' else '08'*32 if p.name=='provider-key-hex' else 'TestSecret_'+p.stem.replace('-','_')+'_'*64);p.chmod(0o600);return str(p)
    return v
   return files(source)
  def test_configuration_diagnostics_are_actionable_without_input_values(self):
@@ -26,7 +26,7 @@ class Deployment(unittest.TestCase):
     data=self.data(root);data.pop(field)
     with self.assertRaises(ValueError) as error:deploy.render(data,root/field,self.candidate())
     self.assertIn(field,deploy.configuration_diagnostic(error.exception))
-   data=self.data(root);data['runtime']['oidc']['providers'][0].pop('keycloak_totp')
+   data=self.data(root);data['runtime']['oidc']['assurance_profiles']=[{'tenant_id':'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','issuer':'https://sso.example.test/realms/identity','client_id':'identity'}]
    with self.assertRaises(ValueError) as error:deploy.render(data,root/'profile',self.candidate())
    self.assertIn('keycloak_totp',deploy.configuration_diagnostic(error.exception))
    for error in [ValueError('synthetic-secret'),KeyError('synthetic-secret'),OSError('synthetic-secret')]:
@@ -57,6 +57,13 @@ class Deployment(unittest.TestCase):
    with self.assertRaises(ValueError):deploy.render(data,root/'bad',self.candidate())
    data=self.data(root);Path(data['runtime']['database']['password_file']).chmod(0o644)
    with self.assertRaises(ValueError):deploy.render(data,root/'unsafe',self.candidate())
+
+ def test_private_mount_rejects_final_symlink(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);data=self.data(root)
+   original=Path(data['runtime']['database']['password_file']);link=root/'linked-password';link.symlink_to(original)
+   data['runtime']['database']['password_file']=str(link)
+   with self.assertRaisesRegex(ValueError,'symlink'):deploy.render(data,root/'linked',self.candidate())
 
  def test_candidate_provider_identity_does_not_follow_new_checkout(self):
   with tempfile.TemporaryDirectory() as tmp:
@@ -151,7 +158,8 @@ class Deployment(unittest.TestCase):
     path=root/name;path.write_text(name+'_'*64);path.chmod(0o600);keys.append(str(path))
    data.pop('hydra_system_secret_file',None)
    data['hydra_system_secret_files']=keys[:2];data['hydra_cookie_secret_files']=keys[2:]
-   data['runtime']['oidc']['providers'][0]['keycloak_totp']=True
+   data['runtime']['oidc']['assurance_profiles']=[{'tenant_id':'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','issuer':'https://sso.example.test/realms/identity','client_id':'identity','keycloak_totp':True}]
+   realm={'realm':'identity','enabled':True,'clients':[]};realm.update(json.loads((deploy.ROOT/'deployment/keycloak-totp.json').read_text()));Path(data['keycloak']['realm_files'][0]).write_text(json.dumps(realm))
    deploy.render(data,root/'rendered',self.candidate())
    hydra=json.loads((root/'rendered/hydra.json').read_text())
    self.assertEqual(hydra['secrets'],{'system':[Path(p).read_text() for p in keys[:2]],'cookie':[Path(keys[2]).read_text()]})

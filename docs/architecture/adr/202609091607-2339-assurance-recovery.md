@@ -1,10 +1,10 @@
 # I09：可信认证事实与原生恢复接缝
 
-本项一个实现 PR 闭合 T1/T2；新增产品 T3 独立交付。没有旧部署，初始 schema 原子替换为 v7，旧开发库由 owner 重建，无升级、降级、双读或兼容配置。#2339 在目标冻结及适用产品验收完成前保持未完成。
+本项一个实现 PR 闭合 T1/T2；新增产品 T3 独立交付。I09 的历史初始版本为 v7；当前按 #2427 使用 v8。没有旧数据，旧库只拒绝，不自动清理，无升级、降级、双读或兼容配置。#2339 在目标冻结及适用产品验收完成前保持未完成。
 
 ## Assurance
 
-首版唯一 MFA profile 是锁定 Keycloak 的 password + TOTP、ACR `2`。`keycloak_totp` 由部署 owner 在 issuer/client/tenant/secret_ref 的完整绑定内批准，不能由租户 ProviderSettings 或浏览器修改。渲染器使用 `deployment/keycloak-totp.json` 给新 realm 安装 LoA1/password、LoA2/required OTP 的条件 flow；无用户、口令或 OTP seed。已有 realm 不以重新 import 代替管理员核验。
+首版唯一 MFA profile 是锁定 Keycloak 的 password + TOTP、ACR `2`。`keycloak_totp` 由部署 owner 在 issuer/client/tenant 的完整绑定内配置为可信解释（#2427 删除 IdP 接入审批及 secret_ref），不能由租户 ProviderSettings 或浏览器修改。渲染器使用 `deployment/keycloak-totp.json` 给新 realm 安装 LoA1/password、LoA2/required OTP 的条件 flow；无用户、口令或 OTP seed。已有 realm 不以重新 import 代替管理员核验。
 
 `AuthenticationMode` 区分 Login、Reauthenticate、StepUp；不再用 reauth bool。正常登录不强制 MFA，关联再认证不推断 MFA。step-up 使用 `prompt=login`、`max_age=0`、`acr_values=2`，请求模式随现有 OIDC transaction 持久化；callback 即使收到浏览器降低强度后的有效 token，也必须满足原持久要求。
 
@@ -16,11 +16,11 @@ step-up 复用 Login purpose、replacement_session 和唯一 callback，必须�
 
 ## 恢复与轮换
 
-采用 PG 原生 pg_basebackup/pg_verifybackup 与真实恢复验证；部署负责停写、隔离、选取完整切点、保管配置/密钥、核验后开放。Identity/Hydra/Keycloak 在单一集群中仍保持独立数据库/schema owner。没有恢复产品 binary、seal/generation、库外激活记录或自动放行逻辑。
+采用 PG 原生 pg_basebackup/pg_verifybackup 与真实恢复验证；部署负责停写、隔离、选取完整切点、保管配置/密钥、核验后开放。Identity/Hydra/Keycloak 在单一集群中仍保持独立数据库/schema owner。没有独立恢复产品 binary、seal、库外激活工作流或自动放行逻辑。#2427 的外部 storage target/lineage 与单一 deployment generation 持有恢复 fencing，不能从恢复数据库反填期望代际。
 
 恢复严格回到所选备份切点；后续禁用、改密或撤销不会凭空保留。T2 同时验证当前切点拒绝旧凭据、历史切点确实带回历史事实；后一场景不得作为生产开放证明。无法证明所需安全状态被包含时，部署保持隔离。增加库内 epoch 不能替代完整恢复材料。
 
-应急账户维持已有 enabled/emergency 语义，凭据独立封存、使用后立即维护改密并验证失效，不扩大 maintenance 权限。普通服务秘密采用停机同步替换；state key 单 current key，替换终止在途登录。Hydra 原生 system/cookie keyring 分域、新钥优先，旧钥按实际加密数据依赖退出；无自写加密迁移或凭时间删除旧钥。
+应急账户维持已有 enabled/emergency 语义，凭据独立封存、使用后立即维护改密并验证失效，不扩大 maintenance 权限。普通服务秘密采用停机同步替换；state key 单 current key，替换终止在途登录。Hydra 原生 system/cookie keyring 分域、新钥优先，旧钥按实际加密数据依赖退出；不自行迁移 Hydra 密文或凭时间删除旧钥。Identity 的 IdP 凭据另由 #2427 的 AES-GCM/keyring 及有界 owner rekey 持有。
 
 ## 验证与限制
 
@@ -36,6 +36,6 @@ T1 证明 claims/配置/时钟边界；真实 PG、Keycloak TOTP 和 Hydra T2 �
 - [PostgreSQL 17 pg_verifybackup](https://www.postgresql.org/docs/17/app-pgverifybackup.html)：manifest 校验不能替代实际恢复测试。
 - [Hydra key rotation](https://www.ory.com/docs/hydra/self-hosted/secrets-key-rotation)：旧数据不自动重新加密，原生列表的第一项用于新加密。
 
-部署批准的 profile identity 由 OIDC adapter 生成并持久保存在 provider 上，不由租户或浏览器提供。应用在单副本维护窗口启动时、监听入口开放之前同步当前部署批准；指纹变化或绑定退出在既有租户锁和事务中推进 provider config_version/revocation_epoch，并写 provider_updated 事件。版本冻结在途 attempt，epoch 撤销既有联合 session 与关联 grant；恢复旧批准也推进 epoch，不会复活旧会话。退出绑定同时停用 provider，重新批准不会自动启用。秘密轮换不改变 profile identity。profile 同步未知提交或失败时启动不开放入口；不支持多个不同批准配置的副本同时运行。
+可信 assurance profile identity 由 OIDC adapter 按部署 owner 配置生成并持久保存在 provider 上，不由租户或浏览器提供；它只决定经过验证的 ACR/AMR 如何解释，不批准 IdP 接入。应用在单副本维护窗口启动时、监听入口开放之前同步该解释；指纹变化在既有租户锁和事务中推进 config_version/revocation_epoch 并写 provider_updated 事件。退出或恢复解释都会撤销旧认证状态，但不控制 provider.enabled；IdP 接入、配置、凭据和启停由租户管理员或系统域平台管理员管理，不设部署审批或 IP/CIDR 限制。凭据更新独立推进 credential_version 及认证状态版本。同步未知提交或失败时启动不开放入口，不支持多个不同 assurance 配置的副本同时运行。
 
 规范化 ACR/AMR 的唯一闭集位于 contracts，core/adapter/client 直接消费类型；JSON wire 拼写保持 unspecified/mfa 与 mfa/otp/pwd，不保留旧字符串 API。当前前端 capability 发现与按钮继续由 #2368 联合交付。

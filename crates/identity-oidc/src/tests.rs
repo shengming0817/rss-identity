@@ -99,7 +99,7 @@ fn config(issuer: &str) -> ProviderSettings {
     (rss_identity_core::federation::ProviderSettingsInput {
         issuer: issuer.into(),
         client_id: "client".into(),
-        secret_ref: "fixture@1".into(),
+
         redirect_uri: "http://127.0.0.1/callback".into(),
         scopes: vec!["openid".into()],
         claims: rss_identity_core::federation::ClaimMapping {
@@ -112,23 +112,22 @@ fn config(issuer: &str) -> ProviderSettings {
     .unwrap()
 }
 fn adapter(issuer: &str) -> HttpOidc {
-    HttpOidc::for_loopback_test(
-        vec![ApprovedProvider {
-            keycloak_totp: false,
-            tenant: tenant(),
-            issuer: issuer.into(),
-            client_id: "client".into(),
-            secret_ref: "fixture@1".into(),
-            redirect_uri: "http://127.0.0.1/callback".into(),
-            addresses: vec!["127.0.0.0/8".parse().unwrap()],
-        }],
-        BTreeMap::from([("fixture@1".into(), Zeroizing::new("fixture-secret".into()))]),
-    )
+    HttpOidc::for_loopback_test(vec![TrustedAssuranceProfile {
+        keycloak_totp: false,
+        tenant: tenant(),
+        issuer: issuer.into(),
+        client_id: "client".into(),
+    }])
     .unwrap()
 }
 fn transport(origin: &str) -> Transport {
     adapter(origin)
-        .transport(tenant(), &config(origin))
+        .transport(
+            tenant(),
+            &config(origin),
+            &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
+        )
         .unwrap()
 }
 async fn get(t: &Transport, url: &str) -> Result<HttpResponse, FederationError> {
@@ -221,7 +220,17 @@ async fn discovery_rejects_external_authorization_and_jwks() {
                 write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
-        let result = adapter(&issuer).discover(tenant(), &config(&issuer)).await;
+        let result = adapter(&issuer)
+            .discover(
+                tenant(),
+                &config(&issuer),
+                &rss_identity_core::federation::ProviderCredentials::new(
+                    "fixture-secret".into(),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await;
         assert!(matches!(
             result,
             Err(FederationError::Provider(ProviderFailure {
@@ -245,7 +254,15 @@ async fn discovery_preserves_unavailable_and_protocol_failure() {
     ] {
         let (issuer, handle) = server(status, "", body);
         let error = adapter(&issuer)
-            .discover(tenant(), &config(&issuer))
+            .discover(
+                tenant(),
+                &config(&issuer),
+                &rss_identity_core::federation::ProviderCredentials::new(
+                    "fixture-secret".into(),
+                    None,
+                )
+                .unwrap(),
+            )
             .await
             .err()
             .unwrap();
@@ -262,27 +279,6 @@ async fn discovery_preserves_unavailable_and_protocol_failure() {
         );
         handle.join().unwrap();
     }
-}
-
-#[tokio::test]
-async fn blocked_dns_resolution_never_connects() {
-    use reqwest::dns::Resolve;
-    let resolver = Resolver {
-        host: "localhost".into(),
-        addresses: vec!["192.0.2.0/24".parse().unwrap()],
-    };
-    assert!(
-        resolver
-            .resolve("localhost".parse().unwrap())
-            .await
-            .is_err()
-    );
-    assert!(
-        resolver
-            .resolve("other.test".parse().unwrap())
-            .await
-            .is_err()
-    );
 }
 
 fn tenant() -> rss_request_context::TenantId {

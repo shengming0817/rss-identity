@@ -160,7 +160,7 @@ impl Downstream {
         admission: Arc<PrepareAdmission>,
     ) -> Result<Self, AuthorityError> {
         authority.require_runtime()?;
-        if registrations.is_empty() || registrations.len() > 128 {
+        if registrations.len() > 128 {
             return Err(AuthorityError::Invalid);
         }
         let mut entries = BTreeMap::new();

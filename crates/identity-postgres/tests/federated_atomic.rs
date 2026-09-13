@@ -119,7 +119,15 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
     // A config edit after beginning the flow invalidates the exact persisted binding.
     let token = step_begin(&f, &s, &p, &upgraded).await?;
     let p = s
-        .update_provider(actor(&f).await?, p.id, p.version, settings(), deadline())
+        .update_provider(
+            actor(&f).await?,
+            p.id,
+            p.version,
+            settings(),
+            rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
+            deadline(),
+        )
         .await?;
     assert!(step_finish(&s, token, &upgraded, "alice").await.is_err());
     // Recreate a usable session; revocation between begin and callback rejects before exchange.
@@ -156,6 +164,8 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
             p.id,
             1,
             next.clone().try_into()?,
+            rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
             deadline()
         )
         .await
@@ -167,6 +177,8 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
             p.id,
             p.version,
             next.try_into()?,
+            rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
             deadline(),
         )
         .await?;
@@ -230,6 +242,8 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
             p.id,
             updated.version,
             invalid.try_into()?,
+            rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
             deadline()
         )
         .await
@@ -258,6 +272,8 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
         s.create_provider(
             support::session_actor(&f.store, member).await?,
             settings(),
+            rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
             deadline()
         )
         .await
@@ -356,6 +372,8 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
         .create_provider(
             support::session_actor(&f.store, admin_b).await?,
             settings(),
+            rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
             deadline(),
         )
         .await?;
@@ -420,6 +438,8 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
             p.id,
             p.version,
             off.try_into()?,
+            rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
             deadline(),
         )
         .await?;
@@ -468,6 +488,8 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
             p.id,
             p.version,
             p.settings.clone(),
+            rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
             deadline(),
         )
         .await?;
@@ -481,7 +503,7 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
         f.store
             .inspect_session(f.key.tenant, secret(&fed), deadline())
             .await
-            .is_ok()
+            .is_err()
     );
     upstream.groups.lock().unwrap().clear();
     let current_session = issued(finish(&s, begin(&f, &s, &edited).await?, "alice").await?);
@@ -590,7 +612,7 @@ async fn federation_atomic_events_and_unknown_commit() -> anyhow::Result<()> {
     ));
     assert!(finish(&s, pending, "alice").await.is_err());
     let persisted:(i64,i64,i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM identity_authority.accounts),(SELECT count(*) FROM identity_authority.memberships),(SELECT count(*) FROM identity_authority.external_identities),(SELECT count(*) FROM identity_authority.sessions),(SELECT count(*) FROM identity_authority.local_credentials)").fetch_one(&f.owner).await?;
-    assert_eq!(persisted, (2, 2, 1, management_sessions + 1, 1));
+    assert_eq!(persisted, (3, 3, 1, management_sessions + 1, 2));
     let committed = events(&f).await?;
     let pair = &committed[committed.len() - 2..];
     assert_eq!(pair[0]["action"], "jit_created");
@@ -939,7 +961,7 @@ async fn federation_concurrent_jit_rls_and_schema_drift() -> anyhow::Result<()> 
     let guards: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.guard")
         .fetch_one(&f.owner)
         .await?;
-    assert_eq!(guards, 1);
+    assert_eq!(guards, 2);
     sqlx::raw_sql("GRANT DELETE ON identity_authority.providers TO identity_account_runtime")
         .execute(&f.owner)
         .await?;
@@ -975,6 +997,7 @@ async fn federation_concurrent_jit_rls_and_schema_drift() -> anyhow::Result<()> 
         committed
             .iter()
             .filter(|v| v["action"] == "created"
+                && v["tenant"] == A
                 && v["principal"] != f.key.principal.as_uuid().to_string())
             .count(),
         2
@@ -995,6 +1018,12 @@ pub async fn events(f: &Fixture) -> anyhow::Result<Vec<serde_json::Value>> {
         let bytes: Vec<u8> = serde_json::from_value(envelope["payload"].clone())?;
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
         let (route, contract, version, schema) = match envelope["route"].as_str().unwrap() {
+            "platform.changed" => (
+                "platform.changed",
+                "identity.platform.security",
+                1,
+                include_str!("../src/platform-security-event-v1.json"),
+            ),
             "federation.changed" => (
                 "federation.changed",
                 "identity.federation.security",
@@ -1260,7 +1289,7 @@ async fn federation_step_up_unknown_commit_and_event_rollback() -> anyhow::Resul
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
-async fn federation_approval_change_revokes_attempts_and_sessions() -> anyhow::Result<()> {
+async fn federation_assurance_change_revokes_attempts_and_sessions() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let upstream = ScriptedOidc::new();
@@ -1275,11 +1304,12 @@ async fn federation_approval_change_revokes_attempts_and_sessions() -> anyhow::R
         rss_identity_core::assurance::Acr::Mfa,
         vec![],
     )?);
-    // A deployment approval change must be settled before a restarted server opens admission.
+    // A trusted assurance profile change must be settled before a restarted server opens admission.
     let prior = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
     let pending = step_begin(&f, &s, &p, &prior).await?;
-    upstream.approval.store(false, Ordering::SeqCst);
-    s.synchronize_approvals(f.key.tenant, deadline()).await?;
+    upstream.trusted_assurance.store(false, Ordering::SeqCst);
+    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+        .await?;
     assert!(
         f.store
             .inspect_session(f.key.tenant, secret(&prior), deadline())
@@ -1287,40 +1317,44 @@ async fn federation_approval_change_revokes_attempts_and_sessions() -> anyhow::R
             .is_err()
     );
     assert!(step_finish(&s, pending, &prior, "alice").await.is_err());
-    upstream.approval.store(true, Ordering::SeqCst);
+    upstream.trusted_assurance.store(true, Ordering::SeqCst);
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     assert!(matches!(
-        s.synchronize_approvals(f.key.tenant, deadline()).await,
+        s.reconcile_assurance_profiles(f.key.tenant, deadline())
+            .await,
         Err(AuthorityError::CommitUnknown(_))
     ));
     let settled_events = events(&f).await?.len();
-    s.synchronize_approvals(f.key.tenant, deadline()).await?;
+    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+        .await?;
     assert_eq!(
         events(&f).await?.len(),
         settled_events,
-        "settled approval must not be applied twice"
+        "settled assurance profile must not be applied twice"
     );
     assert!(
         f.store
             .inspect_session(f.key.tenant, secret(&prior), deadline())
             .await
             .is_err(),
-        "reapproval must not resurrect an old session"
+        "restored assurance profile must not resurrect an old session"
     );
     // More providers than the transaction event bound must settle in bounded batches.
-    sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2 FROM generate_series(1,9)")
+    sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2,decode(repeat('00',32),'hex'),1 FROM generate_series(1,9)")
         .bind(A).bind(serde_json::to_value(settings())?).execute(&f.owner).await?;
     let before_batch = events(&f).await?.len();
-    s.synchronize_approvals(f.key.tenant, deadline()).await?;
+    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+        .await?;
     assert_eq!(events(&f).await?.len(), before_batch + 9);
-    let unapproved: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM identity_authority.providers WHERE deployment_approval IS NULL",
+    let unprofiled: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.providers WHERE assurance_profile=decode(repeat('00',32),'hex')",
     )
     .fetch_one(&f.owner)
     .await?;
-    assert_eq!(unapproved, 0);
-    s.synchronize_approvals(f.key.tenant, deadline()).await?;
+    assert_eq!(unprofiled, 0);
+    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+        .await?;
     assert_eq!(events(&f).await?.len(), before_batch + 9);
     f.close().await;
     Ok(())

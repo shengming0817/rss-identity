@@ -38,7 +38,7 @@ Identity 中央登录会话与产品浏览器会话分开。首期使用 Hydra �
 | ACC-02 / 一级 | 初始化与本地账户 | 无默认密码；独立维护身份的一次性初始化且并发安全，账户/初始管理权/安全事件原子成立；用户创建、禁用、密码变更、受控管理员恢复；最后管理员保护和应急访问有明确规则 |
 | ACC-03 / 一级 | 本地认证安全 | 成熟密码哈希、有界 KDF 和并发；失败响应不枚举账户；尝试限流覆盖验证入口；账户状态/epoch 与发会话并发时不越权 |
 | ACC-04 / 一级 | 服务端会话 | 不透明高熵 cookie，Secure/HttpOnly、明确 SameSite 和 CSRF 策略；登录/提权旋转，idle/absolute expiry，当前/全部会话撤销；密码变化和禁用按冻结规则失效；存储故障拒绝认证 |
-| ACC-05 / 一级 | 租户 IdP 配置 | tenant/provider/config-version 绑定，issuer/client/secret_ref/redirect/scopes/claim mapping；配置管理授权与审计；可诊断连接测试，受控出站与 TLS；停用或版本变化不偷偷切换在途登录 authority |
+| ACC-05 / 一级 | 租户 IdP 配置 | tenant/provider/config-version 绑定，issuer/client/redirect/scopes/claim mapping、加密只写凭据与专用 CA；配置管理授权与审计；可诊断连接测试，HTTPS/TLS 与有界协议请求；停用或版本变化不偷偷切换在途登录 authority |
 | ACC-06 / 一级 | OIDC Code + PKCE | state/nonce/verifier 与浏览器、tenant/provider、目标 client/return target 绑定；过期、重放、存储不可用、issuer/audience/nonce 不匹配均拒绝；只允许受控回跳地址 |
 | ACC-07 / 一级 | JIT 与身份关联 | 稳定关联键包含 tenant/provider/issuer/subject；JIT 可禁用，成员资格明确；不得仅因邮箱相同自动合并本地账户；显式关联须重新认证，冲突可诊断；groups 标准化交给产品授权 |
 | ACC-08 / 一级 | 下游身份交接与撤销 | 服务端凭据与 client/audience 隔离；交接单次且有界；断网、缓存、离线 token 的失效语义明确；消费方承诺撤销最大延迟，不能以短 JWT 自动宣称立即撤销 |
@@ -92,3 +92,12 @@ I04 会话实现决定见 [会话 ADR](../architecture/adr/202609080900-2334-cen
 首版只验证并传递选定 Keycloak password + TOTP assurance，提供显式同会话 step-up，不强制拦截 Identity 管理读写。没有旧部署，直接替换初始 schema 和受影响调用方。应急管理员启用、凭据独立封存，使用后立即维护改密，不新建应急激活权限。
 
 ACC-12 恢复保证具体化为：原生备份精确恢复到所选切点；部署 owner 负责选择包含所需安全状态的备份/WAL，并在秘密/状态核验前保持隔离。不承诺从任意历史快照自动恢复故障前最新撤销，不引入库外安全状态服务；缺完整证据不开放。I09 组件 T1/T2、独立候选 T3 与生产 SLO/RPO/RTO 冻结分别提供证据，未闭合前本项保持未完成。入口见 [ADR](../architecture/adr/202609091607-2339-assurance-recovery.md)。
+
+
+## #2427 / #2428 平台管理与自助 IdP（当前决定）
+
+系统域独立于业务租户，一次初始化只建立系统域与本地平台管理员。显式平台角色是系统域权限的唯一来源；平台可以开通业务租户及首位管理员，也可以给已有租户创建新的本地管理员并设置口令。这是明确的租户身份管理接管权，MDM 资源授权仍由消费产品持有。平台不直接停用、解禁或修改已有租户账户；后续账户管理复用租户 API。
+
+没有旧数据，schema v8、运行配置 v2 一次替换；退出旧 bootstrap 业务租户含义、静态租户清单及 IdP 审批/秘密引用，不保留兼容双路径。动态租户提交后无需重启即可本地登录；各业务租户和系统域独立配置 OIDC IdP，提交的凭据在 PG 加密，密钥由部署文件持有。IdP 不设部署/IP 范围准入，但保留协议、TLS 和资源预算；MFA 强度解释仍需独立可信 profile。
+
+identity-platform 是 HTTP-only 日常 CLI，密码及浏览器 SSO 共用短期中央会话，可跨命令使用并显式退出。identity-admin 保留独立维护 initialize/recover。平台权限授撤、最后本地平台管理员、恢复与会话失效，以及开通/增加管理员的原子性和未知结果见 [平台 ADR](../architecture/adr/202609130900-2427-platform-onboarding.md)。网页由 #2368 消费新接口，候选 T3 由 #2342 验证，不与本 PR 合并声明。

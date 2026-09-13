@@ -1,0 +1,22 @@
+//! Central session v1 response projections. Bearer secrets only travel in Set-Cookie.
+use serde::{Deserialize, Serialize};
+#[derive(Serialize, Deserialize)]
+pub struct Identity {
+    pub principal_id: String,
+    pub administrator: bool,
+    pub platform_administrator: bool,
+    pub has_local_password: bool,
+}
+#[derive(Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub auth_time: i64,
+    pub idle_expires_at: i64,
+    pub absolute_expires_at: i64,
+}
+#[derive(Serialize, Deserialize)]
+pub struct Issued {
+    pub identity: Identity,
+    pub session: SessionInfo,
+    pub csrf_token: String,
+}

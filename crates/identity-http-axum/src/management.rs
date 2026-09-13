@@ -31,6 +31,15 @@ impl From<HttpError> for Error {
 impl From<AuthorityError> for Error {
     fn from(error: AuthorityError) -> Self {
         let (status, code) = match error {
+            AuthorityError::Platform(
+                rss_identity_core::platform::PlatformError::LastAdministrator,
+            ) => (StatusCode::CONFLICT, "last_platform_administrator"),
+            AuthorityError::Platform(rss_identity_core::platform::PlatformError::Forbidden) => {
+                (StatusCode::FORBIDDEN, "insufficient_privilege")
+            }
+            AuthorityError::Platform(rss_identity_core::platform::PlatformError::Invalid) => {
+                (StatusCode::BAD_REQUEST, "malformed_request")
+            }
             AuthorityError::Rejected => (StatusCode::UNAUTHORIZED, "invalid_credential"),
             AuthorityError::ReauthenticationFailed => {
                 (StatusCode::FORBIDDEN, "reauthentication_failed")
@@ -123,7 +132,7 @@ pub fn management_router(
             "/api/v1/tenants/{tenant}/providers/{provider}/test",
             post(test_provider),
         )
-        .layer(axum::extract::DefaultBodyLimit::max(16384))
+        .layer(axum::extract::DefaultBodyLimit::max(32768))
         .layer(middleware::from_fn_with_state(local, request_boundary))
         .with_state(Management { federation }))
 }
@@ -148,7 +157,7 @@ async fn actor(
 }
 async fn body<T: DeserializeOwned>(request: Request, b: RequestBudget) -> Result<T> {
     let bytes =
-        tokio::time::timeout_at(b.cutoff(), axum::body::to_bytes(request.into_body(), 16384))
+        tokio::time::timeout_at(b.cutoff(), axum::body::to_bytes(request.into_body(), 32768))
             .await
             .map_err(|_| HttpError::request_timeout())?
             .map_err(|_| BAD)?;
@@ -348,6 +357,13 @@ async fn providers(
     )
     .into_response())
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateProvider {
+    settings: ProviderSettingsInput,
+    client_secret: String,
+    ca_pem: Option<String>,
+}
 async fn create_provider(
     State(s): State<Management>,
     Path(t): Path<String>,
@@ -355,13 +371,15 @@ async fn create_provider(
     r: Request,
 ) -> Result<Response> {
     let actor = actor(&s, &t, r.headers(), b, true).await?;
-    let v: ProviderSettingsInput = body(r, b).await?;
-    let settings = ProviderSettings::try_from(v).map_err(AuthorityError::from)?;
+    let v: CreateProvider = body(r, b).await?;
+    let credentials =
+        ProviderCredentials::new(v.client_secret, v.ca_pem).map_err(AuthorityError::from)?;
+    let settings = ProviderSettings::try_from(v.settings).map_err(AuthorityError::from)?;
     Ok((
         StatusCode::CREATED,
         Json(
             s.federation
-                .create_provider(actor, settings, b.remaining())
+                .create_provider(actor, settings, credentials, b.remaining())
                 .await?,
         ),
     )
@@ -372,6 +390,8 @@ async fn create_provider(
 struct UpdateProvider {
     expected_version: i64,
     settings: ProviderSettingsInput,
+    client_secret: String,
+    ca_pem: Option<String>,
 }
 async fn update_provider(
     State(s): State<Management>,
@@ -381,10 +401,19 @@ async fn update_provider(
 ) -> Result<Response> {
     let actor = actor(&s, &t, r.headers(), b, true).await?;
     let v: UpdateProvider = body(r, b).await?;
+    let credentials =
+        ProviderCredentials::new(v.client_secret, v.ca_pem).map_err(AuthorityError::from)?;
     let settings = ProviderSettings::try_from(v.settings).map_err(AuthorityError::from)?;
     Ok(Json(
         s.federation
-            .update_provider(actor, p, v.expected_version, settings, b.remaining())
+            .update_provider(
+                actor,
+                p,
+                v.expected_version,
+                settings,
+                credentials,
+                b.remaining(),
+            )
             .await?,
     )
     .into_response())
