@@ -322,15 +322,10 @@ server { listen 443 ssl; server_name @PRODUCT@; location / { proxy_set_header Ho
         cid = self.name + '-maintenance'
         self.containers.append(cid)
         service = self.config['services']['maintenance']
-        mounts = []
-        for mount in service['volumes']:
-            source = self.config['volumes'][mount['source']]['name']
-            mounts += ['-v', source + ':' + mount['target'] + ':ro']
         input_volume = next(self.config['volumes'][v['source']]['name'] for v in service['volumes'] if v['target'] == '/run/input')
         self.root("import shutil,os;shutil.copy2('/srv/t33/input/platform-password','/delivery/init-password');os.chown('/delivery/init-password',10001,10001)", volumes=[input_volume + ':/delivery'])
-        docker('run', '--rm', '--pull', 'never', '--name', cid, '--platform', 'linux/amd64', '--user', '10001:10001',
-               '--network', self.name + '_protocol', '--entrypoint', 'identity-admin', *mounts,
-               self.candidate['images']['operator'], '/run/config/maintenance.json', 'initialize', self.platform_admin, 'platform', '/run/input/init-password')
+        self.compose('run', '--rm', '--no-deps', '--name', cid, 'maintenance',
+                     'initialize', self.platform_admin, 'platform', '/run/input/init-password')
         self.compose('up', '-d', 'identity', 'public-gateway', 'private-gateway')
         self.compose('up', '-d', 't33-front')
         wait(lambda: self.compose('exec', '-T', 't33-front', 'curl', '--fail', '--silent', '--max-time', '3', '--cacert', '/run/input/ca.crt', '--resolve', HOST + ':443:127.0.0.1', ORIGIN + '/oidc/.well-known/openid-configuration') != '', 'public OIDC ingress')

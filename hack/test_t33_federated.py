@@ -17,6 +17,7 @@ sys.modules[SPEC.name] = proof
 SPEC.loader.exec_module(proof)
 sys.path.insert(0, str(PATH.parent))
 import stack
+import prepare
 import deploy
 RUN_SPEC = importlib.util.spec_from_file_location('t33_run', PATH.parent / 'run.py')
 runner = importlib.util.module_from_spec(RUN_SPEC)
@@ -24,6 +25,54 @@ RUN_SPEC.loader.exec_module(runner)
 
 
 class FederatedProof(unittest.TestCase):
+    def test_prepare_timeout_and_failure_diagnostics_exclude_command_and_output(self):
+        for error in [subprocess.TimeoutExpired(['secret-command'], 30, output='secret-output'),
+                      subprocess.CalledProcessError(7, ['secret-command'], stderr='secret-output')]:
+            with self.subTest(error=type(error).__name__), patch.object(prepare.subprocess, 'run', side_effect=error):
+                with self.assertRaisesRegex(RuntimeError, 'T33 preparation git-status') as caught:
+                    prepare.run('git-status', ['secret-command'])
+                self.assertNotIn('secret', str(caught.exception))
+
+    def test_prepare_budgets_input_archive_and_real_timeout(self):
+        with patch.dict(prepare.os.environ, {'T33_COMMAND_TIMEOUT_SECONDS': '1'}):
+            self.assertEqual(prepare.run('credential-test', [sys.executable, '-c',
+                'import sys; print(sys.stdin.read())'], input='synthetic-input'), 'synthetic-input')
+            with tempfile.TemporaryFile() as stream:
+                prepare.run('archive-test', [sys.executable, '-c',
+                    'import sys; sys.stdout.buffer.write(bytes([0, 255, 10]))'], stdout=stream)
+                stream.seek(0)
+                self.assertEqual(stream.read(), bytes([0, 255, 10]))
+            with self.assertRaisesRegex(RuntimeError, 'sleep-test timed out after 1s'):
+                prepare.run('sleep-test', [sys.executable, '-c', 'import time; time.sleep(60)'])
+        for budget, seconds in [('command', 30), ('build', 3600), ('transfer', 600)]:
+            variable = 'T33_' + budget.upper() + '_TIMEOUT_SECONDS'
+            with patch.dict(prepare.os.environ, {}, clear=True), patch.object(prepare.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess([], 0, 'ok')) as call:
+                self.assertEqual(prepare.run('budget-test', ['tool'], budget=budget), 'ok')
+                self.assertEqual(call.call_args.kwargs['timeout'], seconds)
+            for invalid in ['0', '-1', 'nan', 'inf', '']:
+                with patch.dict(prepare.os.environ, {variable: invalid}), patch.object(prepare.subprocess, 'run') as call:
+                    with self.assertRaisesRegex(ValueError, variable):
+                        prepare.run('budget-test', ['tool'], budget=budget)
+                    call.assert_not_called()
+
+    def test_empty_cli_paths_are_rejected_at_the_argument_boundary(self):
+        cases = [('prepare.py', {'--output': 'out', '--ui-source': 'source', '--ui-dist': 'dist'}),
+                 ('run.py', {'--artifacts': 'artifacts', '--output': 'out', '--artifacts-sha256': 'a' * 64})]
+        for script, defaults in cases:
+            for flag in defaults:
+                if flag == '--artifacts-sha256':
+                    continue
+                for empty in ['', '   ']:
+                    with self.subTest(script=script, flag=flag, empty=empty):
+                        args = {**defaults, flag: empty}
+                        result = subprocess.run([sys.executable, str(PATH.parent / script),
+                            *[v for pair in args.items() for v in pair]], capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 2)
+                        self.assertIn(flag, result.stderr)
+                        self.assertIn('nonempty path', result.stderr)
+                        self.assertNotIn('Traceback', result.stderr)
+
     def test_digest_rejects_substitution_and_unsafe_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -109,7 +158,11 @@ class FederatedProof(unittest.TestCase):
             'volumes': {name: {'name': 'owned-' + name} for name in ['config', 'input']},
         }
         value.compose, value.root = Mock(), Mock()
-        with patch.object(stack, 'docker', side_effect=RuntimeError('maintenance rejected')):
+        def compose(*args):
+            if 'maintenance' in args:
+                raise RuntimeError('maintenance rejected')
+        value.compose.side_effect = compose
+        with patch.object(stack, 'docker'):
             with self.assertRaisesRegex(RuntimeError, 'maintenance rejected'):
                 value.initialize()
         started = [call.args[2:] for call in value.compose.call_args_list
@@ -128,8 +181,11 @@ class FederatedProof(unittest.TestCase):
         original = json.dumps(value.config)
         with patch.object(stack, 'docker') as docker, patch.object(stack, 'wait'):
             value.initialize()
-        calls = [c.args for c in docker.call_args_list if 'initialize' in c.args]
+        calls = [c.args for c in value.compose.call_args_list if 'initialize' in c.args]
         self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:4], ('run', '--rm', '--no-deps', '--name'))
+        self.assertIn('maintenance', calls[0])
+        docker.assert_not_called()
         self.assertEqual(calls[0][-4:], ('initialize', 'platform-admin', 'platform', '/run/input/init-password'))
         self.assertEqual(json.dumps(value.config), original)
         self.assertEqual(len(value.root.call_args_list), 1)
@@ -171,6 +227,10 @@ class FederatedProof(unittest.TestCase):
             with patch.object(value, 'root', side_effect=[path.read_text()] + [''] * 40) as execute, \
                     patch.object(value, 'volume', side_effect=lambda name: name), patch.object(stack, 'docker'):
                 value.stage()
+            maintenance = value.config['services']['maintenance']
+            canonical = json.loads(path.read_text())['services']['maintenance']
+            for field in ['read_only', 'cap_drop', 'security_opt', 'tmpfs', 'entrypoint', 'networks', 'user']:
+                self.assertEqual(maintenance[field], canonical[field], field)
             pool = value.config['networks']['front']['ipam']['config'][0]
             self.assertEqual(pool['ip_range'], '10.233.12.128/25')
             consumer = value.config['services']['t33-consumer']

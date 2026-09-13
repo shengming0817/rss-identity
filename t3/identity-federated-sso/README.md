@@ -6,7 +6,7 @@
 
 ## 固定输入与入口
 
-先完成并提交本仓改动。Identity candidate、测试消费端和 carrier 必须来自同一干净 Git HEAD。正式 gateway 的静态打包输入固定为 rss-web `37b7fb356aa7e436cc708caa1593427e6d553d30`，按其正式入口构建 apps/identity；候选构建验证 UI SHA/lock/dist。此摘要只记录打包身份，不要求该网页支持新平台或 IdP 协议。输出目录必须不存在。
+先完成并提交本仓改动。Identity candidate、测试消费端和 carrier 必须来自同一干净 Git HEAD。正式 gateway 的静态打包输入固定为 rss-web `37b7fb356aa7e436cc708caa1593427e6d553d30`，按其正式入口构建 apps/identity；候选构建验证 UI SHA/lock/dist。此摘要只记录打包身份，不要求该网页支持新平台或 IdP 协议。输出目录必须不存在；两个 CLI 的所有路径参数拒绝空字符串或纯空白，错误会指出对应参数（Make 的 T33_ARTIFACTS、IDENTITY_UI_SOURCE、IDENTITY_UI_DIST、T33_OUTPUT）。
 
 ```sh
 make prepare-t33 T33_ARTIFACTS=/absolute/t33-artifacts \
@@ -15,6 +15,8 @@ make prepare-t33 T33_ARTIFACTS=/absolute/t33-artifacts \
 make test-t33 T33_ARTIFACTS=/absolute/t33-artifacts \
   T33_ARTIFACTS_SHA256="准备阶段输出并固定的64位摘要" T33_OUTPUT=/absolute/new-t33-run
 ```
+
+准备阶段全部外部命令统一使用有限预算：Git/credential/inspect 默认 30 秒，candidate/buildx 默认 3600 秒，load/pull/save 默认 600 秒；分别由正整数环境变量 `T33_COMMAND_TIMEOUT_SECONDS`、`T33_BUILD_TIMEOUT_SECONDS`、`T33_TRANSFER_TIMEOUT_SECONDS` 覆盖。失败只报告 operation、超时预算或退出码，不输出命令参数和子进程原文。
 
 准备阶段调用正式 candidate builder；测试消费端从 Git archive 中以独立 Cargo.lock 构建 Linux amd64 binary，浏览器工具从固定 Playwright 1.60.0 镜像与 npm lock 构建。准备记录二进制、OCI、源码、UI、锁和工具链身份，并导出全部五个运行 provider 的 Docker 归档。provider 归档按准备时核实的 registry digest→image ID/平台映射加载，Compose 只消费固定 image ID 且 pull_policy=never。准备输出的 T33_ARTIFACTS_SHA256 由调用方独立固定，运行前校验；不能在执行时从待验清单重新计算期望值。运行只加载这些产物，不动态构建、下载源码、回退旧格式或猜选候选。
 
@@ -30,7 +32,7 @@ make test-t33 T33_ARTIFACTS=/absolute/t33-artifacts \
 
 ## 运行场景与结果
 
-部署只初始化一次显式系统域与平台管理员；业务租户分别通过平台 API 和 CLI 创建并立即登录，验证普通租户管理员不能开通或接管其它租户，系统域与业务会话不能串用。IdP 凭据通过租户管理 API 加密持久化，部署只持有外部 keyring；真实 Keycloak 的 realm 与 client 由独立 provider 配置输入创建。
+初始化通过 `docker compose run --rm --no-deps maintenance` 继承候选服务的只读根文件系统、cap_drop、no-new-privileges、tmpfs、用户、网络和挂载，不重新拼装安全参数。部署只初始化一次显式系统域与平台管理员；业务租户分别通过平台 API 和 CLI 创建并立即登录，验证普通租户管理员不能开通或接管其它租户，系统域与业务会话不能串用。IdP 凭据通过租户管理 API 加密持久化，部署只持有外部 keyring；真实 Keycloak 的 realm 与 client 由独立 provider 配置输入创建。
 
 两真实租户分别配置 provider 和 downstream client。保留原 20 项场景，并新增 4 项平台初始化、API/CLI 开通和权限隔离场景：独立租户 SSO、consumer 发起的 SSO/Hydra 继续、错误浏览器/租户/重放/回跳、在途配置变化或停用、JIT 开关、同邮箱不合并、本人再认证关联与冲突、下游绑定、中央退出、provider 撤销及重启用不复活、Keycloak/Hydra/private validation 故障与恢复。配置/凭据更新按当前产品语义撤销旧会话，停用与清理另用更新后新建的有效 grant，防止既有撤销掩盖被测行为。
 

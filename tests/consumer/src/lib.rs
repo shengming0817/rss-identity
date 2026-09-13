@@ -1,4 +1,5 @@
-//! Standalone simulated product: public client + standard OIDC only.
+//! Shared T2/T33 server-side confidential client using Authorization Code with S256 PKCE.
+//! Client secrets stay on the server; each product session is validated online through IdentityClient.
 //! ref: openidconnect 4.0.1 client.rs and verification/mod.rs.
 use openidconnect::{core::*, *};
 use reqwest::{Client, Url};

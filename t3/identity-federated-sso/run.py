@@ -12,6 +12,12 @@ from stack import Stack, docker, command, redact
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def nonempty_path(value):
+    if not value.strip():
+        raise argparse.ArgumentTypeError('expected nonempty path')
+    return Path(value)
+
+
 class Cancelled(RuntimeError):
     pass
 
@@ -117,9 +123,9 @@ def execute(artifacts, output, expected_sha256):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--artifacts', type=Path, required=True)
+    parser.add_argument('--artifacts', type=nonempty_path, required=True)
     parser.add_argument('--artifacts-sha256', required=True)
-    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--output', type=nonempty_path, required=True)
     args = parser.parse_args()
     with cancellation():
         execute(args.artifacts.resolve(), args.output.resolve(), args.artifacts_sha256)
