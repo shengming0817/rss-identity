@@ -410,12 +410,36 @@ async fn credential_rekey_is_bounded_and_fenced(
             .await
             .is_err()
     );
+    let damaged:uuid::Uuid=sqlx::query_scalar("SELECT provider_id FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid ORDER BY provider_id OFFSET 49 LIMIT 1").bind(system.to_string()).fetch_one(&mut owner).await?;
+    let original:serde_json::Value=sqlx::query_scalar("SELECT sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid AND provider_id=$2").bind(system.to_string()).bind(damaged).fetch_one(&mut owner).await?;
+    let mut invalid = original.clone();
+    invalid["ciphertext"][0] = serde_json::json!(invalid["ciphertext"][0].as_u64().unwrap() ^ 1);
+    sqlx::query("UPDATE identity_authority.provider_credentials SET sealed=$3 WHERE tenant_id=$1::uuid AND provider_id=$2").bind(system.to_string()).bind(damaged).bind(invalid).execute(&mut owner).await?;
+    assert!(
+        rss_identity_app::rekey::run(serde_json::from_value(value.clone())?)
+            .await
+            .is_err()
+    );
+    let untouched:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.provider_credentials WHERE sealed->>'key_id'='initial'").fetch_one(&mut owner).await?;
+    assert_eq!(
+        untouched, 101,
+        "failure after earlier UPDATEs must roll back the complete batch"
+    );
+    sqlx::query("UPDATE identity_authority.provider_credentials SET sealed=$3 WHERE tenant_id=$1::uuid AND provider_id=$2").bind(system.to_string()).bind(damaged).bind(original).execute(&mut owner).await?;
     assert_eq!(
         rss_identity_app::rekey::run(serde_json::from_value(value.clone())?).await?,
         100
     );
+    let mut blocker = owner.begin().await?;
+    sqlx::query("SELECT provider_id FROM identity_authority.provider_credentials WHERE sealed->>'key_id'='next' ORDER BY tenant_id,provider_id LIMIT 1 FOR UPDATE").execute(&mut *blocker).await?;
+    let remaining = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        rss_identity_app::rekey::run(serde_json::from_value(value.clone())?),
+    )
+    .await;
+    blocker.rollback().await?;
     assert_eq!(
-        rss_identity_app::rekey::run(serde_json::from_value(value.clone())?).await?,
+        remaining.expect("rekey must not wait on an already-active credential")?,
         1
     );
     assert_eq!(

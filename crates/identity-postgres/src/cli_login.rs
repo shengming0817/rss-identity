@@ -80,19 +80,8 @@ impl Authority {
         }
         let budget = Budget::new(deadline)?;
         let system = self.system_domain;
-        self.reserve(
-            system,
-            format!(
-                "cli:exchange:{}",
-                digest(&code)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            ),
-            &source,
-            budget.remaining(),
-        )
-        .await?;
+        self.reserve_source(system, &source, budget.remaining())
+            .await?;
         self.mutate(system,budget.remaining(),move|tx|Box::pin(async move{
             transaction::connection(tx,move|c|Box::pin(async move{
                 lock_guard(c,system).await?;

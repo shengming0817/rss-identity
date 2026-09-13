@@ -15,6 +15,30 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+/// Only these stable public codes can enter a CLI diagnostic.
+#[derive(Debug, Clone, Copy, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceRefusal {
+    #[error("malformed_request")]
+    MalformedRequest,
+    #[error("invalid_platform_request")]
+    InvalidPlatformRequest,
+    #[error("platform_conflict")]
+    PlatformConflict,
+    #[error("tenant_limit_reached")]
+    TenantLimitReached,
+    #[error("rate_limited")]
+    RateLimited,
+}
+impl ServiceRefusal {
+    fn status(self) -> u16 {
+        match self {
+            Self::MalformedRequest | Self::InvalidPlatformRequest => 400,
+            Self::PlatformConflict | Self::TenantLimitReached => 409,
+            Self::RateLimited => 429,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum Error {
     #[error("invalid_input_or_private_file")]
@@ -23,6 +47,8 @@ pub enum Error {
     Authentication,
     #[error("request_rejected_or_conflict")]
     Conflict,
+    #[error("{0}")]
+    Refused(ServiceRefusal),
     #[error("service_unavailable_operation_not_completed")]
     Unavailable,
     #[error("operation_outcome_unknown_use_saved_operation_id")]
@@ -37,7 +63,7 @@ impl Error {
         match self {
             Self::Input => 2,
             Self::Authentication => 10,
-            Self::Conflict => 11,
+            Self::Conflict | Self::Refused(_) => 11,
             Self::Unavailable => 12,
             Self::Unknown => 20,
             Self::LogoutPending => 21,
@@ -219,7 +245,14 @@ impl Client {
     fn classify(reply: &Reply, write: bool) -> Error {
         match reply.status.as_u16() {
             401 | 403 => Error::Authentication,
-            400 | 409 | 429 => Error::Conflict,
+            400 | 409 | 429 => reply
+                .value
+                .get("code")
+                .cloned()
+                .and_then(|v| serde_json::from_value::<ServiceRefusal>(v).ok())
+                .filter(|code| code.status() == reply.status.as_u16())
+                .map(Error::Refused)
+                .unwrap_or(Error::Conflict),
             503 if reply.value.get("code").and_then(Value::as_str)
                 == Some("operation_not_completed") =>
             {

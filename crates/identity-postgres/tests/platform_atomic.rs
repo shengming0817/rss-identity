@@ -21,6 +21,7 @@ fn input(tenant: TenantId, id: uuid::Uuid) -> NewTenantAdministrator {
 async fn platform_initialization_roles_and_existing_accounts() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
+    assert_cli_reservation_is_source_bounded(&f).await?;
     assert_key_material_and_registrar_privileges(&f).await?;
     let platform = f.platform_actor().await?;
     assert!(platform.identity().platform_administrator);
@@ -70,6 +71,7 @@ async fn platform_initialization_roles_and_existing_accounts() -> anyhow::Result
             deadline(),
         )
         .await?;
+    assert_role_event_rollback(&f, second.key(), true).await?;
     f.store
         .set_platform_role(
             f.platform_actor().await?,
@@ -78,6 +80,7 @@ async fn platform_initialization_roles_and_existing_accounts() -> anyhow::Result
             deadline(),
         )
         .await?;
+    assert_role_event_rollback(&f, second.key(), false).await?;
     let roles = f
         .store
         .list_accounts(f.platform_actor().await?, None, 100, deadline())
@@ -748,4 +751,125 @@ async fn platform_change(
                 .await
         }
     }
+}
+
+async fn assert_cli_reservation_is_source_bounded(f: &Fixture) -> anyhow::Result<()> {
+    let attacker = AttemptSource::parse("cli-capacity-attacker")?;
+    for n in 0..30 {
+        assert!(
+            f.store
+                .exchange_cli_login(
+                    zeroize::Zeroizing::new(format!("{n:043}")),
+                    zeroize::Zeroizing::new("A".repeat(43)),
+                    "http://127.0.0.1:49152/callback".into(),
+                    attacker.clone(),
+                    deadline()
+                )
+                .await
+                .is_err()
+        );
+    }
+    let before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.attempts WHERE tenant_id=$1::uuid",
+    )
+    .bind(SYSTEM)
+    .fetch_one(&f.owner)
+    .await?;
+    for n in 30..50 {
+        assert!(matches!(
+            f.store
+                .exchange_cli_login(
+                    zeroize::Zeroizing::new(format!("{n:043}")),
+                    zeroize::Zeroizing::new("A".repeat(43)),
+                    "http://127.0.0.1:49152/callback".into(),
+                    attacker.clone(),
+                    deadline()
+                )
+                .await,
+            Err(AuthorityError::RateLimited)
+        ));
+    }
+    assert!(matches!(
+        f.store
+            .verify_password(
+                f.system_key.tenant,
+                login("random-login-after-source-limit"),
+                password(),
+                attacker,
+                deadline()
+            )
+            .await,
+        Err(AuthorityError::RateLimited)
+    ));
+    let after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.attempts WHERE tenant_id=$1::uuid",
+    )
+    .bind(SYSTEM)
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(
+        before, after,
+        "source rejection must not create attacker-controlled scopes"
+    );
+    let random_keys:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.attempts WHERE tenant_id=$1::uuid AND key LIKE 'cli:exchange:%'").bind(SYSTEM).fetch_one(&f.owner).await?;
+    assert_eq!(
+        random_keys, 0,
+        "untrusted codes are not persistent limiter identities"
+    );
+    assert_eq!(
+        f.store
+            .verify_password(
+                f.system_key.tenant,
+                login("platform"),
+                password(),
+                AttemptSource::parse("legitimate-platform-login")?,
+                deadline()
+            )
+            .await?
+            .account(),
+        f.system_key
+    );
+    Ok(())
+}
+
+async fn assert_role_event_rollback(
+    f: &Fixture,
+    target: AccountKey,
+    granted: bool,
+) -> anyhow::Result<()> {
+    let candidate = f
+        .store
+        .verify_password(
+            target.tenant,
+            login("second"),
+            password(),
+            source(),
+            deadline(),
+        )
+        .await?;
+    let session = f.store.create_session(candidate, None, deadline()).await?;
+    let before:(i64,bool)=sqlx::query_as("SELECT auth_epoch,EXISTS(SELECT FROM identity_authority.platform_administrators p WHERE p.tenant_id=a.tenant_id AND p.principal_id=a.principal_id) FROM identity_authority.accounts a WHERE tenant_id=$1::uuid AND principal_id=$2").bind(target.tenant.to_string()).bind(target.principal.as_uuid()).fetch_one(&f.owner).await?;
+    let actor = f.platform_actor().await?;
+    let events = f.events().await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reject_role_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER reject_role_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_role_event()").execute(&f.owner).await?;
+    assert!(matches!(
+        f.store
+            .set_platform_role(actor, target.principal, granted, deadline())
+            .await,
+        Err(AuthorityError::RolledBack(_))
+    ));
+    let after:(i64,bool)=sqlx::query_as("SELECT auth_epoch,EXISTS(SELECT FROM identity_authority.platform_administrators p WHERE p.tenant_id=a.tenant_id AND p.principal_id=a.principal_id) FROM identity_authority.accounts a WHERE tenant_id=$1::uuid AND principal_id=$2").bind(target.tenant.to_string()).bind(target.principal.as_uuid()).fetch_one(&f.owner).await?;
+    assert_eq!(before, after);
+    assert_eq!(f.events().await?, events);
+    let valid = f
+        .store
+        .inspect_session(
+            target.tenant,
+            rss_identity_core::session::SessionSecret::parse(session.secret().expose().into())?,
+            deadline(),
+        )
+        .await?;
+    assert_eq!(valid.identity().platform_administrator, before.1);
+    sqlx::raw_sql("DROP TRIGGER reject_role_event ON rss_transactional_messaging.outbox; DROP FUNCTION public.reject_role_event()").execute(&f.owner).await?;
+    Ok(())
 }

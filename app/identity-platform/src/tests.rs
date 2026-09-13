@@ -215,3 +215,31 @@ fn response_additions_do_not_change_the_closed_session_file() {
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn closed_server_rejections_remain_distinguishable_without_raw_error_text() {
+    for (status, code) in [
+        (400, "invalid_platform_request"),
+        (409, "platform_conflict"),
+        (409, "tenant_limit_reached"),
+        (429, "rate_limited"),
+    ] {
+        let r = Reply {
+            status: StatusCode::from_u16(status).unwrap(),
+            cookie: None,
+            value: json!({"code":code,"message":"private-provider-marker"}),
+        };
+        let error = Client::classify(&r, true);
+        assert_eq!(error.exit_code(), 11);
+        assert_eq!(error.to_string(), code);
+        assert!(!format!("{error:?}").contains("private-provider-marker"));
+    }
+    let r = Reply {
+        status: StatusCode::CONFLICT,
+        cookie: None,
+        value: json!({"code":"private-provider-marker"}),
+    };
+    let error = Client::classify(&r, true);
+    assert_eq!(error.exit_code(), 11);
+    assert!(!error.to_string().contains("private-provider-marker"));
+}

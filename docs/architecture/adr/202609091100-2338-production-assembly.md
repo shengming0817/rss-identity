@@ -4,13 +4,13 @@
 
 ## Owner 与退出
 
-`app/identity` 是唯一可执行装配 package，输出 identity-server、identity-migrate、identity-admin、identity-clients。数据库相关入口共享安全文件读取和数据库配置，部署分别授予 runtime、migration owner、maintenance 凭据。没有兼容应用目录、日常管理 CLI、配置别名或 provider registry。
+`app/identity` 持有服务端及维护装配，输出 identity-server、identity-migrate、identity-admin、identity-clients。#2428 新增独立 HTTP-only 客户端 `app/identity-platform`，输出 identity-platform；它只消费 contracts 与 HTTP，不依赖 core、PG 或维护配置。数据库相关入口共享安全文件读取和数据库配置，部署分别授予 runtime、migration owner、maintenance 凭据。没有兼容应用目录、旧数据库日常管理 CLI、配置别名或 provider registry；平台日常操作由新 HTTP CLI 消费中央会话。
 
 RSS managed listener 提供标准 accepted TCP ConnectInfo；Identity 根据真实 peer 和固定网关地址解释单值 X-Forwarded-For，再提供 ClientAddress 给限流。原始 peer 保留。NGINX 覆盖来源头，公网和私网使用独立网络地址；backend 不发布宿主端口。Hydra admin 使用既有私有 TLS + service credential。
 
 ## 身份与迁移
 
-Identity 新初始 schema 为 v6；原 v5 是可丢弃开发库，不提供升级兼容、自动清库或原地修复。schema/version、结构签名、权限探测和测试 fixture 同步替换。
+当前初始 schema 为 #2427 定义的 v8；I08 原 v6 和 I09 原 v7 均为历史初始版本，没有旧数据，不提供升级兼容、自动清库或原地修复。schema/version、结构签名、权限探测和测试 fixture 同步替换。
 
 现有 deployment singleton 唯一持有 environment_id、identity_config_version、两个 HTTPS origin；owner 首次安装时写入，之后触发器禁止原地改变。Authority::connect_runtime / connect_maintenance 必填期望 DeploymentIdentity，启动时在同一探测事务中核对。首版不支持同库 origin/environment 迁移，修改后明确拒绝；不得用重启绕过 I01 的身份迁移规则。需要保留数据的域名迁移须另行实现并验收。
 
@@ -22,7 +22,7 @@ JSON format_version 只表示文件结构；schema version 只表示数据库结
 
 一个 LifecycleScope 登记 PG、共享 KDF、deferred cleanup worker、critical listener，最后开放 admission。请求 permit 覆盖 response body。关闭先停止准入并排空请求/连接，再停止 worker、等待真实 KDF closure、关闭 PG；资源和总期限保持独立。关闭失败非零退出，避免 Tokio Drop 再次无限等待 blocking work。KDF 的 token 和容量许可都由实际 closure 持有；取消调用方不释放运行中的容量。
 
-/livez 只报告进程存活；/readyz 在 admission 开放时检查 PG/schema/身份/权限和 Hydra，最多一个并发探测。它不是认证授权证明，失败不会全局关闭本地 API。PG 故障拒绝业务；Hydra 故障拒绝产品交接/在线验证，本地账户与管理仍可操作；Keycloak 故障阻断其登录/test，不自动降级或按 email 关联。清理任务按已配置 tenant 有界轮询，provider 失败退避，任务意外退出触发进程关闭。
+/livez 只报告进程存活；/readyz 在 admission 开放时检查 PG/schema/身份/权限；仅配置下游 clients 时依赖 Hydra readiness，最多一个并发探测。它不是认证授权证明，失败不会全局关闭本地 API。PG 故障拒绝业务；Hydra 故障拒绝产品交接/在线验证，本地账户与管理仍可操作；Keycloak 故障阻断其登录/test，不自动降级或按 email 关联。清理任务按系统域注册表激活的完整 tenant binding 有界轮询，provider 失败退避，任务意外退出触发进程关闭。
 
 初版 Compose 单副本，PrepareAdmission 是每进程共享入口配额；不承诺跨副本限额。安全事件落 PG Outbox，不在本项新增 broker relay。
 
