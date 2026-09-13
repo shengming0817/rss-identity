@@ -20,11 +20,11 @@ def run():
     with tempfile.TemporaryDirectory(prefix='identity-platform-t2-') as tmp, providers.postgres() as (_,ports):
         root=Path(tmp); backend=providers.free_port()
         commands=[
-            ['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=CLI Fixture CA','-addext','keyUsage=critical,keyCertSign,cRLSign','-keyout',str(root/'ca-key.pem'),'-out',str(root/'ca.pem')],
+            ['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=CLI Fixture CA','-addext','keyUsage=critical,keyCertSign,cRLSign','-addext','basicConstraints=critical,CA:TRUE','-addext','subjectKeyIdentifier=hash','-keyout',str(root/'ca-key.pem'),'-out',str(root/'ca.pem')],
             ['openssl','req','-new','-newkey','rsa:2048','-nodes','-subj','/CN=localhost','-keyout',str(root/'key.pem'),'-out',str(root/'server.csr')],
         ]
         for command in commands:subprocess.run(command,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
-        (root/'extensions').write_text('subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n')
+        (root/'extensions').write_text('subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n')
         subprocess.run(['openssl','x509','-req','-in',str(root/'server.csr'),'-CA',str(root/'ca.pem'),'-CAkey',str(root/'ca-key.pem'),'-CAcreateserial','-days','1','-sha256','-extfile',str(root/'extensions'),'-out',str(root/'cert.pem')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
         browser=root/'browser-fixture'
         browser.write_text('#!'+sys.executable+'\n'+(providers.ROOT/'hack/platform_browser.py').read_text())
