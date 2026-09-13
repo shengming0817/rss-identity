@@ -11,7 +11,7 @@ SCENARIOS = ('login', 'protection', 'refresh', 'logout', 'logout_all', 'password
 PUBLIC_FIELDS = {'stage', 'status', 'passed', 'online', 'remaining', 'control_status',
                  'correlation_id', 'action', 'tenant', 'principal', 'session_id',
                  'grant_id', 'epoch', 'seq', 'contract', 'version', 'count', 'steps',
-                 'browser_version', 'events', 'failure', 'identity_status', 'schema'}
+                 'failure_status', 'recovery_status', 'same_browser_session', 'browser_version', 'events', 'failure', 'identity_status', 'schema'}
 
 
 class Refused(ValueError):
@@ -108,9 +108,64 @@ def project_event(event, tenant, schemas):
     return result
 
 
+def candidate_fields(data):
+    """Closed candidate v1 parser. Only validated structured fields become public."""
+    digest = r'[a-f0-9]{64}'
+    revision = r'[a-f0-9]{40}'
+    version = r'[0-9]+\.[0-9]+\.[0-9]+'
+    packages = ('rss-axum', 'rss-contract', 'rss-diag-context', 'rss-redact',
+                'rss-request-context', 'rss-runtime', 'rss-transactional-messaging',
+                'rss-transactional-messaging-postgres')
+    source = r'git\+https://dev\.azure\.com/shengming0923/rss/_git/rss\?rev=([a-f0-9]{40})#\1'
+    schema = {
+        'format_version': 1, 'revision': revision, 'version': version, 'platform': 'linux/amd64',
+        'cargo_lock_sha256': digest, 'rust': version,
+        'ui': {'repository': r'https://github\.com/shengming0817/rss-web\.git',
+               'revision': revision, 'lock_sha256': digest, 'dist_sha256': digest},
+        'providers': {key: r'[A-Za-z0-9_./:-]+@sha256:' + digest for key in
+                      ('postgres', 'keycloak', 'hydra', 'nginx', 'rust', 'runtime')},
+        'migration_sha256': digest,
+        'images': {key: r'rss-identity/' + key + ':' + revision + '@sha256:' + digest
+                   for key in ('server', 'operator', 'gateway')},
+        'archives': {key: {'file': key + r'\.oci\.tar', 'sha256': digest, 'manifest_digest': 'sha256:' + digest}
+                     for key in ('server', 'operator', 'gateway')},
+        'binaries': {key: digest for key in ('identity-admin', 'identity-server', 'identity-clients', 'identity-migrate')},
+        'rss': [{'package': '(?:' + '|'.join(packages) + ')', 'version': version, 'source': source}],
+        'migrations': {'identity_sql_sha256': digest, 'rss_sql_sha256': digest,
+                       'schema_contract': digest, 'schema_version': int},
+        'identity_schema': int,
+        'production_features': {key: [r'(?:default|http1|managed-server|consumer|producer)'] for key in packages},
+        # Raw compiler diagnostics are private input, never part of the public projection.
+        'toolchain': str,
+    }
+    def parse(value, expected):
+        if isinstance(expected, dict):
+            require(isinstance(value, dict) and set(value) == set(expected), 'invalid_candidate_fields')
+            return {key: parse(value[key], child) for key, child in expected.items()}
+        if isinstance(expected, list):
+            require(isinstance(value, list), 'invalid_candidate_list')
+            return [parse(child, expected[0]) for child in value]
+        if expected is int:
+            require(type(value) is int and value > 0, 'invalid_candidate_integer')
+        elif expected is str:
+            require(isinstance(value, str) and 0 < len(value) <= 4096, 'invalid_candidate_text')
+        elif isinstance(expected, str):
+            require(isinstance(value, str) and re.fullmatch(expected, value), 'invalid_candidate_value')
+        else:
+            require(type(value) is type(expected) and value == expected, 'invalid_candidate_constant')
+        return value
+    result = parse(data, schema)
+    require(len(result['rss']) == len(packages) and {v['package'] for v in result['rss']} == set(packages),
+            'invalid_candidate_packages')
+    require(result['migrations']['schema_version'] == result['identity_schema']
+            and result['migrations']['identity_sql_sha256'] == result['migration_sha256'], 'invalid_candidate_migrations')
+    result.pop('toolchain')
+    return result
+
+
 def candidate(directory, repository):
     path = directory / 'candidate.json'
-    data = json.loads(path.read_text())
+    data = candidate_fields(json.loads(path.read_text()))
     require(data['format_version'] == 1 and data['platform'] == 'linux/amd64', 'unsupported_candidate')
     require(re.fullmatch('[a-f0-9]{40}', data['revision']), 'invalid_revision')
     require(set(data['archives']) == set(data['images']) == {'server', 'operator', 'gateway'},

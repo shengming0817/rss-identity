@@ -66,8 +66,11 @@ measure-capacity:
 
 .PHONY: test-t3-local-auth check-t3-local-auth
 check-t3-local-auth:
+	$(PYTHON) -c "from pathlib import Path; [compile(p.read_bytes(), str(p), 'exec') for p in [*sorted(Path('t3/access-local-auth').glob('*.py')), Path('hack/bounded_process.py')]]"
+	@for script in t3/access-local-auth/*.mjs; do node --check "$$script" || exit; done
 	$(PYTHON) -m unittest discover -s t3/access-local-auth -p 'test_*.py'
 	pnpm --dir t3/access-local-auth install --frozen-lockfile --ignore-scripts
+	pnpm --dir t3/access-local-auth exec eslint .
 	pnpm --dir t3/access-local-auth test
 	pnpm --dir t3/access-local-auth audit
 

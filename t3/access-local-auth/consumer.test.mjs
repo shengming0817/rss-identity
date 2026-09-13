@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { retainedProbe, checkFacts, validationResponse } from './consumer.mjs'
+import { retainedProbe, checkFacts, validationResponse, protectedSession } from './consumer.mjs'
 
 test('a retained credential is verified online after its browser session was removed', async () => {
   const entries = new Map([['handle', { token: 'private-token', subject: 's', expires: Date.now() / 1000 + 60 }]])
@@ -39,4 +39,24 @@ test('only a valid received Identity response can prove provider unavailability'
     new Response('{}', { status: 200, headers: { 'cache-control': 'no-store' } })]) {
     await assert.rejects(validationResponse(bad, {}, {}, 0))
   }
+})
+
+for (const status of [200, 401, 403, 429, 503]) {
+  test(`protected session decision for ${status} and recovery`, async () => {
+    const sessions = new Map([['cookie', 'handle']]), entries = new Map([['handle', {}]])
+    const result = await protectedSession(sessions, entries, 'cookie', async () => ({ status }))
+    assert.equal(result.status, status)
+    const revoked = [401, 403].includes(status)
+    assert.equal(result.clear, revoked)
+    assert.equal(sessions.has('cookie'), !revoked)
+    assert.equal((await protectedSession(sessions, entries, 'cookie', async () => ({ status: 200 }))).status, revoked ? 401 : 200)
+  })
+}
+test('anonymous and malformed upstream results fail closed without deleting a valid session', async () => {
+  const sessions = new Map([['cookie', 'handle']]), entries = new Map([['handle', {}]])
+  assert.equal((await protectedSession(sessions, entries, 'missing', () => assert.fail())).status, 401)
+  const failed = await protectedSession(sessions, entries, 'cookie', async () => { throw new Error('bad response') })
+  assert.equal(failed.status, 503)
+  assert.equal(failed.clear, false)
+  assert.equal(sessions.get('cookie'), 'handle')
 })

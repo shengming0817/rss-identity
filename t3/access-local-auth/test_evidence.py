@@ -9,6 +9,33 @@ import evidence
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_candidate_schema_rejects_extra_fields_at_every_object(self):
+        fixture = pathlib.Path(__file__).resolve().parents[2] / 'docs/reviews/202609120803-2341-local-auth-t3-passed.json'
+        manifest = json.loads(fixture.read_text())['candidate']
+        projected = evidence.candidate_fields(manifest)
+        self.assertNotIn('toolchain', projected)
+        def objects(value, path=()):
+            if isinstance(value, dict):
+                yield path
+                for key, child in value.items():
+                    yield from objects(child, path + (key,))
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    yield from objects(child, path + (index,))
+        for path in objects(manifest):
+            bad = copy.deepcopy(manifest)
+            target = bad
+            for key in path:
+                target = target[key]
+            target['password'] = 'PRIVATE_SENTINEL'
+            with self.subTest(path=path), self.assertRaises(evidence.Refused):
+                evidence.candidate_fields(bad)
+        for key in manifest:
+            bad = copy.deepcopy(manifest)
+            bad[key] = None
+            with self.subTest(key=key), self.assertRaises(evidence.Refused):
+                evidence.candidate_fields(bad)
+
     def test_changed_execution_helper_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)

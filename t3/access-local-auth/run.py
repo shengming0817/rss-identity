@@ -76,15 +76,49 @@ def docker(*args, **kwargs):
     return execute(['docker', *args], **kwargs)
 
 
-def allocation():
-    ids = docker('network', 'ls', '-q').split()
-    networks = json.loads(docker('network', 'inspect', *ids)) if ids else []
-    used = [ipaddress.ip_network(c['Subnet']) for n in networks for c in (n['IPAM'].get('Config') or []) if 'Subnet' in c]
+def allocation(project):
+    # Docker owns the atomic overlap check; observation alone cannot reserve IPAM.
     for number in range(80, 220, 2):
-        pair = [ipaddress.ip_network(f'10.234.{i}.0/24') for i in (number, number + 1)]
-        if not any(a.overlaps(b) for a in pair for b in used if b.version == 4):
-            return [f'10.234.{number}', f'10.234.{number+1}']
+        prefixes = [f'10.234.{i}' for i in (number, number + 1)]
+        owned = []
+        try:
+            for key, prefix in zip(('backend', 'protocol'), prefixes):
+                owned.append(docker('network', 'create', '--driver', 'bridge', '--internal',
+                                    '--subnet', prefix + '.0/24', '--gateway', prefix + '.1',
+                                    '--label', 'identity.t32=' + project, project + '-' + key))
+            return prefixes
+        except BaseException as error:
+            # Roll back even if the second create was interrupted. Final owner-label cleanup
+            # also catches a create that succeeded remotely before its response was lost.
+            for identifier in owned:
+                docker('network', 'rm', identifier)
+            if not isinstance(error, CommandFailed):
+                raise
+            ids = docker('network', 'ls', '-q').split()
+            networks = json.loads(docker('network', 'inspect', *ids)) if ids else []
+            used = [ipaddress.ip_network(c['Subnet']) for n in networks
+                    for c in (n['IPAM'].get('Config') or []) if 'Subnet' in c]
+            if not any(ipaddress.ip_network(prefix + '.0/24').overlaps(n)
+                       for prefix in prefixes for n in used if n.version == 4):
+                raise
     raise evidence.Refused('no_isolated_subnets')
+
+
+def bind_reserved(topology, project, prefixes):
+    # Fail on renderer drift BEFORE externalising: never erase IPAM/isolation errors.
+    for key, prefix in zip(('backend', 'protocol'), prefixes):
+        expected = {'internal': True, 'ipam': {'config': [{'subnet': prefix + '.0/24'}]}}
+        evidence.require(topology['networks'][key] == expected, 'candidate_network_mismatch')
+        name = project + '-' + key
+        observed = json.loads(docker('network', 'inspect', name))[0]
+        evidence.require(observed['Internal'] is True and observed['Driver'] == 'bridge'
+                         and observed['EnableIPv6'] is False
+                         and observed['Labels'].get('identity.t32') == project
+                         and observed['IPAM']['Driver'] == 'default'
+                         and observed['IPAM']['Config'] == [{'Subnet': prefix + '.0/24', 'Gateway': prefix + '.1'}],
+                         'reserved_network_mismatch')
+    for key in ('backend', 'protocol'):
+        topology['networks'][key] = {'external': True, 'name': project + '-' + key}
 
 
 def clean_owned(project, volume, control, network, tag, process):
@@ -100,6 +134,7 @@ def clean_owned(project, volume, control, network, tag, process):
     # Each resource is attempted independently; only owned labels/names are eligible.
     for kind, args_list in [('container', ['ps', '-aq', '--filter', 'label=com.docker.compose.project=' + project]),
                             ('network', ['network', 'ls', '-q', '--filter', 'label=com.docker.compose.project=' + project]),
+                            ('network', ['network', 'ls', '-q', '--filter', 'label=identity.t32=' + project]),
                             ('volume', ['volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=' + project])]:
         ids = []
         attempt(kind, project, 'list', lambda: ids.extend(docker(*args_list).split()))
@@ -187,7 +222,8 @@ def main():
         docker('network', 'create', '--internal', '--label', 'identity.t32=' + project, network)
         with tempfile.TemporaryDirectory(prefix=project) as temp:
             root = Path(temp)
-            alloc = allocation() + [network]
+            prefixes = allocation(project)
+            alloc = prefixes + [network]
             (root / 'allocation.json').write_text(json.dumps(alloc))
             docker('run', '--rm', '--user', '0:0', '--network', 'none',
                    '-v', volume + ':/run/t32', '-v', control + ':/control',
@@ -201,6 +237,7 @@ def main():
             topology = json.loads(read_volume('rendered/compose.json'))
             record['configuration'] = configuration
             record['rendered_topology_sha256'] = hashlib.sha256(json.dumps(topology, sort_keys=True).encode()).hexdigest()
+            bind_reserved(topology, project, prefixes)
             topology['name'] = project
             topology['volumes']['fixture'] = {'external': True, 'name': volume}
             topology['volumes']['control'] = {'external': True, 'name': control}

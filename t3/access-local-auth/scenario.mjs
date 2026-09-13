@@ -17,7 +17,7 @@ const origin = config.identity_origin, product = config.product_origin
 const base = `${origin}/api/v1/tenants/${config.tenant}`
 const passwords = Object.fromEntries(['admin-password', 'member-password', 'new-password'].map(name => [name, readFileSync('/run/test/' + name, 'utf8')]))
 const steps = {}, contexts = []
-let stage = 'login', browser, admin, cleanupCheckpoint
+let stage = 'login', browser, admin, member, cleanupCheckpoint
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function probe(handle, binding) {
   return new Promise((resolve, reject) => {
@@ -100,6 +100,8 @@ async function denied(actor, control) {
   assert.ok(result.remaining > 0)
   const good = await probe(control.handle)
   assert.equal(good.status, 200)
+  assert.ok([401, 403].includes((await actor.page.goto(product + '/app')).status()))
+  await expect(actor.page.getByRole('heading', { name: '请重新登录' })).toBeVisible()
   assert.ok([401, 403].includes((await actor.ctx.request.get(product + '/api/protected')).status()))
   // Re-probe after that failure cleared the browser's product cookie.
   const again = await probe(actor.handle)
@@ -122,7 +124,7 @@ try {
     admin = await login('admin', passwords['admin-password'])
     await event('initialized', 'principal', config.admin_principal)
     const principal = await create('member')
-    globalThis.member = await handoff(await login('member'))
+    member = await handoff(await login('member'))
     member.principal = principal
     const cookies = await member.ctx.cookies()
     for (const name of ['__Host-identity-session', '__Host-identity-downstream-browser', '__Host-t32-product']) {
@@ -147,6 +149,9 @@ try {
     assert.equal((await member.ctx.request.post(origin + '/internal/v1/identity/validate', { data: {} })).status(), 404)
     for (const binding of ['tenant', 'audience', 'client']) assert.ok([401, 403].includes((await probe(member.handle, binding)).status))
     const fresh = await context()
+    assert.equal((await fresh.page.goto(product + '/app')).status(), 401)
+    await expect(fresh.page.getByRole('heading', { name: '请重新登录' })).toBeVisible()
+    assert.equal((await fresh.ctx.request.get(product + '/api/protected')).status(), 401)
     const responses = []
     for (const login of ['missing-user', 'member']) {
       const response = await api(fresh, 'login', { login, password: 'deliberately incorrect password' })
@@ -254,18 +259,30 @@ try {
   await run('storage_failure', async () => {
     await create('storage-user')
     const actor = await handoff(await login('storage-user'))
+    const cookieBefore = (await actor.ctx.cookies()).find(c => c.name === '__Host-t32-product')
+    const before = await (await actor.ctx.request.get(product + '/api/protected')).json()
     await rpc('fault', { service: 'postgres', action: 'pause' })
     try {
-      const unavailable = await probe(actor.handle)
-      assert.equal(unavailable.status, 503)
-      assert.equal(unavailable.identity_status, 503)
-      assert.equal(unavailable.online, true)
-      const fresh = await context()
-      const response = await api(fresh, 'login', { login: 'storage-user', password: passwords['member-password'] })
+      const response = await actor.ctx.request.get(product + '/api/protected')
       assert.equal(response.status(), 503)
+      assert.deepEqual(await response.json(), { identity_status: 503, online: true })
       assert.equal(response.headers()['set-cookie'], undefined)
+      assert.equal(response.headers()['retry-after'], '1')
+      assert.equal((await actor.page.goto(product + '/app')).status(), 503)
+      await expect(actor.page.getByRole('heading', { name: '暂时无法验证会话，请重试' })).toBeVisible()
+      assert.deepEqual((await actor.ctx.cookies()).find(c => c.name === cookieBefore.name), cookieBefore)
+      const fresh = await context()
+      const loginResponse = await api(fresh, 'login', { login: 'storage-user', password: passwords['member-password'] })
+      assert.equal(loginResponse.status(), 503)
+      assert.equal(loginResponse.headers()['set-cookie'], undefined)
     } finally { await rpc('fault', { service: 'postgres', action: 'unpause' }) }
-    assert.equal((await probe(actor.handle)).status, 200)
+    const recovered = await actor.ctx.request.get(product + '/api/protected')
+    assert.equal(recovered.status(), 200)
+    assert.deepEqual(await recovered.json(), before)
+    assert.equal((await actor.page.goto(product + '/app')).status(), 200)
+    await expect(actor.page.getByRole('heading', { name: '产品会话已建立' })).toBeVisible()
+    assert.deepEqual((await actor.ctx.cookies()).find(c => c.name === cookieBefore.name), cookieBefore)
+    return { failure_status: 503, recovery_status: 200, same_browser_session: true, session_id: before.session_id }
   })
   await run('events', async () => {
     let cleaned = false

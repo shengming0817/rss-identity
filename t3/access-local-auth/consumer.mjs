@@ -35,6 +35,18 @@ export async function retainedProbe(entries, handle, validate, binding) {
   return { ...await validate(entry, binding), remaining: Math.floor(entry.expires - Date.now() / 1000) }
 }
 
+// Pages and APIs must make the same authoritative session decision.
+export async function protectedSession(sessions, entries, secret, validate) {
+  const handle = sessions.get(secret), entry = entries.get(handle)
+  if (!entry) return { status: 401, clear: true }
+  let result
+  try { result = await validate(entry) }
+  catch { result = { status: 503, identity_status: null, online: false } }
+  const clear = [401, 403].includes(result.status)
+  if (clear) sessions.delete(secret)
+  return { ...result, clear, handle }
+}
+
 function cookie(req, name) {
   return (req.headers.cookie ?? '').split(';').map(s => s.trim()).find(s => s.startsWith(name + '='))?.slice(name.length + 1)
 }
@@ -133,13 +145,18 @@ async function main() {
         res.writeHead(303, { Location: '/app', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' })
         return res.end()
       }
-      if (url.pathname === '/app') { res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' }); return res.end('<h1>产品会话已建立</h1>') }
-      if (url.pathname === '/api/protected') {
-        const secret = cookie(req, '__Host-t32-product'), handle = sessions.get(secret), entry = entries.get(handle)
-        if (!entry) return reply(res, 401)
-        const result = await validate(entry)
-        if (result.status !== 200) { sessions.delete(secret); setCookie(res, '__Host-t32-product', '', 0) }
-        return reply(res, result.status, result.status === 200 ? { handle, session_id: result.session_id } : {})
+      if (['/app', '/api/protected'].includes(url.pathname)) {
+        const result = await protectedSession(sessions, entries, cookie(req, '__Host-t32-product'), validate)
+        if (result.clear) setCookie(res, '__Host-t32-product', '', 0)
+        if ([429, 503].includes(result.status)) res.setHeader('Retry-After', '1')
+        if (url.pathname === '/app') {
+          const text = result.status === 200 ? '<h1>产品会话已建立</h1>' :
+            result.clear ? '<h1>请重新登录</h1><a href="/auth/login">登录产品</a>' : '<h1>暂时无法验证会话，请重试</h1><a href="/app">重试</a>'
+          res.writeHead(result.status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+          return res.end(text)
+        }
+        return reply(res, result.status, result.status === 200 ? { handle: result.handle, session_id: result.session_id } :
+          { identity_status: result.identity_status ?? null, online: result.online ?? false })
       }
       reply(res, 404)
     } catch { reply(res, 401) }

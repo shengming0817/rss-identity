@@ -5,12 +5,69 @@ from pathlib import Path
 import signal
 import subprocess
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 from unittest.mock import patch
 import run as runner
 
 
 class RunnerTests(unittest.TestCase):
+    def test_allocation_claims_disjoint_pairs_and_rolls_back_partial_failure(self):
+        networks, removed = {}, []
+        lock = threading.Lock()
+        def docker(*args, **_):
+            with lock:
+                if args[:2] == ('network', 'create'):
+                    subnet, name = args[args.index('--subnet') + 1], args[-1]
+                    # First runner loses its second subnet to a competing owner.
+                    if subnet == '10.234.81.0/24' and 'competitor' not in networks:
+                        networks['competitor'] = subnet
+                    if subnet in networks.values():
+                        raise runner.CommandFailed('network_create', 1, 'overlap')
+                    networks[name] = subnet
+                    return name
+                if args[:2] == ('network', 'ls'):
+                    return ' '.join(networks)
+                if args[:2] == ('network', 'inspect'):
+                    return json.dumps([{'IPAM': {'Config': [{'Subnet': networks[n]}]}} for n in args[2:]])
+                if args[:2] == ('network', 'rm'):
+                    removed.append(args[2]); del networks[args[2]]
+                    return ''
+                self.fail(args)
+        with patch.object(runner, 'docker', side_effect=docker), ThreadPoolExecutor(2) as pool:
+            first, second = list(pool.map(runner.allocation, ['owner-a', 'owner-b']))
+        self.assertFalse(set(first) & set(second))
+        self.assertEqual(len(networks), 5)
+        self.assertTrue(removed)
+        self.assertIn('competitor', networks)
+
+    def test_external_binding_refuses_candidate_ipam_or_isolation_drift(self):
+        prefixes = ['10.234.80', '10.234.81']
+        original = {'services': {'identity': {'networks': {'backend': {'ipv4_address': prefixes[0] + '.4'}}}},
+                    'networks': {key: {'internal': True, 'ipam': {'config': [{'subnet': prefix + '.0/24'}]}}
+                                 for key, prefix in zip(('backend', 'protocol'), prefixes)}}
+        def observed(*args, **_):
+            key = args[-1].split('-')[-1]
+            prefix = prefixes[('backend', 'protocol').index(key)]
+            return json.dumps([{'Internal': True, 'Driver': 'bridge', 'EnableIPv6': False,
+                                'Labels': {'identity.t32': 'owner'},
+                                'IPAM': {'Driver': 'default', 'Config': [{'Subnet': prefix + '.0/24', 'Gateway': prefix + '.1'}]}}])
+        import copy
+        with patch.object(runner, 'docker', side_effect=observed):
+            for change in ('isolation', 'subnet', 'ip_range'):
+                topology = copy.deepcopy(original)
+                definition = topology['networks']['backend']
+                if change == 'isolation': definition['internal'] = False
+                elif change == 'subnet': definition['ipam']['config'][0]['subnet'] = '10.99.0.0/24'
+                else: definition['ipam']['config'][0]['ip_range'] = prefixes[0] + '.128/25'
+                with self.assertRaises(runner.evidence.Refused):
+                    runner.bind_reserved(topology, 'owner', prefixes)
+            topology = copy.deepcopy(original)
+            runner.bind_reserved(topology, 'owner', prefixes)
+            self.assertEqual(topology['services'], original['services'])
+            self.assertEqual(topology['networks']['backend'], {'external': True, 'name': 'owner-backend'})
+
     def test_preflight_failure_writes_receipt_without_starting_docker(self):
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / 'record.json'
