@@ -43,6 +43,8 @@ impl AttemptSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorityError {
+    #[error(transparent)]
+    Platform(#[from] rss_identity_core::platform::PlatformError),
     #[error("invalid account input")]
     Invalid,
     #[error(transparent)]

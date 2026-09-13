@@ -28,7 +28,8 @@
         "linked",
         "already_linked",
         "reauthenticated",
-        "stepped_up"
+        "stepped_up",
+        "cli_authorized"
       ]
     },
     "provider_id": {

@@ -5,3 +5,7 @@ GRANT SELECT ON rss_transactional_messaging.policy TO identity_runtime,identity_
 GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_runtime,identity_maintenance;
 GRANT USAGE ON SEQUENCE rss_transactional_messaging.outbox_seq_seq TO identity_runtime,identity_maintenance;
 GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO identity_runtime,identity_maintenance;
+
+GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_tenant_registrar;
+GRANT INSERT ON rss_transactional_messaging.tenant_epoch TO identity_tenant_registrar;
+GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO identity_tenant_registrar;

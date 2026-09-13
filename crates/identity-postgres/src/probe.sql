@@ -8,6 +8,11 @@ WITH protected AS (
  SELECT * FROM pg_roles WHERE rolname IN ('identity_account_runtime','identity_account_maintenance')
 ), required_privileges AS (
  SELECT * FROM (VALUES
+ ('runtime','cli_grants','SELECT'),('runtime','cli_grants','INSERT'),('runtime','cli_grants','UPDATE'),('runtime','cli_grants','DELETE'),
+ ('runtime','provider_credentials','SELECT'),('runtime','provider_credentials','INSERT'),('runtime','provider_credentials','UPDATE'),
+ ('runtime','platform_administrators','SELECT'),('runtime','platform_administrators','INSERT'),('runtime','platform_administrators','DELETE'),
+ ('maintenance','platform_administrators','SELECT'),('maintenance','platform_administrators','INSERT'),
+ ('runtime','tenant_registry','SELECT'),('runtime','tenant_registry','INSERT'),('runtime','platform_operations','SELECT'),('runtime','platform_operations','INSERT'),
  ('runtime','local_credentials','SELECT'),('runtime','local_credentials','INSERT'),('runtime','local_credentials','UPDATE'),
  ('maintenance','local_credentials','SELECT'),('maintenance','local_credentials','INSERT'),
  ('runtime','providers','SELECT'),('runtime','providers','INSERT'),('runtime','providers','UPDATE'),('runtime','external_identities','SELECT'),('runtime','external_identities','INSERT'),('runtime','external_identities','UPDATE'),('runtime','link_intents','SELECT'),('runtime','link_intents','INSERT'),('runtime','link_intents','UPDATE'),('runtime','link_intents','DELETE'),('runtime','oidc_transactions','SELECT'),('runtime','oidc_transactions','INSERT'),('runtime','oidc_transactions','UPDATE'),('runtime','oidc_transactions','DELETE'),
@@ -26,16 +31,49 @@ WITH protected AS (
  ) AS r(profile,tab,privilege)
 ), required_columns AS (
  SELECT * FROM (VALUES
- ('maintenance','deployment','bootstrap_tenant','UPDATE'),
+ ('maintenance','deployment','system_domain','UPDATE'),
  ('maintenance','local_credentials','password_hash','UPDATE'),
  ('maintenance','accounts','auth_epoch','UPDATE')
  ) AS r(profile,tab,col,privilege)
 ), tables AS (
  SELECT c.oid,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='identity_authority' AND c.relkind='r'
+), registrar_privileges AS (
+ SELECT * FROM (VALUES
+ ('identity_authority','deployment','SELECT'),('identity_authority','tenant_registry','SELECT'),
+ ('identity_authority','guard','SELECT'),('identity_authority','guard','INSERT'),('identity_authority','guard','UPDATE'),
+ ('identity_authority','accounts','INSERT'),('identity_authority','local_credentials','INSERT'),('identity_authority','memberships','INSERT'),
+ ('rss_transactional_messaging','tenant_epoch','INSERT')
+ ) r(schema_name,tab,privilege)
+), registrar_objects AS (
+ SELECT c.oid,c.relname,c.relkind,n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+ WHERE n.nspname IN ('identity_authority','rss_transactional_messaging')
+), registrar_check AS (
+ SELECT
+ NOT EXISTS(SELECT FROM pg_namespace n CROSS JOIN (VALUES('USAGE'),('CREATE')) p(privilege)
+   WHERE n.nspname IN ('identity_authority','rss_transactional_messaging')
+   AND (has_schema_privilege(r.oid,n.oid,p.privilege) IS DISTINCT FROM (p.privilege='USAGE')
+     OR has_schema_privilege(r.oid,n.oid,p.privilege||' WITH GRANT OPTION')))
+ AND NOT EXISTS(SELECT FROM registrar_objects t CROSS JOIN (VALUES('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER'),('MAINTAIN')) p(privilege)
+   WHERE t.relkind='r' AND (has_table_privilege(r.oid,t.oid,p.privilege) IS DISTINCT FROM
+     EXISTS(SELECT FROM registrar_privileges expected WHERE expected.schema_name=t.nspname AND expected.tab=t.relname AND expected.privilege=p.privilege)
+     OR has_table_privilege(r.oid,t.oid,p.privilege||' WITH GRANT OPTION')))
+ AND NOT EXISTS(SELECT FROM registrar_objects t JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped
+   CROSS JOIN (VALUES('SELECT'),('INSERT'),('UPDATE'),('REFERENCES')) p(privilege)
+   WHERE t.relkind='r' AND (has_column_privilege(r.oid,t.oid,a.attnum,p.privilege) IS DISTINCT FROM
+     EXISTS(SELECT FROM registrar_privileges expected WHERE expected.schema_name=t.nspname AND expected.tab=t.relname AND expected.privilege=p.privilege)
+     OR has_column_privilege(r.oid,t.oid,a.attnum,p.privilege||' WITH GRANT OPTION')))
+ AND NOT EXISTS(SELECT FROM registrar_objects t CROSS JOIN (VALUES('USAGE'),('SELECT'),('UPDATE')) p(privilege)
+   WHERE t.relkind='S' AND has_sequence_privilege(r.oid,t.oid,p.privilege))
+ AND NOT EXISTS(SELECT FROM pg_proc p JOIN pg_namespace n ON p.pronamespace=n.oid
+   WHERE n.nspname IN ('identity_authority','rss_transactional_messaging') AND
+   (has_function_privilege(r.oid,p.oid,'EXECUTE') IS DISTINCT FROM
+     (p.oid IN (to_regprocedure('identity_authority.register_tenant(uuid,bigint)'),to_regprocedure('identity_authority.insert_tenant_administrator(uuid,uuid,text,text)'),to_regprocedure('rss_transactional_messaging.check_execution()')))
+    OR (p.proowner<>r.oid AND has_function_privilege(r.oid,p.oid,'EXECUTE WITH GRANT OPTION')))) AS valid
+ FROM pg_roles r WHERE r.rolname='identity_tenant_registrar'
 ), checks AS (
  SELECT
- (SELECT count(*)=1 AND bool_and(version=7) FROM identity_authority.schema_version) AS version_ok,
+ (SELECT count(*)=1 AND bool_and(version=8) FROM identity_authority.schema_version) AS version_ok,
  ((SELECT count(*)=2 AND bool_and(NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication) FROM groups)
  AND (SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication FROM pg_roles WHERE rolname=current_user)
  AND NOT EXISTS(SELECT FROM pg_roles WHERE pg_has_role(current_user,oid,'MEMBER') AND (rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication))
@@ -44,7 +82,8 @@ WITH protected AS (
  ELSE
    $1='maintenance' AND pg_has_role(current_user,(SELECT oid FROM groups WHERE rolname='identity_account_maintenance'),'USAGE') AND NOT pg_has_role(current_user,(SELECT oid FROM groups WHERE rolname='identity_account_runtime'),'MEMBER')
  END) AS role_ok,
- (NOT has_schema_privilege(current_user,(SELECT oid FROM pg_namespace WHERE nspname='identity_authority'),'CREATE')
+ ((SELECT valid FROM registrar_check) IS TRUE
+ AND NOT has_schema_privilege(current_user,(SELECT oid FROM pg_namespace WHERE nspname='identity_authority'),'CREATE')
  AND (SELECT bool_and(coalesce(has_table_privilege(current_user,t.oid,r.privilege),false)) FROM required_privileges r LEFT JOIN tables t ON t.relname=r.tab WHERE r.profile=$1)
  AND NOT EXISTS (
    SELECT FROM tables t CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER'),('MAINTAIN')) p(privilege)
@@ -61,7 +100,9 @@ WITH protected AS (
      OR has_column_privilege(current_user,t.oid,a.attnum,p.privilege||' WITH GRANT OPTION')
  )
 ) AS privileges_ok,
- true AS contract_ok
+ (EXISTS(SELECT FROM pg_roles WHERE rolname='identity_tenant_registrar' AND NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication)
+ AND NOT EXISTS(SELECT FROM pg_auth_members WHERE roleid=(SELECT oid FROM pg_roles WHERE rolname='identity_tenant_registrar') OR member=(SELECT oid FROM pg_roles WHERE rolname='identity_tenant_registrar'))
+ AND (SELECT count(*)=2 AND bool_and(p.prosecdef AND p.proowner=(SELECT oid FROM pg_roles WHERE rolname='identity_tenant_registrar') AND has_function_privilege(current_user,p.oid,'EXECUTE')=($1='runtime') AND NOT EXISTS(SELECT FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE')) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace=n.oid WHERE n.nspname='identity_authority' AND p.proname IN ('register_tenant','insert_tenant_administrator'))) AS contract_ok
 )
 SELECT CASE
  WHEN version_ok IS NOT TRUE THEN 'schema-version'

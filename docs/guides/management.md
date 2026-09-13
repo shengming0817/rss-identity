@@ -6,7 +6,7 @@
 
 管理员在账户页面创建普通/管理员/应急本地账户，分别管理账户启用、成员资格和管理员资格，或协助重置他人口令。本人改密必须输入当前口令。密码操作只替换口令并推进认证 epoch；不会恢复其它状态。最后本地管理员不能被移除。所有写入都可能使目标旧会话失效，本人安全变更后须重新登录。
 
-IdP 页面只配置部署已批准的绑定与不可变 secret_ref；不上传原始秘密、CA 或出站许可。每租户最多 100 个 provider，创建事务原子检查，超限返回 409 `provider_limit_reached`。新 provider 默认停用，更新和启停消费当前版本。冲突先重新读取再编辑；未知写入不能重复提交。连接测试报告仅证明 discovery/TLS/JWKS 与 RFC 9207，不能冒充实际用户登录或 secret 有效性。
+IdP API 接受自助配置、只写 client secret 和可选 CA；后端加密保存，网页 #2368 按新协议消费。每租户最多 100 个 provider，创建事务原子检查，超限返回 409 `provider_limit_reached`。新 provider 默认停用，更新和启停消费当前版本。冲突先重新读取再编辑；未知写入不能重复提交。连接测试报告仅证明 discovery/TLS/JWKS 与 RFC 9207，不能冒充实际用户登录或 secret 有效性。
 
 `identity-admin` 仅保留独立维护身份的 initialize/recover。日常服务不可读取维护凭据；不可通过维护恢复自动启用账户或成员。
 
@@ -25,3 +25,5 @@ pnpm test:identity:joint
 rss-web 自行构建实际 UI、选择同一源码内的 runner，记录两仓 commit/lock、UI 产物及 runner 摘要；后端仅提供 `make test-ui` 测试 fixture，不获取或构建消费者源码。fixture 创建临时 PG、测试 TLS gateway 与 in-process Router。浏览器验证账户写入、IdP 创建/更新/测试/启停、退出和普通成员拒绝。IdP 远程端口在此使用脚本实现，真实连接由 Keycloak 分组覆盖。该证明不是生产 binary/image/config T3。
 
 连接测试从剩余总预算中保留四分之一（最多一秒）用于权限/版本重检和审计结算，上游超时也须确认失败事件提交后才返回诊断；存储结算不确定仍返回不可用，不假定审计成功。重复本地登录名返回明确冲突，管理员会话不因此退出。
+
+平台角色只在专用系统域生效。系统域账户使用 member 账户形态，再通过平台 role API 显式授撤平台资格，不复用租户 administrator 标志。租户开通/增加管理员见[平台指南](platform.md)。

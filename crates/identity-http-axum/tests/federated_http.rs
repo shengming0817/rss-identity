@@ -13,7 +13,7 @@ use axum::{
 };
 use rss_identity_core::{federation::*, session::SessionSecret};
 use rss_identity_http_axum::{HttpConfig, federated_router};
-use rss_identity_oidc::{ApprovedProvider, HttpOidc};
+use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
 use rss_identity_postgres::*;
 use rss_transactional_messaging_postgres::PgTransactionFault;
 use serde_json::{Value, json};
@@ -24,28 +24,33 @@ use zeroize::Zeroizing;
 const ORIGIN: &str = "https://identity.example.test";
 const CALLBACK: &str = "https://identity.example.test/api/v1/oidc/callback";
 const BROWSER: &str = "__Host-identity-oidc-browser=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-fn production(ca: bool, allow: bool, keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
-    let issuer = std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?;
-    let pem = std::fs::read(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
-    Ok(HttpOidc::new(
-        vec![ApprovedProvider {
-            keycloak_totp,
-            tenant: tenant(),
-            issuer,
-            client_id: "identity-test".into(),
-            secret_ref: "fixture@1".into(),
-            redirect_uri: CALLBACK.into(),
-            addresses: vec![if allow { "127.0.0.0/8" } else { "192.0.2.0/24" }.parse()?],
-        }],
-        BTreeMap::from([("fixture@1".into(), Zeroizing::new("fixture-secret".into()))]),
-        ca.then_some(pem.as_slice()),
-    )?)
+fn production(keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
+    Ok(HttpOidc::new(vec![TrustedAssuranceProfile {
+        keycloak_totp,
+        tenant: tenant(),
+        issuer: std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?,
+        client_id: "identity-test".into(),
+    }])?)
 }
+fn credentials(ca: bool) -> anyhow::Result<ProviderCredentials> {
+    ProviderCredentials::new(
+        "fixture-secret".into(),
+        if ca {
+            Some(std::fs::read_to_string(std::env::var(
+                "IDENTITY_TEST_FEDERATED_CA",
+            )?)?)
+        } else {
+            None
+        },
+    )
+    .map_err(Into::into)
+}
+
 fn config() -> anyhow::Result<ProviderSettings> {
     Ok((rss_identity_core::federation::ProviderSettingsInput {
         issuer: std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?,
         client_id: "identity-test".into(),
-        secret_ref: "fixture@1".into(),
+
         redirect_uri: CALLBACK.into(),
         scopes: vec!["openid".into(), "profile".into(), "email".into()],
         claims: ClaimMapping {
@@ -75,7 +80,17 @@ fn app(s: &Federation) -> Router {
 }
 async fn provider(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
     let p = s
-        .create_provider(federation_support::actor(f).await?, config()?, deadline())
+        .create_provider(
+            federation_support::actor(f).await?,
+            config()?,
+            rss_identity_core::federation::ProviderCredentials::new(
+                "fixture-secret".into(),
+                Some(std::fs::read_to_string(std::env::var(
+                    "IDENTITY_TEST_FEDERATED_CA",
+                )?)?),
+            )?,
+            deadline(),
+        )
         .await?;
     Ok(s.enable_provider(
         federation_support::actor(f).await?,
@@ -189,7 +204,7 @@ async fn successful(app: &Router, p: &ProviderView, user: &str) -> anyhow::Resul
 async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(production(true, true, true)?));
+    let s = service(&f, Arc::new(production(true)?));
     let p = provider(&f, &s).await?;
     let app = app(&s);
     let original = successful(&app, &p, "alice").await?;
@@ -292,9 +307,9 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         1
     );
     // A real adapter profile withdrawal is applied before startup opens HTTP admission.
-    let withdrawn = service(&f, Arc::new(production(true, true, false)?));
+    let withdrawn = service(&f, Arc::new(production(false)?));
     withdrawn
-        .synchronize_approvals(f.key.tenant, deadline())
+        .reconcile_assurance_profiles(f.key.tenant, deadline())
         .await?;
     assert!(
         f.store
@@ -306,13 +321,14 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         federation_support::begin(&f, &s, &p).await.is_err(),
         "stale approved process must not start flows"
     );
-    s.synchronize_approvals(f.key.tenant, deadline()).await?;
+    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+        .await?;
     assert!(
         f.store
             .inspect_session(f.key.tenant, secret(&upgraded), deadline())
             .await
             .is_err(),
-        "reapproval must not revive MFA"
+        "restoring the assurance profile must not revive MFA"
     );
     f.close().await;
     Ok(())
@@ -323,7 +339,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
 async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let old = service(&f, Arc::new(production(true, true, true)?));
+    let old = service(&f, Arc::new(production(true)?));
     let p = provider(&f, &old).await?;
     let old_app = app(&old);
     let url = begin(&old_app, &p, BROWSER, None, None, false).await?;
@@ -378,28 +394,26 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
     let rejected = callback(&old_app, &cb, BROWSER).await?;
     assert_eq!(rejected.headers()["location"], "/auth/error?reason=failed");
     assert!(!rejected.headers().contains_key("set-cookie"));
-    let next = HttpOidc::new(
-        vec![ApprovedProvider {
-            tenant: f.key.tenant,
-            issuer,
-            client_id: "identity-test".into(),
-            redirect_uri: CALLBACK.into(),
-            secret_ref: "fixture@2".into(),
-            addresses: vec!["127.0.0.0/8".parse()?],
-            keycloak_totp: true,
-        }],
-        BTreeMap::from([("fixture@2".into(), new_secret)]),
-        Some(&ca),
-    )?;
+    let next = HttpOidc::new(vec![TrustedAssuranceProfile {
+        tenant: f.key.tenant,
+        issuer,
+        client_id: "identity-test".into(),
+        keycloak_totp: true,
+    }])?;
     let next = service(&f, Arc::new(next));
-    let mut settings = p.settings.input();
-    settings.secret_ref = "fixture@2".into();
+    let settings = p.settings.input();
     let updated = next
         .update_provider(
             federation_support::actor(&f).await?,
             p.id,
             p.version,
             settings.try_into()?,
+            rss_identity_core::federation::ProviderCredentials::new(
+                new_secret.to_string(),
+                Some(std::fs::read_to_string(std::env::var(
+                    "IDENTITY_TEST_FEDERATED_CA",
+                )?)?),
+            )?,
             deadline(),
         )
         .await?;
@@ -412,7 +426,7 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
 async fn real_federated_login_and_linking() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(production(true, true, true)?));
+    let s = service(&f, Arc::new(production(true)?));
     let p = provider(&f, &s).await?;
     let app = app(&s);
     f.store
@@ -523,7 +537,7 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
 async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(production(true, true, true)?));
+    let s = service(&f, Arc::new(production(true)?));
     let p = provider(&f, &s).await?;
     let app = app(&s);
     let url = begin(&app, &p, BROWSER, None, None, false).await?;
@@ -585,6 +599,12 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
             p.id,
             p.version,
             p.settings.clone(),
+            rss_identity_core::federation::ProviderCredentials::new(
+                "fixture-secret".into(),
+                Some(std::fs::read_to_string(std::env::var(
+                    "IDENTITY_TEST_FEDERATED_CA",
+                )?)?),
+            )?,
             deadline(),
         )
         .await?;
@@ -606,7 +626,7 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
     let scripted = federation_support::ScriptedOidc::new();
     let mocked = service(&f, scripted.clone());
     mocked
-        .synchronize_approvals(f.key.tenant, deadline())
+        .reconcile_assurance_profiles(f.key.tenant, deadline())
         .await?;
     let mock_app = federated_router(
         mocked.clone(),
@@ -646,31 +666,23 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
 }
 #[tokio::test]
 #[ignore = "requires make test-federated"]
-async fn federated_tls_and_egress_policy() -> anyhow::Result<()> {
-    production(true, true, true)?
-        .test(tenant(), &config()?)
+async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
+    production(true)?
+        .test(tenant(), &config()?, &credentials(true)?)
         .await?;
     assert_eq!(
-        production(false, true, true)?
-            .test(tenant(), &config()?)
+        production(true)?
+            .test(tenant(), &config()?, &credentials(false)?)
             .await
             .unwrap_err(),
         FederationError::provider(ProviderStage::Discovery, ProviderReason::TlsRejected)
     );
-    assert_eq!(
-        production(true, false, true)?
-            .test(tenant(), &config()?)
-            .await
-            .unwrap_err(),
-        FederationError::provider(ProviderStage::Binding, ProviderReason::EgressDenied)
-    );
-    let mut wrong = config()?.input();
-    wrong.issuer = "https://169.254.169.254".into();
+    let mut private = config()?.input();
+    private.issuer = "https://127.0.0.1".into();
     assert!(
-        production(true, true, true)?
-            .test(tenant(), &wrong.try_into()?)
-            .await
-            .is_err()
+        production(false)?
+            .validate(tenant(), &private.try_into()?, &credentials(false)?)
+            .is_ok()
     );
     Ok(())
 }
@@ -681,73 +693,33 @@ fn tenant() -> rss_request_context::TenantId {
 
 #[tokio::test]
 #[ignore = "requires make test-federated"]
-async fn real_provider_management_and_missing_secret() -> anyhow::Result<()> {
+async fn real_provider_management_and_encrypted_credentials() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let settings = config()?;
-    let binding = ApprovedProvider {
-        keycloak_totp: true,
-        tenant: tenant(),
-        issuer: settings.issuer().as_str().into(),
-        client_id: settings.client_id().as_str().into(),
-        secret_ref: settings.secret_ref().into(),
-        redirect_uri: settings.redirect_uri().into(),
-        addresses: vec!["127.0.0.0/8".parse()?],
-    };
-    let pem = std::fs::read(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
-    let missing = service(
-        &f,
-        Arc::new(HttpOidc::new(vec![binding], BTreeMap::new(), Some(&pem))?),
-    );
-    let p = missing
-        .create_provider(f.actor().await?, settings, deadline())
+    let s = service(&f, Arc::new(production(true)?));
+    let p = s
+        .create_provider(f.actor().await?, config()?, credentials(true)?, deadline())
         .await?;
     assert!(!p.enabled);
-    let session = federation_support::session(&f).await?;
-    let cookie = format!("__Host-identity-session={}", session.secret().expose());
-    let csrf = session.secret().csrf();
-    let config = HttpConfig::new(ORIGIN, Duration::from_secs(30))?;
-    let app = rss_identity_http_axum::management_router(missing.clone(), config.clone())?;
-    let test = format!("/api/v1/tenants/{A}/providers/{}/test", p.id);
-    let r = app
-        .clone()
-        .oneshot(request("POST", &test, &cookie, Some(&csrf), json!({})))
-        .await?;
-    assert_eq!(r.status(), StatusCode::OK);
-    let result = body(r).await?;
-    assert_eq!(result["passed"], false);
-    assert_eq!(result["diagnostic"]["reason"], "missing_secret");
-    let r = app
-        .clone()
-        .oneshot(request(
-            "GET",
-            &format!("/api/v1/tenants/{A}/providers"),
-            &cookie,
-            None,
-            json!(null),
-        ))
-        .await?;
-    assert_eq!(r.status(), StatusCode::OK);
-    let r = app
-        .clone()
-        .oneshot(request(
-            "POST",
-            &format!("/api/v1/tenants/{A}/providers/{}/enabled", p.id),
-            &cookie,
-            Some(&csrf),
-            json!({"expected_version":p.version,"enabled":false}),
-        ))
-        .await?;
-    assert_eq!(r.status(), StatusCode::OK);
-    let real = service(&f, Arc::new(production(true, true, true)?));
-    let app = rss_identity_http_axum::management_router(real, config)?;
-    let r = app
-        .oneshot(request("POST", &test, &cookie, Some(&csrf), json!({})))
-        .await?;
-    assert_eq!(r.status(), StatusCode::OK);
-    let result = body(r).await?;
-    assert_eq!(result["passed"], true);
-    assert_eq!(result["report"]["tls_verified"], true);
+    assert!(!serde_json::to_string(&p)?.contains("fixture-secret"));
+    let sealed:Value=sqlx::query_scalar("SELECT sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(A).bind(p.id.to_string()).fetch_one(&f.owner).await?;
+    assert!(!sealed.to_string().contains("fixture-secret"));
+    sqlx::query("UPDATE identity_authority.provider_credentials SET sealed=jsonb_set(sealed,'{key_id}','\"missing\"') WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(A).bind(p.id.to_string()).execute(&f.owner).await?;
+    assert!(
+        s.test_provider(f.actor().await?, p.id, deadline())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        s.list_providers(f.actor().await?, deadline()).await?.len(),
+        1
+    );
+    sqlx::query("UPDATE identity_authority.provider_credentials SET sealed=$3 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(A).bind(p.id.to_string()).bind(sealed).execute(&f.owner).await?;
+    assert!(
+        s.test_provider(f.actor().await?, p.id, deadline())
+            .await?
+            .tls_verified
+    );
     f.close().await;
     Ok(())
 }

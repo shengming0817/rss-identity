@@ -25,10 +25,31 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 
 pub(crate) struct Loaded {
     pub assurance: Assurance,
+    pub system_domain: bool,
+    pub platform_administrator: bool,
     pub state: AccountState,
     pub view: SessionView,
     pub lifetime: SessionLifetime,
     pub now: i64,
+}
+impl Loaded {
+    pub fn authorize_administration(
+        &self,
+        tenant: TenantId,
+    ) -> Result<(), rss_identity_core::account::AccountRuleError> {
+        if self.state.key().tenant != tenant {
+            return Err(rss_identity_core::account::AccountRuleError::InsufficientPrivilege);
+        }
+        if self.system_domain {
+            if self.platform_administrator {
+                Ok(())
+            } else {
+                Err(rss_identity_core::account::AccountRuleError::InsufficientPrivilege)
+            }
+        } else {
+            self.state.authorize_administration(tenant)
+        }
+    }
 }
 pub(crate) async fn lookup(
     c: &mut PgConnection,
@@ -89,11 +110,16 @@ pub(crate) async fn by_id(
     if let Some(origin) = &origin {
         crate::federation_storage::check_origin(c, tenant, origin).await?;
     }
+    let system_domain = crate::platform::system_domain(c).await? == Some(tenant);
+    let platform_administrator = crate::platform::platform_role(c, key).await?;
+    if system_domain && (state.administrator() || state.emergency()) {
+        return Err(corrupt());
+    }
     let lifetime = SessionLifetime::restore(
         row.try_get("auth_time")?,
         row.try_get("idle_expires_at")?,
         row.try_get("absolute_expires_at")?,
-        state.administrator(),
+        state.administrator() || platform_administrator,
     )
     .map_err(|_| corrupt())?;
     let now = session_storage::now(c).await?;
@@ -112,6 +138,8 @@ pub(crate) async fn by_id(
         .map_err(|_| reject())?;
     Ok(Loaded {
         assurance,
+        system_domain,
+        platform_administrator,
         state,
         view: SessionView::new(session_id(&id)?, lifetime),
         lifetime,

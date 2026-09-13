@@ -65,7 +65,7 @@ provider/tenant 必须非空有效 UUID。client_id/return_target 是部署注�
 
 ## 日常管理 HTTP（I07）
 
-前缀 `/api/v1/tenants/{tenant}/`，所有管理请求均检查中央 cookie；写入另要求精确 Origin、X-Identity-Request: 1、X-CSRF-Token。JSON 不接受额外字段；管理 body 上限 16 KiB。未确认事务不返回成功。
+前缀 `/api/v1/tenants/{tenant}/`，所有管理请求均检查中央 cookie；写入另要求精确 Origin、X-Identity-Request: 1、X-CSRF-Token。JSON 不接受额外字段；管理 body 上限 32 KiB。未确认事务不返回成功。
 
 | 方法 / 路径 | 输入 / 输出 |
 | --- | --- |
@@ -78,8 +78,8 @@ provider/tenant 必须非空有效 UUID。client_id/return_target 是部署注�
 | POST accounts/{principal}/password | 管理员重置他人；`{password}`；200 AccountView |
 | POST account/password | 本人改密；`{current_password,password}`；200 AccountView |
 | GET providers | 管理员；`{providers:[ProviderView]}` |
-| POST providers | ProviderSettings；201 ProviderView，默认 disabled |
-| PUT providers/{provider} | `{expected_version,settings}`；200 ProviderView |
+| POST providers | `{settings,client_secret,ca_pem}`；201 ProviderView，默认 disabled |
+| PUT providers/{provider} | `{expected_version,settings,client_secret,ca_pem}`；200 ProviderView |
 | POST providers/{provider}/enabled | `{expected_version,enabled}`；200 ProviderView |
 | POST providers/{provider}/test | 200 `{passed:true,report}` 或 `{passed:false,diagnostic:{stage,reason}}`；报告须在权限/version 重检与事件提交确认后返回 |
 
@@ -99,3 +99,26 @@ OIDC callback 的失败现在统一 303 到固定同源 `/auth/error?reason=canc
 `POST /api/v1/tenants/{tenant}/oidc/{provider}/step-up` 使用当前 session、Origin、CSRF 和 `X-Identity-Request: 1`；body 为既有 `client_id/return_target`，响应为 `authorization_url`。请求模式持久化，回调复用唯一 OIDC callback、原子轮换会话并返回既有目标，不增加回跳参数。仅提升同一已关联主体；缺 MFA/新鲜时间、配置漂移、退出、重放、换主体均拒绝，不 JIT 或 linking。管理权限不增加门禁；完整语义见 [assurance 指南](../guides/assurance.md)。
 
 MFA 强度与新鲜度以本在线响应的同源 `acr/amr/auth_time` 为准。Hydra 标准 ID Token 的时间是 Hydra 登录时间，`acr=unspecified` 且不投影上游 AMR，不提供上游 MFA 新鲜度。
+
+
+## #2427/#2428 平台与自助 IdP 替换
+
+此未发布产品版本按 #2427/#2428 原地替换，无旧请求兼容分支。当前会话 identity 增加 platform_administrator；administrator 仍只表达业务租户角色。系统域账户列表/创建/启停/成员/密码沿用 tenant 路径并检查平台角色；系统域创建仅允许 role=member，平台资格另行授撤。
+
+| API | 输入与结果 |
+| --- | --- |
+| GET /api/v1/platform | 系统域会话；返回 system_domain_id 和当前 identity。 |
+| POST /api/v1/platform/tenants | `{tenant_id,name,administrator:{operation_id,principal_id,login,password}}`；201 `{operation,active:true}`，202 为提交已确认但 active=false。 |
+| POST /api/v1/platform/tenants/{tenant}/administrators | `{operation_id,principal_id,login,password}`；只新建，不覆盖既有账户。 |
+| GET /api/v1/platform/tenants | cursor、limit(1..100)，默认50；返回 tenants、next_cursor。 |
+| GET /api/v1/platform/tenants/{tenant} | 返回 tenant_id、name、initial_principal_id。 |
+| GET /api/v1/platform/operations/{operation_id} | 返回 `{operation,active}`；404 operation_not_observed 不表示原事务未提交。 |
+| POST /api/v1/platform/accounts/{principal}/role | `{granted}`；返回 principal_id、auth_epoch、platform_administrator，目标旧会话失效。 |
+
+operation 包含 operation_id、kind(tenant_created/administrator_added)、tenant_id、principal_id、created_at。平台 API 复用精确 Origin、会话 cookie、X-Identity-Request 和 CSRF；普通租户管理员不能调用。平台错误为 platform_administrator_required、invalid_platform_request、platform_conflict、last_platform_administrator、tenant_limit_reached、operation_not_observed、operation_outcome_unknown、operation_not_completed；不公开存储原文。
+
+IdP 管理请求体上限 32 KiB；client secret 与可选 CA 合计仍受凭据字段各自上限约束。IdP create body 为 `{settings,client_secret,ca_pem}`，update 为 `{expected_version,settings,client_secret,ca_pem}`。settings 移除 secret_ref；凭据只写，ca_pem 可为 null。响应 ProviderView 增加 credential_version，不返回密钥、密文或秘密。配置/凭据变化撤销旧版本认证状态，连接测试不证明 client secret 有效。
+
+原生 CLI 登录为 GET /api/v1/cli/sso/authorize，参数 provider_id、redirect_uri、code_challenge、state。仅接纳 literal 127.0.0.1 临时端口的 http /callback，无 query/fragment/userinfo；S256 和随机 state 必需。此 GET 在浏览器设置 OIDC browser-binding cookie并跳转上游；唯一 /api/v1/oidc/callback 完成后只返回一分钟单次 code/state。CLI 兑换只消耗真实传输来源的共享限流额度，不按随机 code 创建持久限流键；来源已达限时其它认证路径也不插入新的 scope。POST /api/v1/cli/sso/exchange 接受 `{code,verifier,redirect_uri}`，精确 Origin + X-Identity-Request，验证 PKCE、期限、系统账户/成员/IdP/平台角色后原子消费 grant、创建管理员会话，响应复用现有 identity/session/csrf_token 和 Set-Cookie。CLI 在失败或未知结果后不自动重试该 code；错误 PKCE 不消耗合法兑换资格，成功或实际已提交的兑换不能重放，不在浏览器发送中央会话。
+
+账户列表每个条目增加只读 `platform_administrator`，表示当前显式平台角色；业务租户恒为 false，系统域账户的业务 `administrator` 仍为 false。该投影与其他账户状态在同一授权事务内读取。

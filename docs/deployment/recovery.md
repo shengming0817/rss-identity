@@ -105,7 +105,7 @@ trap - EXIT
 | --- | --- |
 | 应急管理员口令 | 每次使用结束立即 `identity-admin recover`，确认 emergency/enabled/member 状态未被扩大；验证旧口令、中央 cookie 与下游凭据失效。受控保管和人工使用归属由部署入口记录。 |
 | PG runtime/maintenance/owner、Hydra/Keycloak DB 密码 | 数据库 owner 用 PostgreSQL `ALTER ROLE` 在受控交互任务中更新，再同步私有文件；重启所有持有旧连接池的服务。必须以新连接证明旧密码拒绝、新密码成功，不能用缓存连接证明轮换。 |
-| OIDC client secret | Keycloak 原生 client-secret 轮换；分配新 secret_ref，显式更新 provider 配置版本和部署允许绑定。取消在途流程，验证旧 secret 兑换失败、新配置重新登录成功。需要撤销已建立联合会话时显式停用/重新启用 provider。 |
+| OIDC client secret | Keycloak 原生 client-secret 轮换；通过租户或系统域管理 API 提交新的只写 client_secret，配置、密文、凭据版本与事件同事务更新。旧登录事务和相关旧会话立即失效；验证旧 secret 兑换失败、新配置重新登录成功。数据库加密 keyring 轮换按平台操作指南执行。 |
 | Identity state key | 生成独立新 32 字节 key 并更换 state_key_file，重启服务；全部旧 state 拒绝，用户重新开始登录。没有双钥窗口。 |
 | 下游 OIDC client secret | 通过 Hydra 原生 admin API 在维护窗口替换，同步产品后端文件；`identity-clients` 仅核验最终配置，不自动覆盖漂移。旧 client secret 必须认证失败。 |
 | Identity validation / Hydra gateway service secret | 同步调用双方文件和渲染配置，重启双方；旧 secret 拒绝、新 secret 成功。凭据轮换本身不替代账户/会话撤销。 |

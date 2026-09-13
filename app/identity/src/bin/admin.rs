@@ -28,10 +28,10 @@ struct Config {
     user: String,
     password_file: String,
     ca_file: String,
-    tenant_id: String,
+    system_domain_id: String,
     storage_target: [u8; 16],
     storage_lineage: [u8; 16],
-    storage_tenant_epoch: i64,
+    storage_generation: i64,
 }
 struct Timer;
 impl Clock for Timer {
@@ -78,7 +78,7 @@ async fn run() -> Result<(), AppError> {
     let command = parse_command(&args[1..])?;
     let raw = read_public_file(Path::new(&args[0]), 16384).map_err(|_| AppError::Configuration)?;
     let config: Config = serde_json::from_slice(&raw).map_err(|_| AppError::Json)?;
-    let tenant = TenantId::parse(&config.tenant_id).map_err(|_| AppError::Tenant)?;
+    let tenant = TenantId::parse(&config.system_domain_id).map_err(|_| AppError::Tenant)?;
     let ca = PgPrivateCa::from_pem(
         read_public_file(Path::new(&config.ca_file), 1024 * 1024).map_err(|_| AppError::Ca)?,
     )
@@ -91,13 +91,23 @@ async fn run() -> Result<(), AppError> {
         PgPassword::new(read_secret(Path::new(&config.password_file))?.to_string()),
         ca,
     );
+    let mut tenants = vec![(
+        tenant,
+        Epoch::new(config.storage_generation).map_err(|_| AppError::StorageEpoch)?,
+    )];
+    if let Command::Recover(target, _, _) = command {
+        let target = TenantId::parse(target).map_err(|_| AppError::Tenant)?;
+        if target != tenant {
+            tenants.push((
+                target,
+                Epoch::new(config.storage_generation).map_err(|_| AppError::StorageEpoch)?,
+            ));
+        }
+    }
     let binding = ExecutionBinding::new(
         StorageIdentity::new(config.storage_target, config.storage_lineage)
             .map_err(|_| AppError::StorageIdentity)?,
-        vec![(
-            tenant,
-            Epoch::new(config.storage_tenant_epoch).map_err(|_| AppError::StorageEpoch)?,
-        )],
+        tenants,
     )
     .map_err(|_| AppError::StorageIdentity)?;
     let runtime = Arc::new(
@@ -106,7 +116,7 @@ async fn run() -> Result<(), AppError> {
             .map_err(|_| AppError::Connection)?,
     );
     let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new());
-    let authority = Authority::connect(
+    let authority = Authority::connect_maintenance(
         runtime.clone(),
         kdf.clone(),
         config.identity_origin,
@@ -118,7 +128,6 @@ async fn run() -> Result<(), AppError> {
         )
         .map_err(|_| AppError::Budget)?,
         tenant,
-        AuthorityProfile::Maintenance,
         budget(),
     )
     .await;
@@ -153,9 +162,16 @@ async fn execute(a: &Authority, tenant: TenantId, command: Command<'_>) -> Resul
             )
             .await
         }
-        Command::Recover(principal, pw) => {
-            a.recover_administrator(key(tenant, principal)?, password(pw)?, budget())
-                .await
+        Command::Recover(target, principal, pw) => {
+            a.recover_administrator(
+                key(
+                    TenantId::parse(target).map_err(|_| AppError::Tenant)?,
+                    principal,
+                )?,
+                password(pw)?,
+                budget(),
+            )
+            .await
         }
     }?;
     println!(
@@ -169,18 +185,18 @@ async fn execute(a: &Authority, tenant: TenantId, command: Command<'_>) -> Resul
 #[derive(Debug)]
 enum Command<'a> {
     Initialize(&'a str, &'a str, &'a str),
-    Recover(&'a str, &'a str),
+    Recover(&'a str, &'a str, &'a str),
 }
 fn usage() -> &'static str {
-    "Usage: identity-admin CONFIG COMMAND\n  initialize <principal> <login> <password-file>\n  recover <principal> <password-file>"
+    "Usage: identity-admin CONFIG COMMAND\n  initialize <principal> <login> <password-file>\n  recover <tenant> <principal> <password-file>"
 }
 fn parse_command(args: &[String]) -> Result<Command<'_>, AppError> {
     match args {
         [name, principal, login, password] if name == "initialize" => {
             Ok(Command::Initialize(principal, login, password))
         }
-        [name, principal, password] if name == "recover" => {
-            Ok(Command::Recover(principal, password))
+        [name, tenant, principal, password] if name == "recover" => {
+            Ok(Command::Recover(tenant, principal, password))
         }
         [name, ..] if name == "initialize" || name == "recover" => Err(AppError::Arguments),
         _ => Err(AppError::UnknownCommand),
@@ -192,7 +208,7 @@ mod tests {
     #[test]
     fn maintenance_commands_are_single_step() {
         assert!(parse_command(&["initialize", "id", "login", "file"].map(String::from)).is_ok());
-        assert!(parse_command(&["recover", "id", "file"].map(String::from)).is_ok());
+        assert!(parse_command(&["recover", "tenant", "id", "file"].map(String::from)).is_ok());
         for command in [
             "create",
             "password",
@@ -215,6 +231,8 @@ mod tests {
                 Err(AppError::UnknownCommand)
             ));
         }
-        assert!(parse_command(&["recover", "id", "file", "extra"].map(String::from)).is_err());
+        assert!(
+            parse_command(&["recover", "tenant", "id", "file", "extra"].map(String::from)).is_err()
+        );
     }
 }

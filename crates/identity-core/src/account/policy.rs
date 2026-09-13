@@ -186,6 +186,29 @@ impl AccountState {
         if !(matches!(change, LocalChange::Password) && actor.key == self.key && actor.active()) {
             actor.authorize_administration(self.key.tenant)?;
         }
+        let (next, action) = self.transition(change)?;
+        if !next.available_local_administrator()
+            && available_admins - i64::from(self.available_local_administrator()) < 1
+        {
+            return Err(AccountRuleError::LastAdministrator);
+        }
+        Ok((next, action))
+    }
+    pub(crate) fn advance_epoch(self) -> Result<Self, AccountRuleError> {
+        let mut next = self;
+        next.epoch = next
+            .epoch
+            .checked_add(1)
+            .ok_or(AccountRuleError::EpochExhausted)?;
+        Ok(next)
+    }
+    pub(crate) fn transition(
+        self,
+        change: LocalChange,
+    ) -> Result<(Self, SecurityAction), AccountRuleError> {
+        if matches!(change, LocalChange::Password) && !self.has_local_password {
+            return Err(AccountRuleError::Rejected);
+        }
         let mut next = self;
         next.epoch = next
             .epoch
@@ -225,11 +248,6 @@ impl AccountState {
             }
             LocalChange::Password => SecurityAction::PasswordChanged,
         };
-        if !next.available_local_administrator()
-            && available_admins - i64::from(self.available_local_administrator()) < 1
-        {
-            return Err(AccountRuleError::LastAdministrator);
-        }
         Ok((next, action))
     }
     /// The adapter must verify maintenance authority before persisting this result.

@@ -6,7 +6,9 @@ rust-version.workspace = true
 publish.workspace = true
 [dependencies]
 rand_core.workspace = true
+ring.workspace = true
 rss-identity-core.workspace = true
+rss-identity-contracts.workspace = true
 rss-contract.workspace = true
 serde.workspace = true
 serde_json.workspace = true

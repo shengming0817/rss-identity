@@ -45,10 +45,10 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     let mut jobs = Vec::new();
     for _ in 0..4 {
         let maintenance = f.maintenance.clone();
-        let key = f.key;
+        let key = f.system_key;
         jobs.push(tokio::spawn(async move {
             maintenance
-                .initialize(key, login("admin"), password(), deadline())
+                .initialize(key, login("platform"), password(), deadline())
                 .await
         }));
     }
@@ -57,24 +57,17 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
         successes += usize::from(job.await?.is_ok());
     }
     assert_eq!(successes, 1);
-    assert_eq!(f.account_events().await?, 1);
-    assert_event(
-        &f,
-        "initialized",
-        f.key,
-        None,
-        1,
-        Some(AccountState::new_local(f.key, true, false)?),
-    )
-    .await?;
+    assert_eq!(f.account_events().await?, 0);
+    assert_eq!(f.events().await?, 1);
+    f.provision_a().await?;
     let bootstrap: String =
-        sqlx::query_scalar("SELECT bootstrap_tenant::text FROM identity_authority.deployment")
+        sqlx::query_scalar("SELECT system_domain::text FROM identity_authority.deployment")
             .fetch_one(&f.owner)
             .await?;
-    assert_eq!(bootstrap, A);
+    assert_eq!(bootstrap, SYSTEM);
     for reset in [
-        "UPDATE identity_authority.deployment SET bootstrap_tenant=NULL",
-        "UPDATE identity_authority.deployment SET bootstrap_tenant='22222222-2222-4222-8222-222222222222'",
+        "UPDATE identity_authority.deployment SET system_domain=NULL",
+        "UPDATE identity_authority.deployment SET system_domain='22222222-2222-4222-8222-222222222222'",
         "UPDATE identity_authority.deployment SET authority_id=gen_random_uuid()",
     ] {
         assert!(sqlx::raw_sql(reset).execute(&f.owner).await.is_err());
@@ -662,8 +655,8 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             StorageMismatch::SchemaContract,
         ),
         (
-            "GRANT UPDATE(bootstrap_tenant) ON identity_authority.deployment TO identity_runtime",
-            "REVOKE UPDATE(bootstrap_tenant) ON identity_authority.deployment FROM identity_runtime",
+            "GRANT UPDATE(system_domain) ON identity_authority.deployment TO identity_runtime",
+            "REVOKE UPDATE(system_domain) ON identity_authority.deployment FROM identity_runtime",
             StorageMismatch::Privileges,
         ),
         (
@@ -715,7 +708,7 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             ]
         } else {
             vec![
-                ("deployment", "UPDATE(bootstrap_tenant)"),
+                ("deployment", "UPDATE(system_domain)"),
                 ("deployment", "UPDATE(authority_id)"),
             ]
         }) {
@@ -724,21 +717,41 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             )))
             .execute(&f.owner)
             .await?;
-            let result = Authority::connect(
-                runtime.clone(),
-                std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
-                deployment_identity(),
-                rss_transactional_messaging::policy::DeliveryBudget::new(
-                    Duration::from_secs(60),
-                    Duration::from_secs(5),
-                    Duration::from_secs(5),
-                    Duration::from_secs(5),
-                )?,
-                f.key.tenant,
-                profile,
-                deadline(),
-            )
-            .await;
+            let result = match profile {
+                rss_identity_postgres::AuthorityProfile::Runtime => {
+                    Authority::connect_runtime(
+                        runtime.clone(),
+                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        deployment_identity(),
+                        rss_transactional_messaging::policy::DeliveryBudget::new(
+                            Duration::from_secs(60),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                        )?,
+                        f.system_key.tenant,
+                        support::runtime_configuration(f.port, &f.database),
+                        deadline(),
+                    )
+                    .await
+                }
+                rss_identity_postgres::AuthorityProfile::Maintenance => {
+                    Authority::connect_maintenance(
+                        runtime.clone(),
+                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        deployment_identity(),
+                        rss_transactional_messaging::policy::DeliveryBudget::new(
+                            Duration::from_secs(60),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                        )?,
+                        f.system_key.tenant,
+                        deadline(),
+                    )
+                    .await
+                }
+            };
             assert!(
                 matches!(result, Err(AuthorityError::StorageIncompatible(_))),
                 "accepted {profile:?} {table} {privilege}"
@@ -748,21 +761,41 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             )))
             .execute(&f.owner)
             .await?;
-            Authority::connect(
-                runtime.clone(),
-                std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
-                deployment_identity(),
-                rss_transactional_messaging::policy::DeliveryBudget::new(
-                    Duration::from_secs(60),
-                    Duration::from_secs(5),
-                    Duration::from_secs(5),
-                    Duration::from_secs(5),
-                )?,
-                f.key.tenant,
-                profile,
-                deadline(),
-            )
-            .await?;
+            match profile {
+                rss_identity_postgres::AuthorityProfile::Runtime => {
+                    Authority::connect_runtime(
+                        runtime.clone(),
+                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        deployment_identity(),
+                        rss_transactional_messaging::policy::DeliveryBudget::new(
+                            Duration::from_secs(60),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                        )?,
+                        f.system_key.tenant,
+                        support::runtime_configuration(f.port, &f.database),
+                        deadline(),
+                    )
+                    .await
+                }
+                rss_identity_postgres::AuthorityProfile::Maintenance => {
+                    Authority::connect_maintenance(
+                        runtime.clone(),
+                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        deployment_identity(),
+                        rss_transactional_messaging::policy::DeliveryBudget::new(
+                            Duration::from_secs(60),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                        )?,
+                        f.system_key.tenant,
+                        deadline(),
+                    )
+                    .await
+                }
+            }?;
         }
     }
     // A second database cannot silently adopt the existing global roles, even if their names match.
@@ -801,7 +834,7 @@ async fn source_budgets_are_shared() -> anyhow::Result<()> {
     f.bootstrap().await?;
     f.reset_attempts().await?;
     let other_runtime = f.additional_runtime().await?;
-    let other = Authority::connect(
+    let other = Authority::connect_runtime(
         other_runtime.clone(),
         std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
         deployment_identity(),
@@ -811,8 +844,8 @@ async fn source_budgets_are_shared() -> anyhow::Result<()> {
             Duration::from_secs(5),
             Duration::from_secs(5),
         )?,
-        f.key.tenant,
-        AuthorityProfile::Runtime,
+        f.system_key.tenant,
+        support::runtime_configuration(f.port, &f.database),
         deadline(),
     )
     .await?;
@@ -985,15 +1018,9 @@ fn assert_envelope(
 async fn account_transition_matrix_and_events() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    assert_event(
-        &f,
-        "initialized",
-        f.key,
-        None,
-        1,
-        Some(AccountState::new_local(f.key, true, false)?),
-    )
-    .await?;
+    // Platform initialization/provisioning emit platform events; tenant changes below
+    // continue to emit the account security contract.
+    assert_eq!(f.account_events().await?, 0);
     for change in [
         AccountChange::Administrator(false),
         AccountChange::Membership(false),
@@ -1389,12 +1416,10 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
             Box::pin(async move {
                 tx.with_connection(|c| {
                     Box::pin(async move {
-                        sqlx::query(
-                            "UPDATE identity_authority.deployment SET bootstrap_tenant=NULL",
-                        )
-                        .execute(c)
-                        .await
-                        .map(|_| ())
+                        sqlx::query("UPDATE identity_authority.deployment SET system_domain=NULL")
+                            .execute(c)
+                            .await
+                            .map(|_| ())
                     })
                 })
                 .await
@@ -1410,7 +1435,7 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
             StorageMismatch::SchemaVersion
         ))
     ));
-    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=7; ALTER TABLE identity_authority.schema_version ADD CHECK(version=7)").execute(&f.owner).await?;
+    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=8; ALTER TABLE identity_authority.schema_version ADD CHECK(version=8)").execute(&f.owner).await?;
     assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
     for (remove, restore, expected) in [
         (
@@ -1520,7 +1545,7 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
                 .unwrap_err(),
             AuthorityError::RuleRejected(AccountRuleError::EpochExhausted)
         );
-        assert_eq!(f.account_events().await?, 1);
+        assert_eq!(f.account_events().await?, 0);
         sqlx::raw_sql("UPDATE identity_authority.accounts SET auth_epoch=1")
             .execute(&f.owner)
             .await?;
@@ -1537,12 +1562,12 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
     );
     assert_eq!(
         f.maintenance
-            .initialize(f.key, login("admin"), password(), deadline())
+            .initialize(f.system_key, login("platform"), password(), deadline())
             .await
             .unwrap_err(),
         AuthorityError::Fenced
     );
-    assert_eq!(f.account_events().await?, 1);
+    assert_eq!(f.account_events().await?, 0);
     f.close().await;
     Ok(())
 }
@@ -1587,7 +1612,7 @@ async fn maintenance_runbook_respects_forced_rls() -> anyhow::Result<()> {
         "DO $$ BEGIN
         IF (SELECT count(*) FROM identity_authority.accounts)<>1
         OR (SELECT count(*) FROM identity_authority.memberships)<>1
-        OR (SELECT count(*) FROM rss_transactional_messaging.outbox)<>2 THEN
+        OR (SELECT count(*) FROM rss_transactional_messaging.outbox)<>1 THEN
           RAISE EXCEPTION 'runbook lost tenant evidence under FORCE RLS';
         END IF;
         END $$; COMMIT;",

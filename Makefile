@@ -6,7 +6,7 @@ export PYTHONDONTWRITEBYTECODE := 1
 CARGO_TARGET_DIR ?= $(REPOSITORY_ROOT)/target
 export CARGO_TARGET_DIR
 .PHONY: ci check test test-pg test-oidc dependencies licenses
-ci: check test dependencies licenses test-pg test-oidc test-federated test-downstream test-assembly test-gateway test-clients test-recovery
+ci: check test dependencies licenses test-pg test-oidc test-federated test-downstream test-assembly test-gateway test-clients test-recovery test-platform
 check:
 	cargo fmt --all -- --check
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -81,3 +81,7 @@ test-t3-local-auth:
 .PHONY: test-lifecycle
 test-lifecycle:
 	$(PYTHON) t3/identity-lifecycle/run.py --candidate "$(LIFECYCLE_CANDIDATE)" --output "$(LIFECYCLE_OUTPUT)"
+
+.PHONY: test-platform
+test-platform:
+	$(PYTHON) hack/platform_cli.py

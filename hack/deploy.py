@@ -48,10 +48,11 @@ def render(data,out,candidate):
  require(os.getuid()==0 or (os.getuid()==DEPLOY_UID==KEYCLOAK_UID and os.getgid()==DEPLOY_GID==KEYCLOAK_GID),'render as root to deliver provider-specific ownership')
  require(isinstance(data,dict),'invalid deployment object')
  require(not any(k in data for k in ('hydra_system_secret_file','hydra_cookie_secret_file')),'removed singular Hydra secret fields; use hydra_system_secret_files and hydra_cookie_secret_files')
- fields(data,{'runtime','owner_password_file','maintenance_password_file','hydra_database_password_file','keycloak_database_password_file','hydra_system_secret_files','hydra_cookie_secret_files','tls_certificate_file','tls_key_file','hydra_admin_certificate_file','hydra_admin_key_file','keycloak_certificate_file','keycloak_key_file','postgres_certificate_file','postgres_key_file','backend_subnet','protocol_subnet','consumer_network'},'deployment')
- for provider in data['runtime']['oidc']['providers']:
-  require('keycloak_totp' in provider,'provider missing field: keycloak_totp')
-  require(type(provider['keycloak_totp']) is bool,'invalid keycloak_totp approval')
+ fields(data,{'runtime','owner_password_file','maintenance_password_file','hydra_database_password_file','keycloak_database_password_file','hydra_system_secret_files','hydra_cookie_secret_files','tls_certificate_file','tls_key_file','hydra_admin_certificate_file','hydra_admin_key_file','keycloak_certificate_file','keycloak_key_file','postgres_certificate_file','postgres_key_file','backend_subnet','protocol_subnet','consumer_network','keycloak'},'deployment')
+ require(data['runtime']['format_version']==2,'unsupported runtime configuration')
+ fields(data['keycloak'],{'public_origin','ca_file','realm_files'},'keycloak')
+ for profile in data['runtime']['oidc']['assurance_profiles']:
+  require(type(profile.get('keycloak_totp')) is bool,'invalid keycloak_totp profile')
  require(not out.exists(),'output directory must be new');out.mkdir(mode=0o700,parents=True);os.chown(out,DEPLOY_UID,DEPLOY_GID)
  c=copy.deepcopy(data['runtime']);origin=c['identity_origin'];ih=host(origin['identity_public_origin']);ph=host(origin['product_public_origin']);require(ih!=ph,'distinct origins required')
  back=ipaddress.ip_network(data['backend_subnet']);proto=ipaddress.ip_network(data['protocol_subnet']);require(back.version==4 and proto.version==4 and back.prefixlen==24 and proto.prefixlen==24 and not back.overlaps(proto),'distinct /24 networks required')
@@ -61,6 +62,7 @@ def render(data,out,candidate):
  require(c['hydra']['admin_url']=='https://hydra-admin:8443' and c['hydra']['addresses']==[str(proto.network_address+5)+'/32'],'invalid Hydra network binding')
  mounts={};generated={}
  def mounted(path,key,private=False,owner=None):
+  require(not private or not Path(path).is_symlink(),'private deployment file must not be a symlink')
   path=str(Path(path).resolve());require(Path(path).is_file(),'missing deployment file')
   if private:
    secret(path);m=Path(path).stat();require((m.st_uid,m.st_gid)==(owner or (DEPLOY_UID,DEPLOY_GID)),'secret owner must match service UID/GID')
@@ -72,27 +74,35 @@ def render(data,out,candidate):
   generated[name]={'type':'bind','source':str(p.resolve()),'target':'/run/config/'+name,'read_only':True};return p
  def remap_db(db,prefix):
   v=copy.deepcopy(db);v['password_file']=mounted(db['password_file'],prefix+'-password',True);v['ca_file']=mounted(db['ca_file'],prefix+'-ca');return v
- c['database']=remap_db(c['database'],'runtime');c['oidc']['ca_file']=mounted(c['oidc']['ca_file'],'oidc-ca');c['oidc']['state_key_file']=mounted(c['oidc']['state_key_file'],'state-key',True)
- idp_hosts=set();realms={}
- for n,p in enumerate(c['oidc']['providers']):
-  u=urlsplit(p['issuer']);idp_hosts.add(host('https://'+u.netloc));require(re.fullmatch(r'/realms/[A-Za-z0-9_-]+',u.path),'Keycloak realm issuer required')
-  require(p['addresses']==[str(proto.network_address+2)+'/32'],'OIDC must use the fixed TLS gateway')
-  value=secret(p['secret_file']);p['secret_file']=mounted(p['secret_file'],'idp-'+str(n),True)
-  realm=u.path.split('/')[-1];realms.setdefault(realm,{'realm':realm,'enabled':True,'sslRequired':'all','clients':[]})['clients'].append({'clientId':p['client_id'],'secret':value,'publicClient':False,'standardFlowEnabled':True,'directAccessGrantsEnabled':False,'serviceAccountsEnabled':False,'redirectUris':[origin['identity_public_origin']+'/api/v1/oidc/callback'],'attributes':{'pkce.code.challenge.method':'S256'}})
- for p in c['oidc']['providers']:
-  if p['keycloak_totp']:realms[urlsplit(p['issuer']).path.split('/')[-1]].update(json.loads((ROOT/'deployment/keycloak-totp.json').read_text()))
- require(len(idp_hosts)==1,'reference profile requires one Keycloak hostname');idph=next(iter(idp_hosts));require(idph not in (ih,ph),'IdP origin must be distinct')
+ c['database']=remap_db(c['database'],'runtime');c['oidc']['state_key_file']=mounted(c['oidc']['state_key_file'],'state-key',True)
+ keyring_config=c['oidc']['credential_keyring'];require(1<=len(keyring_config['keys'])<=8,'invalid credential keyring')
+ key_ids=set();key_values=set();credential_mounts=[]
+ for n,key_config in enumerate(keyring_config['keys']):
+  value=secret(key_config['path']);require(re.fullmatch(r'[a-fA-F0-9]{64}',value) and int(value,16)!=0,'invalid provider encryption key')
+  require(key_config['key_id'] not in key_ids and value.lower() not in key_values,'duplicate provider encryption key');key_ids.add(key_config['key_id']);key_values.add(value.lower())
+  key='provider-key-'+str(n);credential_mounts.append(key);key_config['path']=mounted(key_config['path'],key,True)
+ require(keyring_config['active_key_id'] in key_ids,'missing active encryption key')
+ idph=host(data['keycloak']['public_origin']);require(idph not in (ih,ph),'IdP origin must be distinct')
+ mounted(data['keycloak']['ca_file'],'oidc-ca')
+ realms={}
+ require(isinstance(data['keycloak']['realm_files'],list) and len(data['keycloak']['realm_files'])<=128,'invalid realm files')
+ for path in data['keycloak']['realm_files']:
+  fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+  with os.fdopen(fd) as f:
+   m=os.fstat(f.fileno());require(stat.S_ISREG(m.st_mode) and not m.st_mode&0o077 and m.st_size<=1048576,'unsafe realm file')
+   raw=f.read(1048577);require(len(raw)<=1048576,'realm file too large');realm=json.loads(raw)
+  name=realm.get('realm');require(isinstance(name,str) and re.fullmatch(r'[A-Za-z0-9_-]+',name) and name not in realms,'invalid or duplicate realm');realms[name]=realm
  c['hydra']['ca_file']=mounted(c['hydra']['ca_file'],'hydra-ca');service=secret(c['hydra']['service_secret_file']);require(re.fullmatch(r'[A-Za-z0-9_-]{32,256}',service),'Hydra gateway secret must be base64url')
  c['hydra']['service_secret_file']=mounted(c['hydra']['service_secret_file'],'hydra-service',True)
  for n,client in enumerate(c['hydra']['clients']):
   oidc_secret=secret(client['oidc_secret_file']);require(oidc_secret!=secret(client['validation_secret_file']),'client secret domains overlap')
   client['oidc_secret_file']=mounted(client['oidc_secret_file'],'client-oidc-'+str(n),True);client['validation_secret_file']=mounted(client['validation_secret_file'],'client-validation-'+str(n),True)
- runtime_keys=set(mounts);write('runtime.json',json.dumps(c))
+ runtime_keys=set(mounts)-{'oidc-ca'};write('runtime.json',json.dumps(c))
  owner_db=copy.deepcopy(c['database']);owner_db['user']='postgres';owner_db['password_file']=mounted(data['owner_password_file'],'owner-password',True)
- migration={'format_version':1,'identity_origin':origin,'database':owner_db,'storage':c['storage'],'runtime_password_file':c['database']['password_file'],'maintenance_password_file':mounted(data['maintenance_password_file'],'maintenance-password',True)}
+ migration={'format_version':2,'identity_origin':origin,'database':owner_db,'storage':c['storage'],'credential_keyring':keyring_config,'runtime_password_file':c['database']['password_file'],'maintenance_password_file':mounted(data['maintenance_password_file'],'maintenance-password',True)}
  write('migration.json',json.dumps(migration))
- maintenance=copy.deepcopy(data['runtime']['database']);maintenance['user']='identity_maintenance';maintenance['password_file']=mounts['maintenance-password']['target'];maintenance['ca_file']=c['database']['ca_file'];require(len(c['storage']['tenants'])>=1,'missing maintenance tenant')
- maintenance.update(identity_origin=origin,tenant_id=c['storage']['tenants'][0]['tenant_id'],storage_target=c['storage']['target'],storage_lineage=c['storage']['lineage'],storage_tenant_epoch=c['storage']['tenants'][0]['epoch']);write('maintenance.json',json.dumps(maintenance))
+ maintenance=copy.deepcopy(data['runtime']['database']);maintenance['user']='identity_maintenance';maintenance['password_file']=mounts['maintenance-password']['target'];maintenance['ca_file']=c['database']['ca_file']
+ maintenance.update(identity_origin=origin,system_domain_id=c['storage']['system_domain_id'],storage_target=c['storage']['target'],storage_lineage=c['storage']['lineage'],storage_generation=c['storage']['generation']);write('maintenance.json',json.dumps(maintenance))
  hp=secret(data['hydra_database_password_file']);kp=secret(data['keycloak_database_password_file']);require(hp!=kp and re.fullmatch(r'[A-Za-z0-9_-]{32,256}',kp),'invalid provider passwords')
  write('00-databases.sql',f"SET standard_conforming_strings=on;\nCREATE USER hydra WITH PASSWORD {sql_literal(hp)};\nCREATE DATABASE hydra OWNER hydra;\nCREATE USER keycloak WITH PASSWORD {sql_literal(kp)};\nCREATE DATABASE keycloak OWNER keycloak;\n")
  def keyring(paths):
@@ -124,9 +134,9 @@ def render(data,out,candidate):
   return v
  sv={}
  sv['postgres']={'image':images['postgres'],'user':str(DEPLOY_UID)+':'+str(DEPLOY_GID),'environment':{'POSTGRES_USER':'postgres','POSTGRES_DB':'identity','POSTGRES_PASSWORD_FILE':mounts['owner-password']['target']},'volumes':[mounts['owner-password'],mounts['runtime-ca'],mounts['postgres-cert'],mounts['postgres-key'],{**generated['00-databases.sql'],'target':'/docker-entrypoint-initdb.d/00-databases.sql'},{'type':'volume','source':'pg','target':'/var/lib/postgresql/data','volume':{'nocopy':True}}],'command':['postgres','-c','ssl=on','-c','ssl_cert_file='+pc,'-c','ssl_key_file='+pk],'networks':['protocol'],'healthcheck':{'test':['CMD','pg_isready','-U','postgres'],'interval':'5s','timeout':'3s','retries':12}}
- sv['migrate']=service(artifacts['operator'],['migration.json','owner-password','runtime-ca','runtime-password','maintenance-password'],['protocol'],['--config','/run/config/migration.json']);sv['migrate']['profiles']=['install'];sv['migrate']['depends_on']={'postgres':{'condition':'service_healthy'}}
+ sv['migrate']=service(artifacts['operator'],['migration.json','owner-password','runtime-ca','runtime-password','maintenance-password']+credential_mounts,['protocol'],['--config','/run/config/migration.json']);sv['migrate']['profiles']=['install'];sv['migrate']['depends_on']={'postgres':{'condition':'service_healthy'}}
  sv['maintenance']=service(artifacts['operator'],['maintenance.json','runtime-ca','maintenance-password'],['protocol']);sv['maintenance']['entrypoint']=['/usr/local/bin/identity-admin','/run/config/maintenance.json'];sv['maintenance']['profiles']=['maintenance']
- sv['identity']=service(artifacts['server'],sorted(runtime_keys)+['runtime.json'],{'backend':{'ipv4_address':app},'protocol':{}},['--config','/run/config/runtime.json']);sv['identity'].update(restart='unless-stopped',stop_grace_period=str(c['budgets']['drain_seconds']+15)+'s',depends_on={'postgres':{'condition':'service_healthy'},'hydra':{'condition':'service_started'}})
+ sv['identity']=service(artifacts['server'],sorted(runtime_keys)+['runtime.json'],{'backend':{'ipv4_address':app},'protocol':{},'egress':{}},['--config','/run/config/runtime.json']);sv['identity'].update(restart='unless-stopped',stop_grace_period=str(c['budgets']['drain_seconds']+15)+'s',depends_on={'postgres':{'condition':'service_healthy'},'hydra':{'condition':'service_started'}})
  common=['hydra.json','runtime-ca']
  sv['hydra-migrate']=service(images['hydra'],common,['protocol'],['migrate','sql','-e','--yes','--config','/run/config/hydra.json']);sv['hydra-migrate']['profiles']=['install'];sv['hydra-migrate']['depends_on']={'postgres':{'condition':'service_healthy'}}
  sv['hydra']=service(images['hydra'],common,{'protocol':{'ipv4_address':str(proto.network_address+5),'aliases':['hydra-admin']}},['serve','all','--config','/run/config/hydra.json']);sv['hydra']['restart']='unless-stopped';sv['hydra']['healthcheck']={'test':['CMD','wget','-q','-T','3','-O','/dev/null','http://127.0.0.1:4445/health/ready'],'interval':'2s','timeout':'4s','start_period':'10s','retries':30}
@@ -145,7 +155,7 @@ def render(data,out,candidate):
  sv['hydra-admin'].pop('networks');sv['hydra-admin']['network_mode']='service:hydra';sv['hydra-admin']['depends_on']=['hydra']
  sv['volume-init']={'image':images['runtime'],'user':'0:0','network_mode':'none','profiles':['install'],'entrypoint':['sh','-ec'],'command':['for spec in /volumes/pg:10001:10001 /volumes/keycloak:1000:0; do d="${spec%%:*}"; owner="${spec#*:}"; if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit)" ]; then test "$(stat -c %u:%g "$d")" = "$owner" || exit 1; else chown "$owner" "$d"; chmod 700 "$d"; fi; done'],'volumes':[{'type':'volume','source':n,'target':'/volumes/'+n,'volume':{'nocopy':True}} for n in ['pg','keycloak']]}
 
- networks={'public':{},'backend':{'internal':True,'ipam':{'config':[{'subnet':str(back),'ip_range':str(back.network_address+128)+'/25'}]}},'protocol':{'internal':True,'ipam':{'config':[{'subnet':str(proto),'ip_range':str(proto.network_address+128)+'/25'}]}},'consumer':{'external':True,'name':data['consumer_network']}}
+ networks={'egress':{},'public':{},'backend':{'internal':True,'ipam':{'config':[{'subnet':str(back),'ip_range':str(back.network_address+128)+'/25'}]}},'protocol':{'internal':True,'ipam':{'config':[{'subnet':str(proto),'ip_range':str(proto.network_address+128)+'/25'}]}},'consumer':{'external':True,'name':data['consumer_network']}}
  write('compose.json',json.dumps(compose_literals({'name':'rss-identity','services':sv,'networks':networks,'volumes':{'pg':{},'keycloak':{}}}),indent=2))
  return out/'compose.json'
 def main():

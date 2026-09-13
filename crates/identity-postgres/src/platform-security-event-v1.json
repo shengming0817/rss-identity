@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tenant",
+    "action",
+    "actor",
+    "target_tenant",
+    "principal",
+    "operation_id"
+  ],
+  "properties": {
+    "tenant": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "target_tenant": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "principal": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "actor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "operation_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "system_initialized",
+        "platform_administrator_recovered",
+        "tenant_created",
+        "administrator_added",
+        "platform_role_granted",
+        "platform_role_revoked"
+      ]
+    }
+  }
+}

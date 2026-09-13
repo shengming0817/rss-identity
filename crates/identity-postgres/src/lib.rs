@@ -13,59 +13,130 @@ mod federation_storage;
 pub use federation::{
     FederatedOutcome, FederatedRedirect, Federation, LinkRequest, LinkResult, LoginRequest,
 };
+mod cli_login;
+mod credentials;
 mod maintenance;
+mod platform;
+pub use credentials::CredentialKeys;
+pub use platform::{
+    NewTenantAdministrator, PlatformOperation, PlatformOperationKind, TenantPage, TenantView,
+};
 mod operations;
-pub use operations::{AccountPage, AccountView, LocalAccountRole};
+pub use operations::{AccountListEntry, AccountPage, AccountView, LocalAccountRole};
+mod runtime;
 mod session_storage;
 mod sessions;
 mod storage;
 mod transaction;
+pub use runtime::RuntimeSource;
 mod types;
 pub use sessions::{
     AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
 };
 pub use types::*;
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 8;
 pub const SCHEMA_SIGNATURE_SQL: &str = include_str!("schema-signature.sql");
 pub const SCHEMA_SIGNATURE: &str = include_str!("schema-signature.sha256");
 pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_authority.sql");
 use rss_identity_core::account::{AccountChange, AccountKey, AccountState};
-use rss_transactional_messaging::message::MessagingDomain;
 use rss_transactional_messaging::policy::DeliveryBudget;
-use rss_transactional_messaging_postgres::{PgOutboxStore, PgRuntime};
+use rss_transactional_messaging_postgres::PgRuntime;
 use std::sync::Arc;
 
+/// All runtime dependencies are established before a usable authority can exist.
+pub struct RuntimeConfiguration {
+    source: RuntimeSource,
+    credential_keys: Arc<CredentialKeys>,
+}
+impl RuntimeConfiguration {
+    pub fn new(source: RuntimeSource, credential_keys: Arc<CredentialKeys>) -> Self {
+        Self {
+            source,
+            credential_keys,
+        }
+    }
+}
+#[derive(Clone)]
+enum AuthorityMode {
+    Runtime(Arc<RuntimeConfiguration>),
+    Maintenance,
+}
 #[derive(Clone)]
 pub struct Authority {
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
-    runtime: Arc<PgRuntime>,
-    profile: AuthorityProfile,
-    outbox: Arc<PgOutboxStore<()>>,
+    runtimes: Arc<runtime::RuntimeState>,
+    mode: AuthorityMode,
+    system_domain: rss_request_context::TenantId,
+    identity_origin: String,
 }
 impl Authority {
+    /// Construct a runtime authority with its immutable external source and keyring.
+    pub async fn connect_runtime(
+        runtime: Arc<PgRuntime>,
+        kdf: Arc<rss_identity_core::account::PasswordKdf>,
+        deployment: DeploymentIdentity,
+        budget: DeliveryBudget,
+        system: rss_request_context::TenantId,
+        configuration: RuntimeConfiguration,
+        deadline: rss_transactional_messaging::policy::OperationDeadline,
+    ) -> Result<Self, AuthorityError> {
+        Self::connect(
+            runtime,
+            kdf,
+            deployment,
+            budget,
+            system,
+            AuthorityMode::Runtime(Arc::new(configuration)),
+            deadline,
+        )
+        .await
+    }
+    /// Maintenance has no tenant-admission or IdP credential configuration.
+    pub async fn connect_maintenance(
+        runtime: Arc<PgRuntime>,
+        kdf: Arc<rss_identity_core::account::PasswordKdf>,
+        deployment: DeploymentIdentity,
+        budget: DeliveryBudget,
+        system: rss_request_context::TenantId,
+        deadline: rss_transactional_messaging::policy::OperationDeadline,
+    ) -> Result<Self, AuthorityError> {
+        Self::connect(
+            runtime,
+            kdf,
+            deployment,
+            budget,
+            system,
+            AuthorityMode::Maintenance,
+            deadline,
+        )
+        .await
+    }
+    fn runtime_configuration(&self) -> Result<&RuntimeConfiguration, AuthorityError> {
+        match &self.mode {
+            AuthorityMode::Runtime(c) => Ok(c),
+            AuthorityMode::Maintenance => Err(AuthorityError::Rejected),
+        }
+    }
     /// Validate the Identity schema and effective role before exposing an authority.
-    pub async fn connect(
+    async fn connect(
         runtime: Arc<PgRuntime>,
         kdf: Arc<rss_identity_core::account::PasswordKdf>,
         deployment: DeploymentIdentity,
         budget: DeliveryBudget,
         tenant: rss_request_context::TenantId,
-        profile: AuthorityProfile,
+        mode: AuthorityMode,
         deadline: rss_transactional_messaging::policy::OperationDeadline,
     ) -> Result<Self, AuthorityError> {
-        let domain =
-            MessagingDomain::parse("identity.security").map_err(|_| AuthorityError::Unavailable)?;
-        let outbox = PgOutboxStore::new(runtime.clone(), domain, budget)
-            .map_err(|_| AuthorityError::Unavailable)?;
         let authority = Self {
             kdf,
-            runtime,
-            profile,
-            outbox: Arc::new(outbox),
+            runtimes: Arc::new(runtime::RuntimeState::new(runtime, budget, tenant)?),
+            mode,
+            system_domain: tenant,
+            identity_origin: deployment.identity_origin().to_owned(),
         };
-        let label = match profile {
-            AuthorityProfile::Runtime => "runtime",
-            AuthorityProfile::Maintenance => "maintenance",
+        let label = match &authority.mode {
+            AuthorityMode::Runtime(_) => "runtime",
+            AuthorityMode::Maintenance => "maintenance",
         };
         let valid = authority
             .read(tenant, deadline, move |tx| {
@@ -91,8 +162,8 @@ impl Authority {
                             if versions != [SCHEMA_VERSION] {return Ok(Some("schema-version".into()));}
                             let signature:String=sqlx::query_scalar(include_str!("schema-signature.sql")).fetch_one(&mut *c).await?;
                             if signature != include_str!("schema-signature.sha256").trim() { return Ok(Some("schema-contract".into())); }
-                            let identity_matches: bool = sqlx::query_scalar("SELECT count(*)=1 AND coalesce(bool_and(environment_id=$1 AND identity_config_version=$2 AND identity_public_origin=$3 AND product_public_origin=$4),false) FROM identity_authority.deployment")
-                                .bind(deployment.environment_id).bind(deployment.config_version).bind(deployment.identity_public_origin).bind(deployment.product_public_origin).fetch_one(&mut *c).await?;
+                            let identity_matches: bool = sqlx::query_scalar("SELECT count(*)=1 AND coalesce(bool_and(environment_id=$1 AND identity_config_version=$2 AND identity_public_origin=$3 AND product_public_origin=$4 AND (system_domain IS NULL OR system_domain=$5::uuid)),false) FROM identity_authority.deployment")
+                                .bind(deployment.environment_id).bind(deployment.config_version).bind(deployment.identity_public_origin).bind(deployment.product_public_origin).bind(tenant.to_string()).fetch_one(&mut *c).await?;
                             if !identity_matches { return Ok(Some("deployment-identity".into())); }
                             sqlx::query_scalar::<_, Option<String>>(include_str!("probe.sql"))
                                 .bind(label)
@@ -109,7 +180,7 @@ impl Authority {
     }
 
     fn require_maintenance(&self) -> Result<(), AuthorityError> {
-        if self.profile != AuthorityProfile::Maintenance {
+        if !matches!(self.mode, AuthorityMode::Maintenance) {
             return Err(AuthorityError::Rejected);
         }
         Ok(())
@@ -117,7 +188,7 @@ impl Authority {
 
     /// Reject maintenance-only authority when composing a runtime adapter.
     pub fn require_runtime(&self) -> Result<(), AuthorityError> {
-        if self.profile != AuthorityProfile::Runtime {
+        if !matches!(self.mode, AuthorityMode::Runtime(_)) {
             return Err(AuthorityError::Rejected);
         }
         Ok(())

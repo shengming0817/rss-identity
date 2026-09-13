@@ -11,7 +11,7 @@ fn literal(value: &str) -> Result<String, AppError> {
     Ok(format!("'{}'", value.replace('\'', "''")))
 }
 pub async fn install(c: MigrationConfig) -> Result<(), AppError> {
-    if c.format_version != 1
+    if c.format_version != 2
         || c.database.user == "identity_runtime"
         || c.database.user == "identity_maintenance"
     {
@@ -47,13 +47,13 @@ pub async fn install(c: MigrationConfig) -> Result<(), AppError> {
             sqlx::query("UPDATE identity_authority.deployment SET environment_id=$1,identity_config_version=$2,identity_public_origin=$3,product_public_origin=$4")
                 .bind(c.identity_origin.environment()).bind(c.identity_origin.version()).bind(c.identity_origin.identity_origin()).bind(c.identity_origin.product_origin()).execute(&mut *tx).await.map_err(|_|AppError::Migration)?;
             sqlx::query("INSERT INTO rss_transactional_messaging.storage_lineage VALUES(true,$1,$2)").bind(c.storage.target.as_slice()).bind(c.storage.lineage.as_slice()).execute(&mut *tx).await.map_err(|_|AppError::Migration)?;
-            for tenant in &c.storage.tenants {sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,$2)").bind(&tenant.tenant_id).bind(tenant.epoch).execute(&mut *tx).await.map_err(|_|AppError::Migration)?;}
+            sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,$2)").bind(c.storage.system_domain_id.as_str()).bind(c.storage.generation).execute(&mut *tx).await.map_err(|_|AppError::Migration)?;
         }
         let relay_safe:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_roles r WHERE r.rolname='rss_tmsg_relay' AND NOT r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolbypassrls AND NOT r.rolreplication AND NOT EXISTS(SELECT FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid))").fetch_one(&mut *tx).await.map_err(|_|AppError::Migration)?;
         if !relay_safe {return Err(AppError::Migration);}
         // Existing installations never take a mutation/repair branch.
         let version:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *tx).await.map_err(|_|AppError::Migration)?;
-        if version!=[7]{return Err(AppError::Migration);}
+        if version!=[8]{return Err(AppError::Migration);}
         let matches:bool=sqlx::query_scalar("SELECT count(*)=1 AND coalesce(bool_and(environment_id=$1 AND identity_config_version=$2 AND identity_public_origin=$3 AND product_public_origin=$4),false) FROM identity_authority.deployment")
             .bind(c.identity_origin.environment()).bind(c.identity_origin.version()).bind(c.identity_origin.identity_origin()).bind(c.identity_origin.product_origin()).fetch_one(&mut *tx).await.map_err(|_|AppError::Migration)?;
         if !matches{return Err(AppError::Migration);}
@@ -65,7 +65,7 @@ pub async fn install(c: MigrationConfig) -> Result<(), AppError> {
             let mut db=c.database.clone();db.user=user.into();db.password_file=path.clone();
             let pool=std::sync::Arc::new(rss_transactional_messaging_postgres::PgRuntime::connect_producer(db.pg()?,assembly::Timer,c.storage.binding()?).await.map_err(|_|AppError::Migration)?);
             let kdf=std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new());
-            let result=async{for tenant in c.storage.tenants()? {rss_identity_postgres::Authority::connect(pool.clone(),kdf.clone(),c.identity_origin.clone(),assembly::delivery_budget()?,tenant,profile,assembly::deadline()).await?;}Ok::<_,AppError>(())}.await;
+            let result=async{match profile { rss_identity_postgres::AuthorityProfile::Runtime => rss_identity_postgres::Authority::connect_runtime(pool.clone(),kdf.clone(),c.identity_origin.clone(),assembly::delivery_budget()?,c.storage.system()?,rss_identity_postgres::RuntimeConfiguration::new(rss_identity_postgres::RuntimeSource::new(db.pg()?,c.storage.identity()?,c.storage.epoch()?),c.credential_keyring.load()?),assembly::deadline()).await, rss_identity_postgres::AuthorityProfile::Maintenance => rss_identity_postgres::Authority::connect_maintenance(pool.clone(),kdf.clone(),c.identity_origin.clone(),assembly::delivery_budget()?,c.storage.system()?,assembly::deadline()).await }?;Ok::<_,AppError>(())}.await;
             pool.close().await;
             result?;
         }
