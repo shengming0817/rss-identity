@@ -59,6 +59,40 @@ async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()>
         p.id.to_string()
     );
     assert_eq!(snapshot.authentication.acr, Acr::Unspecified);
+    // A capability can be withdrawn without changing the persisted interpretation identity.
+    let now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    *upstream.assurance.lock().unwrap() = Some(rss_identity_core::assurance::Assurance::new(
+        Some(now),
+        Acr::Mfa,
+        vec![],
+    )?);
+    let token = step_begin(&f, &s, &p, &linked).await?;
+    upstream.step_up_disabled.store(true, Ordering::SeqCst);
+    let before = upstream.calls.load(Ordering::SeqCst);
+    assert!(step_finish(&s, token, &linked, "alice").await.is_err());
+    assert_eq!(upstream.calls.load(Ordering::SeqCst), before);
+    upstream.step_up_disabled.store(false, Ordering::SeqCst);
+    let token = step_begin(&f, &s, &p, &linked).await?;
+    let withdraw = upstream.clone();
+    *upstream.hook.lock().unwrap() = Some(Box::new(move || {
+        Box::pin(async move {
+            withdraw.step_up_disabled.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+    }));
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
+        .fetch_one(&f.owner)
+        .await?;
+    assert!(step_finish(&s, token, &linked, "alice").await.is_err());
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
+        .fetch_one(&f.owner)
+        .await?;
+    assert_eq!(before, after);
+    upstream.step_up_disabled.store(false, Ordering::SeqCst);
+    *upstream.assurance.lock().unwrap() = None;
     // Different upstream subject for the same principal must not duplicate the provider.
     upstream.trusted_assurance.store(false, Ordering::SeqCst);
     assert!(

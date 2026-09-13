@@ -27,7 +27,7 @@ def docker(*args):
     return subprocess.check_output(["docker", *args], text=True, stderr=subprocess.PIPE, timeout=180).strip()
 
 @contextlib.contextmanager
-def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), network=None):
+def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), network=None, on_container=None):
     name = "identity-t2-" + uuid.uuid4().hex
     command = ["run", "-d", "--name", name]
     if network is not None: command += ["--network", network]
@@ -42,7 +42,9 @@ def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), n
         command += ["-v", mount]
     failure = None
     try:
+        if on_container is not None: on_container(name, False)
         cid = docker(*command, image, *args)
+        if on_container is not None: on_container(name, True)
         mapped = {p: int(docker("port", cid, str(p)).rsplit(":", 1)[1]) for p in ports}
         yield cid, mapped
     except BaseException as error:
@@ -53,7 +55,7 @@ def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), n
             diagnostics(name, image, failure)
         try:
             # Named before startup so even a timed-out run has a cleanup identity.
-            subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, timeout=30, check=True)
+            subprocess.run(["docker", "rm", "-f", "-v", name], stdout=subprocess.DEVNULL, timeout=30, check=True)
         except (subprocess.SubprocessError, OSError) as cleanup_error:
             if failure is None:
                 raise RuntimeError(f"fixture cleanup failed: {name}") from cleanup_error
@@ -149,8 +151,8 @@ def cargo(package, test, env, features=()):
         raise RuntimeError(f'{package}/{test}: canonical test execution incomplete')
 
 @contextlib.contextmanager
-def postgres():
-    with container(PG, [5432], [("POSTGRES_PASSWORD", "fixture-only")]) as (cid, ports):
+def postgres(on_container=None):
+    with container(PG, [5432], [("POSTGRES_PASSWORD", "fixture-only")], on_container=on_container) as (cid, ports):
         for _ in range(120):
             p = subprocess.run(["docker", "exec", cid, "pg_isready", "-U", "postgres"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
             if p.returncode == 0: break
@@ -202,7 +204,7 @@ def configure_totp(realm):
         user['credentials'].append({'type':'otp','userLabel':'fixture-totp','secretData':json.dumps({'value':'fixture-totp-secret-2339'}),'credentialData':json.dumps({'digits':6,'counter':0,'period':30,'algorithm':'HmacSHA1','subType':'totp'})})
 
 @contextlib.contextmanager
-def keycloak(redirect_uri="https://identity.example.test/api/v1/oidc/callback", database_env=(), network=None):
+def keycloak(redirect_uri="https://identity.example.test/api/v1/oidc/callback", database_env=(), network=None, on_container=None):
     realm = {"realm":"identity", "enabled":True, "sslRequired":"all", "duplicateEmailsAllowed":True,
              "loginWithEmailAllowed":False,
              "groups":[{"name":"staff"}],
@@ -225,7 +227,7 @@ def keycloak(redirect_uri="https://identity.example.test/api/v1/oidc/callback", 
         port=free_port();origin=f"https://127.0.0.1:{port}";issuer=origin+"/realms/identity"
         kc_id, _ = stack.enter_context(container(KEYCLOAK,{8443:port},env=[('KC_BOOTSTRAP_ADMIN_USERNAME','fixture-operator'),('KC_BOOTSTRAP_ADMIN_PASSWORD','fixture-operator-password'),*database_env],network=network,args=["start-dev","--import-realm","--http-enabled=false",f"--hostname={origin}",
             "--https-certificate-file=/opt/keycloak/conf/tls.crt","--https-certificate-key-file=/opt/keycloak/conf/tls.key"],
-            mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro",f"{cert}:/opt/keycloak/conf/tls.crt:ro",f"{key}:/opt/keycloak/conf/tls.key:ro"]))
+            mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro",f"{cert}:/opt/keycloak/conf/tls.crt:ro",f"{key}:/opt/keycloak/conf/tls.key:ro"], on_container=on_container))
         context=ssl.create_default_context(cafile=str(cert));deadline=time.monotonic()+120
         while time.monotonic()<deadline:
             try:

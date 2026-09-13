@@ -20,12 +20,14 @@ def main():
              'IDENTITY_TEST_FEDERATED_CA':os.environ['IDENTITY_TEST_FEDERATED_CA'],
              'PLAYWRIGHT_BROWSERS_PATH':os.environ.get('PLAYWRIGHT_BROWSERS_PATH', str(Path.home() / ('Library/Caches/ms-playwright' if __import__('sys').platform == 'darwin' else '.cache/ms-playwright')))}
         fallback = 'unavailable diagnostic'
+        browser_record = {'stage':'environment','failure':'environment'}
         try:
             result=run([node,str(runner)],cwd=runner.parent,env=env,timeout=180,termination_grace=1,capture_output=True,text=True)
             failed = result.returncode != 0
         except subprocess.TimeoutExpired:
             failed = True
             fallback = 'environment/timeout'
+            browser_record = {'stage':'environment','failure':'timeout'}
         except OSError:
             failed = True
             fallback = 'environment/environment'
@@ -38,8 +40,13 @@ def main():
                 failure=value.get('failure')
                 if stage not in ('environment','login','create','disable','reset','enable','providers','signout','member-negative','platform','tenant-login','platform-negative','federated-login','step-up') or failure not in ('environment','timeout','assertion'):
                     raise ValueError('unknown diagnostic')
+                browser_record = {'stage':stage,'failure':failure}
                 print(f'Identity browser failure: {stage}/{failure}',flush=True)
             except (OSError,ValueError,TypeError):
                 print(f'Identity browser failure: {fallback}',flush=True)
+            if os.environ.get('IDENTITY_UI_BROWSER_RECORD'):
+                Path(os.environ['IDENTITY_UI_BROWSER_RECORD']).write_text(json.dumps(browser_record))
             raise SystemExit(1)
+        if os.environ.get('IDENTITY_UI_BROWSER_RECORD'):
+            Path(os.environ['IDENTITY_UI_BROWSER_RECORD']).write_text(json.dumps({'stage':'complete','failure':None}))
 if __name__ == '__main__':main()

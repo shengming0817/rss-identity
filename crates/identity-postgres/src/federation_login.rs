@@ -213,13 +213,17 @@ impl Federation {
         let claim_state = state.clone();
         let claim_browser = browser.clone();
         let claimed_issuer = response_issuer;
+        let claim_oidc = self.oidc.clone();
         let (attempt,view,material)=self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, secrets) = db::attempt(c, &locator, &claim_state, &claim_browser, false).await?;
                     let view = db::provider(c, tenant, attempt.provider).await?;
                     db::exact(&view, attempt.version)?;
                     if view.settings.issuer().as_str()!=claimed_issuer{return Err(FederationError::Claims.into())}
-                    check_actor(c, tenant, &attempt, session).await?;
+                    let actor = check_actor(c, tenant, &attempt, session).await?;
+                    if attempt.mode == AuthenticationMode::StepUp {
+                        crate::federation::check_step_up(c, actor.as_ref().ok_or_else(reject)?.state.key(), &view, claim_oidc.as_ref()).await?;
+                    }
                     let (nonce, verifier) = secrets.ok_or_else(corrupt)?;
                     sqlx::query(concat!(
                         "UPDATE identity_authority.oidc_transactions SET claimed=true,nonce=NULL,verifier",
@@ -278,12 +282,16 @@ impl Federation {
                 .await;
         }
         let locator = self.signer.verify(&state)?;
+        let commit_oidc = self.oidc.clone();
         self.authority.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
                     let view = db::provider(c, tenant, attempt.provider).await?;
                     db::exact(&view, attempt.version)?;
                     let actor = check_actor(c, tenant, &attempt, session).await?;
+                    if attempt.mode == AuthenticationMode::StepUp {
+                        crate::federation::check_step_up(c, actor.as_ref().ok_or_else(reject)?.state.key(), &view, commit_oidc.as_ref()).await?;
+                    }
                     let existing = sqlx::query(concat!(
                         "SELECT identity_id,principal_id FROM identity_authority.external_identities WHER",
                         "E tenant_id=$1::uuid AND provider_id=$2::uuid AND issuer=$3 AND subject=$4"
