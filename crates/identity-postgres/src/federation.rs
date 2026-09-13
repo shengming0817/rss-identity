@@ -434,7 +434,10 @@ impl Federation {
         }
         self.oidc
             .validate(actor.key.tenant, &settings, &credentials)?;
-        let profile = self.oidc.assurance_profile(actor.key.tenant, &settings);
+        let profile = self
+            .oidc
+            .assurance_profile(actor.key.tenant, &settings)
+            .fingerprint;
         self.authority
             .create_provider(actor, settings, credentials, profile, deadline)
             .await
@@ -456,7 +459,10 @@ impl Federation {
         }
         self.oidc
             .validate(actor.key.tenant, &settings, &credentials)?;
-        let profile = self.oidc.assurance_profile(actor.key.tenant, &settings);
+        let profile = self
+            .oidc
+            .assurance_profile(actor.key.tenant, &settings)
+            .fingerprint;
         self.authority
             .edit_provider(
                 actor,
@@ -528,12 +534,64 @@ pub struct LoginOption {
 }
 
 impl Federation {
+    /// Current, subject-bound browser facts. A capability snapshot never authorizes a later POST.
+    pub async fn current_session_security(
+        &self,
+        actor: AuthenticatedSession,
+        deadline: OperationDeadline,
+    ) -> Result<rss_identity_contracts::session::SessionSecurity, AuthorityError> {
+        let oidc = self.oidc.clone();
+        self.authority.read_sql(actor.key.tenant, deadline, move |c| Box::pin(async move {
+            use rss_identity_contracts::session::{AuthenticationFacts, SessionSecurity, StepUpProvider};
+            lock_guard(c, actor.key.tenant).await?;
+            let loaded = crate::session_storage::recheck(c, &actor).await?;
+            // A persisted authentication fact must still match this process's approved interpretation.
+            if let Some(origin) = db::origin(c, actor.key.tenant, loaded.view.id).await? {
+                let (provider, _, _) = db::identity(c, actor.key.tenant, origin.identity).await?;
+                let view = db::provider(c, actor.key.tenant, provider).await?;
+                if oidc.assurance_profile(actor.key.tenant, &view.settings).fingerprint != view.assurance_profile {
+                    return Err(FederationError::StaleConfiguration.into());
+                }
+            }
+            let ids: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT 101"
+            ).bind(actor.key.tenant.to_string()).fetch_all(&mut *c).await?;
+            if ids.len() > 100 { return Err(reject().into()); }
+            let mut providers = Vec::new();
+            for id in ids {
+                let view = db::provider(c, actor.key.tenant, ProviderId::parse(&id.to_string())?).await?;
+                match check_step_up(c, actor.key, &view, oidc.as_ref()).await {
+                    Ok(()) => providers.push(StepUpProvider {
+                        provider_id: id,
+                        label: format!("{} · {} · {}", view.settings.issuer().as_str(), view.settings.client_id().as_str(), id),
+                    }),
+                    Err(transaction::MutationError::Federation(
+                        FederationError::Rejected | FederationError::StaleConfiguration
+                    )) => {},
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(SessionSecurity {
+                session_id: loaded.view.id.to_string(),
+                authentication: AuthenticationFacts {
+                    auth_time: loaded.assurance.auth_time().unwrap_or(loaded.view.auth_time),
+                    acr: loaded.assurance.acr(),
+                    amr: loaded.assurance.amr().to_vec(),
+                },
+                eligible_step_up_providers: providers,
+            })
+        })).await
+    }
+
     pub(super) fn check_assurance_profile(
         &self,
         tenant: TenantId,
         view: &ProviderView,
     ) -> Result<(), AuthorityError> {
-        let current = self.oidc.assurance_profile(tenant, &view.settings);
+        let current = self
+            .oidc
+            .assurance_profile(tenant, &view.settings)
+            .fingerprint;
         if view.assurance_profile != current {
             return Err(FederationError::StaleConfiguration.into());
         }
@@ -561,7 +619,7 @@ impl Federation {
             for id in ids {
                 let id=ProviderId::parse(&id.to_string())?;
                 let mut view=db::provider(c,tenant,id).await?;
-                let profile=oidc.assurance_profile(tenant,&view.settings);
+                let profile=oidc.assurance_profile(tenant,&view.settings).fingerprint;
                 if profile==view.assurance_profile { continue; }
                 view.version=view.version.checked_add(1).ok_or(FederationError::Rejected)?;
                 view.revocation_epoch=view.revocation_epoch.checked_add(1).ok_or(FederationError::Rejected)?;
@@ -578,4 +636,29 @@ impl Federation {
             }
         }
     }
+}
+
+/// Shared by the UX projection and both sides of remote step-up preparation.
+/// Call only under the tenant guard after rechecking the current session.
+pub(super) async fn check_step_up(
+    c: &mut sqlx::PgConnection,
+    key: rss_identity_core::account::AccountKey,
+    view: &ProviderView,
+    oidc: &dyn UpstreamOidc,
+) -> Result<(), transaction::MutationError> {
+    let profile = oidc.assurance_profile(key.tenant, &view.settings);
+    if profile.fingerprint != view.assurance_profile {
+        return Err(FederationError::StaleConfiguration.into());
+    }
+    if !view.enabled || !profile.supports_step_up {
+        return Err(FederationError::Rejected.into());
+    }
+    let linked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM identity_authority.external_identities WHERE tenant_id=$1::uuid AND principal_id=$2 AND provider_id=$3::uuid AND issuer=$4)"
+    ).bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(view.id.to_string())
+        .bind(view.settings.issuer().as_str()).fetch_one(c).await?;
+    if !linked {
+        return Err(FederationError::Rejected.into());
+    }
+    Ok(())
 }

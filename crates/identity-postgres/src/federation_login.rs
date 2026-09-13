@@ -56,7 +56,30 @@ impl Federation {
         } else {
             self.target(&client, &target)?
         };
-        let view = db::read_provider(&self.authority, tenant, provider, budget.remaining()).await?;
+        let (view, replacement) = if mode == AuthenticationMode::StepUp {
+            let actor = replacement.ok_or(FederationError::Rejected)?;
+            let oidc = self.oidc.clone();
+            self.authority
+                .read_sql(tenant, budget.remaining(), move |c| {
+                    Box::pin(async move {
+                        lock_guard(c, tenant).await?;
+                        if actor.key.tenant != tenant {
+                            return Err(reject().into());
+                        }
+                        session_storage::recheck(c, &actor).await?;
+                        let view = db::provider(c, tenant, provider).await?;
+                        crate::federation::check_step_up(c, actor.key, &view, oidc.as_ref())
+                            .await?;
+                        Ok((view, Some(actor)))
+                    })
+                })
+                .await?
+        } else {
+            (
+                db::read_provider(&self.authority, tenant, provider, budget.remaining()).await?,
+                replacement,
+            )
+        };
         self.check_assurance_profile(tenant, &view)?;
         let credentials = self
             .authority
@@ -90,6 +113,7 @@ impl Federation {
                     .prepare(tenant, &view.settings, &credentials, &material, mode),
             )
             .await?;
+        let oidc = self.oidc.clone();
         self.authority
             .read_sql(tenant, budget.remaining(), move |c| {
                 Box::pin(async move {
@@ -99,7 +123,19 @@ impl Federation {
                             if proof.key.tenant != tenant {
                                 return Err(reject().into());
                             }
-                            Some(session_storage::recheck(c, &proof).await?.view.id)
+                            let loaded = session_storage::recheck(c, &proof).await?;
+                            if mode == AuthenticationMode::StepUp {
+                                let current = db::provider(c, tenant, provider).await?;
+                                db::exact(&current, view.version)?;
+                                crate::federation::check_step_up(
+                                    c,
+                                    proof.key,
+                                    &current,
+                                    oidc.as_ref(),
+                                )
+                                .await?;
+                            }
+                            Some(loaded.view.id)
                         }
                         None => None,
                     };

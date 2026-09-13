@@ -9,6 +9,106 @@ use std::sync::atomic::Ordering;
 use support::*;
 use zeroize::Zeroizing;
 
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()> {
+    use rss_identity_core::assurance::{Acr, Amr};
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let s = service(&f, upstream.clone());
+    let p = enabled(&f, &s).await?;
+    let local = session(&f).await?;
+    let snapshot = s
+        .current_session_security(
+            f.store
+                .inspect_session(f.key.tenant, secret(&local), deadline())
+                .await?,
+            deadline(),
+        )
+        .await?;
+    assert_eq!(snapshot.session_id, local.view().id.to_string());
+    assert_eq!(snapshot.authentication.auth_time, local.view().auth_time);
+    assert_eq!(snapshot.authentication.acr, Acr::Unspecified);
+    assert_eq!(snapshot.authentication.amr, [Amr::Pwd]);
+    assert!(snapshot.eligible_step_up_providers.is_empty());
+    // An enabled trusted provider is not enough: no linked identity, no attempt.
+    assert!(step_begin(&f, &s, &p, &local).await.is_err());
+    let attempts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity_authority.oidc_transactions")
+            .fetch_one(&f.owner)
+            .await?;
+    assert_eq!(attempts, 0);
+
+    let linked = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
+    let other = enabled(&f, &s).await?;
+    let _other_subject = issued(finish(&s, begin(&f, &s, &other).await?, "alice").await?);
+    let snapshot = s
+        .current_session_security(
+            f.store
+                .inspect_session(f.key.tenant, secret(&linked), deadline())
+                .await?,
+            deadline(),
+        )
+        .await?;
+    assert_eq!(snapshot.eligible_step_up_providers.len(), 1);
+    assert_eq!(
+        snapshot.eligible_step_up_providers[0]
+            .provider_id
+            .to_string(),
+        p.id.to_string()
+    );
+    assert_eq!(snapshot.authentication.acr, Acr::Unspecified);
+    // Different upstream subject for the same principal must not duplicate the provider.
+    upstream.trusted_assurance.store(false, Ordering::SeqCst);
+    assert!(
+        s.current_session_security(
+            f.store
+                .inspect_session(f.key.tenant, secret(&linked), deadline())
+                .await?,
+            deadline()
+        )
+        .await
+        .is_err(),
+        "facts from an unsynchronized approval must not be displayed"
+    );
+    upstream.trusted_assurance.store(true, Ordering::SeqCst);
+    sqlx::query("INSERT INTO identity_authority.external_identities(tenant_id,identity_id,principal_id,provider_id,issuer,subject) SELECT tenant_id,$1,principal_id,provider_id,issuer,'second-subject' FROM identity_authority.external_identities WHERE provider_id=$2::uuid")
+        .bind(uuid::Uuid::new_v4()).bind(p.id.to_string()).execute(&f.owner).await?;
+    let snapshot = s
+        .current_session_security(
+            f.store
+                .inspect_session(f.key.tenant, secret(&linked), deadline())
+                .await?,
+            deadline(),
+        )
+        .await?;
+    assert_eq!(snapshot.eligible_step_up_providers.len(), 1);
+    let proof = f
+        .store
+        .inspect_session(f.key.tenant, secret(&linked), deadline())
+        .await?;
+    s.enable_provider(actor(&f).await?, p.id, p.version, false, deadline())
+        .await?;
+    assert!(s.current_session_security(proof, deadline()).await.is_err());
+    assert!(step_begin(&f, &s, &p, &linked).await.is_err());
+    upstream.trusted_assurance.store(false, Ordering::SeqCst);
+    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+        .await?;
+    let snapshot = s
+        .current_session_security(
+            f.store
+                .inspect_session(f.key.tenant, secret(&local), deadline())
+                .await?,
+            deadline(),
+        )
+        .await?;
+    assert!(snapshot.eligible_step_up_providers.is_empty());
+    assert_eq!(snapshot.authentication.acr, Acr::Unspecified);
+    f.close().await;
+    Ok(())
+}
+
 async fn step_begin(
     f: &Fixture,
     s: &Federation,

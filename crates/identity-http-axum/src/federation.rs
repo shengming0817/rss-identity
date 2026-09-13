@@ -49,6 +49,7 @@ pub fn federated_router(
     };
 
     let routes = Router::new()
+        .route("/api/v1/tenants/{tenant}/session/security", get(security))
         .route("/api/v1/cli/sso/authorize", get(cli_authorize))
         .route("/api/v1/cli/sso/exchange", post(cli_exchange))
         .route(
@@ -72,6 +73,27 @@ pub fn federated_router(
         .with_state(state);
 
     Ok(router(authority, config)?.merge(routes))
+}
+
+async fn security(
+    State(state): State<FederationState>,
+    Path(raw): Path<String>,
+    Extension(budget): Extension<RequestBudget>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let secret = cookie(&headers)?.ok_or(UNAUTH)?;
+    let actor = state
+        .local
+        .authority
+        .inspect_session(tenant(&raw)?, secret, budget.remaining())
+        .await?;
+    Ok(Json(
+        state
+            .federation
+            .current_session_security(actor, budget.remaining())
+            .await?,
+    )
+    .into_response())
 }
 
 #[derive(Deserialize)]

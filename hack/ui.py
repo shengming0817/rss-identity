@@ -53,7 +53,9 @@ def main():
         tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.load_cert_chain(cert,key);server.socket=tls.wrap_socket(server.socket,server_side=True)
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
-            env={'IDENTITY_TEST_PG_PORT':str(ports[5432]),'IDENTITY_TEST_UI_PORT':str(server.backend_port),'IDENTITY_TEST_UI_ORIGIN':f'https://localhost:{server.server_port}','IDENTITY_UI_RUNNER':str(runner)}
+            origin=f'https://localhost:{server.server_port}'
+            upstream=stack.enter_context(providers.keycloak(redirect_uri=origin+'/api/v1/oidc/callback'))
+            env={**upstream,'IDENTITY_TEST_PG_PORT':str(ports[5432]),'IDENTITY_TEST_UI_PORT':str(server.backend_port),'IDENTITY_TEST_UI_ORIGIN':origin,'IDENTITY_UI_RUNNER':str(runner)}
             providers.cargo('rss-identity-http-axum','ui_host',env)
             print('Identity test fixture completed')
         finally:server.shutdown();server.server_close();thread.join(timeout=5)

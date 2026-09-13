@@ -16,6 +16,8 @@ def main():
         env={'PATH':os.environ['PATH'],'HOME':home,'TMPDIR':home,
              'IDENTITY_UI_DIAGNOSTIC':str(Path(home)/'result.json'),
              'IDENTITY_TEST_UI_ORIGIN':os.environ['IDENTITY_TEST_UI_ORIGIN'],
+             'IDENTITY_TEST_FEDERATED_ISSUER':os.environ['IDENTITY_TEST_FEDERATED_ISSUER'],
+             'IDENTITY_TEST_FEDERATED_CA':os.environ['IDENTITY_TEST_FEDERATED_CA'],
              'PLAYWRIGHT_BROWSERS_PATH':os.environ.get('PLAYWRIGHT_BROWSERS_PATH', str(Path.home() / ('Library/Caches/ms-playwright' if __import__('sys').platform == 'darwin' else '.cache/ms-playwright')))}
         fallback = 'unavailable diagnostic'
         try:
@@ -34,7 +36,7 @@ def main():
                 if not isinstance(value,dict): raise ValueError('invalid diagnostic')
                 stage=value.get('stage')
                 failure=value.get('failure')
-                if stage not in ('environment','login','create','disable','reset','enable','providers','signout','member-negative') or failure not in ('environment','timeout','assertion'):
+                if stage not in ('environment','login','create','disable','reset','enable','providers','signout','member-negative','platform','tenant-login','platform-negative','federated-login','step-up') or failure not in ('environment','timeout','assertion'):
                     raise ValueError('unknown diagnostic')
                 print(f'Identity browser failure: {stage}/{failure}',flush=True)
             except (OSError,ValueError,TypeError):

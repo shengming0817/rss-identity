@@ -89,6 +89,48 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     let (app, _, _) = app(&f);
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let base = format!("/api/v1/tenants/{A}");
+    let security = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("{base}/session/security"),
+            &cookie,
+            "",
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(security.status(), StatusCode::OK);
+    assert!(
+        security.headers()["cache-control"]
+            .to_str()?
+            .contains("no-store")
+    );
+    let facts = json_body(security).await?;
+    assert_eq!(facts["authentication"]["acr"], "unspecified");
+    assert_eq!(facts["authentication"]["amr"], json!(["pwd"]));
+    assert_eq!(facts["eligible_step_up_providers"], json!([]));
+    let absent = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("{base}/session/security"),
+            "",
+            "",
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(absent.status(), StatusCode::UNAUTHORIZED);
+    let other = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/api/v1/tenants/{B}/session/security"),
+            &cookie,
+            "",
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(other.status(), StatusCode::UNAUTHORIZED);
     let duplicate = app
         .clone()
         .oneshot(req(

@@ -42,8 +42,12 @@ impl ScriptedOidc {
     }
 }
 impl UpstreamOidc for ScriptedOidc {
-    fn assurance_profile(&self, _tenant: TenantId, _c: &ProviderSettings) -> [u8; 32] {
-        [u8::from(self.trusted_assurance.load(Ordering::SeqCst)); 32]
+    fn assurance_profile(&self, _tenant: TenantId, _c: &ProviderSettings) -> AssuranceProfile {
+        let approved = self.trusted_assurance.load(Ordering::SeqCst);
+        AssuranceProfile {
+            fingerprint: [u8::from(approved); 32],
+            supports_step_up: approved,
+        }
     }
     fn validate(
         &self,

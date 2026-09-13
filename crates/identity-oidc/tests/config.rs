@@ -77,6 +77,23 @@ fn trusted_assurance_is_independent_and_exactly_scoped() {
         keycloak_totp: true,
     }])
     .unwrap();
+    let approved = trusted.assurance_profile(tenant(), &c);
+    assert!(approved.supports_step_up);
+    assert_eq!(
+        approved.fingerprint,
+        digest("keycloak-26.7.3/password-totp/acr-2/v1")
+    );
+    let unapproved = weak.assurance_profile(tenant(), &c);
+    assert!(!unapproved.supports_step_up);
+    assert_eq!(unapproved.fingerprint, digest("unspecified/v1"));
+    assert!(
+        !trusted
+            .assurance_profile(
+                TenantId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                &c
+            )
+            .supports_step_up
+    );
     assert_ne!(
         weak.assurance_profile(tenant(), &c),
         trusted.assurance_profile(tenant(), &c)
