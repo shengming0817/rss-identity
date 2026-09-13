@@ -65,6 +65,12 @@ test-recovery:
 measure-capacity:
 	$(PYTHON) hack/downstream.py --measure
 
+.PHONY: prepare-t33 test-t33
+prepare-t33:
+	$(PYTHON) t3/identity-federated-sso/prepare.py --output "$(T33_ARTIFACTS)" --ui-source "$(IDENTITY_UI_SOURCE)" --ui-dist "$(IDENTITY_UI_DIST)"
+
+test-t33:
+	$(PYTHON) t3/identity-federated-sso/run.py --artifacts "$(T33_ARTIFACTS)" --artifacts-sha256 "$(T33_ARTIFACTS_SHA256)" --output "$(T33_OUTPUT)"
 .PHONY: test-t3-local-auth check-t3-local-auth
 check-t3-local-auth:
 	$(PYTHON) -c "from pathlib import Path; [compile(p.read_bytes(), str(p), 'exec') for p in [*sorted(Path('t3/access-local-auth').glob('*.py')), Path('hack/bounded_process.py')]]"
