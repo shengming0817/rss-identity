@@ -259,7 +259,7 @@ server { listen 443 ssl; server_name @PRODUCT@; location / { proxy_set_header Ho
         def bind(source, target):
             return {'type': 'bind', 'source': source, 'target': target, 'read_only': True}
         consumer_files = ['ca.crt', 'consumer.json'] + [Path(c[k]).name for c in self.data['runtime']['hydra']['clients'] for k in ['oidc_secret_file', 'validation_secret_file']]
-        services['t33-consumer'] = {'image': self.candidate['providers']['runtime'], 'platform': 'linux/amd64', 'user': '10001:10001',
+        services['t33-consumer'] = {'image': self.candidate['images']['server'], 'platform': 'linux/amd64', 'user': '10001:10001',
             'read_only': True, 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
             'entrypoint': ['/artifact/identity-federated-t3-consumer', '/run/input/consumer.json'],
             'volumes': [bind('/srv/t33/input/' + n, '/run/input/' + n) for n in consumer_files] +
@@ -389,7 +389,14 @@ server { listen 443 ssl; server_name @PRODUCT@; location / { proxy_set_header Ho
         if action in ('stop', 'start'):
             if request['service'] not in ('keycloak', 'hydra', 'private-gateway'):
                 raise ValueError('unknown fault target')
-            self.compose(action, request['service'])
+            if request['service'] == 'hydra':
+                # Match the lifecycle carrier: both containers own one network namespace.
+                if action == 'stop':
+                    self.compose('stop', 'hydra-admin', 'hydra')
+                else:
+                    self.compose('up', '-d', '--force-recreate', '--pull', 'never', 'hydra', 'hydra-admin')
+            else:
+                self.compose(action, request['service'])
             return {'result': 'ok'}
         if action == 'cleanup_snapshot':
             session = str(uuid.UUID(request['session_id']))

@@ -2,7 +2,7 @@
 
 本 carrier 验证固定产品候选的正式网关、Identity binary、平台 API/CLI、Keycloak、Hydra、独立消费端、撤销调度与 Outbox 的部署连接。源码及测试实现不等于运行通过；实际结果由对应 PR 的同 HEAD 运行记录持有。
 
-2026-09-13 范围校正：租户开通、IdP 管理与 Hydra login/consent 使用正式后端接口；第二个业务租户经候选中的 identity-platform CLI 开通。#2368 管理网页与本 PR 无依赖关系。浏览器只执行真实上游登录、cookie 与重定向协议；Identity 的 login/consent/resume/error 静态落地页使用测试空页面，不替换 API、callback 或认证响应，不声明网页验收通过。
+2026-09-13 范围校正：租户开通、IdP 管理与 Hydra login/consent 使用正式后端接口；第二个业务租户经候选中的 identity-platform CLI 开通。#2368 管理网页与本 PR 无依赖关系。浏览器执行真实 Keycloak 登录；取得其授权重定向后，由共享 cookie 的 HTTP context 请求唯一 callback 并检查响应。Hydra 交接逐跳检查真实 HTTP 重定向，禁止加载 Identity 落地页触发网页脚本重复提交；不替换 API、callback 或认证响应，不声明网页或浏览器 SameSite 策略验收通过。
 
 ## 固定输入与入口
 
@@ -35,6 +35,8 @@ make test-t33 T33_ARTIFACTS=/absolute/t33-artifacts \
 两真实租户分别配置 provider 和 downstream client。保留原 20 项场景，并新增 4 项平台初始化、API/CLI 开通和权限隔离场景：独立租户 SSO、consumer 发起的 SSO/Hydra 继续、错误浏览器/租户/重放/回跳、在途配置变化或停用、JIT 开关、同邮箱不合并、本人再认证关联与冲突、下游绑定、中央退出、provider 撤销及重启用不复活、Keycloak/Hydra/private validation 故障与恢复。配置/凭据更新按当前产品语义撤销旧会话，停用与清理另用更新后新建的有效 grant，防止既有撤销掩盖被测行为。
 
 撤销场景读取实际 grant horizon。只读观察产品 cleanup worker，在 horizon +120 秒以内确认 grant 删除及同一 grant 的 cleaned 事件；不修改业务记录、时间或直接调用内部清理接口。撤销提交后开始的在线复核必须拒绝，已验证的在途业务不追溯取消。上游退出、中央退出和产品会话退出不是全局退出承诺。
+
+Hydra 故障按同仓生命周期 carrier 的既有方式操作：停止 hydra-admin 与 hydra，恢复时一起重新创建，使管理代理加入恢复后的共享网络命名空间。消费者固定使用候选 server 的 amd64 运行层，避免 ARM 宿主 provider 镜像缺少 amd64 加载器。结果必须确认 Identity 网页请求数为 0。
 
 唯一机器判定集合为 proof.py 的 SCENARIOS。缺少、重复、跳过或失败的场景不允许报告成功；浏览器异常退出或资源清理失败同样失败。SIGTERM/SIGINT 转为受控失败并执行清理；不承诺捕获 SIGKILL。Docker 故障仍生成最低失败回执，诊断保留有界脱敏摘要。公开 result.json 只记录固定身份、配置版本、HTTP 状态、安全错误类别、实际关联 ID 与断言。口令、cookie、code、verifier、token、callback query 和上游原文不进入结果。私有控制通道、证书及秘密在成功清理后删除。
 

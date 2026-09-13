@@ -173,6 +173,9 @@ class FederatedProof(unittest.TestCase):
                 value.stage()
             pool = value.config['networks']['front']['ipam']['config'][0]
             self.assertEqual(pool['ip_range'], '10.233.12.128/25')
+            consumer = value.config['services']['t33-consumer']
+            self.assertEqual(consumer['image'], candidate['images']['server'])
+            self.assertEqual(consumer['platform'], 'linux/amd64')
             extra = next(json.loads(c.kwargs['input']) for c in execute.call_args_list
                          if 'front.conf' in c.kwargs.get('input', ''))
             self.assertIn('proxy_pass https://public-gateway:443;', extra['front.conf'])
@@ -184,6 +187,14 @@ class FederatedProof(unittest.TestCase):
         with patch.object(stack, 'docker') as docker, self.assertRaisesRegex(ValueError, 'never replay'):
             value.onboard_cli()
         docker.assert_not_called()
+
+    def test_hydra_fault_recovery_recreates_the_shared_namespace_owners(self):
+        value = stack.Stack.__new__(stack.Stack)
+        value.compose = Mock()
+        value.control({'action': 'stop', 'service': 'hydra'})
+        value.compose.assert_called_with('stop', 'hydra-admin', 'hydra')
+        value.control({'action': 'start', 'service': 'hydra'})
+        value.compose.assert_called_with('up', '-d', '--force-recreate', '--pull', 'never', 'hydra', 'hydra-admin')
 
     def test_signal_and_daemon_failure_keep_cleanup_and_failure_receipt(self):
         for cause in ['signal', 'daemon']:

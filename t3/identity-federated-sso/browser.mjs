@@ -15,6 +15,7 @@ let stage = 'environment'
 let step = 'start'
 let browser
 let sequence = 0
+let identityUiRequests = 0
 const contexts = []
 const providers = []
 const admins = []
@@ -48,10 +49,10 @@ async function context() {
   ctx.setDefaultTimeout(15000)
   ctx.setDefaultNavigationTimeout(30000)
   contexts.push(ctx)
-  // Static landing pages only: protocol APIs, callback, cookies and redirects remain real.
-  // The product UI is packaged in the gateway but is not a prerequisite for this backend T3.
-  await ctx.route(url => url.origin === origin && ['/login', '/consent', '/auth/resume', '/auth/error'].includes(url.pathname),
-    route => route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>T33 protocol landing</title>' }))
+  ctx.on('request', request => {
+    const url = new URL(request.url())
+    if (url.origin === origin && ['/login', '/consent', '/auth/resume', '/auth/error'].includes(url.pathname)) identityUiRequests++
+  })
   return ctx
 }
 async function platform(ctx, path, data, status = 200, csrf) {
@@ -106,15 +107,21 @@ async function keycloak(page, user) {
 }
 async function tenantSso(ctx, index, user = 'alice') {
   step = 'tenant_sso_api'
-  const page = await ctx.newPage()
-  await page.goto((await begin(ctx, index)).authorization_url)
-  await keycloak(page, user)
-  await expect(page).toHaveURL(origin + '/auth/resume')
-  return { page, session: await current(ctx, index) }
+  const callback = await capture(ctx, (await begin(ctx, index)).authorization_url, user)
+  await deliver(ctx, callback, true)
+  return { session: await current(ctx, index) }
 }
-async function downstream(ctx, index, page, kind) {
+async function redirect(ctx, source, targetOrigin, targetPath) {
+  const response = await ctx.request.get(source, { maxRedirects: 0 })
+  expect([302, 303]).toContain(response.status())
+  const location = new URL(response.headers().location, source)
+  expect(location.origin).toBe(targetOrigin)
+  expect(location.pathname).toBe(targetPath)
+  return location.href
+}
+async function downstream(ctx, index, location, kind) {
   step = 'downstream_' + kind
-  const challenge = new URL(page.url()).searchParams.get(kind + '_challenge')
+  const challenge = new URL(location).searchParams.get(kind + '_challenge')
   expect(challenge).toBeTruthy()
   const headers = { Origin: origin, 'X-Identity-Request': '1' }
   const prepared = await ctx.request.post(`${origin}/api/v1/downstream/${kind}`, { headers, data: { challenge } })
@@ -126,7 +133,7 @@ async function downstream(ctx, index, page, kind) {
     const accepted = await ctx.request.post(`${origin}/api/v1/downstream/${kind}/accept`, {
       headers: { ...headers, 'X-CSRF-Token': session.csrf_token }, data: { challenge, flow } })
     expect(accepted.status()).toBe(200)
-    await page.goto((await accepted.json()).redirect_to)
+    return (await accepted.json()).redirect_to
   }
 }
 async function consumer(ctx, index, user = 'alice') {
@@ -135,16 +142,14 @@ async function consumer(ctx, index, user = 'alice') {
     headers: { Origin: product, 'X-T33-Request': '1' }, data: { client_id: config.clients[index].client_id },
   })
   expect(response.status()).toBe(200)
-  const page = await ctx.newPage()
-  await page.goto((await response.json()).authorization_url)
-  await expect(page).toHaveURL(new RegExp(`${origin}/login`))
-  const acceptLogin = await downstream(ctx, index, page, 'login')
+  const login = await redirect(ctx, (await response.json()).authorization_url, origin, '/login')
+  const acceptLogin = await downstream(ctx, index, login, 'login')
   const existing = await ctx.request.get(`${origin}/api/v1/tenants/${tenants[index]}/session`)
   if (existing.status() !== 200) await tenantSso(ctx, index, user)
-  await acceptLogin()
-  await expect(page).toHaveURL(new RegExp(`${origin}/consent`))
-  await (await downstream(ctx, index, page, 'consent'))()
-  await expect(page).toHaveURL(product + '/session')
+  const consent = await redirect(ctx, await acceptLogin(), origin, '/consent')
+  const acceptConsent = await downstream(ctx, index, consent, 'consent')
+  const callback = await redirect(ctx, await acceptConsent(), product, '/auth/callback')
+  await redirect(ctx, callback, product, '/session')
   const proof = await ctx.request.get(`${product}/session`)
   expect(proof.status()).toBe(200)
   const facts = await proof.json()
@@ -152,7 +157,7 @@ async function consumer(ctx, index, user = 'alice') {
   expect(facts.client_id).toBe(config.clients[index].client_id)
   expect(facts.audience).toBe(config.clients[index].audience)
   expect(facts.issuer).toBe(origin + '/oidc')
-  return { page, facts }
+  return { facts }
 }
 async function begin(ctx, index, suffix = 'login', fields = {}) {
   return api(ctx, index, `oidc/${providers[index].id}/${suffix}`,
@@ -162,11 +167,22 @@ async function capture(ctx, authorization, user = 'alice') {
   step = 'callback_capture'
   const page = await ctx.newPage()
   let callback
-  await page.route(`${origin}/api/v1/oidc/callback?**`, async route => {
-    callback = route.request().url()
-    await route.abort()
+  // Route handlers do not intercept every hop of a redirect chain. Stop the upstream
+  // response itself, before a landing page can run a second protocol operation.
+  await page.route(`${idp}/**`, async route => {
+    if (!route.request().isNavigationRequest()) return route.continue()
+    const response = await route.fetch({ maxRedirects: 0 })
+    if ([302, 303].includes(response.status())) {
+      const target = new URL(response.headers().location, route.request().url())
+      expect(target.origin).toBe(origin)
+      expect(target.pathname).toBe('/api/v1/oidc/callback')
+      callback = target.href
+      await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>T33 authorization received</title>' })
+    } else {
+      await route.fulfill({ response })
+    }
   })
-  await page.goto(authorization).catch(() => {})
+  await page.goto(authorization)
   if (!callback) await keycloak(page, user)
   await expect.poll(() => Boolean(callback), { timeout: 30000 }).toBe(true)
   await page.close()
@@ -330,7 +346,7 @@ try {
   const link = await context()
   const original = await local(link, 0, 'alice@example.test')
   const oldCookies = await link.cookies(origin)
-  await api(link, 0, `oidc/${providers[0].id}/link`, { client_id: 'identity-ui', return_target: 'resume', password: 'incorrect fixture password' }, 'POST', 403)
+  await api(link, 0, `oidc/${providers[0].id}/link`, { client_id: 'identity-ui', return_target: 'resume', password: 'incorrect fixture password' }, 'POST', 401)
   const target = await begin(link, 0, 'link', { password })
   const linkCallback = await capture(link, target.authorization_url, 'linker')
   await deliver(link, linkCallback, true)
@@ -431,7 +447,9 @@ try {
   expect(events.some(e => e.action === 'jit_created' && e.principal === joined.session.identity.principal_id && e.provider_id === providers[0].id)).toBe(true)
   expect(events.some(e => e.action === 'linked' && e.principal === localAccount.principal_id)).toBe(true)
   pass(stage, { actions: [...new Set(events.map(e => e.action))].sort(), count: events.length })
+  expect(identityUiRequests).toBe(0)
   write('result', { result: 'passed', checks, browser: browser.version(), playwright: playwrightVersion,
+    identity_ui_requests: identityUiRequests,
     providers: providers.map(p => ({ id: p.id, version: p.version, enabled: p.enabled })) })
 } catch (error) {
   const location = String(error?.stack ?? '').match(/browser\.mjs:(\d+):(\d+)/)
