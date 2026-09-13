@@ -8,6 +8,7 @@ TOOLS = json.loads((Path(__file__).resolve().parent / 'tools.lock.json').read_te
 UI_REVISION = TOOLS['ui_revision']
 PROVIDERS = {'postgres', 'keycloak', 'hydra', 'nginx', 'runtime'}
 SCENARIOS = (
+    'platform_bootstrap', 'tenant_api_onboarding', 'tenant_cli_onboarding', 'platform_authorization',
     'tenant_sso', 'consumer_sso', 'browser_binding', 'tenant_binding', 'callback_replay',
     'return_target', 'configuration_version', 'configuration_disabled', 'jit_disabled',
     'same_email', 'explicit_link', 'link_conflict', 'downstream_binding', 'central_logout',

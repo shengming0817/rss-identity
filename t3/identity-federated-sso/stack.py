@@ -13,6 +13,7 @@ import uuid
 import proof
 
 TENANTS = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222']
+SYSTEM_DOMAIN = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 ORIGIN = 'https://identity.t33.test'
 IDP = 'https://sso.t33.test'
 PRODUCT = 'https://product.t33.test'
@@ -74,6 +75,7 @@ class Stack:
         self.work = self.name + '-work'
         self.consumer_network = self.name + '-consumer'
         self.snapshots = {}
+        self.cli_started = False
 
     def compose(self, *args, **kwargs):
         return command(['docker', 'compose', '-p', self.name, '-f', str(self.compose_path), *args], **kwargs)
@@ -140,19 +142,24 @@ class Stack:
         runtime['identity_origin'] = {'environment_id': self.name, 'config_version': 1,
                                      'identity_public_origin': ORIGIN, 'product_public_origin': PRODUCT}
         runtime['storage'] = {'target': list(uuid.uuid4().bytes), 'lineage': list(uuid.uuid4().bytes),
-                              'tenants': [{'tenant_id': t, 'epoch': 1} for t in TENANTS]}
+                              'system_domain_id': SYSTEM_DOMAIN, 'generation': 1}
         runtime['public_gateway'], runtime['private_gateway'] = str(back[2]), str(back[3])
         runtime['hydra']['addresses'] = [str(proto[5]) + '/32']
         state_key = secrets.token_hex(32)
         SENSITIVE.add(state_key); self.secrets.append(state_key)
         runtime['oidc']['state_key_file'] = self.write('state-key-hex', state_key)
-        runtime['oidc']['providers'] = []
+        credential_key = secrets.token_hex(32)
+        SENSITIVE.add(credential_key); self.secrets.append(credential_key)
+        runtime['oidc']['credential_keyring'] = {'active_key_id': 't33', 'keys': [
+            {'key_id': 't33', 'path': self.write('provider-key-hex', credential_key)}]}
+        providers = []
         runtime['hydra']['clients'] = []
         for index, tenant in enumerate(TENANTS):
             name = ['alpha', 'beta'][index]
-            runtime['oidc']['providers'].append({'tenant_id': tenant, 'issuer': IDP + '/realms/' + name,
-                'client_id': 'identity-' + name, 'secret_ref': name + '@1',
-                'secret_file': self.ephemeral_secret('idp-' + name), 'addresses': [str(proto[2]) + '/32'], 'keycloak_totp': False})
+            secret_path = self.ephemeral_secret('idp-' + name)
+            providers.append({'tenant_id': tenant, 'issuer': IDP + '/realms/' + name,
+                'client_id': 'identity-' + name,
+                'client_secret': (self.inputs / Path(secret_path).name).read_text()})
             runtime['hydra']['clients'].append({'tenant_id': tenant, 'client_id': 't33-' + name,
                 'audience': 't33-' + name + '-api', 'config_version': 1,
                 'validation_secret_file': self.ephemeral_secret('validation-' + name),
@@ -163,7 +170,6 @@ class Stack:
         (self.inputs / 'ca.key').chmod(0o600)
         ca = '/srv/t33/input/ca.crt'
         runtime['database']['ca_file'] = ca
-        runtime['oidc']['ca_file'] = ca
         runtime['hydra']['ca_file'] = ca
         for key, names in [('tls', [HOST, IDP_HOST, PRODUCT_HOST, VALIDATION_HOST]),
                            ('keycloak', ['keycloak']), ('hydra_admin', ['hydra-admin']), ('postgres', ['postgres'])]:
@@ -172,17 +178,37 @@ class Stack:
         self.secrets.append(password)
         SENSITIVE.add(password)
         self.write('user-password', password)
+        platform_path = self.ephemeral_secret('platform-password')
+        self.platform_admin = str(uuid.uuid5(uuid.NAMESPACE_URL, self.name + SYSTEM_DOMAIN))
         self.admins = [str(uuid.uuid5(uuid.NAMESPACE_URL, self.name + t)) for t in TENANTS]
+        self.operations = [str(uuid.uuid5(uuid.NAMESPACE_URL, self.name + t + '/create')) for t in TENANTS]
+        realms = []
+        for index, provider in enumerate(providers):
+            name = ['alpha', 'beta'][index]
+            realm = {'realm': name, 'enabled': True, 'sslRequired': 'all', 'duplicateEmailsAllowed': True,
+                'clients': [{'clientId': provider['client_id'], 'secret': provider['client_secret'],
+                    'enabled': True, 'publicClient': False, 'standardFlowEnabled': True,
+                    'directAccessGrantsEnabled': False, 'redirectUris': [ORIGIN + '/api/v1/oidc/callback'],
+                    'attributes': {'pkce.code.challenge.method': 'S256'}}],
+                'users': [{'username': user, 'enabled': True, 'email': email, 'emailVerified': True,
+                    'firstName': 'T33', 'lastName': 'Fixture',
+                    'credentials': [{'type': 'password', 'value': password, 'temporary': False}]}
+                    for user, email in [('alice', 'alice@example.test'), ('linker', 'linker@example.test'), ('fresh', 'fresh@example.test')]]}
+            realms.append(self.write('realm-' + name + '.json', realm))
+        data['keycloak'] = {'public_origin': IDP, 'ca_file': ca, 'realm_files': realms}
         self.data = data
         self.write('deployment.json', data)
         self.browser_config = {'origin': ORIGIN, 'idp': IDP, 'product': PRODUCT, 'tenants': TENANTS,
-            'admins': self.admins, 'password': password, 'providers': runtime['oidc']['providers'],
+            'admins': self.admins, 'password': password, 'providers': providers,
+            'system_domain': SYSTEM_DOMAIN, 'platform_admin': self.platform_admin,
+            'platform_password': (self.inputs / Path(platform_path).name).read_text(), 'operations': self.operations,
             'clients': runtime['hydra']['clients'], 'ca_file': '/input/ca.crt',
             'ui_revision': self.record['ui_revision'], 'playwright': self.record['browser']['playwright']}
         # Browser input contains fixture secrets only and is never copied to the public receipt.
         self.write('browser.json', self.browser_config)
         self.public_config = {'identity_origin': runtime['identity_origin'],
-            'tenants': TENANTS, 'providers': [{k: v for k, v in p.items() if k != 'secret_file'} for p in runtime['oidc']['providers']],
+            'system_domain': SYSTEM_DOMAIN, 'tenants': TENANTS,
+            'providers': [{k: v for k, v in p.items() if k != 'client_secret'} for p in providers],
             'clients': [{k: v for k, v in c.items() if not k.endswith('_file')} for c in runtime['hydra']['clients']],
             'lifetimes': {k: runtime['hydra'][k] for k in ['request_seconds', 'code_seconds', 'access_token_seconds', 'clock_skew_seconds']}}
 
@@ -202,10 +228,6 @@ for p in Path('/srv/t33/input').iterdir():
  os.chmod(p,0o644 if p.suffix=='.crt' else 0o600);os.chown(p,10001,10001)
 os.chown('/srv/t33/input/keycloak.key',1000,0)
 subprocess.run(['python3','/artifacts/candidate/deploy.py','--input','/srv/t33/input/deployment.json','--output','/srv/t33/rendered','--candidate','/artifacts/candidate/candidate.json'],check=True)
-pw=Path('/srv/t33/input/user-password').read_text()
-for p in Path('/srv/t33/rendered').glob('realm-*.json'):
- data=json.loads(p.read_text());data['users']=[{'username':name,'enabled':True,'email':email,'emailVerified':True,'firstName':'T33','lastName':'Fixture','credentials':[{'type':'password','value':pw,'temporary':False}]} for name,email in [('alice','alice@example.test'),('linker','linker@example.test'),('fresh','fresh@example.test')]]
- p.write_text(json.dumps(data));os.chown(p,1000,0)
 print(Path('/srv/t33/rendered/compose.json').read_text())
 '''
         self.config = json.loads(self.root(script, volumes=[str(self.inputs) + ':/staging:ro']))
@@ -213,14 +235,15 @@ print(Path('/srv/t33/rendered/compose.json').read_text())
         services = config['services']
         services['public-gateway'].pop('ports')
         services['public-gateway']['networks']['front'] = {'ipv4_address': str(self.front[11])}
-        config['networks']['front'] = {'internal': True, 'ipam': {'config': [{'subnet': str(self.front)}]}}
+        config['networks']['front'] = {'internal': True, 'ipam': {'config': [
+            {'subnet': str(self.front), 'ip_range': str(self.front[128]) + '/25'}]}}
         services['private-gateway']['networks']['consumer']['aliases'].append(VALIDATION_HOST)
         # One test-only public ingress gives the real gateway its external port-443 mapping.
         # It never routes Identity API requests directly to the application.
         front_config = '''pid /tmp/nginx.pid; error_log stderr crit; events {} http { access_log off; error_log stderr crit; resolver 127.0.0.11 ipv6=off;
 client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi;
 ssl_certificate /run/input/tls.crt; ssl_certificate_key /run/input/tls.key; ssl_protocols TLSv1.2 TLSv1.3;
-server { listen 443 ssl; server_name @IDENTITY@ @IDP@; location / { proxy_ssl_verify on; proxy_ssl_trusted_certificate /run/input/ca.crt; proxy_ssl_server_name on; proxy_ssl_name $host; proxy_set_header Host $host; proxy_pass https://public-gateway:8443; } }
+server { listen 443 ssl; server_name @IDENTITY@ @IDP@; location / { proxy_ssl_verify on; proxy_ssl_trusted_certificate /run/input/ca.crt; proxy_ssl_server_name on; proxy_ssl_name $host; proxy_set_header Host $host; proxy_pass https://public-gateway:443; } }
 server { listen 443 ssl; server_name @PRODUCT@; location / { proxy_set_header Host $host; set $consumer t33-consumer:8080; proxy_pass http://$consumer; } } }
 '''.replace('@IDENTITY@', HOST).replace('@IDP@', IDP_HOST).replace('@PRODUCT@', PRODUCT_HOST)
         consumer_config = {'listen': '0.0.0.0:8080', 'product_origin': PRODUCT, 'issuer': ORIGIN + '/oidc',
@@ -295,30 +318,60 @@ server { listen 443 ssl; server_name @PRODUCT@; location / { proxy_set_header Ho
         self.compose('run', '--rm', 'hydra-migrate')
         self.compose('up', '-d', 'hydra', 'hydra-admin', 'keycloak')
         self.compose('run', '--rm', 'hydra-clients')
-        # Keep the original tenant-scoped maintenance command and permission profile.
-        for tenant, principal in zip(TENANTS, self.admins):
-            cid = self.name + '-maintenance-' + tenant[:4]
-            self.containers.append(cid)
-            # The renderer's maintenance volume holds only maintenance credentials.
-            service = self.config['services']['maintenance']
-            mounts = []
-            for mount in service['volumes']:
-                source = self.config['volumes'][mount['source']]['name']
-                mounts += ['-v', source + ':' + mount['target'] + ':ro']
-            # Stage a separate config for the second tenant without changing any authority data.
-            config_volume = next(self.config['volumes'][v['source']]['name'] for v in service['volumes'] if v['target'] == '/run/config')
-            self.root("import json,sys,os\nfrom pathlib import Path\np=Path('/delivery/maintenance.json');v=json.loads(p.read_text());v['tenant_id']=sys.stdin.read().strip();p.write_text(json.dumps(v));p.chmod(0o600);os.chown(p,10001,10001)",
-                      volumes=[config_volume + ':/delivery'], input=tenant)
-            input_volume = next(self.config['volumes'][v['source']]['name'] for v in service['volumes'] if v['target'] == '/run/input')
-            self.root("import shutil,os;shutil.copy2('/srv/t33/input/user-password','/delivery/init-password');os.chown('/delivery/init-password',10001,10001)", volumes=[input_volume + ':/delivery'])
-            docker('run', '--rm', '--pull', 'never', '--name', cid, '--platform', 'linux/amd64', '--user', '10001:10001',
-                   '--network', self.name + '_protocol', '--entrypoint', 'identity-admin', *mounts,
-                   self.candidate['images']['operator'], '/run/config/maintenance.json', 'initialize', principal, 'admin', '/run/input/init-password')
+        # Bootstrap the explicit system domain exactly once, before opening runtime ingress.
+        cid = self.name + '-maintenance'
+        self.containers.append(cid)
+        service = self.config['services']['maintenance']
+        mounts = []
+        for mount in service['volumes']:
+            source = self.config['volumes'][mount['source']]['name']
+            mounts += ['-v', source + ':' + mount['target'] + ':ro']
+        input_volume = next(self.config['volumes'][v['source']]['name'] for v in service['volumes'] if v['target'] == '/run/input')
+        self.root("import shutil,os;shutil.copy2('/srv/t33/input/platform-password','/delivery/init-password');os.chown('/delivery/init-password',10001,10001)", volumes=[input_volume + ':/delivery'])
+        docker('run', '--rm', '--pull', 'never', '--name', cid, '--platform', 'linux/amd64', '--user', '10001:10001',
+               '--network', self.name + '_protocol', '--entrypoint', 'identity-admin', *mounts,
+               self.candidate['images']['operator'], '/run/config/maintenance.json', 'initialize', self.platform_admin, 'platform', '/run/input/init-password')
         self.compose('up', '-d', 'identity', 'public-gateway', 'private-gateway')
         self.compose('up', '-d', 't33-front')
         wait(lambda: self.compose('exec', '-T', 't33-front', 'curl', '--fail', '--silent', '--max-time', '3', '--cacert', '/run/input/ca.crt', '--resolve', HOST + ':443:127.0.0.1', ORIGIN + '/oidc/.well-known/openid-configuration') != '', 'public OIDC ingress')
         self.compose('up', '-d', 't33-consumer')
         wait(lambda: self.compose('exec', '-T', 't33-front', 'curl', '--silent', '--max-time', '3', '--output', '/dev/null', '--write-out', '%{http_code}', '--cacert', '/run/input/ca.crt', '--resolve', PRODUCT_HOST + ':443:127.0.0.1', PRODUCT + '/ready') == '204', 'consumer HTTPS readiness')
+
+    def onboard_cli(self):
+        if self.cli_started:
+            raise ValueError('CLI onboarding already attempted; never replay a write')
+        self.cli_started = True
+        volume = self.volume(self.name + '-cli')
+        config = {'format_version': 1, 'origin': ORIGIN, 'system_domain_id': SYSTEM_DOMAIN,
+                  'session_dir': '/run/cli/session', 'ca_file': '/run/cli/ca.crt', 'request_seconds': 30}
+        self.root("import json,sys,os,shutil\nfrom pathlib import Path\np=Path('/delivery');os.chown(p,10001,10001);p.chmod(0o700)\nfor name in ['ca.crt','platform-password','user-password']:\n shutil.copy2('/srv/t33/input/'+name,p/name);os.chown(p/name,10001,10001);(p/name).chmod(0o600)\nf=p/'config.json';f.write_text(sys.stdin.read());f.chmod(0o600);os.chown(f,10001,10001)",
+                  volumes=[volume + ':/delivery'], input=json.dumps(config))
+        def cli(*args):
+            name = self.name + '-cli-' + uuid.uuid4().hex[:8]
+            self.containers.append(name)
+            value = json.loads(docker('run', '--rm', '--pull', 'never', '--name', name,
+                '--platform', 'linux/amd64', '--user', '10001:10001', '--read-only', '--cap-drop', 'ALL',
+                '--security-opt', 'no-new-privileges:true', '--network', self.name + '_front',
+                '-v', volume + ':/run/cli', '--entrypoint', 'identity-platform',
+                self.candidate['images']['operator'], '--config', '/run/cli/config.json', *args))
+            proof.assert_safe(value, self.secrets)
+            return value
+        login = cli('login', '--login', 'platform', '--password-file', '/run/cli/platform-password')
+        if login.get('principal_id') != self.platform_admin:
+            raise ValueError('CLI platform identity mismatch')
+        reply = cli('tenant', 'create', '--tenant', TENANTS[1], '--name', 'T33 Beta',
+            '--principal', self.admins[1], '--login', 'admin', '--password-file', '/run/cli/user-password',
+            '--operation', self.operations[1])
+        observed = cli('operation', 'status', '--operation', self.operations[1])
+        for value in [reply, observed]:
+            operation = value['operation']
+            if not (value['active'] and operation['operation_id'] == self.operations[1]
+                    and operation['tenant_id'] == TENANTS[1] and operation['principal_id'] == self.admins[1]
+                    and operation['kind'] == 'tenant_created'):
+                raise ValueError('CLI onboarding receipt mismatch')
+        if cli('logout') != {'logged_out': True}:
+            raise ValueError('CLI logout unconfirmed')
+        return observed
 
     def sql(self, sql):
         return self.compose('exec', '-T', 'postgres', 'psql', '-X', '-U', 'postgres', '-d', 'identity', '-At', '-v', 'ON_ERROR_STOP=1', '-c', sql)
@@ -331,6 +384,8 @@ server { listen 443 ssl; server_name @PRODUCT@; location / { proxy_set_header Ho
 
     def control(self, request):
         action = request['action']
+        if action == 'onboard_cli':
+            return self.onboard_cli()
         if action in ('stop', 'start'):
             if request['service'] not in ('keycloak', 'hydra', 'private-gateway'):
                 raise ValueError('unknown fault target')

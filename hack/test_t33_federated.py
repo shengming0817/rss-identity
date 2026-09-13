@@ -4,6 +4,7 @@ import json
 import sys
 import subprocess
 import signal
+import ipaddress
 from unittest.mock import patch, Mock
 from pathlib import Path
 import tempfile
@@ -16,6 +17,7 @@ sys.modules[SPEC.name] = proof
 SPEC.loader.exec_module(proof)
 sys.path.insert(0, str(PATH.parent))
 import stack
+import deploy
 RUN_SPEC = importlib.util.spec_from_file_location('t33_run', PATH.parent / 'run.py')
 runner = importlib.util.module_from_spec(RUN_SPEC)
 RUN_SPEC.loader.exec_module(runner)
@@ -99,7 +101,7 @@ class FederatedProof(unittest.TestCase):
 
     def test_failed_administrator_setup_never_opens_runtime_ingress(self):
         value = stack.Stack.__new__(stack.Stack)
-        value.name, value.admins, value.containers = 'owned', ['admin-a', 'admin-b'], []
+        value.name, value.platform_admin, value.containers = 'owned', 'platform-admin', []
         value.candidate = {'images': {'operator': 'fixed-operator'}}
         value.config = {
             'services': {'maintenance': {'volumes': [
@@ -114,6 +116,74 @@ class FederatedProof(unittest.TestCase):
                    if call.args[:2] == ('up', '-d')]
         for forbidden in ['identity', 'public-gateway', 'private-gateway', 't33-front', 't33-consumer']:
             self.assertFalse(any(forbidden in services for services in started), forbidden)
+
+    def test_initialize_bootstraps_once_without_rewriting_maintenance_authority(self):
+        value = stack.Stack.__new__(stack.Stack)
+        value.name, value.platform_admin, value.containers = 'owned', 'platform-admin', []
+        value.candidate = {'images': {'operator': 'fixed-operator'}}
+        value.config = {'services': {'maintenance': {'volumes': [
+            {'source': name, 'target': '/run/' + name} for name in ['config', 'input']]}},
+            'volumes': {name: {'name': 'owned-' + name} for name in ['config', 'input']}}
+        value.compose, value.root = Mock(), Mock()
+        original = json.dumps(value.config)
+        with patch.object(stack, 'docker') as docker, patch.object(stack, 'wait'):
+            value.initialize()
+        calls = [c.args for c in docker.call_args_list if 'initialize' in c.args]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][-4:], ('initialize', 'platform-admin', 'platform', '/run/input/init-password'))
+        self.assertEqual(json.dumps(value.config), original)
+        self.assertEqual(len(value.root.call_args_list), 1)
+        self.assertIn('/srv/t33/input/platform-password', value.root.call_args.args[0])
+
+    def test_configure_matches_current_candidate_renderer_and_gateway(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifacts = root / 'artifacts'
+            (artifacts / 'candidate/deployment').mkdir(parents=True)
+            (artifacts / 'candidate/deployment/example.json').write_bytes((deploy.ROOT / 'deployment/example.json').read_bytes())
+            output = root / 'output'; output.mkdir()
+            candidate = {'providers': deploy.IMAGES, 'images': {
+                k: k + '@sha256:' + 'a' * 64 for k in ['server', 'operator', 'gateway']}}
+            record = {'browser': {'image_id': 'fixed-tool', 'playwright': '1.60.0'},
+                      'providers': {}, 'ui_revision': proof.UI_REVISION}
+            value = stack.Stack(artifacts, output, record, candidate)
+            with patch.object(value, 'subnets', return_value=[ipaddress.ip_network(f'10.233.{n}.0/24') for n in [10, 11, 12]]):
+                value.configure()
+            def paths(item):
+                if isinstance(item, dict): return {k: paths(v) for k, v in item.items()}
+                if isinstance(item, list): return [paths(v) for v in item]
+                if isinstance(item, str) and item.startswith('/srv/t33/input/'):
+                    return str(value.inputs / Path(item).name)
+                return item
+            with patch.multiple(deploy, DEPLOY_UID=stack.os.getuid(), DEPLOY_GID=stack.os.getgid(),
+                                KEYCLOAK_UID=stack.os.getuid(), KEYCLOAK_GID=stack.os.getgid()):
+                path = deploy.render(paths(value.data), root / 'rendered', candidate)
+            runtime = json.loads((root / 'rendered/runtime.json').read_text())
+            self.assertEqual(runtime['storage']['system_domain_id'], stack.SYSTEM_DOMAIN)
+            self.assertNotIn('tenants', runtime['storage'])
+            self.assertNotIn('providers', runtime['oidc'])
+            self.assertNotIn('ca_file', runtime['oidc'])
+            self.assertEqual(len(runtime['oidc']['credential_keyring']['keys']), 1)
+            for index, realm in enumerate(sorted((root / 'rendered').glob('realm-*.json'))):
+                client = json.loads(realm.read_text())['clients'][0]
+                self.assertEqual(client['secret'], value.browser_config['providers'][index]['client_secret'])
+            proof.assert_safe(value.public_config, value.secrets)
+            with patch.object(value, 'root', side_effect=[path.read_text()] + [''] * 40) as execute, \
+                    patch.object(value, 'volume', side_effect=lambda name: name), patch.object(stack, 'docker'):
+                value.stage()
+            pool = value.config['networks']['front']['ipam']['config'][0]
+            self.assertEqual(pool['ip_range'], '10.233.12.128/25')
+            extra = next(json.loads(c.kwargs['input']) for c in execute.call_args_list
+                         if 'front.conf' in c.kwargs.get('input', ''))
+            self.assertIn('proxy_pass https://public-gateway:443;', extra['front.conf'])
+            self.assertNotIn(':8443', extra['front.conf'])
+
+    def test_cli_unknown_write_cannot_be_reissued(self):
+        value = stack.Stack.__new__(stack.Stack)
+        value.cli_started = True
+        with patch.object(stack, 'docker') as docker, self.assertRaisesRegex(ValueError, 'never replay'):
+            value.onboard_cli()
+        docker.assert_not_called()
 
     def test_signal_and_daemon_failure_keep_cleanup_and_failure_receipt(self):
         for cause in ['signal', 'daemon']:

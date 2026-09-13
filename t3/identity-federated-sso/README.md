@@ -1,10 +1,12 @@
 # #2342 Identity 联合 SSO T3
 
-本 carrier 验证固定产品候选的 UI、正式网关、Identity binary、Keycloak、Hydra、独立消费端、撤销调度与 Outbox 的部署连接。源码及测试实现不等于运行通过；实际结果由对应 PR 的同 HEAD 运行记录持有。
+本 carrier 验证固定产品候选的正式网关、Identity binary、平台 API/CLI、Keycloak、Hydra、独立消费端、撤销调度与 Outbox 的部署连接。源码及测试实现不等于运行通过；实际结果由对应 PR 的同 HEAD 运行记录持有。
+
+2026-09-13 范围校正：租户开通、IdP 管理与 Hydra login/consent 使用正式后端接口；第二个业务租户经候选中的 identity-platform CLI 开通。#2368 管理网页与本 PR 无依赖关系。浏览器只执行真实上游登录、cookie 与重定向协议；Identity 的 login/consent/resume/error 静态落地页使用测试空页面，不替换 API、callback 或认证响应，不声明网页验收通过。
 
 ## 固定输入与入口
 
-先完成并提交本仓改动。Identity candidate、测试消费端和 carrier 必须来自同一干净 Git HEAD。UI 固定为 rss-web `37b7fb356aa7e436cc708caa1593427e6d553d30`，按其正式入口构建 apps/identity；候选构建验证 UI SHA/lock/dist。输出目录必须不存在。
+先完成并提交本仓改动。Identity candidate、测试消费端和 carrier 必须来自同一干净 Git HEAD。正式 gateway 的静态打包输入固定为 rss-web `37b7fb356aa7e436cc708caa1593427e6d553d30`，按其正式入口构建 apps/identity；候选构建验证 UI SHA/lock/dist。此摘要只记录打包身份，不要求该网页支持新平台或 IdP 协议。输出目录必须不存在。
 
 ```sh
 make prepare-t33 T33_ARTIFACTS=/absolute/t33-artifacts \
@@ -28,7 +30,9 @@ make test-t33 T33_ARTIFACTS=/absolute/t33-artifacts \
 
 ## 运行场景与结果
 
-两真实租户分别配置 provider 和 downstream client。场景包括独立租户 SSO、consumer 发起的 SSO/Hydra 继续、错误浏览器/租户/重放/回跳、在途配置变化或停用、JIT 开关、同邮箱不合并、本人再认证关联与冲突、下游绑定、中央退出、provider 撤销及重启用不复活、Keycloak/Hydra/private validation 故障与恢复。
+部署只初始化一次显式系统域与平台管理员；业务租户分别通过平台 API 和 CLI 创建并立即登录，验证普通租户管理员不能开通或接管其它租户，系统域与业务会话不能串用。IdP 凭据通过租户管理 API 加密持久化，部署只持有外部 keyring；真实 Keycloak 的 realm 与 client 由独立 provider 配置输入创建。
+
+两真实租户分别配置 provider 和 downstream client。保留原 20 项场景，并新增 4 项平台初始化、API/CLI 开通和权限隔离场景：独立租户 SSO、consumer 发起的 SSO/Hydra 继续、错误浏览器/租户/重放/回跳、在途配置变化或停用、JIT 开关、同邮箱不合并、本人再认证关联与冲突、下游绑定、中央退出、provider 撤销及重启用不复活、Keycloak/Hydra/private validation 故障与恢复。配置/凭据更新按当前产品语义撤销旧会话，停用与清理另用更新后新建的有效 grant，防止既有撤销掩盖被测行为。
 
 撤销场景读取实际 grant horizon。只读观察产品 cleanup worker，在 horizon +120 秒以内确认 grant 删除及同一 grant 的 cleaned 事件；不修改业务记录、时间或直接调用内部清理接口。撤销提交后开始的在线复核必须拒绝，已验证的在途业务不追溯取消。上游退出、中央退出和产品会话退出不是全局退出承诺。
 

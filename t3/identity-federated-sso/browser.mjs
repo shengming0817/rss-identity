@@ -1,5 +1,5 @@
 // Real browser against immutable product artifacts; all inputs are disposable fixture data.
-// ref: microsoft/playwright v1.60.0 browser.ts and browserContext.ts.
+// ref: microsoft/playwright v1.60.0 browserContext.ts and fetch.ts.
 import { chromium, expect } from '@playwright/test'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
@@ -48,7 +48,22 @@ async function context() {
   ctx.setDefaultTimeout(15000)
   ctx.setDefaultNavigationTimeout(30000)
   contexts.push(ctx)
+  // Static landing pages only: protocol APIs, callback, cookies and redirects remain real.
+  // The product UI is packaged in the gateway but is not a prerequisite for this backend T3.
+  await ctx.route(url => url.origin === origin && ['/login', '/consent', '/auth/resume', '/auth/error'].includes(url.pathname),
+    route => route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>T33 protocol landing</title>' }))
   return ctx
+}
+async function platform(ctx, path, data, status = 200, csrf) {
+  const headers = { Origin: origin, 'X-Identity-Request': '1' }
+  if (csrf) headers['X-CSRF-Token'] = csrf
+  const response = await ctx.request.fetch(`${origin}${path}`, { method: data === undefined ? 'GET' : 'POST',
+    headers, data, maxRedirects: 0 })
+  expect(response.status()).toBe(status)
+  return response.json()
+}
+function credentials(index) {
+  return { client_secret: config.providers[index].client_secret, ca_pem: readFileSync(config.ca_file, 'utf8') }
 }
 async function current(ctx, index) {
   step = 'central_session'
@@ -75,7 +90,7 @@ async function local(ctx, index, login = 'admin') {
 async function update(index, patch) {
   const p = providers[index]
   providers[index] = await api(admins[index], index, `providers/${p.id}`,
-    { expected_version: p.version, settings: { ...p.settings, ...patch } }, 'PUT')
+    { expected_version: p.version, settings: { ...p.settings, ...patch }, ...credentials(index) }, 'PUT')
 }
 async function enabled(index, value) {
   const p = providers[index]
@@ -90,13 +105,29 @@ async function keycloak(page, user) {
   await page.locator('#kc-login').click()
 }
 async function tenantSso(ctx, index, user = 'alice') {
-  step = 'tenant_ui'
+  step = 'tenant_sso_api'
   const page = await ctx.newPage()
-  await page.goto(`${origin}/tenants/${tenants[index]}/login`)
-  await page.getByRole('button').filter({ hasText: config.providers[index].client_id }).click()
+  await page.goto((await begin(ctx, index)).authorization_url)
   await keycloak(page, user)
-  await expect(page.getByRole('heading', { name: '我的会话' })).toBeVisible()
+  await expect(page).toHaveURL(origin + '/auth/resume')
   return { page, session: await current(ctx, index) }
+}
+async function downstream(ctx, index, page, kind) {
+  step = 'downstream_' + kind
+  const challenge = new URL(page.url()).searchParams.get(kind + '_challenge')
+  expect(challenge).toBeTruthy()
+  const headers = { Origin: origin, 'X-Identity-Request': '1' }
+  const prepared = await ctx.request.post(`${origin}/api/v1/downstream/${kind}`, { headers, data: { challenge } })
+  expect(prepared.status()).toBe(200)
+  const flow = await prepared.json()
+  expect(flow.tenant_id).toBe(tenants[index])
+  return async () => {
+    const session = await current(ctx, index)
+    const accepted = await ctx.request.post(`${origin}/api/v1/downstream/${kind}/accept`, {
+      headers: { ...headers, 'X-CSRF-Token': session.csrf_token }, data: { challenge, flow } })
+    expect(accepted.status()).toBe(200)
+    await page.goto((await accepted.json()).redirect_to)
+  }
 }
 async function consumer(ctx, index, user = 'alice') {
   step = 'consumer_flow'
@@ -107,15 +138,12 @@ async function consumer(ctx, index, user = 'alice') {
   const page = await ctx.newPage()
   await page.goto((await response.json()).authorization_url)
   await expect(page).toHaveURL(new RegExp(`${origin}/login`))
+  const acceptLogin = await downstream(ctx, index, page, 'login')
   const existing = await ctx.request.get(`${origin}/api/v1/tenants/${tenants[index]}/session`)
-  if (existing.status() === 200) {
-    await page.getByRole('button', { name: '继续', exact: true }).click()
-  } else {
-    await page.getByRole('button').filter({ hasText: config.providers[index].client_id }).click()
-    await keycloak(page, user)
-  }
+  if (existing.status() !== 200) await tenantSso(ctx, index, user)
+  await acceptLogin()
   await expect(page).toHaveURL(new RegExp(`${origin}/consent`))
-  await page.getByRole('button', { name: '继续', exact: true }).click()
+  await (await downstream(ctx, index, page, 'consent'))()
   await expect(page).toHaveURL(product + '/session')
   const proof = await ctx.request.get(`${product}/session`)
   expect(proof.status()).toBe(200)
@@ -183,21 +211,64 @@ try {
   const build = await preflight.request.get(`${origin}/identity-build.json`)
   expect((await build.json()).revision).toBe(config.ui_revision)
   expect(playwrightVersion).toBe(config.playwright)
+  stage = 'platform_bootstrap'
+  const owner = await context()
+  const platformSession = await platform(owner, `/api/v1/tenants/${config.system_domain}/login`,
+    { login: 'platform', password: config.platform_password })
+  expect(platformSession.identity.principal_id).toBe(config.platform_admin)
+  expect(platformSession.identity.platform_administrator).toBe(true)
+  expect(platformSession.identity.administrator).toBe(false)
+  const initial = await platform(owner, '/api/v1/platform/tenants')
+  expect(initial.tenants).toEqual([])
+  pass(stage, { system_domain: config.system_domain, principal_id: config.platform_admin })
+  stage = 'tenant_api_onboarding'
+  const created = await platform(owner, '/api/v1/platform/tenants', {
+    tenant_id: tenants[0], name: 'T33 Alpha', administrator: { operation_id: config.operations[0],
+      principal_id: config.admins[0], login: 'admin', password } }, 201, platformSession.csrf_token)
+  expect(created.active).toBe(true)
+  expect(created.operation).toMatchObject({ operation_id: config.operations[0], kind: 'tenant_created',
+    tenant_id: tenants[0], principal_id: config.admins[0] })
+  pass(stage, { ...created.operation })
+  stage = 'tenant_cli_onboarding'
+  const cli = await control('onboard_cli')
+  expect(cli.active).toBe(true)
+  expect(cli.operation).toMatchObject({ operation_id: config.operations[1], kind: 'tenant_created',
+    tenant_id: tenants[1], principal_id: config.admins[1] })
+  const registered = await platform(owner, '/api/v1/platform/tenants')
+  expect(registered.tenants.map(t => t.tenant_id).sort()).toEqual([...tenants].sort())
+  pass(stage, { ...cli.operation })
   for (let index = 0; index < 2; ++index) {
     step = `provider_${index}`
     const admin = await context(); admins.push(admin)
-    await local(admin, index)
-    const approved = config.providers[index]
-    let p = await api(admin, index, 'providers', {
-      issuer: approved.issuer, client_id: approved.client_id, secret_ref: approved.secret_ref,
+    const identity = await local(admin, index)
+    expect(identity.identity.principal_id).toBe(config.admins[index])
+    expect(identity.identity.administrator).toBe(true)
+    expect(identity.identity.platform_administrator).toBe(false)
+    const configured = config.providers[index]
+    let p = await api(admin, index, 'providers', { settings: {
+      issuer: configured.issuer, client_id: configured.client_id,
       redirect_uri: origin + '/api/v1/oidc/callback', scopes: ['openid', 'profile', 'email'],
       claims: { email: 'email', groups: null }, jit: true,
-    }, 'POST', 201)
+    }, ...credentials(index) }, 'POST', 201)
     providers.push(p)
     await enabled(index, true)
     const test = await api(admin, index, `providers/${p.id}/test`, {})
     expect(test.passed).toBe(true)
   }
+  stage = 'platform_authorization'
+  const forbidden = { tenant_id: '33333333-3333-4333-8333-333333333333', name: 'Forbidden',
+    administrator: { operation_id: '33333333-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      principal_id: '33333333-bbbb-4bbb-8bbb-bbbbbbbbbbbb', login: 'intruder', password } }
+  for (let index = 0; index < 2; ++index) {
+    const session = await current(admins[index], index)
+    await platform(admins[index], '/api/v1/platform/tenants', forbidden, 401, session.csrf_token)
+    await platform(admins[index], `/api/v1/platform/tenants/${tenants[1 - index]}/administrators`,
+      forbidden.administrator, 401, session.csrf_token)
+    expect((await admins[index].request.get(`${origin}/api/v1/tenants/${tenants[1 - index]}/session`)).status()).toBe(401)
+  }
+  expect((await owner.request.get(`${origin}/api/v1/tenants/${tenants[0]}/session`)).status()).toBe(401)
+  expect((await platform(owner, '/api/v1/platform/tenants')).tenants).toHaveLength(2)
+  pass(stage, { rejected_status: 401, tenant_count: 2 })
   const localAccount = await api(admins[0], 0, 'accounts', { login: 'alice@example.test', password, role: 'member' }, 'POST', 201)
 
   stage = 'tenant_sso'
@@ -242,7 +313,7 @@ try {
   const inFlight = await capture(version, (await begin(version, 0)).authorization_url)
   await update(0, { jit: false })
   await deliver(version, inFlight, false)
-  await productStatus(a, 200)
+  await productStatus(a, 401)
   pass(stage, { provider_id: providers[0].id, config_version: providers[0].version })
   stage = 'jit_disabled'
   const jitOff = await context()
@@ -250,6 +321,10 @@ try {
   await deliver(jitOff, fresh, false)
   await update(0, { jit: true })
   pass(stage)
+
+  // New credentials/configuration revoke old sessions; use a fresh live grant for disable/cleanup.
+  const revoke = await context()
+  const revokeFacts = (await consumer(revoke, 0)).facts
 
   stage = 'explicit_link'
   const link = await context()
@@ -272,7 +347,8 @@ try {
   pass(stage)
 
   stage = 'downstream_binding'
-  const mismatched = await a.request.get(`${product}/session?client_id=${config.clients[1].client_id}`)
+  await productStatus(revoke, 200)
+  const mismatched = await revoke.request.get(`${product}/session?client_id=${config.clients[1].client_id}`)
   expect(mismatched.status()).toBe(401)
   const wrongAudience = await context()
   const prepare = await wrongAudience.request.post(`${product}/auth/login`, { headers: { Origin: product, 'X-T33-Request': '1' }, data: { client_id: config.clients[0].client_id } })
@@ -291,16 +367,16 @@ try {
   stage = 'configuration_disabled'
   const disabled = await context()
   const disabledCallback = await capture(disabled, (await begin(disabled, 0)).authorization_url)
-  const cleanupTarget = await control('cleanup_snapshot', { session_id: downstreamA.facts.session_id })
+  const cleanupTarget = await control('cleanup_snapshot', { session_id: revokeFacts.session_id })
   expect(cleanupTarget.grants.length).toBeGreaterThan(0)
   await enabled(0, false)
   await deliver(disabled, disabledCallback, false)
   pass(stage, { provider_id: providers[0].id, config_version: providers[0].version })
   stage = 'provider_revocation'
-  expect((await a.request.get(`${origin}/api/v1/tenants/${tenants[0]}/session`)).status()).toBe(401)
-  await productStatus(a, 401)
+  expect((await revoke.request.get(`${origin}/api/v1/tenants/${tenants[0]}/session`)).status()).toBe(401)
+  await productStatus(revoke, 401)
   await enabled(0, true)
-  await productStatus(a, 401)
+  await productStatus(revoke, 401)
   pass(stage)
 
   stage = 'keycloak_unavailable'
@@ -338,10 +414,10 @@ try {
   const horizon = Math.max(...cleanupTarget.grants.map(g => g.horizon))
   let snapshot
   while (true) {
-    snapshot = await control('cleanup_snapshot', { session_id: downstreamA.facts.session_id })
+    snapshot = await control('cleanup_snapshot', { session_id: revokeFacts.session_id })
     if (snapshot.grants.length === 0 && cleanupTarget.grants.every(g => snapshot.cleaned.includes(g.id))) break
     if (snapshot.now > horizon + 120) throw new Error('cleanup deadline')
-    await productStatus(a, 401)
+    await productStatus(revoke, 401)
     await new Promise(resolve => setTimeout(resolve, 5000))
   }
   await productStatus(a, 401)
@@ -349,7 +425,7 @@ try {
   stage = 'events'
   const evidence = await control('events')
   const events = evidence.events
-  for (const action of ['provider_created', 'provider_enabled', 'provider_updated', 'provider_disabled', 'jit_created', 'linked', 'created', 'active', 'revoking', 'cleaned']) {
+  for (const action of ['system_initialized', 'tenant_created', 'provider_created', 'provider_enabled', 'provider_updated', 'provider_disabled', 'jit_created', 'linked', 'created', 'active', 'revoking', 'cleaned']) {
     expect(events.some(e => e.action === action)).toBe(true)
   }
   expect(events.some(e => e.action === 'jit_created' && e.principal === joined.session.identity.principal_id && e.provider_id === providers[0].id)).toBe(true)
