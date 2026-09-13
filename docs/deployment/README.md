@@ -4,6 +4,8 @@
 
 - [首次安装与运维](operations.md)
 - [候选构建](candidate.md)
+- [本地认证候选 T3（#2341）](../../t3/access-local-auth/README.md)
+
 - [#2340 生命周期验收记录](202609120756-2340-lifecycle-acceptance.md)
 - [固定候选生命周期 T3](../../t3/identity-lifecycle/README.md)：#2340 的执行入口、故障矩阵和证据边界。
 - [停机备份、恢复、轮换与测量](recovery.md)
