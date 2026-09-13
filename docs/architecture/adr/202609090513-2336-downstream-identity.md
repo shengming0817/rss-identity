@@ -6,7 +6,7 @@
 
 Identity 持有账户、成员、中央 session 和 grant 关联；Hydra 只持有标准 OIDC 协议状态。`identity-contracts` 是 wire 数据，`identity-client` 是不含账户/KDF/PG/OIDC 的在线验证客户端，`identity-hydra` 是受控 admin transport。core 定义窄 port，Postgres coordinator 唯一持有结算并返回私有构造的 ValidatedIdentity，HTTP 唯一映射到 wire DTO；PG 不依赖 contracts。I02 的 SessionSnapshot 检查骨架和假 Hydra bridge 已被删除，不保留兼容别名或第二条认证入口。
 
-新增 product_subjects 按 tenant/client/principal 稳定保存随机 subject，直接作为 Hydra login subject，不能用 force_subject_identifier 替代（它不改变 introspection sub）。downstream_grants 引用中央 session 和 subject，不复制 epoch 或认证事实。注册版本及完整配置指纹共同约束在途和已发授权，避免仅改 redirect 却复用版本导致旧授权存活。schema v5 仅显式重建开发库；所有新表 FORCE tenant RLS，runtime 精确权限，maintenance 无新表权限。新事件 identity.downstream.security V1 与状态同事务，不包含挑战、cookie、code、token 或 secret。
+新增 product_subjects 按 tenant/client/principal 稳定保存随机 subject，直接作为 Hydra login subject，不能用 force_subject_identifier 替代（它不改变 introspection sub）。downstream_grants 引用中央 session 和 subject，不复制 epoch 或认证事实。注册版本及完整配置指纹共同约束在途和已发授权，避免仅改 redirect 却复用版本导致旧授权存活。I06 历史初始版本为 schema v5，仅显式重建开发库；当前安装以 [#2427 ADR](202609130900-2427-platform-onboarding.md) 为准；所有新表 FORCE tenant RLS，runtime 精确权限，maintenance 无新表权限。新事件 identity.downstream.security V1 与状态同事务，不包含挑战、cookie、code、token 或 secret。
 
 ## 交接
 

@@ -11,8 +11,8 @@ impl Authority {
         source: &AttemptSource,
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
-        self.reserve_attempt(tenant, Some(scope), source, deadline)
-            .await
+        // Keep the shared database future out of composed authentication stack frames.
+        Box::pin(self.reserve_attempt(tenant, Some(scope), source, deadline)).await
     }
     /// Native codes are untrusted, high-cardinality input; only charge the transport source.
     pub(crate) async fn reserve_source(
@@ -21,7 +21,7 @@ impl Authority {
         source: &AttemptSource,
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
-        self.reserve_attempt(tenant, None, source, deadline).await
+        Box::pin(self.reserve_attempt(tenant, None, source, deadline)).await
     }
     async fn reserve_attempt(
         &self,

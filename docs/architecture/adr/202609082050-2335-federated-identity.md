@@ -38,7 +38,7 @@ link stage 使用闭合集合与带预期前态的推进操作。link intent 绑
 
 ## 结算、权限与验证
 
-所有账户/JIT/关联/session 和必要事件通过原有 PgRuntime/Outbox 结算，单事务事件批次有界；没有独立池或第二套 commit/rollback 实现。保留 NotStarted、RolledBack、RollbackFailed、CommitUnknown 和 Fenced；失败不释放成功凭据。新表全部 FORCE tenant RLS。schema version 4 只支持显式开发库重建。
+所有账户/JIT/关联/session 和必要事件通过原有 PgRuntime/Outbox 结算，单事务事件批次有界；没有独立池或第二套 commit/rollback 实现。保留 NotStarted、RolledBack、RollbackFailed、CommitUnknown 和 Fenced；失败不释放成功凭据。新表全部 FORCE tenant RLS。I05 历史初始版本为 schema version 4，只支持显式开发库重建；当前安装以 [#2427 ADR](202609130900-2427-platform-onboarding.md) 为准。
 
 启动校验 schema 完整结构摘要（列/约束/index/RLS/trigger/function）及独立的精确有效权限/角色检查。结构摘要由 `hack/schema_signature.py` 在固定 PG 上安装唯一 migration 生成；源变更必须一起更新 migration、摘要和行为测试，摘要不是另一份迁移定义。运行漂移拒绝，维护角色不获得 session/federation 表权限。
 

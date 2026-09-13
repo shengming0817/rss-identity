@@ -12,7 +12,7 @@ T31 验证 binary/config/secret/TLS、PG、Hydra、Keycloak、RSS producer 与 l
 | --- | --- |
 | Identity source | `06d4e85498281a874eff9898a3b77fc19705e8b1`，rss-identity PR #1008 |
 | candidate.json SHA-256 | `01429fb94beed6e361749c1342f8f93389f18de47862a82a861c73a407ddd568` |
-| 配置/schema | 当前配置格式，Identity schema v7，无旧格式适配 |
+| 配置/schema | 该固定候选的配置格式，Identity schema v7，无旧格式适配 |
 | UI source | rss-web `37b7fb356aa7e436cc708caa1593427e6d553d30` |
 | UI dist SHA-256 | `074055e9978964d1fd38cf88b70cba6aa93797e6eaba20a5d8abe80e26654c15` |
 | RSS source | `93ce6848b7c78753df9947bd08abfb37e5799838`，单一固定 Git 消费 |

@@ -114,11 +114,11 @@ T32 的独立执行载体见 [本地认证候选验收](../../t3/access-local-au
 
 仅有可重建测试数据且没有外部事件消费者：初始安装使用 `identity_authority`、`identity_account_runtime` / `identity_account_maintenance`，事件使用 `identity.security` / `identity.account.security`。没有旧入口别名、升级迁移、双读或旧事件桥接；已有开发库及 Outbox 须停用后重建，数据库角色属于集群对象，须单独核实依赖再清理。该一次性切换不进入产品启动逻辑。
 
-schema version 2、事件 V1 payload、账户/租户/authority/lineage/epoch 的业务语义不因名称改变；新测试安装自行生成身份，不将重建视为保留旧数据。历史 `ACCESS-*` / `ACC-*` 编号、工作项 ID、ADR 文件名与固定来源继续用于追溯。Hydra 架构不变，#2360 不属于本项。实际验证和本地切换证据由 #2359 PR 持有。
+该历史更名阶段使用 schema version 2，事件 V1 payload、账户/租户/authority/lineage/epoch 的业务语义不因名称改变；新测试安装自行生成身份，不将重建视为保留旧数据。历史 `ACCESS-*` / `ACC-*` 编号、工作项 ID、ADR 文件名与固定来源继续用于追溯。Hydra 架构不变，#2360 不属于本项。实际验证和本地切换证据由 #2359 PR 持有。
 
 ## I04 实施落点
 
-#2334 的当前决定见 [中央会话 ADR](adr/202609080900-2334-central-session.md)：identity-core 会话策略、identity-postgres 单表/统一 auth_epoch 与事务事件、identity-http-axum Router。初始安装更新为 schema version 3，替代上文更名阶段的 v2；不兼容旧开发库。仅 T1/T2，验证结果随实现 PR 记录，I05/I06/I07/I08 与独立 T3 的退出条件保持独立。
+#2334 的会话决定见 [中央会话 ADR](adr/202609080900-2334-central-session.md)：identity-core 会话策略、identity-postgres 单表/统一 auth_epoch 与事务事件、identity-http-axum Router。该历史阶段直接替换初始安装，不兼容旧开发库。仅 T1/T2，验证结果随实现 PR 记录，I05/I06/I07/I08 与独立 T3 的退出条件保持独立。
 
 ## I05 实施决定（#2335）
 
@@ -127,7 +127,7 @@ schema version 2、事件 V1 payload、账户/租户/authority/lineage/epoch 的
 
 ## I06 实施决定（#2336）
 
-[下游 ADR](adr/202609090513-2336-downstream-identity.md) 持有真实 Hydra bridge、唯一 PG 关联、只读在线验证与有界清理；[接入指南](../guides/downstream.md) 持有公共消费面。当前安装更新为 schema v5，替代 I05 的 v4，不保留兼容。实际验证结果和版本身份由实现 PR 持有。
+[下游 ADR](adr/202609090513-2336-downstream-identity.md) 持有真实 Hydra bridge、唯一 PG 关联、只读在线验证与有界清理；[接入指南](../guides/downstream.md) 持有公共消费面。该历史阶段直接替换 I05 初始安装，不保留兼容。实际验证结果和版本身份由实现 PR 持有。
 
 ## I07 当前决定
 
@@ -136,7 +136,7 @@ schema version 2、事件 V1 payload、账户/租户/authority/lineage/epoch 的
 
 ## I09 实施决定（#2339）
 
-[Assurance 与恢复 ADR](adr/202609091607-2339-assurance-recovery.md) 固定 Keycloak password/TOTP 的可信事实、显式 step-up 和下游传播。初始 schema v7 替换 v6，无旧部署兼容。应急沿用现有维护权限；恢复采用原生 PG 切点、真实 provider T2 和部署隔离规程，不增加 seal/激活业务状态机。
+[Assurance 与恢复 ADR](adr/202609091607-2339-assurance-recovery.md) 固定 Keycloak password/TOTP 的可信事实、显式 step-up 和下游传播。该历史阶段直接替换 I08 初始安装，无旧部署兼容。应急沿用现有维护权限；恢复采用原生 PG 切点、真实 provider T2 和部署隔离规程，不增加 seal/激活业务状态机。
 
 `make measure-capacity` 只提供组件测量，真实生产目标待测后冻结；#2339 不随实现 PR 自动关闭。已登记独立 PBI，Parent 均为 #2330，原生 Predecessor 为已完成的 #2338；额外执行前提是 #2339 实现 PR 合入后的精确候选/API，不以 #2339 Done 为启动条件：
 
@@ -150,4 +150,4 @@ schema version 2、事件 V1 payload、账户/租户/authority/lineage/epoch 的
 
 ## #2427 + #2428 同 PR 实施
 
-系统域、显式平台角色、动态租户开通/新增管理员、自助加密 OIDC、持久会话与 SSO CLI 按 [当前 ADR](adr/202609130900-2427-platform-onboarding.md) 交付。#2368 消费替换后的网页协议；#2342 绑定新的 CLI/API 候选做 T3。实施与验收状态以 PR 实际记录为准。
+系统域、显式平台角色、动态租户开通/新增管理员、自助加密 OIDC、持久会话与 SSO CLI 按 [当前 ADR](adr/202609130900-2427-platform-onboarding.md) 交付。当前安装版本由 [SCHEMA_VERSION](../../crates/identity-postgres/src/lib.rs) 及其安装探测持有，上述阶段的版本说明只用于历史追溯。#2368 消费替换后的网页协议；#2342 绑定新的 CLI/API 候选做 T3。实施与验收状态以 PR 实际记录为准。
