@@ -2209,7 +2209,11 @@ dependencies = [
 name = "rss-identity-contracts"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "serde",
+ "sha2 0.10.9",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2305,9 +2309,11 @@ dependencies = [
 name = "rss-identity-platform"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "libc",
+ "rand_core 0.6.4",
  "reqwest",
- "rss-identity-core",
+ "rss-identity-contracts",
  "rustix",
  "serde",
  "serde_json",
@@ -2328,6 +2334,7 @@ dependencies = [
  "rand_core 0.6.4",
  "ring",
  "rss-contract",
+ "rss-identity-contracts",
  "rss-identity-core",
  "rss-request-context",
  "rss-transactional-messaging",

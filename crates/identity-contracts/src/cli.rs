@@ -1,5 +1,12 @@
 //! Fixed native CLI redirect and PKCE binding. ref: RFC 8252 section 7.3.
-use crate::federation::FederationError;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CliBindingError;
+impl std::fmt::Display for CliBindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid CLI login binding")
+    }
+}
+impl std::error::Error for CliBindingError {}
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,7 +25,7 @@ struct Input {
     state: String,
 }
 impl TryFrom<Input> for CliLoginBinding {
-    type Error = FederationError;
+    type Error = CliBindingError;
     fn try_from(v: Input) -> Result<Self, Self::Error> {
         Self::new(v.redirect_uri, v.code_challenge, v.state)
     }
@@ -28,8 +35,8 @@ impl CliLoginBinding {
         redirect_uri: String,
         code_challenge: String,
         state: String,
-    ) -> Result<Self, FederationError> {
-        let u = url::Url::parse(&redirect_uri).map_err(|_| FederationError::Configuration)?;
+    ) -> Result<Self, CliBindingError> {
+        let u = url::Url::parse(&redirect_uri).map_err(|_| CliBindingError)?;
         if u.scheme() != "http"
             || !matches!(u.host(),Some(url::Host::Ipv4(ip)) if ip==std::net::Ipv4Addr::LOCALHOST)
             || u.port().is_none_or(|p| p == 0)
@@ -40,14 +47,12 @@ impl CliLoginBinding {
             || u.password().is_some()
             || u.as_str() != redirect_uri
         {
-            return Err(FederationError::Configuration);
+            return Err(CliBindingError);
         }
         for v in [&code_challenge, &state] {
-            let raw = URL_SAFE_NO_PAD
-                .decode(v)
-                .map_err(|_| FederationError::Configuration)?;
+            let raw = URL_SAFE_NO_PAD.decode(v).map_err(|_| CliBindingError)?;
             if raw.len() != 32 || URL_SAFE_NO_PAD.encode(raw) != *v {
-                return Err(FederationError::Configuration);
+                return Err(CliBindingError);
             }
         }
         Ok(Self {
@@ -76,12 +81,11 @@ impl CliLoginBinding {
             && redirect == self.redirect_uri
             && URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())) == self.code_challenge
     }
-    pub fn result_url(&self, name: &str, value: &str) -> Result<String, FederationError> {
+    pub fn result_url(&self, name: &str, value: &str) -> Result<String, CliBindingError> {
         if !matches!(name, "code" | "error") {
-            return Err(FederationError::Configuration);
+            return Err(CliBindingError);
         }
-        let mut u =
-            url::Url::parse(&self.redirect_uri).map_err(|_| FederationError::Configuration)?;
+        let mut u = url::Url::parse(&self.redirect_uri).map_err(|_| CliBindingError)?;
         u.query_pairs_mut()
             .append_pair(name, value)
             .append_pair("state", &self.state);

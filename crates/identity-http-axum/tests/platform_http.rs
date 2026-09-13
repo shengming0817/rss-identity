@@ -8,7 +8,8 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use rss_identity_core::{cli::CliLoginBinding, federation::*};
+use rss_identity_contracts::cli::CliLoginBinding;
+use rss_identity_core::federation::*;
 use rss_identity_postgres::*;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -144,6 +145,54 @@ async fn platform_http_enforces_roles_and_activates_created_tenants() -> anyhow:
     let read = json_body(read).await?;
     assert_eq!(read["operation"]["principal_id"], principal.to_string());
     assert!(!read.to_string().contains(PASSWORD));
+    // Existing connections can settle writes while fresh runtime acquisition is denied.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "REVOKE CONNECT ON DATABASE {} FROM PUBLIC",
+        f.database
+    )))
+    .execute(&f.owner)
+    .await?;
+    let pending_tenant = uuid::Uuid::new_v4();
+    let pending_operation = uuid::Uuid::new_v4();
+    let body = json!({"tenant_id":pending_tenant,"name":"Pending activation","administrator":{"operation_id":pending_operation,"principal_id":uuid::Uuid::new_v4(),"login":"pending-admin","password":PASSWORD}});
+    let created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/platform/tenants",
+            Some(&cookie),
+            Some(&csrf),
+            body,
+        ))
+        .await?;
+    assert_eq!(created.status(), StatusCode::ACCEPTED);
+    assert_eq!(json_body(created).await?["active"], false);
+    let added_operation = uuid::Uuid::new_v4();
+    let added=app.clone().oneshot(request("POST",&format!("/api/v1/platform/tenants/{pending_tenant}/administrators"),Some(&cookie),Some(&csrf),json!({"operation_id":added_operation,"principal_id":uuid::Uuid::new_v4(),"login":"pending-extra","password":PASSWORD}))).await?;
+    assert_eq!(added.status(), StatusCode::ACCEPTED);
+    assert_eq!(json_body(added).await?["active"], false);
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "GRANT CONNECT ON DATABASE {} TO PUBLIC",
+        f.database
+    )))
+    .execute(&f.owner)
+    .await?;
+    for operation in [pending_operation, added_operation] {
+        let status = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/v1/platform/operations/{operation}"),
+                Some(&cookie),
+                None,
+                Value::Null,
+            ))
+            .await?;
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_eq!(json_body(status).await?["active"], true);
+    }
+    session(&app, &pending_tenant.to_string(), "pending-admin").await?;
+    session(&app, &pending_tenant.to_string(), "pending-extra").await?;
     f.close().await;
     Ok(())
 }
@@ -235,7 +284,7 @@ async fn cli_sso_code_is_single_use_pkce_bound_and_revocable() -> anyhow::Result
         .store
         .exchange_cli_login(
             zeroize::Zeroizing::new(code.clone()),
-            verifier,
+            verifier.clone(),
             binding.redirect_uri().into(),
             source(),
             deadline(),
@@ -247,7 +296,7 @@ async fn cli_sso_code_is_single_use_pkce_bound_and_revocable() -> anyhow::Result
         f.store
             .exchange_cli_login(
                 zeroize::Zeroizing::new(code),
-                random_secret()?,
+                verifier,
                 binding.redirect_uri().into(),
                 source(),
                 deadline()
@@ -255,6 +304,21 @@ async fn cli_sso_code_is_single_use_pkce_bound_and_revocable() -> anyhow::Result
             .await
             .is_err()
     );
+    let (expired, verifier, binding) = native_code(&s, p.id).await?;
+    sqlx::query("UPDATE identity_authority.cli_grants SET created_at=created_at-61,expires_at=expires_at-61 WHERE tenant_id=$1::uuid").bind(SYSTEM).execute(&f.owner).await?;
+    assert!(
+        f.store
+            .exchange_cli_login(
+                expired,
+                verifier,
+                binding.redirect_uri().into(),
+                source(),
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    let (revoked, revoked_verifier, revoked_binding) = native_code(&s, p.id).await?;
     let second = f
         .store
         .create_local_account(
@@ -291,6 +355,64 @@ async fn cli_sso_code_is_single_use_pkce_bound_and_revocable() -> anyhow::Result
             .await
             .is_err()
     );
+    assert!(
+        f.store
+            .exchange_cli_login(
+                revoked,
+                revoked_verifier,
+                revoked_binding.redirect_uri().into(),
+                source(),
+                deadline()
+            )
+            .await
+            .is_err()
+    );
     f.close().await;
     Ok(())
+}
+
+async fn native_code(
+    s: &Federation,
+    provider: ProviderId,
+) -> anyhow::Result<(
+    zeroize::Zeroizing<String>,
+    zeroize::Zeroizing<String>,
+    CliLoginBinding,
+)> {
+    let verifier = random_secret()?;
+    let binding = CliLoginBinding::new(
+        "http://127.0.0.1:49152/callback".into(),
+        CliLoginBinding::challenge_for(&verifier),
+        random_secret()?.to_string(),
+    )?;
+    let redirect = s
+        .begin_cli_login(
+            provider,
+            binding.clone(),
+            federation_support::BROWSER.into(),
+            source(),
+            deadline(),
+        )
+        .await?;
+    let outcome = s
+        .complete(
+            federation_support::state(redirect),
+            federation_support::BROWSER.into(),
+            zeroize::Zeroizing::new("platform-subject".into()),
+            "https://idp.example.test".into(),
+            None,
+            deadline(),
+        )
+        .await?;
+    let FederatedOutcome::Redirect(redirect) = outcome else {
+        anyhow::bail!("expected native grant")
+    };
+    let url = url::Url::parse(&redirect.url)?;
+    let code = url
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .unwrap()
+        .1
+        .into_owned();
+    Ok((zeroize::Zeroizing::new(code), verifier, binding))
 }

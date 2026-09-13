@@ -388,6 +388,13 @@ async fn callback_result(
         .await?;
 
     let (location, cookie) = match outcome {
+        FederatedOutcome::CliFailure { return_url, error } => {
+            let mut response = axum::response::Redirect::to(&return_url).into_response();
+            response
+                .extensions_mut()
+                .insert(crate::HttpFailure::Authority(error));
+            return Ok(response);
+        }
         FederatedOutcome::Redirect(redirect) => (redirect.url, None),
         FederatedOutcome::Session {
             issued,
@@ -442,9 +449,12 @@ async fn cli_authorize(
     Query(q): Query<CliAuthorize>,
     r: Request,
 ) -> Result<Response, HttpError> {
-    let binding =
-        rss_identity_core::cli::CliLoginBinding::new(q.redirect_uri, q.code_challenge, q.state)
-            .map_err(AuthorityError::from)?;
+    let binding = rss_identity_contracts::cli::CliLoginBinding::new(
+        q.redirect_uri,
+        q.code_challenge,
+        q.state,
+    )
+    .map_err(|_| BAD)?;
     let (browser, created) = browser(r.headers(), true)?;
     let redirect = s
         .federation

@@ -144,7 +144,7 @@ pub(crate) async fn identity(
     ))
 }
 pub(crate) struct Attempt {
-    pub cli: Option<rss_identity_core::cli::CliLoginBinding>,
+    pub cli: Option<rss_identity_contracts::cli::CliLoginBinding>,
     pub mode: AuthenticationMode,
     pub browser: [u8; 32],
     pub provider: ProviderId,
@@ -219,7 +219,7 @@ pub(crate) async fn attempt(
     ))
 }
 pub(crate) struct NewAttempt {
-    pub cli: Option<rss_identity_core::cli::CliLoginBinding>,
+    pub cli: Option<rss_identity_contracts::cli::CliLoginBinding>,
     pub mode: AuthenticationMode,
     pub locator: StateLocator,
     pub material: ProtocolMaterial,

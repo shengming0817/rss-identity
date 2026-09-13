@@ -193,19 +193,8 @@ impl CredentialKeys {
     }
 }
 impl Authority {
-    pub fn configure_credentials(
-        &self,
-        keys: std::sync::Arc<CredentialKeys>,
-    ) -> Result<(), AuthorityError> {
-        self.credential_keys
-            .set(keys)
-            .map_err(|_| AuthorityError::Invalid)
-    }
     pub(crate) fn credential_keys(&self) -> Result<std::sync::Arc<CredentialKeys>, AuthorityError> {
-        self.credential_keys
-            .get()
-            .cloned()
-            .ok_or(AuthorityError::Unavailable)
+        Ok(self.runtime_configuration()?.credential_keys.clone())
     }
     pub async fn check_credential_keys(
         &self,
@@ -215,8 +204,14 @@ impl Authority {
         for tenant in self.active_tenants()? {
             let keys = keys.clone();
             self.read_sql(tenant,deadline,move|c|Box::pin(async move {
-                let ids:Vec<Option<String>>=sqlx::query_scalar("SELECT DISTINCT sealed->>'key_id' FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid LIMIT 101").bind(tenant.to_string()).fetch_all(c).await?;
-                if ids.len()>100 || ids.iter().any(|v|v.as_ref().is_none_or(|id|!keys.has_key(id))){return Err(corrupt().into());}
+                let authority=authority_id(c).await?;
+                let rows:Vec<(Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid LIMIT 101").bind(tenant.to_string()).fetch_all(c).await?;
+                if rows.len()>100 {return Err(corrupt().into());}
+                for (provider,version,value) in rows {
+                    let provider=ProviderId::parse(&provider.to_string()).map_err(|_|corrupt())?;
+                    let sealed:Sealed=serde_json::from_value(value).map_err(|_|corrupt())?;
+                    keys.open(authority,tenant,provider,version,&sealed).map_err(|_|corrupt())?;
+                }
                 Ok(())
             })).await?;
         }
@@ -275,6 +270,8 @@ mod tests {
         assert!(keys.open(Uuid::new_v4(), t, p, 1, &sealed).is_err());
         assert!(keys.open(a, t, ProviderId::generate(), 1, &sealed).is_err());
         assert!(keys.open(a, t, p, 2, &sealed).is_err());
+        let other_tenant = TenantId::parse("22222222-2222-4222-8222-222222222222").unwrap();
+        assert!(keys.open(a, other_tenant, p, 1, &sealed).is_err());
         let encoded = serde_json::to_string(&sealed).unwrap();
         assert!(!encoded.contains(plain.client_secret()));
         sealed.ciphertext[0] ^= 1;

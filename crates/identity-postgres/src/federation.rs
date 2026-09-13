@@ -57,6 +57,11 @@ impl LinkResult {
     }
 }
 pub enum FederatedOutcome {
+    /// Bound native flow failed after its browser/state transaction was verified.
+    CliFailure {
+        return_url: String,
+        error: AuthorityError,
+    },
     Redirect(FederatedRedirect),
     Session {
         issued: IssuedSession,

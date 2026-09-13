@@ -62,7 +62,7 @@ async fn restored(
         )
         .await?,
     );
-    let authority = Authority::connect(
+    let authority = Authority::connect_runtime(
         runtime.clone(),
         Arc::new(rss_identity_core::account::PasswordKdf::new()),
         deployment_identity(),
@@ -73,7 +73,23 @@ async fn restored(
             Duration::from_secs(5),
         )?,
         rss_request_context::TenantId::parse(SYSTEM)?,
-        AuthorityProfile::Runtime,
+        rss_identity_postgres::RuntimeConfiguration::new(
+            rss_identity_postgres::RuntimeSource::new(
+                PgConfig::new_for_test_plaintext(
+                    "127.0.0.1",
+                    port,
+                    database,
+                    "identity_runtime",
+                    PgPassword::new(password),
+                ),
+                StorageIdentity::new([1; 16], [2; 16])?,
+                Epoch::new(1)?,
+            ),
+            Arc::new(rss_identity_postgres::CredentialKeys::new(
+                "fixture".into(),
+                vec![("fixture".into(), [8; 32])],
+            )?),
+        ),
         deadline(),
     )
     .await?;

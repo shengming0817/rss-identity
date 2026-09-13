@@ -5,7 +5,8 @@ use crate::{
     transaction::{MutationError, corrupt, reject},
     *,
 };
-use rss_identity_core::{account::AccountKey, cli::CliLoginBinding, federation::*};
+use rss_identity_contracts::cli::CliLoginBinding;
+use rss_identity_core::{account::AccountKey, federation::*};
 use rss_transactional_messaging::policy::OperationDeadline;
 use sqlx::Row;
 use zeroize::Zeroizing;
@@ -60,7 +61,9 @@ pub(crate) async fn grant(
     let code = random_secret()?;
     sqlx::query("INSERT INTO identity_authority.cli_grants(tenant_id,code_hash,binding,principal_id,auth_epoch,membership_epoch,external_identity_id,provider_epoch,auth_facts,created_at,expires_at) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
         .bind(key.tenant.to_string()).bind(digest(&code).as_slice()).bind(serde_json::to_value(&binding).map_err(|_|corrupt())?).bind(key.principal.as_uuid()).bind(state.epoch()).bind(state.membership_epoch()).bind(origin.identity).bind(origin.epoch).bind(origin.facts).bind(now).bind(now+60).execute(c).await?;
-    Ok(binding.result_url("code", &code)?)
+    Ok(binding
+        .result_url("code", &code)
+        .map_err(|_| FederationError::Configuration)?)
 }
 impl Authority {
     pub async fn exchange_cli_login(

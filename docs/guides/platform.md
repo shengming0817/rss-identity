@@ -19,7 +19,7 @@ CLI 配置为非秘密 JSON，所有路径使用绝对路径：
 }
 ```
 
-使用系统信任根时 `ca_file` 为 null。CLI 只访问此 HTTPS origin，禁止重定向和隐式环境代理。`session_dir` 的父目录须已存在；CLI 创建当前用户的 0700 会话目录，文件为 0600。口令从当前用户拥有的 0600 普通文件读取，拒绝 symlink/FIFO，不把秘密值传入 argv 或环境变量。
+配置及 CA 文件须由当前用户或 root 持有，group/other 不可写；内容不要求保密。使用系统信任根时 `ca_file` 为 null。CLI 只访问此 HTTPS origin，禁止重定向和隐式环境代理。`session_dir` 的父目录须已存在；CLI 创建当前用户的 0700 会话目录，文件为 0600。口令从当前用户拥有的 0600 普通文件读取，拒绝 symlink/FIFO，不把秘密值传入 argv 或环境变量。
 
 ```sh
 identity-platform --config /private/identity/platform.json login --login platform --password-file /private/identity/platform-password
@@ -59,6 +59,6 @@ CLI 闲置十五分钟、绝对四小时；用户命令串行刷新并原子保�
 
 部署使用外部 storage target/lineage 和统一 generation；恢复前由部署 owner 更新外部身份并同步数据库执行代际，不能从恢复后的数据库读取 epoch 反填期望值。当前只支持 deployment-wide 恢复，不提供 tenant generation override。
 
-IdP 凭据加密 keyring 位于数据库外，每把密钥是私有文件中的 64 位十六进制。先部署包含新 active key 与旧解密钥的配置并重启，再在独立 owner 任务中反复运行 `identity-migrate --rekey --config /run/config/migration.json`，直至 `rewritten=0`。每次最多重写 100 个凭据，同一事务结算；结果未知时重新核验/执行，已使用 active key 的行不会再次改写。只有确认当前数据全部可解密且无旧钥引用后才能退出旧钥；备份仍需保留其切点对应的钥。旧钥缺失使 readiness 或解密失败，不静默接受损坏数据。
+IdP 凭据加密 keyring 位于数据库外，每把密钥是私有文件中的 64 位十六进制。先部署包含新 active key 与旧解密钥的配置并重启，再在独立 owner 任务中反复运行 `identity-migrate --rekey --config /run/config/migration.json`，直至 `rewritten=0`。每次最多重写 100 个凭据，同一事务结算；结果未知时重新核验/执行，已使用 active key 的行不会再次改写。只有确认当前数据全部可解密且无旧钥引用后才能退出旧钥；备份仍需保留其切点对应的钥。启动会逐条验证密文认证；旧钥缺失、同名密钥材料错误或密文损坏使启动核验或解密失败，不静默接受损坏数据。
 
 `make test-platform` 验证真实 CLI、HTTPS、后端及 PG；`make test-pg` 包含平台角色、事务和 CLI SSO 码接缝。完整生产双租户 SSO 验收由 #2342 持有，此指南不代表 T3 已通过。

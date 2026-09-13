@@ -50,6 +50,7 @@ fn mock(responses: Vec<Option<&'static str>>) -> (String, std::thread::JoinHandl
                     Err(e) => panic!("{e}"),
                 }
             };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -173,6 +174,44 @@ async fn uncertain_logout_blocks_all_business_use() {
         Err(Error::LogoutPending)
     ));
     assert_eq!(thread.join().unwrap().len(), 2);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn public_trust_files_are_readable_but_not_writable_by_other_users() {
+    let dir = directory();
+    let file = dir.join("public.json");
+    std::fs::write(&file, b"{}").unwrap();
+    for mode in [0o644, 0o444, 0o600] {
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(store::public(&file, 100).unwrap(), b"{}");
+    }
+    for mode in [0o664, 0o646, 0o666] {
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(matches!(store::public(&file, 100), Err(Error::Input)));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn response_additions_do_not_change_the_closed_session_file() {
+    let dir = directory();
+    let client = client("https://identity.test".into(), dir.clone());
+    let s = session(&client.config.origin);
+    let reply = Reply {
+        status: StatusCode::OK,
+        cookie: Some(Zeroizing::new("a".repeat(64))),
+        value: json!({"identity":{"principal_id":s.identity.principal_id,"administrator":false,"platform_administrator":true,"has_local_password":true,"display_name":"New optional field"},"session":{"id":s.session.id,"auth_time":1,"idle_expires_at":900,"absolute_expires_at":14400,"optional":42},"csrf_token":"b".repeat(64),"added":true}),
+    };
+    let received = client.issued(reply).unwrap();
+    let store = store::Store::lock(&dir).unwrap();
+    store.save(&received).unwrap();
+    let mut data: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("session.json")).unwrap()).unwrap();
+    data["identity"]["unknown"] = json!(true);
+    std::fs::write(dir.join("session.json"), serde_json::to_vec(&data).unwrap()).unwrap();
+    assert!(store.load().is_err());
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }

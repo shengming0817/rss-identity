@@ -38,6 +38,39 @@ WITH protected AS (
 ), tables AS (
  SELECT c.oid,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='identity_authority' AND c.relkind='r'
+), registrar_privileges AS (
+ SELECT * FROM (VALUES
+ ('identity_authority','deployment','SELECT'),('identity_authority','tenant_registry','SELECT'),
+ ('identity_authority','guard','SELECT'),('identity_authority','guard','INSERT'),('identity_authority','guard','UPDATE'),
+ ('identity_authority','accounts','INSERT'),('identity_authority','local_credentials','INSERT'),('identity_authority','memberships','INSERT'),
+ ('rss_transactional_messaging','tenant_epoch','INSERT')
+ ) r(schema_name,tab,privilege)
+), registrar_objects AS (
+ SELECT c.oid,c.relname,c.relkind,n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+ WHERE n.nspname IN ('identity_authority','rss_transactional_messaging')
+), registrar_check AS (
+ SELECT
+ NOT EXISTS(SELECT FROM pg_namespace n CROSS JOIN (VALUES('USAGE'),('CREATE')) p(privilege)
+   WHERE n.nspname IN ('identity_authority','rss_transactional_messaging')
+   AND (has_schema_privilege(r.oid,n.oid,p.privilege) IS DISTINCT FROM (p.privilege='USAGE')
+     OR has_schema_privilege(r.oid,n.oid,p.privilege||' WITH GRANT OPTION')))
+ AND NOT EXISTS(SELECT FROM registrar_objects t CROSS JOIN (VALUES('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER'),('MAINTAIN')) p(privilege)
+   WHERE t.relkind='r' AND (has_table_privilege(r.oid,t.oid,p.privilege) IS DISTINCT FROM
+     EXISTS(SELECT FROM registrar_privileges expected WHERE expected.schema_name=t.nspname AND expected.tab=t.relname AND expected.privilege=p.privilege)
+     OR has_table_privilege(r.oid,t.oid,p.privilege||' WITH GRANT OPTION')))
+ AND NOT EXISTS(SELECT FROM registrar_objects t JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped
+   CROSS JOIN (VALUES('SELECT'),('INSERT'),('UPDATE'),('REFERENCES')) p(privilege)
+   WHERE t.relkind='r' AND (has_column_privilege(r.oid,t.oid,a.attnum,p.privilege) IS DISTINCT FROM
+     EXISTS(SELECT FROM registrar_privileges expected WHERE expected.schema_name=t.nspname AND expected.tab=t.relname AND expected.privilege=p.privilege)
+     OR has_column_privilege(r.oid,t.oid,a.attnum,p.privilege||' WITH GRANT OPTION')))
+ AND NOT EXISTS(SELECT FROM registrar_objects t CROSS JOIN (VALUES('USAGE'),('SELECT'),('UPDATE')) p(privilege)
+   WHERE t.relkind='S' AND has_sequence_privilege(r.oid,t.oid,p.privilege))
+ AND NOT EXISTS(SELECT FROM pg_proc p JOIN pg_namespace n ON p.pronamespace=n.oid
+   WHERE n.nspname IN ('identity_authority','rss_transactional_messaging') AND
+   (has_function_privilege(r.oid,p.oid,'EXECUTE') IS DISTINCT FROM
+     (p.oid IN (to_regprocedure('identity_authority.register_tenant(uuid,bigint)'),to_regprocedure('identity_authority.insert_tenant_administrator(uuid,uuid,text,text)'),to_regprocedure('rss_transactional_messaging.check_execution()')))
+    OR (p.proowner<>r.oid AND has_function_privilege(r.oid,p.oid,'EXECUTE WITH GRANT OPTION')))) AS valid
+ FROM pg_roles r WHERE r.rolname='identity_tenant_registrar'
 ), checks AS (
  SELECT
  (SELECT count(*)=1 AND bool_and(version=8) FROM identity_authority.schema_version) AS version_ok,
@@ -49,7 +82,8 @@ WITH protected AS (
  ELSE
    $1='maintenance' AND pg_has_role(current_user,(SELECT oid FROM groups WHERE rolname='identity_account_maintenance'),'USAGE') AND NOT pg_has_role(current_user,(SELECT oid FROM groups WHERE rolname='identity_account_runtime'),'MEMBER')
  END) AS role_ok,
- (NOT has_schema_privilege(current_user,(SELECT oid FROM pg_namespace WHERE nspname='identity_authority'),'CREATE')
+ ((SELECT valid FROM registrar_check) IS TRUE
+ AND NOT has_schema_privilege(current_user,(SELECT oid FROM pg_namespace WHERE nspname='identity_authority'),'CREATE')
  AND (SELECT bool_and(coalesce(has_table_privilege(current_user,t.oid,r.privilege),false)) FROM required_privileges r LEFT JOIN tables t ON t.relname=r.tab WHERE r.profile=$1)
  AND NOT EXISTS (
    SELECT FROM tables t CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER'),('MAINTAIN')) p(privilege)

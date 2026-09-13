@@ -317,15 +317,15 @@ impl Authority {
         budget.0 = budget.0.min(actor.expires);
         self.read_sql(actor.key.tenant, budget.remaining(), move |c| Box::pin(async move {
             crate::session_storage::recheck(c, &actor).await?.authorize_administration(actor.key.tenant)?;
-            let rows:Vec<(uuid::Uuid,Option<String>)>=sqlx::query_as("SELECT a.principal_id,l.login_key FROM identity_authority.accounts a LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND ($2::uuid IS NULL OR a.principal_id>$2) ORDER BY a.principal_id LIMIT $3")
+            let rows:Vec<(uuid::Uuid,Option<String>,bool)>=sqlx::query_as("SELECT a.principal_id,l.login_key,EXISTS(SELECT FROM identity_authority.platform_administrators p JOIN identity_authority.deployment d ON d.system_domain=p.tenant_id WHERE p.tenant_id=a.tenant_id AND p.principal_id=a.principal_id) FROM identity_authority.accounts a LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND ($2::uuid IS NULL OR a.principal_id>$2) ORDER BY a.principal_id LIMIT $3")
                 .bind(actor.key.tenant.to_string()).bind(cursor.map(|id|id.as_uuid())).bind(i64::from(limit)+1).fetch_all(&mut *c).await?;
             let more=rows.len()>usize::from(limit); let mut accounts=Vec::new();
-            for (id,login) in rows.into_iter().take(usize::from(limit)) {
+            for (id,login,platform_administrator) in rows.into_iter().take(usize::from(limit)) {
                 let principal=principal(&id.to_string())?;
                 let state=load(c,AccountKey{tenant:actor.key.tenant,principal}).await?.state;
-                accounts.push(AccountView::new(state,login));
+                accounts.push(AccountListEntry{account:AccountView::new(state,login),platform_administrator});
             }
-            let next_cursor=if more {accounts.last().map(|a|a.principal_id.clone())} else {None};
+            let next_cursor=if more {accounts.last().map(|a|a.account.principal_id.clone())} else {None};
             Ok(AccountPage{accounts,next_cursor})
         })).await
     }
@@ -371,7 +371,13 @@ impl AccountView {
     }
 }
 #[derive(Debug, serde::Serialize)]
+pub struct AccountListEntry {
+    #[serde(flatten)]
+    pub account: AccountView,
+    pub platform_administrator: bool,
+}
+#[derive(Debug, serde::Serialize)]
 pub struct AccountPage {
-    pub accounts: Vec<AccountView>,
+    pub accounts: Vec<AccountListEntry>,
     pub next_cursor: Option<String>,
 }

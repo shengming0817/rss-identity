@@ -167,7 +167,7 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
     assert!(proof(&f, &replacement).await.is_err());
     assert!(proof(&f, &second).await.is_ok());
     let restarted_runtime = f.additional_runtime().await?;
-    let restarted = Authority::connect(
+    let restarted = Authority::connect_runtime(
         restarted_runtime.clone(),
         std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
         deployment_identity(),
@@ -178,7 +178,7 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
             Duration::from_secs(5),
         )?,
         f.system_key.tenant,
-        AuthorityProfile::Runtime,
+        support::runtime_configuration(f.port, &f.database),
         deadline(),
     )
     .await?;
@@ -497,7 +497,7 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
         sqlx::raw_sql(break_it).execute(&f.owner).await?;
         if break_it.contains("PUBLIC") {
             assert!(
-                Authority::connect(
+                Authority::connect_maintenance(
                     f.maintenance_runtime.clone(),
                     std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
                     deployment_identity(),
@@ -508,7 +508,6 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
                         Duration::from_secs(5)
                     )?,
                     f.system_key.tenant,
-                    AuthorityProfile::Maintenance,
                     deadline()
                 )
                 .await

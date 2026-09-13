@@ -717,21 +717,41 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             )))
             .execute(&f.owner)
             .await?;
-            let result = Authority::connect(
-                runtime.clone(),
-                std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
-                deployment_identity(),
-                rss_transactional_messaging::policy::DeliveryBudget::new(
-                    Duration::from_secs(60),
-                    Duration::from_secs(5),
-                    Duration::from_secs(5),
-                    Duration::from_secs(5),
-                )?,
-                f.system_key.tenant,
-                profile,
-                deadline(),
-            )
-            .await;
+            let result = match profile {
+                rss_identity_postgres::AuthorityProfile::Runtime => {
+                    Authority::connect_runtime(
+                        runtime.clone(),
+                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        deployment_identity(),
+                        rss_transactional_messaging::policy::DeliveryBudget::new(
+                            Duration::from_secs(60),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                        )?,
+                        f.system_key.tenant,
+                        support::runtime_configuration(f.port, &f.database),
+                        deadline(),
+                    )
+                    .await
+                }
+                rss_identity_postgres::AuthorityProfile::Maintenance => {
+                    Authority::connect_maintenance(
+                        runtime.clone(),
+                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        deployment_identity(),
+                        rss_transactional_messaging::policy::DeliveryBudget::new(
+                            Duration::from_secs(60),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                        )?,
+                        f.system_key.tenant,
+                        deadline(),
+                    )
+                    .await
+                }
+            };
             assert!(
                 matches!(result, Err(AuthorityError::StorageIncompatible(_))),
                 "accepted {profile:?} {table} {privilege}"
@@ -741,21 +761,41 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             )))
             .execute(&f.owner)
             .await?;
-            Authority::connect(
-                runtime.clone(),
-                std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
-                deployment_identity(),
-                rss_transactional_messaging::policy::DeliveryBudget::new(
-                    Duration::from_secs(60),
-                    Duration::from_secs(5),
-                    Duration::from_secs(5),
-                    Duration::from_secs(5),
-                )?,
-                f.system_key.tenant,
-                profile,
-                deadline(),
-            )
-            .await?;
+            match profile {
+                rss_identity_postgres::AuthorityProfile::Runtime => {
+                    Authority::connect_runtime(
+                        runtime.clone(),
+                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        deployment_identity(),
+                        rss_transactional_messaging::policy::DeliveryBudget::new(
+                            Duration::from_secs(60),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                        )?,
+                        f.system_key.tenant,
+                        support::runtime_configuration(f.port, &f.database),
+                        deadline(),
+                    )
+                    .await
+                }
+                rss_identity_postgres::AuthorityProfile::Maintenance => {
+                    Authority::connect_maintenance(
+                        runtime.clone(),
+                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        deployment_identity(),
+                        rss_transactional_messaging::policy::DeliveryBudget::new(
+                            Duration::from_secs(60),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                            Duration::from_secs(5),
+                        )?,
+                        f.system_key.tenant,
+                        deadline(),
+                    )
+                    .await
+                }
+            }?;
         }
     }
     // A second database cannot silently adopt the existing global roles, even if their names match.
@@ -794,7 +834,7 @@ async fn source_budgets_are_shared() -> anyhow::Result<()> {
     f.bootstrap().await?;
     f.reset_attempts().await?;
     let other_runtime = f.additional_runtime().await?;
-    let other = Authority::connect(
+    let other = Authority::connect_runtime(
         other_runtime.clone(),
         std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
         deployment_identity(),
@@ -805,7 +845,7 @@ async fn source_budgets_are_shared() -> anyhow::Result<()> {
             Duration::from_secs(5),
         )?,
         f.system_key.tenant,
-        AuthorityProfile::Runtime,
+        support::runtime_configuration(f.port, &f.database),
         deadline(),
     )
     .await?;

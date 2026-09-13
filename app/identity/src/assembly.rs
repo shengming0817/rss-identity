@@ -3,9 +3,7 @@ use crate::{AppError, config::RuntimeConfig, read_public_file, read_secret};
 use rss_identity_core::{downstream::*, federation::StateSigner};
 use rss_identity_hydra::Hydra;
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
-use rss_identity_postgres::{
-    Authority, AuthorityProfile, Downstream, Federation, PrepareAdmission,
-};
+use rss_identity_postgres::{Authority, Downstream, Federation, PrepareAdmission};
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
 use rss_transactional_messaging::policy::{DeliveryBudget, OperationDeadline};
 use rss_transactional_messaging_postgres::PgRuntime;
@@ -44,22 +42,23 @@ pub async fn authority(
     runtime: Arc<PgRuntime>,
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
 ) -> Result<Authority, AppError> {
-    let a = Authority::connect(
+    let a = Authority::connect_runtime(
         runtime,
         kdf,
         config.identity_origin.clone(),
         delivery_budget()?,
         config.storage.system()?,
-        AuthorityProfile::Runtime,
+        rss_identity_postgres::RuntimeConfiguration::new(
+            rss_identity_postgres::RuntimeSource::new(
+                config.database.pg()?,
+                config.storage.identity()?,
+                config.storage.epoch()?,
+            ),
+            config.oidc.credential_keyring.load()?,
+        ),
         deadline(),
     )
     .await?;
-    a.configure_runtime(rss_identity_postgres::RuntimeSource::new(
-        config.database.pg()?,
-        config.storage.identity()?,
-        config.storage.epoch()?,
-    ))?;
-    a.configure_credentials(config.oidc.credential_keyring.load()?)?;
     Ok(a)
 }
 

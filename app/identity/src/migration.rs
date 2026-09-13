@@ -65,7 +65,7 @@ pub async fn install(c: MigrationConfig) -> Result<(), AppError> {
             let mut db=c.database.clone();db.user=user.into();db.password_file=path.clone();
             let pool=std::sync::Arc::new(rss_transactional_messaging_postgres::PgRuntime::connect_producer(db.pg()?,assembly::Timer,c.storage.binding()?).await.map_err(|_|AppError::Migration)?);
             let kdf=std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new());
-            let result=async{rss_identity_postgres::Authority::connect(pool.clone(),kdf.clone(),c.identity_origin.clone(),assembly::delivery_budget()?,c.storage.system()?,profile,assembly::deadline()).await?;Ok::<_,AppError>(())}.await;
+            let result=async{match profile { rss_identity_postgres::AuthorityProfile::Runtime => rss_identity_postgres::Authority::connect_runtime(pool.clone(),kdf.clone(),c.identity_origin.clone(),assembly::delivery_budget()?,c.storage.system()?,rss_identity_postgres::RuntimeConfiguration::new(rss_identity_postgres::RuntimeSource::new(db.pg()?,c.storage.identity()?,c.storage.epoch()?),c.credential_keyring.load()?),assembly::deadline()).await, rss_identity_postgres::AuthorityProfile::Maintenance => rss_identity_postgres::Authority::connect_maintenance(pool.clone(),kdf.clone(),c.identity_origin.clone(),assembly::delivery_budget()?,c.storage.system()?,assembly::deadline()).await }?;Ok::<_,AppError>(())}.await;
             pool.close().await;
             result?;
         }

@@ -2,6 +2,10 @@
 mod browser;
 mod store;
 use reqwest::{Method, StatusCode};
+use rss_identity_contracts::{
+    platform::{OperationKind, OperationReply, TenantPage},
+    session::{Identity, Issued, SessionInfo},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -72,22 +76,6 @@ impl Config {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Identity {
-    principal_id: String,
-    administrator: bool,
-    platform_administrator: bool,
-    has_local_password: bool,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SessionInfo {
-    id: String,
-    auth_time: i64,
-    idle_expires_at: i64,
-    absolute_expires_at: i64,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Session {
     version: u32,
     origin: String,
@@ -103,13 +91,6 @@ impl Drop for Session {
         self.cookie.zeroize();
         self.csrf_token.zeroize();
     }
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Issued {
-    identity: Identity,
-    session: SessionInfo,
-    csrf_token: String,
 }
 fn wipe(v: &mut Value) {
     match v {
@@ -377,34 +358,6 @@ impl Client {
         Ok(next)
     }
 }
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Operation {
-    operation_id: uuid::Uuid,
-    kind: String,
-    tenant_id: String,
-    principal_id: uuid::Uuid,
-    created_at: i64,
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct OperationReply {
-    operation: Operation,
-    active: bool,
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Tenant {
-    tenant_id: String,
-    name: String,
-    initial_principal_id: uuid::Uuid,
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct TenantPage {
-    tenants: Vec<Tenant>,
-    next_cursor: Option<String>,
-}
 fn options(args: &[String]) -> Result<BTreeMap<String, String>, Error> {
     let mut result = BTreeMap::new();
     let mut i = 0;
@@ -597,19 +550,15 @@ pub async fn run(args: Vec<String>) -> Result<(i32, Value), Error> {
             Error::Unavailable
         }
     })?;
-    if !matches!(
-        operation.operation.kind.as_str(),
-        "tenant_created" | "administrator_added"
-    ) || expected_operation.as_deref()
-        != Some(operation.operation.operation_id.to_string().as_str())
+    if expected_operation.as_deref() != Some(operation.operation.operation_id.to_string().as_str())
         || expected_account.is_some_and(|(tenant, principal)| {
             tenant != operation.operation.tenant_id
                 || principal != operation.operation.principal_id.to_string()
                 || operation.operation.kind
                     != if command == "tenant create" {
-                        "tenant_created"
+                        OperationKind::TenantCreated
                     } else {
-                        "administrator_added"
+                        OperationKind::AdministratorAdded
                     }
         })
     {

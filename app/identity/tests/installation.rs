@@ -5,7 +5,7 @@ use rss_identity_app::{
     migration,
 };
 use rss_identity_core::account::PasswordKdf;
-use rss_identity_postgres::{Authority, AuthorityProfile, DeploymentIdentity};
+use rss_identity_postgres::{Authority, DeploymentIdentity};
 use rss_transactional_messaging_postgres::PgRuntime;
 use sqlx::Connection;
 use std::{path::PathBuf, sync::Arc};
@@ -113,13 +113,20 @@ async fn installation_configuration_and_rollback_are_verified() -> anyhow::Resul
     );
     let kdf = Arc::new(PasswordKdf::new());
     let tenant = c.storage.system()?;
-    let authority = Authority::connect(
+    let authority = Authority::connect_runtime(
         pool.clone(),
         kdf.clone(),
         c.identity_origin.clone(),
         assembly::delivery_budget()?,
         tenant,
-        AuthorityProfile::Runtime,
+        rss_identity_postgres::RuntimeConfiguration::new(
+            rss_identity_postgres::RuntimeSource::new(
+                db.pg()?,
+                c.storage.identity()?,
+                c.storage.epoch()?,
+            ),
+            c.credential_keyring.load()?,
+        ),
         assembly::deadline(),
     )
     .await?;
@@ -131,13 +138,20 @@ async fn installation_configuration_and_rollback_are_verified() -> anyhow::Resul
         "https://product.test".into(),
     )?;
     assert!(
-        Authority::connect(
+        Authority::connect_runtime(
             pool.clone(),
             kdf.clone(),
             wrong,
             assembly::delivery_budget()?,
             tenant,
-            AuthorityProfile::Runtime,
+            rss_identity_postgres::RuntimeConfiguration::new(
+                rss_identity_postgres::RuntimeSource::new(
+                    db.pg()?,
+                    c.storage.identity()?,
+                    c.storage.epoch()?
+                ),
+                c.credential_keyring.load()?
+            ),
             assembly::deadline()
         )
         .await
@@ -156,13 +170,20 @@ async fn installation_configuration_and_rollback_are_verified() -> anyhow::Resul
     }
     migration::install(config()).await?;
     // Normal runtime settings/artifact versions are not deployment identity.
-    let again = Authority::connect(
+    let again = Authority::connect_runtime(
         pool.clone(),
         kdf.clone(),
         c.identity_origin.clone(),
         assembly::delivery_budget()?,
         tenant,
-        AuthorityProfile::Runtime,
+        rss_identity_postgres::RuntimeConfiguration::new(
+            rss_identity_postgres::RuntimeSource::new(
+                db.pg()?,
+                c.storage.identity()?,
+                c.storage.epoch()?,
+            ),
+            c.credential_keyring.load()?,
+        ),
         assembly::deadline(),
     )
     .await?;
@@ -208,7 +229,7 @@ async fn credential_rekey_is_bounded_and_fenced(
         session::SessionSecret,
     };
     use rss_identity_postgres::{
-        AttemptSource, CredentialKeys, Federation, NewTenantAdministrator, RuntimeSource,
+        AttemptSource, CredentialKeys, Federation, NewTenantAdministrator,
     };
     use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
     let system = config.storage.system()?;
@@ -220,13 +241,12 @@ async fn credential_rekey_is_bounded_and_fenced(
             .await?,
     );
     let kdf = Arc::new(PasswordKdf::new());
-    let maintenance = Authority::connect(
+    let maintenance = Authority::connect_maintenance(
         maintenance_pool.clone(),
         kdf.clone(),
         config.identity_origin.clone(),
         assembly::delivery_budget()?,
         system,
-        AuthorityProfile::Maintenance,
         assembly::deadline(),
     )
     .await?;
@@ -249,22 +269,23 @@ async fn credential_rekey_is_bounded_and_fenced(
         PgRuntime::connect_producer(database.pg()?, assembly::Timer, config.storage.binding()?)
             .await?,
     );
-    let authority = Authority::connect(
+    let authority = Authority::connect_runtime(
         pool,
         kdf.clone(),
         config.identity_origin.clone(),
         assembly::delivery_budget()?,
         system,
-        AuthorityProfile::Runtime,
+        rss_identity_postgres::RuntimeConfiguration::new(
+            rss_identity_postgres::RuntimeSource::new(
+                database.pg()?,
+                config.storage.identity()?,
+                config.storage.epoch()?,
+            ),
+            config.credential_keyring.load()?,
+        ),
         assembly::deadline(),
     )
     .await?;
-    authority.configure_runtime(RuntimeSource::new(
-        database.pg()?,
-        config.storage.identity()?,
-        config.storage.epoch()?,
-    ))?;
-    authority.configure_credentials(config.credential_keyring.load()?)?;
     let source = || AttemptSource::parse("127.0.0.1").unwrap();
     let candidate = authority
         .verify_password(

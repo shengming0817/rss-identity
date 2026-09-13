@@ -9,7 +9,7 @@ use rss_transactional_messaging::{
 use rss_transactional_messaging_postgres::{PgConfig, PgOutboxStore, PgRuntime};
 use std::{
     sync::{
-        Arc, Mutex, OnceLock, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Instant,
@@ -49,7 +49,6 @@ pub(crate) struct RuntimeBundle {
 pub(crate) struct RuntimeState {
     current: RwLock<Arc<RuntimeBundle>>,
     retired: Mutex<Vec<Arc<RuntimeBundle>>>,
-    source: OnceLock<RuntimeSource>,
     activation: tokio::sync::Mutex<()>,
     closed: AtomicBool,
     budget: DeliveryBudget,
@@ -63,7 +62,6 @@ impl RuntimeState {
         Ok(Self {
             current: RwLock::new(Self::bundle(runtime, budget, vec![system])?),
             retired: Mutex::new(Vec::new()),
-            source: OnceLock::new(),
             activation: tokio::sync::Mutex::new(()),
             closed: AtomicBool::new(false),
             budget,
@@ -97,13 +95,6 @@ impl RuntimeState {
     }
 }
 impl Authority {
-    /// Attach the host source before exposing platform operations. It cannot be changed in place.
-    pub fn configure_runtime(&self, source: RuntimeSource) -> Result<(), AuthorityError> {
-        self.runtimes
-            .source
-            .set(source)
-            .map_err(|_| AuthorityError::Invalid)
-    }
     /// Current PG owner for application readiness and diagnostics; not an authentication API.
     pub fn runtime(&self) -> Result<Arc<PgRuntime>, AuthorityError> {
         Ok(self.runtimes.snapshot()?.runtime.clone())
@@ -179,11 +170,7 @@ impl Authority {
         {
             return Err(AuthorityError::Busy);
         }
-        let source = self
-            .runtimes
-            .source
-            .get()
-            .ok_or(AuthorityError::Unavailable)?;
+        let source = &self.runtime_configuration()?.source;
         let binding = ExecutionBinding::new(
             source.storage,
             tenants.iter().map(|t| (*t, source.generation)).collect(),

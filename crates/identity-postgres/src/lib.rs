@@ -22,7 +22,7 @@ pub use platform::{
     NewTenantAdministrator, PlatformOperation, PlatformOperationKind, TenantPage, TenantView,
 };
 mod operations;
-pub use operations::{AccountPage, AccountView, LocalAccountRole};
+pub use operations::{AccountListEntry, AccountPage, AccountView, LocalAccountRole};
 mod runtime;
 mod session_storage;
 mod sessions;
@@ -43,37 +43,100 @@ use rss_transactional_messaging::policy::DeliveryBudget;
 use rss_transactional_messaging_postgres::PgRuntime;
 use std::sync::Arc;
 
+/// All runtime dependencies are established before a usable authority can exist.
+pub struct RuntimeConfiguration {
+    source: RuntimeSource,
+    credential_keys: Arc<CredentialKeys>,
+}
+impl RuntimeConfiguration {
+    pub fn new(source: RuntimeSource, credential_keys: Arc<CredentialKeys>) -> Self {
+        Self {
+            source,
+            credential_keys,
+        }
+    }
+}
+#[derive(Clone)]
+enum AuthorityMode {
+    Runtime(Arc<RuntimeConfiguration>),
+    Maintenance,
+}
 #[derive(Clone)]
 pub struct Authority {
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
     runtimes: Arc<runtime::RuntimeState>,
-    profile: AuthorityProfile,
+    mode: AuthorityMode,
     system_domain: rss_request_context::TenantId,
     identity_origin: String,
-    credential_keys: Arc<std::sync::OnceLock<Arc<CredentialKeys>>>,
 }
 impl Authority {
+    /// Construct a runtime authority with its immutable external source and keyring.
+    pub async fn connect_runtime(
+        runtime: Arc<PgRuntime>,
+        kdf: Arc<rss_identity_core::account::PasswordKdf>,
+        deployment: DeploymentIdentity,
+        budget: DeliveryBudget,
+        system: rss_request_context::TenantId,
+        configuration: RuntimeConfiguration,
+        deadline: rss_transactional_messaging::policy::OperationDeadline,
+    ) -> Result<Self, AuthorityError> {
+        Self::connect(
+            runtime,
+            kdf,
+            deployment,
+            budget,
+            system,
+            AuthorityMode::Runtime(Arc::new(configuration)),
+            deadline,
+        )
+        .await
+    }
+    /// Maintenance has no tenant-admission or IdP credential configuration.
+    pub async fn connect_maintenance(
+        runtime: Arc<PgRuntime>,
+        kdf: Arc<rss_identity_core::account::PasswordKdf>,
+        deployment: DeploymentIdentity,
+        budget: DeliveryBudget,
+        system: rss_request_context::TenantId,
+        deadline: rss_transactional_messaging::policy::OperationDeadline,
+    ) -> Result<Self, AuthorityError> {
+        Self::connect(
+            runtime,
+            kdf,
+            deployment,
+            budget,
+            system,
+            AuthorityMode::Maintenance,
+            deadline,
+        )
+        .await
+    }
+    fn runtime_configuration(&self) -> Result<&RuntimeConfiguration, AuthorityError> {
+        match &self.mode {
+            AuthorityMode::Runtime(c) => Ok(c),
+            AuthorityMode::Maintenance => Err(AuthorityError::Rejected),
+        }
+    }
     /// Validate the Identity schema and effective role before exposing an authority.
-    pub async fn connect(
+    async fn connect(
         runtime: Arc<PgRuntime>,
         kdf: Arc<rss_identity_core::account::PasswordKdf>,
         deployment: DeploymentIdentity,
         budget: DeliveryBudget,
         tenant: rss_request_context::TenantId,
-        profile: AuthorityProfile,
+        mode: AuthorityMode,
         deadline: rss_transactional_messaging::policy::OperationDeadline,
     ) -> Result<Self, AuthorityError> {
         let authority = Self {
             kdf,
             runtimes: Arc::new(runtime::RuntimeState::new(runtime, budget, tenant)?),
-            profile,
+            mode,
             system_domain: tenant,
             identity_origin: deployment.identity_origin().to_owned(),
-            credential_keys: Arc::new(std::sync::OnceLock::new()),
         };
-        let label = match profile {
-            AuthorityProfile::Runtime => "runtime",
-            AuthorityProfile::Maintenance => "maintenance",
+        let label = match &authority.mode {
+            AuthorityMode::Runtime(_) => "runtime",
+            AuthorityMode::Maintenance => "maintenance",
         };
         let valid = authority
             .read(tenant, deadline, move |tx| {
@@ -117,7 +180,7 @@ impl Authority {
     }
 
     fn require_maintenance(&self) -> Result<(), AuthorityError> {
-        if self.profile != AuthorityProfile::Maintenance {
+        if !matches!(self.mode, AuthorityMode::Maintenance) {
             return Err(AuthorityError::Rejected);
         }
         Ok(())
@@ -125,7 +188,7 @@ impl Authority {
 
     /// Reject maintenance-only authority when composing a runtime adapter.
     pub fn require_runtime(&self) -> Result<(), AuthorityError> {
-        if self.profile != AuthorityProfile::Runtime {
+        if !matches!(self.mode, AuthorityMode::Runtime(_)) {
             return Err(AuthorityError::Rejected);
         }
         Ok(())

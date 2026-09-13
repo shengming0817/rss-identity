@@ -178,7 +178,10 @@ pub async fn serve(
         startup.stage_deferred_task_with_token(worker.into_registration(move |token|async move {
             loop {
                 // The in-flight pass owns its bounded settlement. Cancellation only stops new passes.
-                let _=authority.activate_registered_tenants(assembly::deadline()).await;
+                if let Err(error)=authority.activate_registered_tenants(assembly::deadline()).await {
+                    let reason=match error {rss_identity_postgres::AuthorityError::Busy=>"draining",rss_identity_postgres::AuthorityError::Fenced=>"fenced",_=>"unavailable"};
+                    eprintln!("component=tenant_activation result=pending reason={reason}");
+                }
                 let tenants=authority.active_tenants().map_err(ShutdownError::new)?;
                 for tenant in &tenants {
                     if token.is_cancelled(){return Ok(());}

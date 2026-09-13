@@ -12,7 +12,7 @@ RSS managed listener 提供标准 accepted TCP ConnectInfo；Identity 根据真�
 
 Identity 新初始 schema 为 v6；原 v5 是可丢弃开发库，不提供升级兼容、自动清库或原地修复。schema/version、结构签名、权限探测和测试 fixture 同步替换。
 
-现有 deployment singleton 唯一持有 environment_id、identity_config_version、两个 HTTPS origin；owner 首次安装时写入，之后触发器禁止原地改变。Authority::connect 必填期望 DeploymentIdentity，启动时在同一探测事务中核对。首版不支持同库 origin/environment 迁移，修改后明确拒绝；不得用重启绕过 I01 的身份迁移规则。需要保留数据的域名迁移须另行实现并验收。
+现有 deployment singleton 唯一持有 environment_id、identity_config_version、两个 HTTPS origin；owner 首次安装时写入，之后触发器禁止原地改变。Authority::connect_runtime / connect_maintenance 必填期望 DeploymentIdentity，启动时在同一探测事务中核对。首版不支持同库 origin/environment 迁移，修改后明确拒绝；不得用重启绕过 I01 的身份迁移规则。需要保留数据的域名迁移须另行实现并验收。
 
 JSON format_version 只表示文件结构；schema version 只表示数据库结构；identity_origin.config_version 只表示 origin 身份代际。二进制、Cargo.lock、UI 与 OCI 摘要属于构建记录，不参与数据库身份判断，因此同配置正常换二进制不会夺取或重建 authority。
 

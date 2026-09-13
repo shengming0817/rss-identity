@@ -89,6 +89,7 @@ def build(out,ui_source,ui_dist):
    message=json.loads(line)
    if message.get('reason')=='compiler-artifact':
     p=packages[message['package_id']]
+    if p['name']=='rss-identity-platform' and 'test-support' in message['features']:raise ValueError('test browser launcher in production candidate')
     if p['source'] and p['name'].startswith('rss-'):features[p['name']]=set(message['features'])
   import check_dependencies
   check_dependencies.check_features(features,'production')

@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use rss_identity_contracts::platform as wire;
 use rss_identity_core::{
     PrincipalId,
     account::{LoginKey, Password},
@@ -175,6 +176,29 @@ async fn create(
         s.authority.tenant_active(target),
     ))
 }
+fn project_operation(v: PlatformOperation) -> wire::Operation {
+    wire::Operation {
+        operation_id: v.operation_id,
+        kind: match v.kind {
+            rss_identity_postgres::PlatformOperationKind::TenantCreated => {
+                wire::OperationKind::TenantCreated
+            }
+            rss_identity_postgres::PlatformOperationKind::AdministratorAdded => {
+                wire::OperationKind::AdministratorAdded
+            }
+        },
+        tenant_id: v.tenant_id,
+        principal_id: v.principal_id,
+        created_at: v.created_at,
+    }
+}
+fn project_tenant(v: rss_identity_postgres::TenantView) -> wire::Tenant {
+    wire::Tenant {
+        tenant_id: v.tenant_id,
+        name: v.name,
+        initial_principal_id: v.initial_principal_id,
+    }
+}
 fn operation_response(result: PlatformOperation, active: bool) -> Response {
     (
         if active {
@@ -182,7 +206,10 @@ fn operation_response(result: PlatformOperation, active: bool) -> Response {
         } else {
             StatusCode::ACCEPTED
         },
-        Json(serde_json::json!({"operation":result,"active":active})),
+        Json(wire::OperationReply {
+            operation: project_operation(result),
+            active,
+        }),
     )
         .into_response()
 }
@@ -198,7 +225,9 @@ async fn add(
         .authority
         .add_business_tenant_administrator(actor, v.input(&t)?, b.remaining())
         .await?;
-    Ok(operation_response(result, true))
+    let _ = s.authority.activate_registered_tenants(b.remaining()).await;
+    let active = s.authority.tenant_active(tenant(&result.tenant_id)?);
+    Ok(operation_response(result, active))
 }
 async fn operation(
     State(s): State<AppState>,
@@ -213,7 +242,11 @@ async fn operation(
         .await?;
     let _ = s.authority.activate_registered_tenants(b.remaining()).await;
     let active = s.authority.tenant_active(tenant(&result.tenant_id)?);
-    Ok(Json(serde_json::json!({"operation":result,"active":active})).into_response())
+    Ok(Json(wire::OperationReply {
+        operation: project_operation(result),
+        active,
+    })
+    .into_response())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -228,16 +261,19 @@ async fn list(
     h: HeaderMap,
 ) -> Result<Response> {
     let actor = actor(&s, &h, b, false).await?;
-    Ok(Json(
-        s.authority
-            .list_tenants(
-                actor,
-                p.cursor.as_deref().map(tenant).transpose()?,
-                p.limit.unwrap_or(50),
-                b.remaining(),
-            )
-            .await?,
-    )
+    let page = s
+        .authority
+        .list_tenants(
+            actor,
+            p.cursor.as_deref().map(tenant).transpose()?,
+            p.limit.unwrap_or(50),
+            b.remaining(),
+        )
+        .await?;
+    Ok(Json(wire::TenantPage {
+        tenants: page.tenants.into_iter().map(project_tenant).collect(),
+        next_cursor: page.next_cursor,
+    })
     .into_response())
 }
 async fn detail(
@@ -247,11 +283,11 @@ async fn detail(
     h: HeaderMap,
 ) -> Result<Response> {
     let actor = actor(&s, &h, b, false).await?;
-    Ok(Json(
+    Ok(Json(project_tenant(
         s.authority
             .tenant_detail(actor, tenant(&t)?, b.remaining())
             .await?,
-    )
+    ))
     .into_response())
 }
 #[derive(Deserialize)]

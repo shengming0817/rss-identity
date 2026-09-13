@@ -7,8 +7,12 @@ publish.workspace = true
 [[bin]]
 name = "identity-platform"
 path = "src/main.rs"
+[features]
+test-support = []
 [dependencies]
-rss-identity-core.workspace = true
+rss-identity-contracts.workspace = true
+rand_core.workspace = true
+base64 = "0.22"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

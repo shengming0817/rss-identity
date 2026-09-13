@@ -81,7 +81,7 @@ identity-admin MAINTENANCE_CONFIG recover TENANT_UUID PRINCIPAL_UUID NEW_PASSWOR
 
 具体 owner 连接、删除顺序、RSS 前置角色、固定八个 RSS 迁移、Identity 初始安装、lineage/epoch、登录身份及 GRANT 和验收命令见 [开发库重建与安装](local-maintenance.md#重建与安装)。安装 SQL 全批单事务执行；CLI 不自动清库，遇到未知角色依赖停止，不使用 CASCADE。
 
-安装遇到同名全局角色即失败，不静默复用。`Authority::connect` 检查当前完整结构摘要、所有 tenant RLS 表及精确有效权限；运行角色无 deployment 写权限，维护角色无 attempts/session 和成员更新权限。权限漂移、旧 schema 和高权身份均拒绝连接。错误提供 schema 版本、角色不匹配、权限漂移和 schema/RLS 契约漂移四类安全诊断，底层 provider 故障仍保留 settlement。
+安装遇到同名全局角色即失败，不静默复用。`Authority::connect_runtime` / `connect_maintenance` 检查当前完整结构摘要、所有 tenant RLS 表及精确有效权限；运行角色无 deployment 写权限，维护角色无 attempts/session 和成员更新权限。权限漂移、旧 schema 和高权身份均拒绝连接。错误提供 schema 版本、角色不匹配、权限漂移和 schema/RLS 契约漂移四类安全诊断，底层 provider 故障仍保留 settlement。
 
 ### 简化结果与验证范围
 
@@ -116,3 +116,5 @@ GET/HEAD 会话查询不续期。客户端在有效用户活动期间通过受 O
 ## I08 装配入口
 
 [部署文档](../deployment/README.md)持有统一应用、v7安装、生命周期和候选构建。make test-assembly验证真实TLS PG配置/安装/失败清理，make test-gateway验证真实NGINX TLS/来源覆盖/私有路径；两者均纳入make ci。KDF由应用创建唯一共享实例并注入Authority，关闭使用同一scope。实际peer与ClientAddress分开；测试宿主须显式提供受信客户端归因。
+
+Runtime 构造必须一次提供外部 RuntimeSource 和 CredentialKeys；不存在 connect 后注入 setter。`identity-contracts` 持有 CLI binding、平台及中央会话响应类型，CLI 的编译依赖禁止 core、PG、app 与 KDF。CLI 的 test-support 仅允许 T2 注入受控 browser launcher；候选构建拒绝该 feature。

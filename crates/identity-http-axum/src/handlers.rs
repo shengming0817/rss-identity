@@ -28,11 +28,36 @@ pub(crate) fn issued(value: IssuedSession) -> Result<Response> {
     let header = session_cookie(value.secret(), max_age)
         .parse()
         .map_err(|_| HttpError::from(AuthorityError::Unavailable))?;
-    let mut response =
-        Json(serde_json::json!({"identity":value.identity(),"session":value.view(),"csrf_token":value.secret().csrf()}))
-            .into_response();
+    let mut response = Json(project_session(
+        value.identity(),
+        value.view(),
+        value.secret().csrf(),
+    ))
+    .into_response();
     response.headers_mut().insert(header::SET_COOKIE, header);
     Ok(response)
+}
+fn project_session(
+    identity: &rss_identity_postgres::SessionIdentity,
+    view: &rss_identity_postgres::SessionView,
+    csrf_token: String,
+) -> rss_identity_contracts::session::Issued {
+    use rss_identity_contracts::session::{Identity, Issued, SessionInfo};
+    Issued {
+        identity: Identity {
+            principal_id: identity.principal_id.to_string(),
+            administrator: identity.administrator,
+            platform_administrator: identity.platform_administrator,
+            has_local_password: identity.has_local_password,
+        },
+        session: SessionInfo {
+            id: view.id.to_string(),
+            auth_time: view.auth_time,
+            idle_expires_at: view.idle_expires_at,
+            absolute_expires_at: view.absolute_expires_at,
+        },
+        csrf_token,
+    }
 }
 pub(crate) async fn login(
     State(state): State<AppState>,
@@ -101,10 +126,7 @@ pub(crate) async fn current(
         .authority
         .inspect_session(tenant(&raw)?, secret, budget.remaining())
         .await?;
-    Ok(Json(
-        serde_json::json!({"identity":proof.identity(),"session":proof.view(),"csrf_token":csrf}),
-    )
-    .into_response())
+    Ok(Json(project_session(proof.identity(), proof.view(), csrf)).into_response())
 }
 pub(crate) async fn refresh(
     State(state): State<AppState>,

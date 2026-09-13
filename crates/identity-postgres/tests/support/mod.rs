@@ -43,7 +43,7 @@ pub fn source() -> AttemptSource {
 pub fn deadline() -> OperationDeadline {
     OperationDeadline::from_remaining(Duration::from_secs(30))
 }
-struct Timer;
+pub(crate) struct Timer;
 impl Clock for Timer {
     fn now(&self) -> Instant {
         Instant::now()
@@ -157,46 +157,28 @@ impl Fixture {
         sqlx::raw_sql(include_str!("../../../../app/identity/src/grants.sql"))
             .execute(&owner)
             .await?;
-        let store = Authority::connect(
+        let store = Authority::connect_runtime(
             runtime.clone(),
             std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
             deployment.clone(),
             budget,
             TenantId::parse(SYSTEM)?,
-            AuthorityProfile::Runtime,
+            runtime_configuration(port, &db),
             deadline(),
         )
         .await?;
-        let maintenance = Authority::connect(
+        let maintenance = Authority::connect_maintenance(
             maintenance_runtime.clone(),
             std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
             deployment.clone(),
             budget,
             TenantId::parse(SYSTEM)?,
-            AuthorityProfile::Maintenance,
             deadline(),
         )
         .await?;
         sqlx::raw_sql(include_str!("../../../../app/identity/src/grants.sql"))
             .execute(&owner)
             .await?;
-        let keys = std::sync::Arc::new(CredentialKeys::new(
-            "fixture".into(),
-            vec![("fixture".into(), [8; 32])],
-        )?);
-        store.configure_credentials(keys.clone())?;
-        maintenance.configure_credentials(keys)?;
-        store.configure_runtime(RuntimeSource::new(
-            PgConfig::new_for_test_plaintext(
-                "127.0.0.1",
-                port,
-                &db,
-                "identity_runtime",
-                PgPassword::new("fixture-only"),
-            ),
-            StorageIdentity::new([1; 16], [2; 16])?,
-            Epoch::new(1)?,
-        ))?;
         Ok(Self {
             deployment,
             system_key: AccountKey {
@@ -251,16 +233,31 @@ impl Fixture {
             Duration::from_secs(5),
         )
         .unwrap();
-        Authority::connect(
-            self.runtime.clone(),
-            std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
-            self.deployment.clone(),
-            budget,
-            TenantId::parse(SYSTEM).unwrap(),
-            profile,
-            deadline(),
-        )
-        .await
+        match profile {
+            rss_identity_postgres::AuthorityProfile::Runtime => {
+                Authority::connect_runtime(
+                    self.runtime.clone(),
+                    std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                    self.deployment.clone(),
+                    budget,
+                    TenantId::parse(SYSTEM).unwrap(),
+                    runtime_configuration(self.port, &self.database),
+                    deadline(),
+                )
+                .await
+            }
+            rss_identity_postgres::AuthorityProfile::Maintenance => {
+                Authority::connect_maintenance(
+                    self.runtime.clone(),
+                    std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                    self.deployment.clone(),
+                    budget,
+                    TenantId::parse(SYSTEM).unwrap(),
+                    deadline(),
+                )
+                .await
+            }
+        }
     }
     pub async fn bootstrap(&self) -> anyhow::Result<()> {
         self.maintenance
@@ -451,4 +448,23 @@ pub async fn session_actor(
             deadline(),
         )
         .await?)
+}
+
+pub fn runtime_configuration(port: u16, db: &str) -> RuntimeConfiguration {
+    RuntimeConfiguration::new(
+        RuntimeSource::new(
+            PgConfig::new_for_test_plaintext(
+                "127.0.0.1",
+                port,
+                db,
+                "identity_runtime",
+                PgPassword::new("fixture-only"),
+            ),
+            StorageIdentity::new([1; 16], [2; 16]).unwrap(),
+            Epoch::new(1).unwrap(),
+        ),
+        std::sync::Arc::new(
+            CredentialKeys::new("fixture".into(), vec![("fixture".into(), [8; 32])]).unwrap(),
+        ),
+    )
 }

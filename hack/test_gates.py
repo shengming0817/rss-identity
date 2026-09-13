@@ -31,7 +31,7 @@ class Gates(unittest.TestCase):
             current=pending.pop()
             if current in seen:continue
             seen.add(current);pending.extend(nodes[current])
-        self.assertTrue({'rss-identity-postgres','rss-identity-app','sqlx'}.isdisjoint({packages[i] for i in seen}))
+        self.assertTrue({'rss-identity-postgres','rss-identity-app','rss-identity-core','argon2','sqlx'}.isdisjoint({packages[i] for i in seen}))
 
     def test_independent_consumer_rejects_server_dependencies(self):
         import check_consumer

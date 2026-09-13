@@ -37,7 +37,7 @@ impl Federation {
         &self,
         request: LoginRequest,
         mode: AuthenticationMode,
-        cli: Option<rss_identity_core::cli::CliLoginBinding>,
+        cli: Option<rss_identity_contracts::cli::CliLoginBinding>,
         deadline: OperationDeadline,
     ) -> Result<FederatedRedirect, AuthorityError> {
         let LoginRequest {
@@ -153,7 +153,8 @@ impl Federation {
                     Ok(attempt
                         .cli
                         .map(|v| v.result_url("error", "access_denied"))
-                        .transpose()?)
+                        .transpose()
+                        .map_err(|_| FederationError::Configuration)?)
                 })
             })
             .await
@@ -202,6 +203,8 @@ impl Federation {
                         },
                     ))
                 }) }).await?;
+        let cli_binding = attempt.cli.clone();
+        let completed=async {
         self.check_assurance_profile(tenant, &view)?;
         let credentials = self
             .authority
@@ -364,6 +367,28 @@ impl Federation {
                         ],
                     ))
                 }) }).await
+        }.await;
+        match (completed, cli_binding) {
+            (Err(error), Some(binding)) => {
+                let reason = match error {
+                    AuthorityError::Rejected
+                    | AuthorityError::Platform(_)
+                    | AuthorityError::Federation(
+                        FederationError::Rejected
+                        | FederationError::Claims
+                        | FederationError::StaleConfiguration,
+                    ) => "failed",
+                    _ => "unavailable",
+                };
+                Ok(FederatedOutcome::CliFailure {
+                    return_url: binding
+                        .result_url("error", reason)
+                        .map_err(|_| FederationError::Configuration)?,
+                    error,
+                })
+            }
+            (result, _) => result,
+        }
     }
 }
 pub(crate) fn check_browser(browser: &str) -> Result<(), AuthorityError> {

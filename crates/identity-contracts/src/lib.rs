@@ -1,5 +1,8 @@
 //! Identity v1 wire data. Deserializing these values does not authenticate anyone.
 use serde::{Deserialize, Serialize};
+pub mod cli;
+pub mod platform;
+pub mod session;
 /// Closed normalized authentication strength. ref: serde enum representations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

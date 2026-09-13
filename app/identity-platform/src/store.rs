@@ -41,7 +41,11 @@ pub fn public(path: &Path, limit: u64) -> Result<Vec<u8>, Error> {
         .open(path)
         .map_err(|_| Error::Input)?;
     let m = file.metadata().map_err(|_| Error::Input)?;
-    if !m.is_file() || m.len() > limit {
+    if !m.is_file()
+        || m.len() > limit
+        || (m.uid() != rustix::process::geteuid().as_raw() && m.uid() != 0)
+        || m.permissions().mode() & 0o022 != 0
+    {
         return Err(Error::Input);
     }
     let mut bytes = Vec::new();
@@ -108,9 +112,18 @@ impl Store {
         file.take(16385)
             .read_to_end(&mut bytes)
             .map_err(|_| Error::Input)?;
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| Error::Input)
+        let session: Session = serde_json::from_slice(&bytes).map_err(|_| Error::Input)?;
+        // Network responses may add fields; the on-disk version remains a closed format.
+        let mut input: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| Error::Input)?;
+        let mut canonical = serde_json::to_value(&session).map_err(|_| Error::Input)?;
+        let exact = input == canonical;
+        crate::wipe(&mut input);
+        crate::wipe(&mut canonical);
+        if !exact {
+            return Err(Error::Input);
+        }
+        Ok(Some(session))
     }
     pub fn save(&self, value: &Session) -> Result<(), Error> {
         let path = self
