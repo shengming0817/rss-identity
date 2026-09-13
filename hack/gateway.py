@@ -7,8 +7,11 @@ import deploy,providers
 from test_deployment import Deployment
 
 def main():
- with tempfile.TemporaryDirectory(prefix='identity-gateway-') as tmp:
+ with tempfile.TemporaryDirectory(prefix='identity-gateway-') as tmp, contextlib.ExitStack() as cleanup:
   root=Path(tmp);data=Deployment().data(root)
+  network=root.name
+  providers.docker('network','create',network)
+  cleanup.callback(providers.docker,'network','rm',network)
   # Same renderer, loopback-only topology for the isolated protocol fixture.
   data['backend_subnet']='127.0.0.0/24';data['protocol_subnet']='192.0.2.0/24'
   data['runtime']['public_gateway']='127.0.0.2';data['runtime']['private_gateway']='127.0.0.3'
@@ -32,13 +35,13 @@ def main():
    if not value:raise RuntimeError('gateway behavior mismatch')
    checks+=1
   for kind,service in [('public','public-gateway'),('private','private-gateway'),('hydra-admin','hydra-admin')]:
-   conf=output/(kind+'.conf');source=conf.read_text().replace('http://hydra:4444/','http://127.0.0.1:4444/').replace('http://hydra:4445','http://127.0.0.1:4445').replace('https://keycloak:8443','https://127.0.0.1:8444')
+   conf=output/(kind+'.conf');source=conf.read_text()
    source=source.rsplit('}',1)[0]+'server { listen 127.0.0.4:8080; location / { return 200 "$http_x_forwarded_for|$remote_addr"; } } server { listen 127.0.0.1:4445; location / { return 200 "{}"; } }}'
    conf.write_text(source)
    mounts=[v['source']+':'+v['target']+':ro' for v in compose['services'][service]['volumes']]
-   port=443 if kind=='private' else 8443
+   port=8443 if kind=='hydra-admin' else 443
    prepare=f"""mkdir -p /tmp/fixture; cp -R /run/input /tmp/fixture/input; cp /run/config/{kind}.conf /tmp/fixture/nginx.conf; sed -i "s#/run/input/#/tmp/fixture/input/#g" /tmp/fixture/nginx.conf; chown -R 10001:10001 /tmp/fixture; exec setpriv --reuid=10001 --regid=10001 --clear-groups sh -ec 'test "$(id -u)" = 10001; exec nginx -e stderr -c /tmp/fixture/nginx.conf -g "daemon off;"'"""
-   with providers.container(deploy.IMAGES['nginx'],[port],args=['sh','-ec',prepare],mounts=mounts,user='0:0',sysctls=['net.ipv4.ip_unprivileged_port_start=0']) as (_,ports):
+   with providers.container(deploy.IMAGES['nginx'],[port],args=['sh','-ec',prepare],mounts=mounts,user='0:0',sysctls=['net.ipv4.ip_unprivileged_port_start=0'],network=network) as (_,ports):
     for _ in range(60):
      try:status,_=request(ports[port],'/probe',{});break
      except (OSError,ssl.SSLError):time.sleep(.1)

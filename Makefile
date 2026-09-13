@@ -14,6 +14,7 @@ check:
 
 test:
 	$(PYTHON) -m unittest discover -s hack -p 'test_*.py'
+	$(PYTHON) -m unittest discover -s t3/identity-lifecycle -p 'test_*.py'
 	cargo test --locked --workspace
 
 dependencies:
@@ -76,3 +77,7 @@ check-t3-local-auth:
 
 test-t3-local-auth:
 	$(PYTHON) t3/access-local-auth/run.py --candidate "$(IDENTITY_T3_CANDIDATE)" --record "$(IDENTITY_T3_RECORD)"
+
+.PHONY: test-lifecycle
+test-lifecycle:
+	$(PYTHON) t3/identity-lifecycle/run.py --candidate "$(LIFECYCLE_CANDIDATE)" --output "$(LIFECYCLE_OUTPUT)"

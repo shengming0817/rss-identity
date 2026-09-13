@@ -1,4 +1,4 @@
-import copy,json,tempfile,unittest,os
+import copy,json,tempfile,unittest,os,subprocess,uuid,ipaddress
 from unittest.mock import patch
 from pathlib import Path
 import deploy
@@ -64,6 +64,84 @@ class Deployment(unittest.TestCase):
    changed={**deploy.IMAGES,'postgres':'postgres:new@sha256:'+'b'*64}
    with patch.object(deploy,'IMAGES',changed):path=deploy.render(data,root/'rendered',candidate)
    self.assertEqual(json.loads(path.read_text())['services']['postgres']['image'],candidate['providers']['postgres'])
+
+ def test_compose_preserves_literal_shell_and_paths(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)/'literal-$IDENTITY_T31_SENTINEL';root.mkdir()
+   path=deploy.render(self.data(root),root/'rendered',self.candidate())
+   environment={**os.environ,'IDENTITY_T31_SENTINEL':'must-not-expand','d':'must-not-expand','owner':'must-not-expand'}
+   cli=['docker','compose','--profile','*','-p','identity-compose-test-'+uuid.uuid4().hex[:12],'-f',str(path)]
+   parsed=subprocess.run([*cli,'config','--format','json'],env=environment,text=True,capture_output=True,timeout=15,check=True)
+   services=json.loads(parsed.stdout)['services']
+   self.assertNotIn('must-not-expand',parsed.stdout)
+   mounts={v['target']:v['source'] for v in services['identity']['volumes']}
+   # `config` emits reusable Compose, so its serializer escapes dollars again.
+   self.assertEqual(mounts['/run/config/runtime.json'].replace('$$','$'),str((root/'rendered/runtime.json').resolve()))
+   try:
+    subprocess.run([*cli,'create','--no-build','--pull','never','volume-init'],env=environment,text=True,capture_output=True,timeout=30,check=True)
+    cid=subprocess.check_output([*cli,'ps','--all','--quiet','volume-init'],env=environment,text=True,timeout=15).strip()
+    inspected=json.loads(subprocess.check_output(['docker','inspect',cid],text=True,timeout=15))[0]
+    command=inspected['Config']['Cmd'][0]
+    self.assertIn('${spec%%:*}',command)
+    self.assertIn('"$owner"',command)
+    self.assertNotIn('$$',command)
+    subprocess.run(['docker','start','--attach',cid],text=True,capture_output=True,timeout=30,check=True)
+    state=json.loads(subprocess.check_output(['docker','inspect',cid],text=True,timeout=15))[0]['State']
+    self.assertEqual(state['ExitCode'],0)
+   finally:
+    subprocess.run([*cli,'down','--volumes'],env=environment,text=True,capture_output=True,timeout=30,check=True)
+
+ def test_dynamic_addresses_exclude_all_fixed_service_addresses(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);path=deploy.render(self.data(root),root/'rendered',self.candidate())
+   compose=json.loads(path.read_text())
+   for name in ['backend','protocol']:
+    with self.subTest(network=name):
+     pool=compose['networks'][name]['ipam']['config'][0]
+     subnet=ipaddress.ip_network(pool['subnet']);dynamic=ipaddress.ip_network(pool['ip_range'])
+     self.assertTrue(dynamic.subnet_of(subnet))
+     addresses=[]
+     for service in compose['services'].values():
+      networks=service.get('networks',{})
+      if isinstance(networks,dict) and (address:=networks.get(name,{}).get('ipv4_address')):
+       addresses.append(address)
+       self.assertIn(ipaddress.ip_address(address),subnet)
+       self.assertNotIn(ipaddress.ip_address(address),dynamic)
+     self.assertTrue(addresses)
+
+ def test_dynamic_allocation_leaves_gateway_addresses_available(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);path=deploy.render(self.data(root),root/'rendered',self.candidate())
+   config=json.loads(path.read_text())['networks']['protocol']['ipam']['config'][0]
+   network='identity-ipam-test-'+uuid.uuid4().hex[:12]
+   subnet=ipaddress.ip_network('10.235.'+str(int(uuid.uuid4().hex[:2],16))+'.0/24')
+   options=['--subnet',str(subnet)]
+   if 'ip_range' in config:
+    allocated=ipaddress.ip_network(config['ip_range']);base=ipaddress.ip_network(config['subnet'])
+    options+=['--ip-range',str(subnet.network_address+(int(allocated.network_address)-int(base.network_address)))+'/'+str(allocated.prefixlen)]
+   def docker(*args):return subprocess.run(['docker',*args],capture_output=True,text=True,timeout=30,check=True)
+   docker('network','create',*options,network)
+   containers=[]
+   try:
+    image=deploy.IMAGES['runtime']
+    for suffix,ip in [('dynamic',[]),('gateway',['--ip',str(subnet[2])])]:
+     name=network+'-'+suffix;containers.append(name)
+     docker('run','--detach','--pull','never','--name',name,'--network',network,*ip,image,'sleep','60')
+    actual=json.loads(docker('inspect',containers[0]).stdout)[0]['NetworkSettings']['Networks'][network]['IPAddress']
+    self.assertGreaterEqual(int(ipaddress.ip_address(actual)),int(subnet[128]))
+   finally:
+    for name in containers:subprocess.run(['docker','rm','--force',name],capture_output=True,timeout=30)
+    docker('network','rm',network)
+
+ def test_public_origin_uses_one_port_inside_and_outside(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);path=deploy.render(self.data(root),root/'rendered',self.candidate())
+   services=json.loads(path.read_text())['services']
+   self.assertIn('public',services['public-gateway']['networks'])
+   self.assertFalse(json.loads(path.read_text())['networks']['public'].get('internal',False))
+   self.assertEqual(services['public-gateway']['ports'],['443:443'])
+   self.assertEqual(services['public-gateway']['sysctls'],{'net.ipv4.ip_unprivileged_port_start':'0'})
+   self.assertEqual((root/'rendered/public.conf').read_text().count('listen 443 ssl;'),2)
 
  def test_native_keyrings_and_approved_totp_profile(self):
   with tempfile.TemporaryDirectory() as tmp:
