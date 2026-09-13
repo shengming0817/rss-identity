@@ -49,6 +49,8 @@ pub fn federated_router(
     };
 
     let routes = Router::new()
+        .route("/api/v1/cli/sso/authorize", get(cli_authorize))
+        .route("/api/v1/cli/sso/exchange", post(cli_exchange))
         .route(
             "/api/v1/tenants/{tenant}/oidc/{provider}/login",
             post(begin),
@@ -354,7 +356,7 @@ async fn callback_result(
     let (browser, _) = browser(&headers, false)?;
 
     if let Some(error) = query.error {
-        state
+        let redirect = state
             .federation
             .cancel(
                 query.state,
@@ -364,6 +366,9 @@ async fn callback_result(
                 budget.remaining(),
             )
             .await?;
+        if let Some(url) = redirect {
+            return Ok(axum::response::Redirect::to(&url).into_response());
+        }
         return Ok(callback_failure(if error == "access_denied" {
             "cancelled"
         } else {
@@ -421,4 +426,77 @@ async fn callback_result(
     }
 
     Ok(response)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CliAuthorize {
+    provider_id: ProviderId,
+    redirect_uri: String,
+    code_challenge: String,
+    state: String,
+}
+async fn cli_authorize(
+    State(s): State<FederationState>,
+    Extension(b): Extension<RequestBudget>,
+    Query(q): Query<CliAuthorize>,
+    r: Request,
+) -> Result<Response, HttpError> {
+    let binding =
+        rss_identity_core::cli::CliLoginBinding::new(q.redirect_uri, q.code_challenge, q.state)
+            .map_err(AuthorityError::from)?;
+    let (browser, created) = browser(r.headers(), true)?;
+    let redirect = s
+        .federation
+        .begin_cli_login(
+            q.provider_id,
+            binding,
+            browser.clone(),
+            source(&r)?,
+            b.remaining(),
+        )
+        .await?;
+    let mut response = axum::response::Redirect::to(&redirect.url).into_response();
+    if created {
+        response.headers_mut().insert(
+            header::SET_COOKIE,
+            format!("{BROWSER}={browser}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=3600")
+                .parse()
+                .map_err(|_| BAD)?,
+        );
+    }
+    Ok(response)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CliExchange {
+    code: String,
+    verifier: String,
+    redirect_uri: String,
+}
+async fn cli_exchange(
+    State(s): State<FederationState>,
+    Extension(b): Extension<RequestBudget>,
+    r: Request,
+) -> Result<Response, HttpError> {
+    if unique(r.headers(), "x-identity-request")? != Some("1") {
+        return Err(FORBIDDEN);
+    }
+    let source = source(&r)?;
+    let Json(input) = tokio::time::timeout_at(b.cutoff(), Json::<CliExchange>::from_request(r, &s))
+        .await
+        .map_err(|_| HttpError::request_timeout())?
+        .map_err(|_| BAD)?;
+    crate::handlers::issued(
+        s.local
+            .authority
+            .exchange_cli_login(
+                Zeroizing::new(input.code),
+                Zeroizing::new(input.verifier),
+                input.redirect_uri,
+                source,
+                b.remaining(),
+            )
+            .await?,
+    )
 }

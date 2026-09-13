@@ -73,7 +73,7 @@ fn state_authentication_precedes_tenant_use_and_separates_purpose() {
 #[test]
 fn provider_settings_are_validated_at_every_deserialization_boundary() {
     use rss_identity_core::federation::*;
-    let valid = serde_json::json!({"issuer":"https://idp.example.test","client_id":"client","secret_ref":"secret@1","redirect_uri":"https://identity.example.test/callback","scopes":["openid"],"claims":{"email":null,"groups":null},"jit":false});
+    let valid = serde_json::json!({"issuer":"https://idp.example.test","client_id":"client","redirect_uri":"https://identity.example.test/callback","scopes":["openid"],"claims":{"email":null,"groups":null},"jit":false});
     let checked: ProviderSettings = serde_json::from_value(valid.clone()).unwrap();
     assert!(!checked.jit());
     assert_eq!(checked.issuer().as_str(), "https://idp.example.test");
@@ -83,7 +83,6 @@ fn provider_settings_are_validated_at_every_deserialization_boundary() {
             serde_json::json!("https://user:password@idp.test"),
         ),
         ("client_id", serde_json::json!("")),
-        ("secret_ref", serde_json::json!("mutable")),
         ("scopes", serde_json::json!(["openid", "offline_access"])),
         ("claims", serde_json::json!({"email":"sub","groups":null})),
     ] {

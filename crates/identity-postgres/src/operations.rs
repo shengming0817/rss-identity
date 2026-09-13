@@ -84,7 +84,10 @@ impl Authority {
         self.write_sql(key.tenant, budget.remaining(), move |c| {
             Box::pin(async move {
                 let loaded = crate::session_storage::recheck(c, &actor).await?;
-                loaded.state.authorize_administration(key.tenant)?;
+                loaded.authorize_administration(key.tenant)?;
+                if loaded.system_domain && (administrator || emergency) {
+                    return Err(rss_identity_core::platform::PlatformError::Invalid.into());
+                }
                 insert_account(
                     c,
                     key,
@@ -256,9 +259,21 @@ impl Authority {
             if let Some(proof) = reauthentication {
                 if proof.account() != actor.key || target != actor.key { return Err(crate::transaction::reject().into()); }
                 current(c, &proof, false).await?;
-            } else { loaded.state.authorize_administration(target.tenant)?; }
+            } else { loaded.authorize_administration(target.tenant)?; }
             let old = load(c, target).await?.state;
-            let (next, action) = old.change(&loaded.state, change, admin_count(c, target.tenant).await?)?;
+            let (next, action) = if loaded.system_domain {
+                let platform = crate::platform::load_platform(c, target).await?;
+                let next = platform.change(change, crate::platform::platform_count(c,target.tenant).await?)?.account();
+                let action = match change {
+                    LocalChange::Enabled(true)=>SecurityAction::AccountEnabled,
+                    LocalChange::Enabled(false)=>SecurityAction::AccountDisabled,
+                    LocalChange::Membership(true)=>SecurityAction::MembershipEnabled,
+                    LocalChange::Membership(false)=>SecurityAction::MembershipDisabled,
+                    LocalChange::Password=>SecurityAction::PasswordChanged,
+                    LocalChange::Administrator(_)=>return Err(rss_identity_core::platform::PlatformError::Invalid.into()),
+                };
+                (next, action)
+            } else { old.change(&loaded.state, change, admin_count(c, target.tenant).await?)? };
             sqlx::query("UPDATE identity_authority.accounts SET enabled=$3,administrator=$4,emergency=emergency AND $4,auth_epoch=$5 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(next.enabled()).bind(next.administrator()).bind(next.epoch()).execute(&mut *c).await?;
             if let Some(hash) = hash {
@@ -276,7 +291,11 @@ impl Authority {
     ) -> Result<(), AuthorityError> {
         self.require_runtime()?;
         // Early resource rejection only; every SQL operation must still recheck current authority.
-        if !actor.identity.administrator {
+        if !(if actor.key.tenant == self.system_domain {
+            actor.identity.platform_administrator
+        } else {
+            actor.identity.administrator
+        }) {
             return Err(AuthorityError::RuleRejected(
                 rss_identity_core::account::AccountRuleError::InsufficientPrivilege,
             ));
@@ -297,7 +316,7 @@ impl Authority {
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
         self.read_sql(actor.key.tenant, budget.remaining(), move |c| Box::pin(async move {
-            crate::session_storage::recheck(c, &actor).await?.state.authorize_administration(actor.key.tenant)?;
+            crate::session_storage::recheck(c, &actor).await?.authorize_administration(actor.key.tenant)?;
             let rows:Vec<(uuid::Uuid,Option<String>)>=sqlx::query_as("SELECT a.principal_id,l.login_key FROM identity_authority.accounts a LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND ($2::uuid IS NULL OR a.principal_id>$2) ORDER BY a.principal_id LIMIT $3")
                 .bind(actor.key.tenant.to_string()).bind(cursor.map(|id|id.as_uuid())).bind(i64::from(limit)+1).fetch_all(&mut *c).await?;
             let more=rows.len()>usize::from(limit); let mut accounts=Vec::new();

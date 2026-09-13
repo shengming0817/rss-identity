@@ -73,6 +73,7 @@ def build(out,ui_source,ui_dist):
    elif target=='operator':
     result['migrations']=json.loads(run(['docker','run','--rm','--network','none','--platform','linux/amd64',name,'--describe']))
     if result['migrations']['identity_sql_sha256']!=result['migration_sha256']:raise ValueError('embedded migration identity mismatch')
+    subprocess.run(['docker','run','--rm','--network','none','--platform','linux/amd64','--entrypoint','identity-platform',name,'--version'],check=True)
    if target=='gateway':
     script="""test "$(id -u)" = 10001; printf 'pid /tmp/smoke.pid; error_log stderr crit; events {} http { access_log off; error_log stderr crit; client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi; server { listen 127.0.0.1:8080; root /usr/share/nginx/html; } }' > /tmp/smoke.conf; nginx -e stderr -c /tmp/smoke.conf; trap 'nginx -e stderr -c /tmp/smoke.conf -s quit' EXIT; test -s /usr/share/nginx/html/index.html; curl --fail --silent --max-time 5 http://127.0.0.1:8080/identity-build.json"""
     observed=json.loads(run(['docker','run','--rm','--network','none','--platform','linux/amd64','--entrypoint','sh',name,'-ec',script]))
@@ -96,6 +97,7 @@ def build(out,ui_source,ui_dist):
   result['toolchain']=toolchain
   result['production_features']={k:sorted(v) for k,v in features.items()}
   result['binaries']={p.name:sha(p) for p in (out/'binaries').glob('identity-*')}
+  if set(result['binaries'])!={'identity-server','identity-admin','identity-migrate','identity-clients','identity-platform'}:raise ValueError('candidate binaries incomplete')
   (out/'binaries/metadata.json').unlink();(out/'binaries/artifacts.json').unlink()
   shutil.copytree(ROOT/'deployment',out/'deployment');shutil.copy(ROOT/'hack/deploy.py',out/'deploy.py')
   if run(['/usr/bin/git','rev-parse','HEAD'],cwd=ROOT)!=revision or run(['/usr/bin/git','status','--porcelain'],cwd=ROOT):raise ValueError('source changed during candidate build')

@@ -4,9 +4,9 @@
 
 使用候选中的三份 OCI archives 和 candidate.json，通过 `docker load -i <archive>` 装入本地镜像存储，核对配置使用 candidate.json 的 digest 引用。参考拓扑只支持标准 HTTPS 443、专用 PostgreSQL、一个 Keycloak hostname（可有多个 realm/client）、单 Identity 副本。部署前评估实际 provider 版本，版本/摘要统一来自 deployment/providers.lock.json。
 
-复制 deployment/example.json 为私有部署输入，替换 environment_id、origin、tenant、随机 storage target/lineage、epoch 和全部路径。两个产品 origin 不同；IdP hostname 也独立。域名均由 owner 配置 DNS；不得从请求 Host/Forwarded 推导。
+复制 deployment/example.json 为私有部署输入，替换 environment_id、origin、system_domain_id、随机 storage target/lineage、generation 和全部路径；runtime format_version 固定为 2。两个产品 origin 不同；IdP hostname 也独立。域名均由 owner 配置 DNS；不得从请求 Host/Forwarded 推导。
 
-准备 CA 及独立服务端证书：public 证书 SAN 覆盖 Identity 与 Keycloak 外部 hostname；postgres 证书 SAN 含 postgres；Hydra admin 证书 SAN 含 hydra-admin；Keycloak 服务端证书 SAN 含 keycloak。数据库、Hydra、OIDC 各自 ca_file 必须信任对应证书；不关闭 VerifyFull。
+准备 CA 及独立服务端证书：public 证书 SAN 覆盖 Identity 与 Keycloak 外部 hostname；postgres 证书 SAN 含 postgres；Hydra admin 证书 SAN 含 hydra-admin；Keycloak 服务端证书 SAN 含 keycloak。数据库与 Hydra 的 ca_file、Keycloak 网关的 keycloak.ca_file、各 IdP 提交的 ca_pem 必须信任对应证书；不关闭 VerifyFull。
 
 所有秘密为普通 0600 文件，无尾部换行：runtime/maintenance PG 密码彼此独立且至少32字节；每个产品的 validation secret、OIDC secret独立且至少32字节；OIDC state_key_file 是64位十六进制（32字节、非零）；Hydra gateway service secret和Keycloak DB密码使用32–256字符 base64url；Hydra system/cookie keyring 分别通过 hydra_system_secret_files/hydra_cookie_secret_files 提供，每个 key 至少32字节且两域不重用。秘密不得传命令行值或提交到Git。
 
@@ -26,11 +26,11 @@ Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定�
 1. `docker compose -f /private/rendered/compose.json up -d postgres`。首次 PG 初始化建立独立 hydra/keycloak数据库；已有卷不会重放初始化 SQL。
 2. `docker compose -f /private/rendered/compose.json run --rm migrate`。该命令内嵌 RSS/Identity SQL，执行单库安装并核验实际 runtime/maintenance 权限；旧版本、身份错配、角色碰撞和权限漂移拒绝。
 3. `docker compose -f /private/rendered/compose.json run --rm hydra-migrate`。Hydra 独立执行官方迁移，不受 Identity 事务回滚保护。
-4. 启动 Hydra、hydra-admin和Keycloak：`docker compose -f /private/rendered/compose.json up -d hydra hydra-admin keycloak`。然后运行 `docker compose -f /private/rendered/compose.json run --rm hydra-clients`。Compose 先等待 Hydra 的有界 healthcheck 通过；operator 校验本地配置后，在任何注册写入之前额外等待 admin/public readiness（总预算 60 秒），超时则非零退出。只有无副作用的 readiness GET 会重试。该 operator 任务共享 Hydra 网络命名空间，通过固定 loopback admin/public 端口注册并验证 runtime.json 中的静态 client；仅挂载配置及 OIDC client 秘密，不挂载数据库/维护凭据。缺失时创建，一致时核验通过，配置或凭据漂移时拒绝覆盖；超时/未知创建结果只回读核验，不盲目重发 POST。核验包含 client 认证，成功输出不含秘密。Hydra 全局配置保持 S256，client 固定 authorization_code/code/openid/client_secret_basic、精确 redirect、opaque token 及声明期限。初次Keycloak导入批准realm/client，既有realm变化须经其管理员显式更新，不通过重复导入修复漂移。
-5. 通过独立维护任务初始化首个管理员：`docker compose ... run --rm -v /private/new-password:/run/input/new-password:ro maintenance initialize <principal-uuid> <login> /run/input/new-password`。tenant来自维护配置；初始化只能成功一次，重启不能再次夺取authority。
+4. 启动 Hydra、hydra-admin和Keycloak：`docker compose -f /private/rendered/compose.json up -d hydra hydra-admin keycloak`。然后运行 `docker compose -f /private/rendered/compose.json run --rm hydra-clients`。Compose 先等待 Hydra 的有界 healthcheck 通过；operator 校验本地配置后，在任何注册写入之前额外等待 admin/public readiness（总预算 60 秒），超时则非零退出。只有无副作用的 readiness GET 会重试。该 operator 任务共享 Hydra 网络命名空间，通过固定 loopback admin/public 端口注册并验证 runtime.json 中的静态 client；仅挂载配置及 OIDC client 秘密，不挂载数据库/维护凭据。缺失时创建，一致时核验通过，配置或凭据漂移时拒绝覆盖；超时/未知创建结果只回读核验，不盲目重发 POST。核验包含 client 认证，成功输出不含秘密。Hydra 全局配置保持 S256，client 固定 authorization_code/code/openid/client_secret_basic、精确 redirect、opaque token 及声明期限。初次 Keycloak 导入 IdP owner 提供的 realm/client，既有realm变化须经其管理员显式更新，不通过重复导入修复漂移。
+5. 通过独立维护任务初始化系统域首个平台管理员：`docker compose ... run --rm -v /private/new-password:/run/input/new-password:ro maintenance initialize <principal-uuid> <login> /run/input/new-password`。system_domain_id 来自维护配置；初始化只能成功一次，重启不能再次夺取authority。
 6. 启动 Identity；使用 `docker compose ... exec identity identity-server --probe 127.0.0.1:8080` 执行固定内部探针，Compose healthcheck使用同一命令。公私网网关依赖Identity healthy后才启动并开放端口；不存在启动即自动DDL或自动初始化管理员。
 
-默认维护配置选择声明的第一个tenant；其它tenant维护必须用显式、受审查的维护配置，不根据浏览器输入切换。Keycloak 本身管理员建立/用户生命周期由其部署 owner 负责，本参考不提供默认管理员或密码。
+维护配置固定系统域及外部 deployment generation；recover 命令显式传入目标 tenant 与 principal，连接绑定包含系统域和该目标。Keycloak 本身管理员建立/用户生命周期由其部署 owner 负责，本参考不提供默认管理员或密码。
 
 ## 故障、停止与回退
 
@@ -44,7 +44,7 @@ Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定�
 
 SIGTERM关闭admission并有界等待请求/响应、worker、实际KDF和PG。Compose stop_grace_period大于内部总预算。协议清理持久记录保存在PG，重启继续cleanup_once；应用不盲重试未知提交或远程接受。
 
-回退仅限支持同一schema和同一身份配置的应用artifact；不得回退DB撤销状态。所有旧开发库（含v6）只能由owner确认可丢弃后重建；不自动down migration。首版禁止同库改变environment/origin/config代际，修改配置会明确拒绝；需要保留数据的origin迁移属于后续专门交付。
+回退仅限支持同一schema和同一身份配置的应用artifact；不得回退DB撤销状态。所有旧开发库（含 v7）只能由owner确认可丢弃后重建；不自动down migration。首版禁止同库改变environment/origin/config代际，修改配置会明确拒绝；需要保留数据的origin迁移属于后续专门交付。
 
 维护恢复继续使用 identity-admin recover，详见[维护指南](../guides/local-maintenance.md)。MFA 见[assurance 指南](../guides/assurance.md)；备份恢复、凭据轮换与测量见[I09 运维步骤](recovery.md)。
 
@@ -53,3 +53,14 @@ Hydra admin实际仅监听其网络命名空间的127.0.0.1:4445，认证TLS侧�
 Identity runtime/maintenance 只使用 RSS producer 连接入口：业务变更与 Outbox 同事务提交，
 保留 check_execution fencing；不给 Inbox 访问或 claim/lease/settle 执行权限。重复安装与启动
 会拒绝这些额外权限。实际消息投递由独立 relay owner 承担，不由 Identity 进程代行。
+
+
+## 平台与自助 IdP 配置
+
+`runtime.storage` 仅包含 target、lineage、system_domain_id、generation。业务租户经平台 API 创建，不再配置静态 tenants。`runtime.oidc` 包含 state_key_file、credential_keyring 和 assurance_profiles；后者仅持有可信 ACR/AMR 的解释，不批准 IdP 接入。没有 IdP 时 profiles 可为空。下游 clients 可为空，此时 readiness 不依赖 Hydra 在线。
+
+credential_keyring 为 `{active_key_id, keys:[{key_id,path}]}`，各 path 文件为 0600、32 字节随机钥的 64 位十六进制表示，owner 与服务一致。renderer 只向需要解密的 runtime/owner 任务挂载这些文件。`identity-migrate --rekey --config /run/config/migration.json` 是有界 owner 重加密命令，步骤见[平台指南](../guides/platform.md)。
+
+参考拓扑的 `keycloak` 是独立 IdP 的运维输入，包含 public_origin、ca_file、realm_files。realm_files 是 IdP owner 准备的私有 JSON 文件，渲染后归 Keycloak UID；不由 Identity 租户或审批清单派生。其它 OIDC IdP 可直接由各租户配置。Identity 新增不发布端口的 egress 网络以访问自助 IdP；数据库和内部协议服务继续位于内部网络。
+
+系统域初始化完成后使用 identity-platform login、tenant create 或 tenant admin add。固定候选包含独立 identity-platform 二进制；网页必须消费新协议，旧 UI 不能作为新后端已验收的组合。

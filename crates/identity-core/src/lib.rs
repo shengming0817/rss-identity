@@ -1,8 +1,10 @@
 //! Identity account, session and protocol policy. Authentication is owned by the authority.
 pub mod account;
 pub mod assurance;
+pub mod cli;
 pub mod downstream;
 pub mod federation;
+pub mod platform;
 pub mod session;
 use uuid::Uuid;
 

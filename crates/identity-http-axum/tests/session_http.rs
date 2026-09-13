@@ -295,9 +295,12 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
     let (cookie, csrf, value) = successful_login(&app).await?;
     let id = value["session"]["id"].as_str().unwrap();
     sqlx::query("UPDATE identity_authority.sessions SET auth_time=auth_time-100, absolute_expires_at=absolute_expires_at-100, idle_expires_at=auth_time+20 WHERE session_id=$1::uuid").bind(id).execute(&f.owner).await?;
-    let idle: i64 = sqlx::query_scalar("SELECT idle_expires_at FROM identity_authority.sessions")
-        .fetch_one(&f.owner)
-        .await?;
+    let idle: i64 = sqlx::query_scalar(
+        "SELECT idle_expires_at FROM identity_authority.sessions WHERE session_id=$1::uuid",
+    )
+    .bind(id)
+    .fetch_one(&f.owner)
+    .await?;
     for (origin, token) in [
         ("https://evil.example.test", csrf.as_str()),
         ("null", csrf.as_str()),
@@ -316,9 +319,12 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
         assert!(!response.headers().contains_key("set-cookie"));
     }
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT idle_expires_at FROM identity_authority.sessions")
-            .fetch_one(&f.owner)
-            .await?,
+        sqlx::query_scalar::<_, i64>(
+            "SELECT idle_expires_at FROM identity_authority.sessions WHERE session_id=$1::uuid"
+        )
+        .bind(id)
+        .fetch_one(&f.owner)
+        .await?,
         idle
     );
     let mut req = request("GET", "session", Some(&cookie), None, json!(null));
@@ -347,9 +353,12 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
             .insert("origin", "https://evil.example.test".parse()?);
         assert_eq!(app.clone().oneshot(req).await?.status(), StatusCode::OK);
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT idle_expires_at FROM identity_authority.sessions")
-                .fetch_one(&f.owner)
-                .await?,
+            sqlx::query_scalar::<_, i64>(
+                "SELECT idle_expires_at FROM identity_authority.sessions WHERE session_id=$1::uuid"
+            )
+            .bind(id)
+            .fetch_one(&f.owner)
+            .await?,
             idle
         );
     }

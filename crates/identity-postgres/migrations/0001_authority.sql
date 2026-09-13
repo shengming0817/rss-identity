@@ -1,13 +1,13 @@
 -- Identity owns this migration identity; RSS message schema is installed separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=7));
-INSERT INTO identity_authority.schema_version VALUES(7);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=8));
+INSERT INTO identity_authority.schema_version VALUES(8);
 CREATE ROLE identity_account_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE ROLE identity_account_maintenance NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL DEFAULT gen_random_uuid(),
- bootstrap_tenant uuid,
+ system_domain uuid,
  environment_id text,
  identity_config_version bigint,
  identity_public_origin text,
@@ -21,7 +21,7 @@ CREATE FUNCTION identity_authority.protect_deployment() RETURNS trigger LANGUAGE
 BEGIN
  IF (OLD.environment_id IS NOT NULL AND (NEW.environment_id,NEW.identity_config_version,NEW.identity_public_origin,NEW.product_public_origin) IS DISTINCT FROM (OLD.environment_id,OLD.identity_config_version,OLD.identity_public_origin,OLD.product_public_origin))
  OR NEW.authority_id <> OLD.authority_id
- OR (OLD.bootstrap_tenant IS NOT NULL AND NEW.bootstrap_tenant IS DISTINCT FROM OLD.bootstrap_tenant) THEN
+ OR (OLD.system_domain IS NOT NULL AND NEW.system_domain IS DISTINCT FROM OLD.system_domain) THEN
  RAISE EXCEPTION 'immutable authority state'; END IF;
  RETURN NEW;
 END $$;
@@ -49,6 +49,26 @@ CREATE TABLE identity_authority.memberships (
  PRIMARY KEY(tenant_id,principal_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts
 );
+CREATE TABLE identity_authority.platform_administrators (
+ tenant_id uuid NOT NULL, principal_id uuid NOT NULL,
+ PRIMARY KEY(tenant_id,principal_id),
+ FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts
+);
+CREATE TABLE identity_authority.tenant_registry (
+ tenant_id uuid NOT NULL,
+ business_tenant uuid NOT NULL UNIQUE CHECK(business_tenant<>tenant_id AND business_tenant<>'00000000-0000-0000-0000-000000000000'),
+ name text NOT NULL CHECK(octet_length(name) BETWEEN 1 AND 128 AND name=btrim(name)),
+ initial_principal uuid NOT NULL,
+ PRIMARY KEY(tenant_id,business_tenant)
+);
+CREATE TABLE identity_authority.platform_operations (
+ tenant_id uuid NOT NULL, operation_id uuid NOT NULL CHECK(operation_id<>'00000000-0000-0000-0000-000000000000'),
+ kind text NOT NULL CHECK(kind IN ('tenant_created','administrator_added')),
+ business_tenant uuid NOT NULL, principal_id uuid NOT NULL,
+ created_at bigint NOT NULL DEFAULT floor(extract(epoch FROM clock_timestamp())),
+ PRIMARY KEY(tenant_id,operation_id),
+ FOREIGN KEY(tenant_id,business_tenant) REFERENCES identity_authority.tenant_registry
+);
 CREATE TABLE identity_authority.attempts (
  tenant_id uuid NOT NULL, key text NOT NULL CHECK(octet_length(key) BETWEEN 1 AND 300),
  count integer NOT NULL CHECK(count>0), expires_at timestamptz NOT NULL,
@@ -63,8 +83,13 @@ CREATE TABLE identity_authority.providers (
  enabled boolean NOT NULL,
  settings jsonb NOT NULL CHECK(jsonb_typeof(settings)='object' AND octet_length(settings::text)<=16384),
  PRIMARY KEY(tenant_id,provider_id),
- deployment_approval bytea CHECK(deployment_approval IS NULL OR octet_length(deployment_approval)=32),
- CHECK(NOT enabled OR deployment_approval IS NOT NULL)
+ assurance_profile bytea NOT NULL CHECK(octet_length(assurance_profile)=32),
+ credential_version bigint NOT NULL CHECK(credential_version>0)
+);
+CREATE TABLE identity_authority.provider_credentials (
+ tenant_id uuid NOT NULL, provider_id uuid NOT NULL, credential_version bigint NOT NULL CHECK(credential_version>0),
+ sealed jsonb NOT NULL CHECK(jsonb_typeof(sealed)='object' AND octet_length(sealed::text)<=131072),
+ PRIMARY KEY(tenant_id,provider_id), FOREIGN KEY(tenant_id,provider_id) REFERENCES identity_authority.providers
 );
 CREATE TABLE identity_authority.external_identities (
  tenant_id uuid NOT NULL, identity_id uuid NOT NULL, principal_id uuid NOT NULL, provider_id uuid NOT NULL,
@@ -116,23 +141,33 @@ CREATE TABLE identity_authority.oidc_transactions (
  tenant_id uuid NOT NULL, attempt_id bytea NOT NULL CHECK(octet_length(attempt_id)=32),
  provider_id uuid NOT NULL, config_version bigint NOT NULL CHECK(config_version>0),
  state_hash bytea NOT NULL CHECK(octet_length(state_hash)=32), browser_hash bytea NOT NULL CHECK(octet_length(browser_hash)=32),
- purpose smallint NOT NULL CHECK(purpose BETWEEN 0 AND 2),
+ purpose smallint NOT NULL CHECK(purpose BETWEEN 0 AND 3),
  authentication_mode smallint NOT NULL CHECK(authentication_mode BETWEEN 0 AND 2),
  nonce text, verifier text, claimed boolean NOT NULL DEFAULT false,
  created_at bigint NOT NULL, expires_at bigint NOT NULL CHECK(expires_at>created_at),
  target_client text NOT NULL CHECK(octet_length(target_client) BETWEEN 1 AND 128),
  return_url text NOT NULL CHECK(octet_length(return_url) BETWEEN 1 AND 2048),
  link_intent uuid, replacement_session uuid,
+ cli_binding jsonb CHECK((purpose=3 AND cli_binding IS NOT NULL AND jsonb_typeof(cli_binding)='object' AND octet_length(cli_binding::text)<=2048) OR (purpose<>3 AND cli_binding IS NULL)),
  PRIMARY KEY(tenant_id,attempt_id), UNIQUE(tenant_id,state_hash),
  FOREIGN KEY(tenant_id,provider_id) REFERENCES identity_authority.providers,
  FOREIGN KEY(tenant_id,link_intent) REFERENCES identity_authority.link_intents,
  FOREIGN KEY(tenant_id,replacement_session) REFERENCES identity_authority.sessions,
- CHECK((purpose=1 AND authentication_mode=1) OR (purpose=2 AND authentication_mode=0) OR (purpose=0 AND (authentication_mode=0 OR (authentication_mode=2 AND replacement_session IS NOT NULL)))),
- CHECK((purpose=0 AND link_intent IS NULL) OR (purpose IN(1,2) AND link_intent IS NOT NULL)),
+ CHECK((purpose=1 AND authentication_mode=1) OR (purpose=2 AND authentication_mode=0) OR (purpose=3 AND authentication_mode=0) OR (purpose=0 AND (authentication_mode=0 OR (authentication_mode=2 AND replacement_session IS NOT NULL)))),
+ CHECK((purpose IN(0,3) AND link_intent IS NULL) OR (purpose IN(1,2) AND link_intent IS NOT NULL)),
  CHECK((claimed AND nonce IS NULL AND verifier IS NULL) OR (NOT claimed AND octet_length(nonce)=43 AND octet_length(verifier)=43))
 );
 CREATE INDEX oidc_expiry ON identity_authority.oidc_transactions(tenant_id,expires_at);
 CREATE INDEX link_expiry ON identity_authority.link_intents(tenant_id,expires_at);
+CREATE TABLE identity_authority.cli_grants (
+ tenant_id uuid NOT NULL, code_hash bytea NOT NULL CHECK(octet_length(code_hash)=32),
+ binding jsonb NOT NULL CHECK(jsonb_typeof(binding)='object' AND octet_length(binding::text)<=2048),
+ principal_id uuid NOT NULL, auth_epoch bigint NOT NULL CHECK(auth_epoch>0),membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
+ external_identity_id uuid NOT NULL, provider_epoch bigint NOT NULL CHECK(provider_epoch>0),auth_facts jsonb NOT NULL,
+ created_at bigint NOT NULL, expires_at bigint NOT NULL CHECK(expires_at>created_at AND expires_at-created_at<=60),
+ PRIMARY KEY(tenant_id,code_hash), FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts,
+ FOREIGN KEY(tenant_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,identity_id)
+);
 CREATE TABLE identity_authority.product_subjects (
  tenant_id uuid NOT NULL, client_id text NOT NULL CHECK(octet_length(client_id) BETWEEN 1 AND 256),
  principal_id uuid NOT NULL, subject text NOT NULL CHECK(octet_length(subject)=64),
@@ -162,7 +197,7 @@ CREATE TABLE identity_authority.downstream_grants (
 CREATE INDEX downstream_client ON identity_authority.downstream_grants(tenant_id,client_id);
 CREATE INDEX downstream_sweep ON identity_authority.downstream_grants(tenant_id,next_attempt,grant_id);
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['guard','local_credentials','accounts','memberships','attempts','sessions','providers','external_identities','link_intents','oidc_transactions','product_subjects','downstream_grants'] LOOP
+ FOREACH t IN ARRAY ARRAY['cli_grants','provider_credentials','platform_administrators','tenant_registry','platform_operations','guard','local_credentials','accounts','memberships','attempts','sessions','providers','external_identities','link_intents','oidc_transactions','product_subjects','downstream_grants'] LOOP
  EXECUTE format('ALTER TABLE identity_authority.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE identity_authority.%I FORCE ROW LEVEL SECURITY',t);
  EXECUTE format('CREATE POLICY tenant ON identity_authority.%I USING (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',t);
@@ -173,7 +208,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA identity_authority FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA identity_authority FROM PUBLIC;
 GRANT USAGE ON SCHEMA identity_authority TO identity_account_runtime,identity_account_maintenance;
 GRANT SELECT ON identity_authority.schema_version,identity_authority.deployment TO identity_account_runtime,identity_account_maintenance;
-GRANT UPDATE(bootstrap_tenant) ON identity_authority.deployment TO identity_account_maintenance;
+GRANT UPDATE(system_domain) ON identity_authority.deployment TO identity_account_maintenance;
 GRANT SELECT,INSERT,UPDATE ON identity_authority.guard TO identity_account_runtime,identity_account_maintenance;
 GRANT SELECT,INSERT,UPDATE ON identity_authority.accounts,identity_authority.memberships TO identity_account_runtime;
 GRANT SELECT,INSERT ON identity_authority.accounts,identity_authority.memberships TO identity_account_maintenance;
@@ -190,3 +225,55 @@ GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.link_intents,identity_au
 
 GRANT SELECT,INSERT ON identity_authority.product_subjects TO identity_account_runtime;
 GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.downstream_grants TO identity_account_runtime;
+
+GRANT SELECT,INSERT,DELETE ON identity_authority.platform_administrators TO identity_account_runtime;
+GRANT SELECT,INSERT ON identity_authority.platform_administrators TO identity_account_maintenance;
+GRANT SELECT,INSERT ON identity_authority.tenant_registry,identity_authority.platform_operations TO identity_account_runtime;
+CREATE ROLE identity_tenant_registrar NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+GRANT USAGE,CREATE ON SCHEMA identity_authority TO identity_tenant_registrar;
+GRANT SELECT ON identity_authority.deployment,identity_authority.tenant_registry TO identity_tenant_registrar;
+GRANT SELECT,INSERT,UPDATE ON identity_authority.guard TO identity_tenant_registrar;
+GRANT INSERT ON identity_authority.accounts,identity_authority.local_credentials,identity_authority.memberships TO identity_tenant_registrar;
+
+-- The caller holds the system guard, rechecks its actor, and appends the system event in this transaction.
+CREATE FUNCTION identity_authority.register_tenant(target uuid, generation bigint) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,identity_authority AS $$
+DECLARE system uuid := nullif(current_setting('rss.tenant_id',true),'')::uuid;
+BEGIN
+ IF system IS NULL OR system IS DISTINCT FROM (SELECT system_domain FROM identity_authority.deployment)
+ OR target=system OR generation<1 OR generation IS DISTINCT FROM nullif(current_setting('rss.execution_epoch',true),'')::bigint
+ OR NOT EXISTS(SELECT FROM identity_authority.tenant_registry WHERE tenant_id=system AND business_tenant=target)
+ THEN RAISE EXCEPTION 'platform operation rejected'; END IF;
+ PERFORM rss_transactional_messaging.check_execution();
+ PERFORM set_config('rss.tenant_id',target::text,true);
+ INSERT INTO rss_transactional_messaging.tenant_epoch VALUES(target,generation);
+ PERFORM rss_transactional_messaging.check_execution();
+ INSERT INTO identity_authority.guard VALUES(target);
+ PERFORM set_config('rss.tenant_id',system::text,true);
+END $$;
+ALTER FUNCTION identity_authority.register_tenant(uuid,bigint) OWNER TO identity_tenant_registrar;
+CREATE FUNCTION identity_authority.insert_tenant_administrator(target uuid, principal uuid, login text, phc text) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,identity_authority AS $$
+DECLARE system uuid := nullif(current_setting('rss.tenant_id',true),'')::uuid;
+BEGIN
+ IF system IS NULL OR system IS DISTINCT FROM (SELECT system_domain FROM identity_authority.deployment)
+ OR target=system OR NOT EXISTS(SELECT FROM identity_authority.tenant_registry WHERE tenant_id=system AND business_tenant=target)
+ THEN RAISE EXCEPTION 'platform operation rejected'; END IF;
+ PERFORM rss_transactional_messaging.check_execution();
+ PERFORM set_config('rss.tenant_id',target::text,true);
+ PERFORM rss_transactional_messaging.check_execution();
+ PERFORM tenant_id FROM identity_authority.guard WHERE tenant_id=target FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'unregistered tenant'; END IF;
+ INSERT INTO identity_authority.accounts(tenant_id,principal_id,administrator) VALUES(target,principal,true);
+ INSERT INTO identity_authority.local_credentials VALUES(target,principal,login,phc);
+ INSERT INTO identity_authority.memberships(tenant_id,principal_id) VALUES(target,principal);
+ PERFORM set_config('rss.tenant_id',system::text,true);
+END $$;
+ALTER FUNCTION identity_authority.insert_tenant_administrator(uuid,uuid,text,text) OWNER TO identity_tenant_registrar;
+REVOKE CREATE ON SCHEMA identity_authority FROM identity_tenant_registrar;
+REVOKE ALL ON FUNCTION identity_authority.register_tenant(uuid,bigint),identity_authority.insert_tenant_administrator(uuid,uuid,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION identity_authority.register_tenant(uuid,bigint),identity_authority.insert_tenant_administrator(uuid,uuid,text,text) TO identity_account_runtime;
+
+GRANT SELECT,INSERT,UPDATE ON identity_authority.provider_credentials TO identity_account_runtime;
+
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.cli_grants TO identity_account_runtime;

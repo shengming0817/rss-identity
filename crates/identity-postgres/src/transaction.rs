@@ -55,6 +55,7 @@ impl AccountEvent {
 #[serde(untagged)]
 pub(crate) enum SecurityEvent {
     Account(AccountEvent),
+    Platform(crate::platform::PlatformEvent),
     Session(crate::sessions::SessionEvent),
     Federation(crate::federation::FederationEvent),
     Downstream(crate::downstream::DownstreamEvent),
@@ -65,6 +66,7 @@ impl SecurityEvent {
     }
     fn tenant(&self) -> &str {
         match self {
+            Self::Platform(v) => &v.tenant,
             Self::Downstream(v) => &v.tenant,
             Self::Account(v) => &v.tenant,
             Self::Session(v) => &v.tenant,
@@ -73,6 +75,12 @@ impl SecurityEvent {
     }
     fn contract(&self) -> (&'static str, &'static str, u32, &'static str) {
         match self {
+            Self::Platform(_) => (
+                "platform.changed",
+                "identity.platform.security",
+                1,
+                include_str!("platform-security-event-v1.json"),
+            ),
             Self::Downstream(_) => (
                 "downstream.changed",
                 "identity.downstream.security",
@@ -102,6 +110,8 @@ impl SecurityEvent {
 }
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MutationError {
+    #[error(transparent)]
+    Platform(#[from] rss_identity_core::platform::PlatformError),
     #[error(transparent)]
     Storage(#[from] PgError),
     #[error(transparent)]
@@ -143,12 +153,25 @@ impl Authority {
     where
         F: for<'a> FnOnce(&'a mut PgTransaction<'_>) -> BoxFuture<'a, Result<T, PgError>> + Send,
     {
+        let bundle = self.runtimes.snapshot()?;
+        Self::read_bundle(bundle, tenant, deadline, operation).await
+    }
+    async fn read_bundle<T: Send, F>(
+        bundle: std::sync::Arc<crate::runtime::RuntimeBundle>,
+        tenant: TenantId,
+        deadline: OperationDeadline,
+        operation: F,
+    ) -> Result<T, AuthorityError>
+    where
+        F: for<'a> FnOnce(&'a mut PgTransaction<'_>) -> BoxFuture<'a, Result<T, PgError>> + Send,
+    {
         if deadline.timeout().is_zero() {
             return Err(AuthorityError::NotStarted(
                 crate::StorageFailure::DeadlineElapsed,
             ));
         }
-        self.runtime
+        bundle
+            .runtime
             .local_tx(tenant, deadline, operation)
             .await
             .fold(
@@ -284,68 +307,67 @@ impl Authority {
             + Send
             + 'static,
     {
-        let outbox = self.outbox.clone();
+        let bundle = self.runtimes.snapshot()?;
+        let outbox = bundle.outbox.clone();
         let reason = std::sync::Arc::new(std::sync::OnceLock::new());
         let reason_slot = reason.clone();
-        let result = self
-            .read(tenant, deadline, move |tx| {
-                Box::pin(async move {
-                    let (result, events) = operation(tx)
-                        .await
-                        .map_err(|e| sql_failure(e, &reason_slot))?;
-                    if (require_event && events.is_empty()) || events.len() > MAX_MUTATION_EVENTS {
+        let result = Self::read_bundle(bundle, tenant, deadline, move |tx| {
+            Box::pin(async move {
+                let (result, events) = operation(tx)
+                    .await
+                    .map_err(|e| sql_failure(e, &reason_slot))?;
+                if (require_event && events.is_empty()) || events.len() > MAX_MUTATION_EVENTS {
+                    return Err(corrupt());
+                }
+                for event in events {
+                    if event.tenant() != tenant.to_string() {
                         return Err(corrupt());
                     }
-                    for event in events {
-                        if event.tenant() != tenant.to_string() {
-                            return Err(corrupt());
-                        }
-                        let now: i64 = tx
-                            .with_connection(|c| {
-                                Box::pin(async {
-                                    sqlx::query_scalar(
+                    let now: i64 = tx
+                        .with_connection(|c| {
+                            Box::pin(async {
+                                sqlx::query_scalar(
                                     "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint",
                                 )
                                 .fetch_one(c)
                                 .await
-                                })
                             })
-                            .await?;
-                        let (route, contract, version, schema) = event.contract();
-                        let envelope = MessageEnvelope::new(
-                            MessageId::parse(&Uuid::new_v4().to_string()).map_err(|_| corrupt())?,
-                            MessageMetadata::new(
-                                AuthoredMessageMetadata::new(
-                                    tenant,
-                                    Timepoint::try_from(now).map_err(|_| corrupt())?,
-                                    MessagingDomain::parse("identity.security")
-                                        .map_err(|_| corrupt())?,
-                                    MessageRoute::parse(route).map_err(|_| corrupt())?,
-                                    ContractIdentity::new(
-                                        ContractId::parse(contract).map_err(|_| corrupt())?,
-                                        ContractVersion::from_major(version)
-                                            .map_err(|_| corrupt())?,
-                                        SchemaDigest::parse(&format!(
-                                            "sha256:{:x}",
-                                            Sha256::digest(schema)
-                                        ))
-                                        .map_err(|_| corrupt())?,
-                                    ),
+                        })
+                        .await?;
+                    let (route, contract, version, schema) = event.contract();
+                    let envelope = MessageEnvelope::new(
+                        MessageId::parse(&Uuid::new_v4().to_string()).map_err(|_| corrupt())?,
+                        MessageMetadata::new(
+                            AuthoredMessageMetadata::new(
+                                tenant,
+                                Timepoint::try_from(now).map_err(|_| corrupt())?,
+                                MessagingDomain::parse("identity.security")
+                                    .map_err(|_| corrupt())?,
+                                MessageRoute::parse(route).map_err(|_| corrupt())?,
+                                ContractIdentity::new(
+                                    ContractId::parse(contract).map_err(|_| corrupt())?,
+                                    ContractVersion::from_major(version).map_err(|_| corrupt())?,
+                                    SchemaDigest::parse(&format!(
+                                        "sha256:{:x}",
+                                        Sha256::digest(schema)
+                                    ))
+                                    .map_err(|_| corrupt())?,
                                 ),
-                                MessageMetadataExtensions::default(),
                             ),
-                            serde_json::to_vec(&event).map_err(|_| corrupt())?,
-                        );
-                        if outbox.append(tx, PendingMessage::new(envelope)).await?
-                            != AppendOutcome::Inserted
-                        {
-                            return Err(corrupt());
-                        }
+                            MessageMetadataExtensions::default(),
+                        ),
+                        serde_json::to_vec(&event).map_err(|_| corrupt())?,
+                    );
+                    if outbox.append(tx, PendingMessage::new(envelope)).await?
+                        != AppendOutcome::Inserted
+                    {
+                        return Err(corrupt());
                     }
-                    Ok(result)
-                })
+                }
+                Ok(result)
             })
-            .await;
+        })
+        .await;
         domain_result(result, reason.get().copied())
     }
 }
@@ -369,6 +391,10 @@ where
 fn sql_failure(error: MutationError, reason: &std::sync::OnceLock<AuthorityError>) -> PgError {
     match error {
         MutationError::Storage(e) => e,
+        MutationError::Platform(e) => {
+            let _ = reason.set(AuthorityError::Platform(e));
+            reject()
+        }
         MutationError::Rule(e) => {
             let _ = reason.set(AuthorityError::RuleRejected(e));
             reject()

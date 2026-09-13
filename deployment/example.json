@@ -1,6 +1,6 @@
 {
   "runtime": {
-    "format_version": 1,
+    "format_version": 2,
     "identity_origin": {
       "environment_id": "production",
       "config_version": 1,
@@ -52,12 +52,8 @@
         2,
         2
       ],
-      "tenants": [
-        {
-          "tenant_id": "11111111-1111-4111-8111-111111111111",
-          "epoch": 1
-        }
-      ]
+      "system_domain_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "generation": 1
     },
     "listen": "0.0.0.0:8080",
     "public_gateway": "172.29.0.2",
@@ -68,21 +64,17 @@
       "resource_seconds": 30
     },
     "oidc": {
-      "providers": [
-        {
-          "tenant_id": "11111111-1111-4111-8111-111111111111",
-          "issuer": "https://sso.example.test/realms/identity",
-          "client_id": "identity-rp",
-          "secret_ref": "identity-rp@1",
-          "secret_file": "/srv/rss-identity/input/keycloak-client-secret",
-          "addresses": [
-            "172.30.0.2/32"
-          ],
-          "keycloak_totp": false
-        }
-      ],
-      "ca_file": "/srv/rss-identity/input/keycloak-ca.pem",
-      "state_key_file": "/srv/rss-identity/input/state-key-hex"
+      "assurance_profiles": [],
+      "state_key_file": "/srv/rss-identity/input/state-key-hex",
+      "credential_keyring": {
+        "active_key_id": "initial",
+        "keys": [
+          {
+            "key_id": "initial",
+            "path": "/srv/rss-identity/input/provider-key-hex"
+          }
+        ]
+      }
     },
     "hydra": {
       "admin_url": "https://hydra-admin:8443",
@@ -127,5 +119,12 @@
   ],
   "hydra_cookie_secret_files": [
     "/srv/rss-identity/input/hydra-cookie-secret"
-  ]
+  ],
+  "keycloak": {
+    "public_origin": "https://sso.example.test",
+    "ca_file": "/srv/rss-identity/input/keycloak-ca.pem",
+    "realm_files": [
+      "/srv/rss-identity/input/keycloak-identity-realm.json"
+    ]
+  }
 }

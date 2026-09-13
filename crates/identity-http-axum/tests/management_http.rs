@@ -361,7 +361,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
             &format!("{base}/providers"),
             &cookie,
             &csrf,
-            serde_json::to_value(federation_support::settings().input())?,
+            json!({"settings": federation_support::settings().input(), "client_secret":"fixture-secret"}),
         ))
         .await?;
     assert_eq!(r.status(), StatusCode::CREATED);
@@ -376,14 +376,14 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
             &format!("{base}/providers"),
             &cookie,
             &csrf,
-            serde_json::to_value(&original)?,
+            json!({"settings": original, "client_secret":"fixture-secret"}),
         ))
         .await?;
     let second = json_body(created).await?;
     let second_path = format!("{base}/providers/{}", second["id"].as_str().unwrap());
     let mut changed = original;
     changed.client_id = "updated-client".into();
-    let update = json!({"expected_version":1,"settings":changed});
+    let update = json!({"expected_version":1,"settings":changed,"client_secret":"rotated-secret"});
     let updated = app
         .clone()
         .oneshot(req("PUT", &second_path, &cookie, &csrf, update.clone()))
@@ -435,7 +435,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
         .await?;
     let options = json_body(r).await?;
     assert_eq!(options["providers"].as_array().unwrap().len(), 1);
-    assert!(!options.to_string().contains("secret_ref"));
+    assert!(!options.to_string().contains("client_secret"));
     let enabled = app
         .clone()
         .oneshot(req(
@@ -612,9 +612,20 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
                         .await
                         .map_err(|_| rss_identity_core::federation::FederationError::Unavailable)?;
                 } else {
-                    next.update_provider(other, id, version, settings, deadline())
-                        .await
-                        .map_err(|_| rss_identity_core::federation::FederationError::Unavailable)?;
+                    next.update_provider(
+                        other,
+                        id,
+                        version,
+                        settings,
+                        rss_identity_core::federation::ProviderCredentials::new(
+                            "fixture-secret".into(),
+                            None,
+                        )
+                        .unwrap(),
+                        deadline(),
+                    )
+                    .await
+                    .map_err(|_| rss_identity_core::federation::FederationError::Unavailable)?;
                 }
                 Ok(())
             })
@@ -660,8 +671,9 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
     let (app, _, _) = app(&f);
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let settings = serde_json::to_value(federation_support::settings().input())?;
-    sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2 FROM generate_series(1,99)")
+    sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2,decode(repeat('00',32),'hex'),1 FROM generate_series(1,99)")
         .bind(A).bind(&settings).execute(&f.owner).await?;
+    let settings = json!({"settings":settings,"client_secret":"fixture-secret"});
     let path = format!("/api/v1/tenants/{A}/providers");
     let (first, second) = tokio::join!(
         app.clone()

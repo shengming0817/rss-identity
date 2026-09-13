@@ -22,11 +22,12 @@ pub fn deployment_identity() -> DeploymentIdentity {
     DeploymentIdentity::new(
         "fixture".into(),
         1,
-        "https://identity.test".into(),
-        "https://product.test".into(),
+        "https://identity.example.test".into(),
+        "https://product.example.test".into(),
     )
     .unwrap()
 }
+pub const SYSTEM: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 pub const A: &str = "11111111-1111-4111-8111-111111111111";
 pub const B: &str = "22222222-2222-4222-8222-222222222222";
 pub const PASSWORD: &str = "correct horse battery staple";
@@ -62,11 +63,17 @@ pub struct Fixture {
     pub maintenance_runtime: Arc<PgRuntime>,
     pub store: Authority,
     pub maintenance: Authority,
+    pub deployment: DeploymentIdentity,
     pub key: AccountKey,
+    pub system_key: AccountKey,
+    platform_cookie: tokio::sync::Mutex<Option<String>>,
     management_cookie: tokio::sync::Mutex<Option<String>>,
 }
 impl Fixture {
     pub async fn new() -> anyhow::Result<Self> {
+        Self::with_identity(deployment_identity()).await
+    }
+    pub async fn with_identity(deployment: DeploymentIdentity) -> anyhow::Result<Self> {
         let port = std::env::var("IDENTITY_TEST_PG_PORT")?.parse()?;
         let options = PgConnectOptions::new()
             .host("127.0.0.1")
@@ -90,7 +97,7 @@ impl Fixture {
             .execute(&owner)
             .await?;
         sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
-        sqlx::raw_sql("UPDATE identity_authority.deployment SET environment_id='fixture', identity_config_version=1, identity_public_origin='https://identity.test', product_public_origin='https://product.test'").execute(&owner).await?;
+        sqlx::query("UPDATE identity_authority.deployment SET environment_id=$1,identity_config_version=$2,identity_public_origin=$3,product_public_origin=$4").bind(deployment.environment()).bind(deployment.version()).bind(deployment.identity_origin()).bind(deployment.product_origin()).execute(&owner).await?;
         sqlx::raw_sql("GRANT identity_account_runtime TO identity_runtime; GRANT identity_account_maintenance TO identity_maintenance;").execute(&owner).await?;
         sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO identity_runtime;  GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO identity_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO identity_runtime;").execute(&owner).await?;
         sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO identity_maintenance; GRANT SELECT ON rss_transactional_messaging.policy TO identity_maintenance;  GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO identity_maintenance; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO identity_maintenance; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO identity_maintenance;").execute(&owner).await?;
@@ -99,7 +106,7 @@ impl Fixture {
             .bind([2_u8; 16].as_slice())
             .execute(&owner)
             .await?;
-        for tenant in [A, B] {
+        for tenant in [SYSTEM, B] {
             sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,1)")
                 .bind(tenant)
                 .execute(&owner)
@@ -108,6 +115,7 @@ impl Fixture {
         let binding = ExecutionBinding::new(
             StorageIdentity::new([1; 16], [2; 16])?,
             vec![
+                (TenantId::parse(SYSTEM)?, Epoch::new(1)?),
                 (TenantId::parse(A)?, Epoch::new(1)?),
                 (TenantId::parse(B)?, Epoch::new(1)?),
             ],
@@ -146,12 +154,15 @@ impl Fixture {
             Duration::from_secs(5),
             Duration::from_secs(5),
         )?;
+        sqlx::raw_sql(include_str!("../../../../app/identity/src/grants.sql"))
+            .execute(&owner)
+            .await?;
         let store = Authority::connect(
             runtime.clone(),
             std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
-            deployment_identity(),
+            deployment.clone(),
             budget,
-            TenantId::parse(A)?,
+            TenantId::parse(SYSTEM)?,
             AuthorityProfile::Runtime,
             deadline(),
         )
@@ -159,14 +170,40 @@ impl Fixture {
         let maintenance = Authority::connect(
             maintenance_runtime.clone(),
             std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
-            deployment_identity(),
+            deployment.clone(),
             budget,
-            TenantId::parse(A)?,
+            TenantId::parse(SYSTEM)?,
             AuthorityProfile::Maintenance,
             deadline(),
         )
         .await?;
+        sqlx::raw_sql(include_str!("../../../../app/identity/src/grants.sql"))
+            .execute(&owner)
+            .await?;
+        let keys = std::sync::Arc::new(CredentialKeys::new(
+            "fixture".into(),
+            vec![("fixture".into(), [8; 32])],
+        )?);
+        store.configure_credentials(keys.clone())?;
+        maintenance.configure_credentials(keys)?;
+        store.configure_runtime(RuntimeSource::new(
+            PgConfig::new_for_test_plaintext(
+                "127.0.0.1",
+                port,
+                &db,
+                "identity_runtime",
+                PgPassword::new("fixture-only"),
+            ),
+            StorageIdentity::new([1; 16], [2; 16])?,
+            Epoch::new(1)?,
+        ))?;
         Ok(Self {
+            deployment,
+            system_key: AccountKey {
+                tenant: TenantId::parse(SYSTEM)?,
+                principal: PrincipalId::generate(),
+            },
+            platform_cookie: tokio::sync::Mutex::new(None),
             management_cookie: tokio::sync::Mutex::new(None),
             owner,
             admin,
@@ -186,6 +223,7 @@ impl Fixture {
         let binding = ExecutionBinding::new(
             StorageIdentity::new([1; 16], [2; 16])?,
             vec![
+                (TenantId::parse(SYSTEM)?, Epoch::new(1)?),
                 (TenantId::parse(A)?, Epoch::new(1)?),
                 (TenantId::parse(B)?, Epoch::new(1)?),
             ],
@@ -216,9 +254,9 @@ impl Fixture {
         Authority::connect(
             self.runtime.clone(),
             std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
-            deployment_identity(),
+            self.deployment.clone(),
             budget,
-            self.key.tenant,
+            TenantId::parse(SYSTEM).unwrap(),
             profile,
             deadline(),
         )
@@ -226,7 +264,64 @@ impl Fixture {
     }
     pub async fn bootstrap(&self) -> anyhow::Result<()> {
         self.maintenance
-            .initialize(self.key, login("Admin"), password(), deadline())
+            .initialize(self.system_key, login("platform"), password(), deadline())
+            .await?;
+        self.provision_a().await?;
+        Ok(())
+    }
+    pub async fn platform_actor(&self) -> anyhow::Result<AuthenticatedSession> {
+        use rss_identity_core::session::SessionSecret;
+        let mut cookie = self.platform_cookie.lock().await;
+        if let Some(value) = cookie.as_ref()
+            && let Ok(actor) = self
+                .store
+                .inspect_session(
+                    TenantId::parse(SYSTEM)?,
+                    SessionSecret::parse(value.clone())?,
+                    deadline(),
+                )
+                .await
+        {
+            return Ok(actor);
+        }
+        let candidate = self
+            .store
+            .verify_password(
+                TenantId::parse(SYSTEM)?,
+                login("platform"),
+                password(),
+                source(),
+                deadline(),
+            )
+            .await?;
+        let session = self
+            .store
+            .create_session(candidate, None, deadline())
+            .await?;
+        *cookie = Some(session.secret().expose().into());
+        Ok(self
+            .store
+            .inspect_session(
+                TenantId::parse(SYSTEM)?,
+                SessionSecret::parse(session.secret().expose().into())?,
+                deadline(),
+            )
+            .await?)
+    }
+    pub async fn provision_a(&self) -> anyhow::Result<()> {
+        self.store
+            .provision_business_tenant(
+                self.platform_actor().await?,
+                "Tenant A".into(),
+                NewTenantAdministrator {
+                    operation_id: uuid::Uuid::new_v4(),
+                    tenant: self.key.tenant,
+                    principal: self.key.principal,
+                    login: login("admin"),
+                    password: password(),
+                },
+                deadline(),
+            )
             .await?;
         Ok(())
     }
@@ -291,6 +386,7 @@ impl Fixture {
         )
     }
     pub async fn close(self) {
+        self.store.close().await;
         self.runtime.close().await;
         self.maintenance_runtime.close().await;
         self.owner.close().await;
@@ -303,7 +399,7 @@ impl Fixture {
         .await
         .unwrap();
         sqlx::raw_sql(
-            "DROP ROLE identity_account_runtime; DROP ROLE identity_account_maintenance;",
+            "DROP ROLE identity_account_runtime; DROP ROLE identity_account_maintenance; DROP ROLE identity_tenant_registrar;",
         )
         .execute(&self.admin)
         .await

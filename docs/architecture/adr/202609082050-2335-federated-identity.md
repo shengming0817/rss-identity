@@ -10,9 +10,9 @@
 
 每个 tenant/provider 一行当前配置，含 enabled、单调 config_version 与 revocation_epoch。issuer 创建后不可修改，换 issuer 显式创建新 provider。其它编辑提升 config_version；从 enabled 转为 disabled 额外提升 revocation_epoch；重新启用不回退。没有历史配置表、自动迁移、配置删除或测试激活状态机。
 
-ProviderSettingsInput 仅作为编辑 DTO；构造/反序列化均产生字段私有的已验证 ProviderSettings，issuer/client 使用现有值对象，注入 adapter 不能绕过核心校验。部署许可按 tenant/issuer/client/callback/secret_ref/address 完整绑定，不允许独立 allowlist 的交叉组合。
+ProviderSettingsInput 仅作为编辑 DTO；构造/反序列化均产生字段私有的已验证 ProviderSettings，issuer/client 使用现有值对象，注入 adapter 不能绕过核心校验。配置由租户管理员自助提交；callback 固定为部署 origin 的唯一 OIDC callback。IdP 不再需要部署或 IP 范围批准，凭据独立绑定 tenant/provider/version 加密保存。
 
-配置管理通过已有密码认证候选证明同租户管理员，事务内重新检查；CLI 不持有第二套权限规则。Authority 持有纯管理用例；list/disable 不构造 Federation，不加载 state key/client secret。连接测试在当前管理员与配置验证后只加载目标材料，返回安全 stage/reason 并写入审计。连接测试验证 TLS、discovery/JWKS 与出站政策并审计 exact version；它不证明 client secret 可兑换用户 code，也不冒充用户登录。secret_ref 必须是部署固定的不可变版本绑定（形如 `name@version`），不从数据库保存或读取原始 client secret。
+#2337/#2427 后的管理只接受 AuthenticatedSession，并在事务内复核业务租户管理员或系统域平台角色。Federation 持有管理门面；Authority 包内持有配置、凭据及事件原子写入。create/update 接受只写 client secret 和可选 CA；list/disable 不解密秘密。连接测试检查 TLS/discovery/JWKS 及协议能力，核对前后权限/版本并结算审计；它不证明 secret 可兑换真实 code。数据库外 keyring 加密凭据，变更配置/凭据推进版本并撤销旧认证状态，不再存在 secret_ref 或静态批准的备用路径。
 
 ## 浏览器事务
 
@@ -45,3 +45,5 @@ link stage 使用闭合集合与带预期前态的推进操作。link intent 绑
 T1 证明类型/编码/claims；真实 PG 证明并发、重启、原子事件和未知提交；`test-federated` 使用固定 Keycloak HTTPS + PG + in-process Axum 证明 JIT/关联/cookie 接缝和 TLS/egress；原有 Keycloak/Hydra protocol carrier 保留同一 adapter 的负向回归。
 
 来源：openidconnect 4.0.1 `src/verification/mod.rs` @ b639b5d39eac6903238867aeb2b29326502e6b26；RustCrypto hmac 0.12.1；固定 RSS bf5dd1350997d01aa834094a3347fce30247814e `transaction.rs` 的 tenant-bound local_tx 与私有 pool。没有新增跨租户 SECURITY DEFINER、全局 locator 或原始 SQL 连接旁路。
+
+当前系统域与自助 IdP 威胁边界由 [#2427/#2428 ADR](202609130900-2427-platform-onboarding.md) 补齐；独立可信 assurance profile 只解释验证后的 ACR/AMR，不决定 IdP 准入。

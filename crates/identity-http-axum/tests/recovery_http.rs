@@ -40,6 +40,10 @@ async fn restored(
     let binding = ExecutionBinding::new(
         StorageIdentity::new([1; 16], [2; 16])?,
         vec![
+            (
+                rss_request_context::TenantId::parse(SYSTEM)?,
+                Epoch::new(1)?,
+            ),
             (rss_request_context::TenantId::parse(A)?, Epoch::new(1)?),
             (rss_request_context::TenantId::parse(B)?, Epoch::new(1)?),
         ],
@@ -68,7 +72,7 @@ async fn restored(
             Duration::from_secs(5),
             Duration::from_secs(5),
         )?,
-        rss_request_context::TenantId::parse(A)?,
+        rss_request_context::TenantId::parse(SYSTEM)?,
         AuthorityProfile::Runtime,
         deadline(),
     )

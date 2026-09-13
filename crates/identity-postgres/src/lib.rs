@@ -13,34 +13,44 @@ mod federation_storage;
 pub use federation::{
     FederatedOutcome, FederatedRedirect, Federation, LinkRequest, LinkResult, LoginRequest,
 };
+mod cli_login;
+mod credentials;
 mod maintenance;
+mod platform;
+pub use credentials::CredentialKeys;
+pub use platform::{
+    NewTenantAdministrator, PlatformOperation, PlatformOperationKind, TenantPage, TenantView,
+};
 mod operations;
 pub use operations::{AccountPage, AccountView, LocalAccountRole};
+mod runtime;
 mod session_storage;
 mod sessions;
 mod storage;
 mod transaction;
+pub use runtime::RuntimeSource;
 mod types;
 pub use sessions::{
     AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
 };
 pub use types::*;
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 8;
 pub const SCHEMA_SIGNATURE_SQL: &str = include_str!("schema-signature.sql");
 pub const SCHEMA_SIGNATURE: &str = include_str!("schema-signature.sha256");
 pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_authority.sql");
 use rss_identity_core::account::{AccountChange, AccountKey, AccountState};
-use rss_transactional_messaging::message::MessagingDomain;
 use rss_transactional_messaging::policy::DeliveryBudget;
-use rss_transactional_messaging_postgres::{PgOutboxStore, PgRuntime};
+use rss_transactional_messaging_postgres::PgRuntime;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Authority {
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
-    runtime: Arc<PgRuntime>,
+    runtimes: Arc<runtime::RuntimeState>,
     profile: AuthorityProfile,
-    outbox: Arc<PgOutboxStore<()>>,
+    system_domain: rss_request_context::TenantId,
+    identity_origin: String,
+    credential_keys: Arc<std::sync::OnceLock<Arc<CredentialKeys>>>,
 }
 impl Authority {
     /// Validate the Identity schema and effective role before exposing an authority.
@@ -53,15 +63,13 @@ impl Authority {
         profile: AuthorityProfile,
         deadline: rss_transactional_messaging::policy::OperationDeadline,
     ) -> Result<Self, AuthorityError> {
-        let domain =
-            MessagingDomain::parse("identity.security").map_err(|_| AuthorityError::Unavailable)?;
-        let outbox = PgOutboxStore::new(runtime.clone(), domain, budget)
-            .map_err(|_| AuthorityError::Unavailable)?;
         let authority = Self {
             kdf,
-            runtime,
+            runtimes: Arc::new(runtime::RuntimeState::new(runtime, budget, tenant)?),
             profile,
-            outbox: Arc::new(outbox),
+            system_domain: tenant,
+            identity_origin: deployment.identity_origin().to_owned(),
+            credential_keys: Arc::new(std::sync::OnceLock::new()),
         };
         let label = match profile {
             AuthorityProfile::Runtime => "runtime",
@@ -91,8 +99,8 @@ impl Authority {
                             if versions != [SCHEMA_VERSION] {return Ok(Some("schema-version".into()));}
                             let signature:String=sqlx::query_scalar(include_str!("schema-signature.sql")).fetch_one(&mut *c).await?;
                             if signature != include_str!("schema-signature.sha256").trim() { return Ok(Some("schema-contract".into())); }
-                            let identity_matches: bool = sqlx::query_scalar("SELECT count(*)=1 AND coalesce(bool_and(environment_id=$1 AND identity_config_version=$2 AND identity_public_origin=$3 AND product_public_origin=$4),false) FROM identity_authority.deployment")
-                                .bind(deployment.environment_id).bind(deployment.config_version).bind(deployment.identity_public_origin).bind(deployment.product_public_origin).fetch_one(&mut *c).await?;
+                            let identity_matches: bool = sqlx::query_scalar("SELECT count(*)=1 AND coalesce(bool_and(environment_id=$1 AND identity_config_version=$2 AND identity_public_origin=$3 AND product_public_origin=$4 AND (system_domain IS NULL OR system_domain=$5::uuid)),false) FROM identity_authority.deployment")
+                                .bind(deployment.environment_id).bind(deployment.config_version).bind(deployment.identity_public_origin).bind(deployment.product_public_origin).bind(tenant.to_string()).fetch_one(&mut *c).await?;
                             if !identity_matches { return Ok(Some("deployment-identity".into())); }
                             sqlx::query_scalar::<_, Option<String>>(include_str!("probe.sql"))
                                 .bind(label)

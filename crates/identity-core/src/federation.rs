@@ -1,5 +1,7 @@
-//! Federation values and narrow upstream port. Values are not authentication proofs.
-//! ref: RustCrypto/MACs hmac/src/lib.rs @ hmac-v0.12.1.
+mod credentials;
+pub use credentials::ProviderCredentials;
+// Federation values and narrow upstream port. Values are not authentication proofs.
+// ref: RustCrypto/MACs hmac/src/lib.rs @ hmac-v0.12.1.
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 
 use hmac::{Hmac, Mac};
@@ -63,7 +65,6 @@ pub struct ClaimMapping {
 pub struct ProviderSettingsInput {
     pub issuer: String,
     pub client_id: String,
-    pub secret_ref: String,
     pub redirect_uri: String,
     pub scopes: Vec<String>,
     pub claims: ClaimMapping,
@@ -75,7 +76,6 @@ impl ProviderSettingsInput {
         for (s, max) in [
             (&self.issuer, 2048),
             (&self.client_id, 256),
-            (&self.secret_ref, 256),
             (&self.redirect_uri, 2048),
         ] {
             if s.is_empty() || s.len() > max || s.trim() != s || s.chars().any(char::is_control) {
@@ -95,14 +95,6 @@ impl ProviderSettingsInput {
                 return Err(FederationError::Configuration);
             }
         }
-        // A reference is a versioned opaque binding owned by deployment, never a mutable alias.
-        if !self.secret_ref.contains('@')
-            || self.secret_ref.starts_with('@')
-            || self.secret_ref.ends_with('@')
-        {
-            return Err(FederationError::Configuration);
-        }
-
         if self.scopes.is_empty()
             || self.scopes.len() > 16
             || !self.scopes.iter().any(|s| s == "openid")
@@ -147,7 +139,6 @@ impl ProviderSettingsInput {
 pub struct ProviderSettings {
     issuer: crate::IssuerId,
     client_id: crate::ClientId,
-    secret_ref: String,
     redirect_uri: String,
     scopes: Vec<String>,
     claims: ClaimMapping,
@@ -162,7 +153,6 @@ impl TryFrom<ProviderSettingsInput> for ProviderSettings {
                 .map_err(|_| FederationError::Configuration)?,
             client_id: crate::ClientId::parse(&input.client_id)
                 .map_err(|_| FederationError::Configuration)?,
-            secret_ref: input.secret_ref,
             redirect_uri: input.redirect_uri,
             scopes: input.scopes,
             claims: input.claims,
@@ -182,9 +172,6 @@ impl ProviderSettings {
     pub fn client_id(&self) -> &crate::ClientId {
         &self.client_id
     }
-    pub fn secret_ref(&self) -> &str {
-        &self.secret_ref
-    }
     pub fn redirect_uri(&self) -> &str {
         &self.redirect_uri
     }
@@ -201,7 +188,6 @@ impl ProviderSettings {
         ProviderSettingsInput {
             issuer: self.issuer.as_str().into(),
             client_id: self.client_id.as_str().into(),
-            secret_ref: self.secret_ref.clone(),
             redirect_uri: self.redirect_uri.clone(),
             scopes: self.scopes.clone(),
             claims: self.claims.clone(),
@@ -218,7 +204,8 @@ pub struct ProviderView {
     pub revocation_epoch: i64,
     pub settings: ProviderSettings,
     #[serde(skip)]
-    pub deployment_approval: Option<[u8; 32]>,
+    pub assurance_profile: [u8; 32],
+    pub credential_version: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +214,7 @@ pub enum Purpose {
     Login,
     Reauthenticate,
     Link,
+    CliLogin,
 }
 
 impl Purpose {
@@ -235,6 +223,7 @@ impl Purpose {
             Self::Login => 0,
             Self::Reauthenticate => 1,
             Self::Link => 2,
+            Self::CliLogin => 3,
         }
     }
 
@@ -243,6 +232,7 @@ impl Purpose {
             0 => Ok(Self::Login),
             1 => Ok(Self::Reauthenticate),
             2 => Ok(Self::Link),
+            3 => Ok(Self::CliLogin),
             _ => Err(FederationError::Rejected),
         }
     }
@@ -426,24 +416,19 @@ pub type UpstreamFuture<'a, T> =
 
 /// Installed by trusted composition once. Tenant identity comes from the persisted flow.
 pub trait UpstreamOidc: Send + Sync {
-    /// Check only deployment-approved tenant, issuer, client, callback, secret reference
-    /// and egress bindings. Synchronous and without network I/O or secret resolution.
-    /// Called before saving configuration; an approved but unavailable secret is allowed.
-    /// Return a stable profile identity; changing it fences attempts and revokes sessions.
-    /// Reject unapproved bindings with a closed configuration/provider error.
-    fn approve_configuration(
+    /// Identifies the host-approved interpretation of verified ACR/AMR, never provider admission.
+    fn assurance_profile(&self, tenant: TenantId, config: &ProviderSettings) -> [u8; 32];
+    fn validate(
         &self,
         tenant: TenantId,
         config: &ProviderSettings,
-    ) -> Result<[u8; 32], FederationError>;
-    /// Check runtime usability, including deployment approval and availability of
-    /// secrets/trust material. Synchronous: network checks belong to prepare/test/exchange.
-    /// Called for protocol operations, never required for listing or disabling providers.
-    fn validate(&self, tenant: TenantId, config: &ProviderSettings) -> Result<(), FederationError>;
+        credentials: &ProviderCredentials,
+    ) -> Result<(), FederationError>;
     fn prepare<'a>(
         &'a self,
         tenant: TenantId,
         config: &'a ProviderSettings,
+        credentials: &'a ProviderCredentials,
         material: &'a ProtocolMaterial,
         mode: crate::assurance::AuthenticationMode,
     ) -> UpstreamFuture<'a, String>;
@@ -451,6 +436,7 @@ pub trait UpstreamOidc: Send + Sync {
         &'a self,
         tenant: TenantId,
         config: &'a ProviderSettings,
+        credentials: &'a ProviderCredentials,
         material: ProtocolMaterial,
         code: Zeroizing<String>,
     ) -> UpstreamFuture<'a, UpstreamClaims>;
@@ -458,6 +444,7 @@ pub trait UpstreamOidc: Send + Sync {
         &'a self,
         tenant: TenantId,
         config: &'a ProviderSettings,
+        credentials: &'a ProviderCredentials,
     ) -> UpstreamFuture<'a, ConnectionReport>;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,8 +459,6 @@ pub enum ProviderStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderReason {
-    UnapprovedBinding,
-    MissingSecret,
     InvalidTrustAnchor,
     EgressDenied,
     TlsRejected,

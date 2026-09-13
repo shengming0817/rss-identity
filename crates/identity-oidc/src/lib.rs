@@ -1,4 +1,4 @@
-//! Tenant-bound OIDC adapter. One deployment approval binds credentials to their exact AS/client.
+//! Tenant-bound OIDC adapter with versioned credentials and independent trusted MFA profiles.
 //! ref: openidconnect-rs src/verification/mod.rs @ b639b5d39eac6903238867aeb2b29326502e6b26.
 #![deny(missing_docs)]
 mod assurance;
@@ -13,207 +13,89 @@ use rss_identity_core::{assurance::AuthenticationMode, federation::*};
 use rss_request_context::TenantId;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
-    net::IpAddr,
-    sync::{
-        Arc,
-        atomic::{AtomicU8, Ordering},
-    },
+    sync::atomic::{AtomicU8, Ordering},
     time::Duration,
 };
 use zeroize::Zeroizing;
-/// One indivisible deployment permission. No cross-product of separate allowlists is authorized.
+/// Host-approved interpretation of verified authentication facts. Not IdP admission.
 #[derive(Clone)]
-pub struct ApprovedProvider {
-    /// Tenant allowed to use these credentials.
+pub struct TrustedAssuranceProfile {
+    /// Exact tenant owning this authentication policy.
     pub tenant: TenantId,
-    /// Exact issuer, including its realm/path.
+    /// Exact issuer owning the verified token.
     pub issuer: String,
-    /// RP client registered at this issuer.
+    /// Registered RP client.
     pub client_id: String,
-    /// Exact registered Identity callback.
-    pub redirect_uri: String,
-    /// Immutable versioned secret binding.
-    pub secret_ref: String,
-    /// Allowed addresses for this issuer, checked after resolution.
-    pub addresses: Vec<IpNet>,
-    /// This exact Keycloak client uses the approved password + TOTP LoA 2 flow.
+    /// The operator verified this client uses the Keycloak password/TOTP LoA 2 flow.
     pub keycloak_totp: bool,
 }
 fn failure(stage: ProviderStage, reason: ProviderReason) -> FederationError {
     FederationError::provider(stage, reason)
 }
-fn approved<'a>(
-    bindings: &'a [ApprovedProvider],
-    tenant: TenantId,
-    c: &ProviderSettings,
-    loopback: bool,
-) -> Result<&'a ApprovedProvider, FederationError> {
-    let binding = bindings
-        .iter()
-        .find(|b| {
-            b.tenant == tenant
-                && b.issuer == c.issuer().as_str()
-                && b.client_id == c.client_id().as_str()
-                && b.redirect_uri == c.redirect_uri()
-                && b.secret_ref == c.secret_ref()
-        })
-        .ok_or_else(|| failure(ProviderStage::Binding, ProviderReason::UnapprovedBinding))?;
-    parse_url(&binding.issuer, loopback)?;
-    parse_url(&binding.redirect_uri, loopback)?;
-    if binding.addresses.is_empty() || binding.addresses.len() > 32 {
-        return Err(failure(
-            ProviderStage::Binding,
-            ProviderReason::EgressDenied,
-        ));
-    }
-    Ok(binding)
-}
 #[derive(Debug, thiserror::Error)]
-#[error("destination outside approved network")]
+#[error("invalid protocol destination")]
 struct EgressDenied;
-struct Resolver {
-    host: String,
-    addresses: Vec<IpNet>,
-}
-impl reqwest::dns::Resolve for Resolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = self.host.clone();
-        let allowed = self.addresses.clone();
-        Box::pin(async move {
-            if name.as_str() != host {
-                return Err(EgressDenied.into());
-            }
-            let addresses: Vec<_> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
-            if addresses.is_empty()
-                || addresses
-                    .iter()
-                    .any(|a| !allowed.iter().any(|n| n.contains(&a.ip())))
-            {
-                return Err(EgressDenied.into());
-            }
-            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
-}
-/// Immutable deployment bindings and secret values, independent of browser input.
+/// Protocol transport with tenant credentials supplied for each exact provider version.
 pub struct HttpOidc {
-    bindings: Vec<ApprovedProvider>,
-    secrets: BTreeMap<String, Zeroizing<String>>,
-    roots: Vec<reqwest::Certificate>,
+    profiles: Vec<TrustedAssuranceProfile>,
     loopback: bool,
 }
 impl HttpOidc {
-    /// Construct a production adapter. Every outbound request checks the full tenant/client tuple.
-    pub fn new(
-        bindings: Vec<ApprovedProvider>,
-        secrets: BTreeMap<String, Zeroizing<String>>,
-        ca_pem: Option<&[u8]>,
-    ) -> Result<Self, FederationError> {
-        Self::build(bindings, secrets, ca_pem, false)
+    /// Production uses HTTPS and normal certificate verification. Empty profile sets are valid.
+    pub fn new(profiles: Vec<TrustedAssuranceProfile>) -> Result<Self, FederationError> {
+        Self::build(profiles, false)
     }
-    /// Validate static deployment approval without loading client or login state secrets.
-    pub fn approve(
-        bindings: &[ApprovedProvider],
-        tenant: TenantId,
-        config: &ProviderSettings,
-    ) -> Result<(), FederationError> {
-        approved(bindings, tenant, config, false).map(|_| ())
-    }
-    /// Explicit fixture transport; the application callback still requires response issuer validation.
+    /// Explicit cleartext loopback fixture. Never enabled by production configuration.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_loopback_test(
-        bindings: Vec<ApprovedProvider>,
-        secrets: BTreeMap<String, Zeroizing<String>>,
+        profiles: Vec<TrustedAssuranceProfile>,
     ) -> Result<Self, FederationError> {
-        Self::build(bindings, secrets, None, true)
+        Self::build(profiles, true)
     }
     fn build(
-        bindings: Vec<ApprovedProvider>,
-        secrets: BTreeMap<String, Zeroizing<String>>,
-        ca: Option<&[u8]>,
+        profiles: Vec<TrustedAssuranceProfile>,
         loopback: bool,
     ) -> Result<Self, FederationError> {
-        if bindings.is_empty() || bindings.len() > 128 {
-            return Err(failure(
-                ProviderStage::Binding,
-                ProviderReason::UnapprovedBinding,
-            ));
+        if profiles.len() > 128 {
+            return Err(FederationError::Configuration);
         }
-        for b in &bindings {
-            let c = ProviderSettings::try_from(ProviderSettingsInput {
-                issuer: b.issuer.clone(),
-                client_id: b.client_id.clone(),
-                secret_ref: b.secret_ref.clone(),
-                redirect_uri: b.redirect_uri.clone(),
-                scopes: vec!["openid".into()],
-                claims: ClaimMapping {
-                    email: None,
-                    groups: None,
-                },
-                jit: false,
-            })?;
-            approved(&bindings, b.tenant, &c, loopback)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for p in &profiles {
+            parse_url(&p.issuer, loopback)?;
+            if p.client_id.is_empty()
+                || p.client_id.len() > 256
+                || !seen.insert((p.tenant.to_string(), p.issuer.clone(), p.client_id.clone()))
+            {
+                return Err(FederationError::Configuration);
+            }
         }
-        if secrets
-            .iter()
-            .any(|(k, v)| !k.contains('@') || v.is_empty() || v.len() > 4096)
-        {
-            return Err(failure(
-                ProviderStage::Binding,
-                ProviderReason::MissingSecret,
-            ));
-        }
-        let roots = ca
-            .map(|p| {
-                reqwest::Certificate::from_pem(p)
-                    .map(|c| vec![c])
-                    .map_err(|_| {
-                        failure(ProviderStage::Binding, ProviderReason::InvalidTrustAnchor)
-                    })
-            })
-            .transpose()?
-            .unwrap_or_default();
-        Ok(Self {
-            bindings,
-            secrets,
-            roots,
-            loopback,
+        Ok(Self { profiles, loopback })
+    }
+    fn trusted(&self, tenant: TenantId, c: &ProviderSettings) -> bool {
+        self.profiles.iter().any(|p| {
+            p.tenant == tenant
+                && p.issuer == c.issuer().as_str()
+                && p.client_id == c.client_id().as_str()
+                && p.keycloak_totp
         })
     }
     fn transport(
         &self,
         tenant: TenantId,
         c: &ProviderSettings,
+        credentials: &ProviderCredentials,
     ) -> Result<Transport, FederationError> {
-        self.validate(tenant, c)?;
-        let rule = approved(&self.bindings, tenant, c, self.loopback)?;
-        let u = parse_url(c.issuer().as_str(), self.loopback)?;
-        let origin = u.origin().ascii_serialization();
-        let host = u
-            .host_str()
-            .ok_or(FederationError::Configuration)?
-            .trim_matches(['[', ']'])
-            .to_owned();
-        if let Ok(ip) = host.parse::<IpAddr>()
-            && !rule.addresses.iter().any(|n| n.contains(&ip))
-        {
-            return Err(failure(
-                ProviderStage::Binding,
-                ProviderReason::EgressDenied,
-            ));
-        }
+        self.validate(tenant, c, credentials)?;
+        let origin = parse_url(c.issuer().as_str(), self.loopback)?
+            .origin()
+            .ascii_serialization();
         let mut builder = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))
-            .connect_timeout(Duration::from_secs(3))
-            .dns_resolver(Arc::new(Resolver {
-                host,
-                addresses: rule.addresses.clone(),
-            }));
-        for root in &self.roots {
-            builder = builder.add_root_certificate(root.clone());
+            .connect_timeout(Duration::from_secs(3));
+        for root in certificates(credentials)? {
+            builder = builder.add_root_certificate(root);
         }
         Ok(Transport {
             origin,
@@ -228,8 +110,9 @@ impl HttpOidc {
         &self,
         tenant: TenantId,
         c: &ProviderSettings,
+        credentials: &ProviderCredentials,
     ) -> Result<(Metadata, Transport), FederationError> {
-        let transport = self.transport(tenant, c)?;
+        let transport = self.transport(tenant, c, credentials)?;
         let metadata = Metadata::discover_async(
             IssuerUrl::new(c.issuer().as_str().into())
                 .map_err(|_| FederationError::Configuration)?,
@@ -259,6 +142,24 @@ impl HttpOidc {
             ));
         }
         Ok((metadata, transport))
+    }
+}
+fn certificates(
+    credentials: &ProviderCredentials,
+) -> Result<Vec<reqwest::Certificate>, FederationError> {
+    match credentials.ca_pem() {
+        None => Ok(Vec::new()),
+        Some(pem) => {
+            let roots = reqwest::Certificate::from_pem_bundle(pem.as_bytes())
+                .map_err(|_| failure(ProviderStage::Binding, ProviderReason::InvalidTrustAnchor))?;
+            if roots.is_empty() || roots.len() > 16 {
+                return Err(failure(
+                    ProviderStage::Binding,
+                    ProviderReason::InvalidTrustAnchor,
+                ));
+            }
+            Ok(roots)
+        }
     }
 }
 fn parse_url(value: &str, loopback: bool) -> Result<Url, FederationError> {
@@ -428,21 +329,26 @@ fn verify<'a>(
 }
 
 impl UpstreamOidc for HttpOidc {
-    fn approve_configuration(
-        &self,
-        tenant: TenantId,
-        c: &ProviderSettings,
-    ) -> Result<[u8; 32], FederationError> {
-        approved(&self.bindings, tenant, c, self.loopback)
-            .map(|binding| assurance::profile_identity(binding.keycloak_totp))
+    fn assurance_profile(&self, tenant: TenantId, c: &ProviderSettings) -> [u8; 32] {
+        assurance::profile_identity(self.trusted(tenant, c))
     }
-    fn validate(&self, tenant: TenantId, c: &ProviderSettings) -> Result<(), FederationError> {
-        approved(&self.bindings, tenant, c, self.loopback)?;
-        if !self.secrets.contains_key(c.secret_ref()) {
-            return Err(failure(
-                ProviderStage::Binding,
-                ProviderReason::MissingSecret,
-            ));
+    fn validate(
+        &self,
+        _tenant: TenantId,
+        c: &ProviderSettings,
+        credentials: &ProviderCredentials,
+    ) -> Result<(), FederationError> {
+        parse_url(c.issuer().as_str(), self.loopback)?;
+        parse_url(c.redirect_uri(), self.loopback)?;
+        let roots = certificates(credentials)?;
+        if !roots.is_empty() {
+            let mut builder = reqwest::Client::builder().no_proxy();
+            for root in roots {
+                builder = builder.add_root_certificate(root);
+            }
+            builder
+                .build()
+                .map_err(|_| failure(ProviderStage::Binding, ProviderReason::InvalidTrustAnchor))?;
         }
         Ok(())
     }
@@ -450,20 +356,20 @@ impl UpstreamOidc for HttpOidc {
         &'a self,
         tenant: TenantId,
         c: &'a ProviderSettings,
+        credentials: &'a ProviderCredentials,
         m: &'a ProtocolMaterial,
         mode: AuthenticationMode,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
-            let binding = approved(&self.bindings, tenant, c, self.loopback)?;
-            if mode == AuthenticationMode::StepUp && !binding.keycloak_totp {
+            if mode == AuthenticationMode::StepUp && !self.trusted(tenant, c) {
                 return Err(FederationError::Configuration);
             }
-            let (metadata, _) = self.discover(tenant, c).await?;
+            let (metadata, _) = self.discover(tenant, c, credentials).await?;
 
             let client = CoreClient::from_provider_metadata(
                 metadata,
                 ClientId::new(c.client_id().as_str().to_owned()),
-                Some(ClientSecret::new(self.secrets[c.secret_ref()].to_string())),
+                Some(ClientSecret::new(credentials.client_secret().to_string())),
             )
             .set_redirect_uri(
                 RedirectUrl::new(c.redirect_uri().to_owned())
@@ -510,6 +416,7 @@ impl UpstreamOidc for HttpOidc {
         &'a self,
         tenant: TenantId,
         c: &'a ProviderSettings,
+        credentials: &'a ProviderCredentials,
         m: ProtocolMaterial,
         code: Zeroizing<String>,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
@@ -518,14 +425,14 @@ impl UpstreamOidc for HttpOidc {
                 return Err(FederationError::Rejected);
             }
 
-            let (metadata, transport) = self.discover(tenant, c).await?;
+            let (metadata, transport) = self.discover(tenant, c, credentials).await?;
 
             let client_id = ClientId::new(c.client_id().as_str().to_owned());
 
             let client = CoreClient::from_provider_metadata(
                 metadata,
                 client_id.clone(),
-                Some(ClientSecret::new(self.secrets[c.secret_ref()].to_string())),
+                Some(ClientSecret::new(credentials.client_secret().to_string())),
             )
             .set_redirect_uri(
                 RedirectUrl::new(c.redirect_uri().to_owned())
@@ -594,7 +501,7 @@ impl UpstreamOidc for HttpOidc {
                         .auth_method_refs()
                         .map(|v| v.iter().map(|v| v.as_str().to_owned()).collect())
                         .unwrap_or_default(),
-                    approved(&self.bindings, tenant, c, self.loopback)?.keycloak_totp,
+                    self.trusted(tenant, c),
                 )?,
             };
 
@@ -608,9 +515,10 @@ impl UpstreamOidc for HttpOidc {
         &'a self,
         tenant: TenantId,
         c: &'a ProviderSettings,
+        credentials: &'a ProviderCredentials,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
-            let (metadata, _) = self.discover(tenant, c).await?;
+            let (metadata, _) = self.discover(tenant, c, credentials).await?;
             if !metadata
                 .additional_metadata()
                 .authorization_response_iss_parameter_supported

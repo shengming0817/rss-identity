@@ -147,3 +147,7 @@ schema version 2、事件 V1 payload、账户/租户/authority/lineage/epoch 的
 | 前端 step-up 入口与事实展示 | [#2368](https://dev.azure.com/shengming0923/rss/_workitems/edit/2368) | rss-web |
 
 登记不表示已实施或运行通过；避免把实现项的完整验收条件反向变为 T3 的执行阻塞。
+
+## #2427 + #2428 同 PR 实施
+
+系统域、显式平台角色、动态租户开通/新增管理员、自助加密 OIDC、持久会话与 SSO CLI 按 [当前 ADR](adr/202609130900-2427-platform-onboarding.md) 交付。#2368 消费替换后的网页协议；#2342 绑定新的 CLI/API 候选做 T3。实施与验收状态以 PR 实际记录为准。

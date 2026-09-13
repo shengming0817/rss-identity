@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/identity-contracts", "crates/identity-client", "crates/identity-hydra", "crates/identity-core", "crates/identity-postgres", "crates/identity-oidc", "app/identity", "crates/identity-http-axum"]
+members = ["app/identity-platform", "crates/identity-contracts", "crates/identity-client", "crates/identity-hydra", "crates/identity-core", "crates/identity-postgres", "crates/identity-oidc", "app/identity", "crates/identity-http-axum"]
 resolver = "3"
 
 [workspace.package]
@@ -26,6 +26,7 @@ anyhow = "1"
 argon2 = { version = "=0.5.3", features = ["std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
+ring = "=0.17.14"
 sha2 = "0.10"
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 openidconnect = { version = "=4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }

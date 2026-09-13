@@ -4,7 +4,7 @@
 
 ## Assurance
 
-首版唯一 MFA profile 是锁定 Keycloak 的 password + TOTP、ACR `2`。`keycloak_totp` 由部署 owner 在 issuer/client/tenant/secret_ref 的完整绑定内批准，不能由租户 ProviderSettings 或浏览器修改。渲染器使用 `deployment/keycloak-totp.json` 给新 realm 安装 LoA1/password、LoA2/required OTP 的条件 flow；无用户、口令或 OTP seed。已有 realm 不以重新 import 代替管理员核验。
+首版唯一 MFA profile 是锁定 Keycloak 的 password + TOTP、ACR `2`。`keycloak_totp` 由部署 owner 在 issuer/client/tenant 的完整绑定内配置为可信解释（#2427 删除 IdP 接入审批及 secret_ref），不能由租户 ProviderSettings 或浏览器修改。渲染器使用 `deployment/keycloak-totp.json` 给新 realm 安装 LoA1/password、LoA2/required OTP 的条件 flow；无用户、口令或 OTP seed。已有 realm 不以重新 import 代替管理员核验。
 
 `AuthenticationMode` 区分 Login、Reauthenticate、StepUp；不再用 reauth bool。正常登录不强制 MFA，关联再认证不推断 MFA。step-up 使用 `prompt=login`、`max_age=0`、`acr_values=2`，请求模式随现有 OIDC transaction 持久化；callback 即使收到浏览器降低强度后的有效 token，也必须满足原持久要求。
 

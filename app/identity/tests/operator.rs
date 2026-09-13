@@ -29,11 +29,11 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
             }
             let result = if initialize {
                 f.maintenance
-                    .initialize(f.key, login("admin"), input()?, deadline())
+                    .initialize(f.system_key, login("platform"), input()?, deadline())
                     .await
             } else {
                 f.maintenance
-                    .recover_administrator(f.key, input()?, deadline())
+                    .recover_administrator(f.system_key, input()?, deadline())
                     .await
             };
             if fault.is_some() {
@@ -44,7 +44,7 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
             assert!(!format!("{result:?}").contains("synthetic private marker"));
             assert_eq!(f.events().await?, if initialize { 0 } else { 1 });
             let initialized: bool = sqlx::query_scalar(
-                "SELECT bootstrap_tenant IS NOT NULL FROM identity_authority.deployment",
+                "SELECT system_domain IS NOT NULL FROM identity_authority.deployment",
             )
             .fetch_one(&f.owner)
             .await?;
@@ -60,11 +60,11 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
             .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
         let result = if initialize {
             f.maintenance
-                .initialize(f.key, login("admin"), input()?, deadline())
+                .initialize(f.system_key, login("platform"), input()?, deadline())
                 .await
         } else {
             f.maintenance
-                .recover_administrator(f.key, input()?, deadline())
+                .recover_administrator(f.system_key, input()?, deadline())
                 .await
         };
         assert!(matches!(result, Err(AuthorityError::CommitUnknown(_))));
@@ -77,7 +77,7 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
         assert_eq!(std::fs::read_dir(&dir)?.count(), 1);
         assert!(std::fs::read_to_string(&file)? == PASSWORD);
     }
-    assert!(f.actor().await.is_ok());
+    assert!(f.platform_actor().await.is_ok());
     std::fs::remove_dir_all(dir)?;
     f.close().await;
     Ok(())

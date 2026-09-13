@@ -66,9 +66,10 @@ impl IssuedSession {
         view: SessionView,
         now: i64,
         state: AccountState,
+        platform_administrator: bool,
     ) -> Self {
         Self {
-            identity: SessionIdentity::from_state(state),
+            identity: SessionIdentity::from_state(state, platform_administrator),
             remaining: Duration::from_secs(
                 view.absolute_expires_at.saturating_sub(now).max(0) as u64
             ),
@@ -147,7 +148,9 @@ pub(crate) async fn insert(
 ) -> Result<(IssuedSession, SecurityEvent), transaction::MutationError> {
     let key = state.key();
     let secret = SessionSecret::generate().map_err(|_| corrupt())?;
-    let lifetime = SessionLifetime::new(now, state.administrator()).map_err(|_| corrupt())?;
+    let platform_administrator = crate::platform::platform_role(c, key).await?;
+    let lifetime = SessionLifetime::new(now, state.administrator() || platform_administrator)
+        .map_err(|_| corrupt())?;
     if let Some(id) = replaced {
         db::close(c, key, id, now).await?;
     }
@@ -173,7 +176,13 @@ pub(crate) async fn insert(
     .execute(c)
     .await?;
     Ok((
-        IssuedSession::new(secret, SessionView::new(id, lifetime), now, state),
+        IssuedSession::new(
+            secret,
+            SessionView::new(id, lifetime),
+            now,
+            state,
+            platform_administrator,
+        ),
         event(SessionAction::Created, state, id, replaced),
     ))
 }
@@ -261,7 +270,10 @@ impl Authority {
                                 ),
                         );
                         Ok(AuthenticatedSession {
-                            identity: SessionIdentity::from_state(loaded.state),
+                            identity: SessionIdentity::from_state(
+                                loaded.state,
+                                loaded.platform_administrator,
+                            ),
                             key: loaded.state.key(),
                             digest,
                             authority,
@@ -290,7 +302,7 @@ impl Authority {
                 sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
                     .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;
                 let fact = event(SessionAction::Refreshed,loaded.state,loaded.view.id,None);
-                Ok((IssuedSession::new(secret,loaded.view,loaded.now,loaded.state),fact))
+                Ok((IssuedSession::new(secret,loaded.view,loaded.now,loaded.state,loaded.platform_administrator),fact))
             })).await
         })).await
     }
@@ -350,7 +362,7 @@ impl Authority {
                     .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid().to_string()).bind(loaded.state.epoch()).bind(loaded.state.membership_epoch()).bind(loaded.now).bind(cursor.map(|v|v.to_string())).bind(i64::from(limit)+1).fetch_all(c).await?;
                 let mut sessions = Vec::with_capacity(rows.len());
                 for row in rows {
-                    let lifetime = SessionLifetime::restore(row.try_get("auth_time")?,row.try_get("idle_expires_at")?,row.try_get("absolute_expires_at")?,loaded.state.administrator()).map_err(|_|corrupt())?;
+                    let lifetime = SessionLifetime::restore(row.try_get("auth_time")?,row.try_get("idle_expires_at")?,row.try_get("absolute_expires_at")?,loaded.state.administrator() || loaded.platform_administrator).map_err(|_|corrupt())?;
                     sessions.push(SessionView::new(db::session_id(&row.try_get::<String,_>("session_id")?)?,lifetime));
                 }
                 let next_cursor = if sessions.len() > usize::from(limit) { sessions.pop(); sessions.last().map(|v|v.id) } else { None };
@@ -403,13 +415,15 @@ mod contract_tests {
 pub struct SessionIdentity {
     pub principal_id: String,
     pub administrator: bool,
+    pub platform_administrator: bool,
     pub has_local_password: bool,
 }
 impl SessionIdentity {
-    pub(crate) fn from_state(state: AccountState) -> Self {
+    pub(crate) fn from_state(state: AccountState, platform_administrator: bool) -> Self {
         Self {
             principal_id: state.key().principal.as_uuid().to_string(),
             administrator: state.administrator(),
+            platform_administrator,
             has_local_password: state.has_local_password(),
         }
     }

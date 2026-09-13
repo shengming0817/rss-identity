@@ -2,7 +2,7 @@
 use crate::{AppError, config::RuntimeConfig, read_public_file, read_secret};
 use rss_identity_core::{downstream::*, federation::StateSigner};
 use rss_identity_hydra::Hydra;
-use rss_identity_oidc::{ApprovedProvider, HttpOidc};
+use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
 use rss_identity_postgres::{
     Authority, AuthorityProfile, Downstream, Federation, PrepareAdmission,
 };
@@ -44,23 +44,25 @@ pub async fn authority(
     runtime: Arc<PgRuntime>,
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
 ) -> Result<Authority, AppError> {
-    let mut connected = None;
-    for tenant in config.storage.tenants()? {
-        connected = Some(
-            Authority::connect(
-                runtime.clone(),
-                kdf.clone(),
-                config.identity_origin.clone(),
-                delivery_budget()?,
-                tenant,
-                AuthorityProfile::Runtime,
-                deadline(),
-            )
-            .await?,
-        );
-    }
-    connected.ok_or(AppError::Tenant)
+    let a = Authority::connect(
+        runtime,
+        kdf,
+        config.identity_origin.clone(),
+        delivery_budget()?,
+        config.storage.system()?,
+        AuthorityProfile::Runtime,
+        deadline(),
+    )
+    .await?;
+    a.configure_runtime(rss_identity_postgres::RuntimeSource::new(
+        config.database.pg()?,
+        config.storage.identity()?,
+        config.storage.epoch()?,
+    ))?;
+    a.configure_credentials(config.oidc.credential_keyring.load()?)?;
+    Ok(a)
 }
+
 pub struct Providers {
     pub federation: Federation,
     pub downstream: Downstream,
@@ -68,33 +70,20 @@ pub struct Providers {
     pub validation_secrets: BTreeMap<String, zeroize::Zeroizing<String>>,
 }
 pub fn providers(c: &RuntimeConfig, a: Authority) -> Result<Providers, AppError> {
-    let mut bindings = Vec::new();
-    let mut secrets = BTreeMap::new();
-    for v in &c.oidc.providers {
-        let value = read_secret(Path::new(&v.secret_file))?;
-        if value.is_empty() || secrets.insert(v.secret_ref.clone(), value).is_some() {
-            return Err(AppError::Configuration);
-        }
-        bindings.push(ApprovedProvider {
-            keycloak_totp: v.keycloak_totp,
-            tenant: TenantId::parse(&v.tenant_id).map_err(|_| AppError::Tenant)?,
-            issuer: v.issuer.clone(),
-            client_id: v.client_id.clone(),
-            secret_ref: v.secret_ref.clone(),
-            redirect_uri: c.identity_origin.identity_callback(),
-            addresses: v
-                .addresses
-                .iter()
-                .map(|a| a.parse().map_err(|_| AppError::Configuration))
-                .collect::<Result<_, _>>()?,
-        });
-    }
-    let oidc = HttpOidc::new(
-        bindings,
-        secrets,
-        Some(&read_public_file(Path::new(&c.oidc.ca_file), 1024 * 1024)?),
-    )
-    .map_err(|_| AppError::Provider)?;
+    let profiles = c
+        .oidc
+        .assurance_profiles
+        .iter()
+        .map(|v| {
+            Ok(TrustedAssuranceProfile {
+                tenant: TenantId::parse(&v.tenant_id).map_err(|_| AppError::Tenant)?,
+                issuer: v.issuer.clone(),
+                client_id: v.client_id.clone(),
+                keycloak_totp: v.keycloak_totp,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    let oidc = HttpOidc::new(profiles).map_err(|_| AppError::Provider)?;
     let raw = read_secret(Path::new(&c.oidc.state_key_file))?;
     let mut key = zeroize::Zeroizing::new([0; 32]);
     hex::decode_to_slice(raw.as_str(), key.as_mut()).map_err(|_| AppError::Configuration)?;

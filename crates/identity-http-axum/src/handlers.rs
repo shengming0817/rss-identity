@@ -20,7 +20,7 @@ struct Login {
     login: String,
     password: String,
 }
-fn issued(value: IssuedSession) -> Result<Response> {
+pub(crate) fn issued(value: IssuedSession) -> Result<Response> {
     let max_age = value.cookie_max_age();
     if max_age == 0 {
         return Err(HttpError::from(AuthorityError::Unavailable));

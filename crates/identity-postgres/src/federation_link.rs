@@ -153,12 +153,23 @@ impl Federation {
         let state = self.signer.issue(tenant, purpose)?;
         let locator = self.signer.verify(&state)?;
         let material = ProtocolMaterial::new(state)?;
+        self.check_assurance_profile(tenant, &provider)?;
+        let credentials = self
+            .authority
+            .provider_credentials(
+                tenant,
+                provider.id,
+                provider.credential_version,
+                budget.remaining(),
+            )
+            .await?;
         let url = self
             .upstream(
                 &budget,
                 self.oidc.prepare(
                     tenant,
                     &provider.settings,
+                    &credentials,
                     &material,
                     if purpose == Purpose::Reauthenticate {
                         AuthenticationMode::Reauthenticate
@@ -212,6 +223,7 @@ impl Federation {
                     db::insert_attempt(
                         c,
                         db::NewAttempt {
+                            cli: None,
                             mode: if purpose == Purpose::Reauthenticate { AuthenticationMode::Reauthenticate } else { AuthenticationMode::Login },
                             locator,
                             material,
@@ -258,12 +270,23 @@ impl Federation {
         let new_state = self.signer.issue(tenant, Purpose::Link)?;
         let new_locator = self.signer.verify(&new_state)?;
         let material = ProtocolMaterial::new(new_state)?;
+        self.check_assurance_profile(tenant, &target)?;
+        let credentials = self
+            .authority
+            .provider_credentials(
+                tenant,
+                target.id,
+                target.credential_version,
+                budget.remaining(),
+            )
+            .await?;
         let url = self
             .upstream(
                 budget,
                 self.oidc.prepare(
                     tenant,
                     &target.settings,
+                    &credentials,
                     &material,
                     AuthenticationMode::Login,
                 ),
@@ -307,6 +330,7 @@ impl Federation {
                     db::insert_attempt(
                         c,
                         db::NewAttempt {
+                            cli: None,
                             mode: AuthenticationMode::Login,
                             locator: new_locator,
                             material,

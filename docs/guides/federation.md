@@ -6,13 +6,13 @@ I05/I07 提供 Federation 管理用例、管理 HTTP 和单一 callback；中央
 
 按[本机维护](local-maintenance.md)安装当前 schema 并初始化本地管理员，日常管理使用[管理 HTTP/UI](management.md)。
 
-部署通过 `ApprovedProvider` 集合、不可变秘密映射和可选私有 CA 构造 HttpOidc；文件解析和实际注入由 I08 拥有。
+租户管理员通过 API 创建/更新 IdP 并提交只写 client secret、可选专用 CA。系统域由平台管理员管理；其 JIT 必须关闭，平台用户关联已建立的系统账户。配置、加密凭据及安全事件同事务，读接口不返回秘密、密文或 keyring。
 
-所有域名、地址和路径必须为部署批准的实际值。tenant/issuer/client/callback/secret_ref/address 是部署批准的完整绑定；其它租户、issuer 或 client 不能借用同一个 secret_ref。租户管理员不能通过 IdP settings 重组这些许可。HTTP adapter 固定 HTTPS、TLS 验证、DNS 解析结果地址许可、无重定向、无隐式环境代理、5 秒请求/3 秒连接预算和 1 MiB 响应上限。私有 Keycloak 需显式批准其地址范围及 CA。
+部署不再批准 tenant/issuer/client/secret_ref/address 组合，也不限制 IdP 的 IP/CIDR 范围。HTTP adapter 保持 HTTPS、TLS 验证、协议目的地检查、无重定向、无隐式环境代理、5 秒请求/3 秒连接预算和 1 MiB 响应上限。callback 必须精确等于本部署的 /api/v1/oidc/callback。
 
-管理 policy 不含登录 state key 或回跳注册。list/enable/disable 只需 PG 和管理员认证；create/update 仅检查静态绑定；test 在验证管理员和精确配置后只读取目标 secret 与 CA。其它 IdP 的秘密文件缺失不妨碍管理当前 IdP。
+凭据由数据库外 keyring 加密持久化，每次配置/凭据更新推进配置和凭据版本、撤销旧流程与相关会话。create/update 必须重新提交完整凭据；系统域与各业务租户不共享凭据。list/disable 不解密目标秘密。密钥和恢复步骤见[平台指南](platform.md)。StateSigner 密钥独立，轮换会终止在途上游登录。
 
-秘密文件必须为当前本机私有普通文件，禁止最终 symlink/FIFO/组与其它用户权限。密钥不得放命令参数、环境变量或日志。已有 `name@version` 绑定不可偷偷换值；secret 轮换创建新 ref 并更新 IdP config_version。HTTP 装配另行注入独立随机 32 字节 StateSigner 密钥和受控回跳集合；state key 轮换取消在途登录，中央会话仍按自身撤销规则处理。
+下面是非秘密 settings；create body 为 `{settings, client_secret, ca_pem}`，update 另带 expected_version。client_secret 为只写字段，ca_pem 可为 null。
 
 IdP settings JSON：
 
@@ -20,7 +20,6 @@ IdP settings JSON：
 {
   "issuer":"https://keycloak.example.test/realms/company",
   "client_id":"identity",
-  "secret_ref":"keycloak@1",
   "redirect_uri":"https://identity.example.test/api/v1/oidc/callback",
   "scopes":["openid","profile","email"],
   "claims":{"email":"email","groups":"groups"},

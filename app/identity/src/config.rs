@@ -56,69 +56,68 @@ impl DatabaseConfig {
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TenantBinding {
-    pub tenant_id: String,
-    pub epoch: i64,
-}
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     pub target: [u8; 16],
     pub lineage: [u8; 16],
-    pub tenants: Vec<TenantBinding>,
+    pub system_domain_id: String,
+    pub generation: i64,
 }
 impl StorageConfig {
-    pub fn binding(&self) -> Result<ExecutionBinding, AppError> {
-        if self.tenants.is_empty() || self.tenants.len() > 128 {
-            return Err(AppError::StorageIdentity);
-        }
-        let mut seen = BTreeSet::new();
-        let tenants = self
-            .tenants
-            .iter()
-            .map(|t| {
-                let tenant = TenantId::parse(&t.tenant_id).map_err(|_| AppError::Tenant)?;
-                if !seen.insert(tenant.to_string()) {
-                    return Err(AppError::Tenant);
-                }
-                Ok((
-                    tenant,
-                    Epoch::new(t.epoch).map_err(|_| AppError::StorageEpoch)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, AppError>>()?;
-        ExecutionBinding::new(
-            StorageIdentity::new(self.target, self.lineage)
-                .map_err(|_| AppError::StorageIdentity)?,
-            tenants,
-        )
-        .map_err(|_| AppError::StorageIdentity)
+    pub fn system(&self) -> Result<TenantId, AppError> {
+        TenantId::parse(&self.system_domain_id).map_err(|_| AppError::Tenant)
     }
-    pub fn tenants(&self) -> Result<Vec<TenantId>, AppError> {
-        self.binding()?;
-        self.tenants
-            .iter()
-            .map(|t| TenantId::parse(&t.tenant_id).map_err(|_| AppError::Tenant))
-            .collect()
+    pub fn identity(&self) -> Result<StorageIdentity, AppError> {
+        StorageIdentity::new(self.target, self.lineage).map_err(|_| AppError::StorageIdentity)
+    }
+    pub fn epoch(&self) -> Result<Epoch, AppError> {
+        Epoch::new(self.generation).map_err(|_| AppError::StorageEpoch)
+    }
+    pub fn binding(&self) -> Result<ExecutionBinding, AppError> {
+        ExecutionBinding::new(self.identity()?, vec![(self.system()?, self.epoch()?)])
+            .map_err(|_| AppError::StorageIdentity)
     }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProviderConfig {
-    pub keycloak_totp: bool,
+pub struct AssuranceProfileConfig {
     pub tenant_id: String,
     pub issuer: String,
     pub client_id: String,
-    pub secret_ref: String,
-    pub secret_file: String,
-    pub addresses: Vec<String>,
+    pub keycloak_totp: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialKeyFile {
+    pub key_id: String,
+    pub path: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialKeyringConfig {
+    pub active_key_id: String,
+    pub keys: Vec<CredentialKeyFile>,
+}
+impl CredentialKeyringConfig {
+    pub fn load(&self) -> Result<std::sync::Arc<rss_identity_postgres::CredentialKeys>, AppError> {
+        let mut keys = Vec::new();
+        for key in &self.keys {
+            let raw = read_secret(Path::new(&key.path))?;
+            let mut bytes = zeroize::Zeroizing::new([0; 32]);
+            hex::decode_to_slice(raw.as_str(), bytes.as_mut())
+                .map_err(|_| AppError::Configuration)?;
+            keys.push((key.key_id.clone(), *bytes));
+        }
+        Ok(std::sync::Arc::new(
+            rss_identity_postgres::CredentialKeys::new(self.active_key_id.clone(), keys)?,
+        ))
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OidcConfig {
-    pub providers: Vec<ProviderConfig>,
-    pub ca_file: String,
+    pub assurance_profiles: Vec<AssuranceProfileConfig>,
     pub state_key_file: String,
+    pub credential_keyring: CredentialKeyringConfig,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -193,7 +192,7 @@ impl RuntimeConfig {
         Ok(v)
     }
     pub fn validate(&self) -> Result<(), AppError> {
-        if self.format_version != 1
+        if self.format_version != 2
             || self.public_gateway == self.private_gateway
             || self.public_gateway.is_unspecified()
             || self.private_gateway.is_unspecified()
@@ -204,23 +203,15 @@ impl RuntimeConfig {
             return Err(AppError::Configuration);
         }
         self.budgets.validate()?;
-        let tenants = self.storage.tenants()?;
-        if self.oidc.providers.is_empty()
-            || self.oidc.providers.len() > 128
-            || self.hydra.clients.is_empty()
-            || self.hydra.clients.len() > 128
-        {
+        self.storage.binding()?;
+        if self.oidc.assurance_profiles.len() > 128 || self.hydra.clients.len() > 128 {
             return Err(AppError::Configuration);
         }
-        for tenant in self
-            .oidc
-            .providers
-            .iter()
-            .map(|v| &v.tenant_id)
-            .chain(self.hydra.clients.iter().map(|v| &v.tenant_id))
-        {
-            if !tenants.contains(&TenantId::parse(tenant).map_err(|_| AppError::Tenant)?) {
-                return Err(AppError::Tenant);
+        let mut clients = BTreeSet::new();
+        for client in &self.hydra.clients {
+            let tenant = TenantId::parse(&client.tenant_id).map_err(|_| AppError::Tenant)?;
+            if tenant == self.storage.system()? || !clients.insert(&client.client_id) {
+                return Err(AppError::Configuration);
             }
         }
         Ok(())
@@ -235,6 +226,7 @@ pub struct MigrationConfig {
     pub storage: StorageConfig,
     pub runtime_password_file: String,
     pub maintenance_password_file: String,
+    pub credential_keyring: CredentialKeyringConfig,
 }
 pub fn load<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, AppError> {
     serde_json::from_slice(&read_public_file(path, 256 * 1024)?).map_err(|_| AppError::Json)
