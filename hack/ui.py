@@ -53,7 +53,7 @@ def write_record(path, value):
 
 def verify_cleanup(resources, volumes=()):
     remaining = []
-    for name, confirmed in resources.items():
+    for name, state in resources.items():
         try:
             result = subprocess.run(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$', '--format', '{{.Names}}'],
                                     capture_output=True, text=True, timeout=10)
@@ -61,7 +61,7 @@ def verify_cleanup(resources, volumes=()):
         except (OSError, subprocess.SubprocessError):
             absent = False
         # An interrupted Docker create may settle later, even if not yet observed.
-        if not absent or not confirmed: remaining.append(name)
+        if not absent or state != providers.ContainerState.REMOVED: remaining.append(name)
     for volume in volumes:
         try:
             result = subprocess.run(['docker', 'volume', 'ls', '--filter', 'name=' + volume, '--format', '{{.Name}}'],
@@ -78,19 +78,18 @@ def main():
               'browser': None, 'cleanup': {'status': 'pending', 'recovery_targets': []}}
     resources = {}
     volumes = set()
-    def observe(name, confirmed):
-        if not confirmed: resources[name] = False
-        record['cleanup']['recovery_targets'] = list(resources) + ['volume:' + v for v in sorted(volumes)]
+    def observe(name, state):
+        resources[name] = state
+        record['cleanup']['recovery_targets'] = [name for name, state in resources.items() if state != providers.ContainerState.REMOVED] + ['volume:' + v for v in sorted(volumes)]
         write_record(path, record)
-        if confirmed:
+        if state == providers.ContainerState.CREATED:
             mounts = json.loads(providers.docker('inspect', '--format', '{{json .Mounts}}', name))
             for mount in mounts:
                 if mount['Type'] == 'volume':
                     volume = mount['Name']
                     if not re.fullmatch('[a-f0-9]{64}', volume): raise RuntimeError('unexpected fixture volume')
                     volumes.add(volume)
-            resources[name] = True
-            record['cleanup']['recovery_targets'] = list(resources) + ['volume:' + v for v in sorted(volumes)]
+            record['cleanup']['recovery_targets'] = [name for name, state in resources.items() if state != providers.ContainerState.REMOVED] + ['volume:' + v for v in sorted(volumes)]
             write_record(path, record)
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
     def interrupt(signum, _frame): raise SystemExit(128 + signum)

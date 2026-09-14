@@ -30,5 +30,5 @@ rss-web 自行构建实际 UI、选择同一源码内的 runner，记录两仓 c
 
 联合入口通过受控进程组处理 SIGINT/SIGTERM；`make test-ui` 使用 ExitStack 删除自己的容器及匿名卷，
 并核实具名资源已经消失。`IDENTITY_UI_FIXTURE_RECORD` 是可选的测试协议输出，容器创建前记录定位，
-终止后原子写结果、浏览器失败分类与 cleanup。创建或清理未知不冒称成功；固定消费者入口会将
+终止后原子写结果、浏览器失败分类与 cleanup。浏览器 Node、runner 与必需环境变量预检失败也写 environment 终态。容器跟踪 precreate、created、removed、remove-unknown；只有精确删除成功且核实容器及已记录匿名卷消失才确认清理，启动超时后删除成功可结算为已清理。创建或清理未知不冒称成功；固定消费者入口会将
 恢复目标并入最终记录。SIGKILL 不能承诺执行 finally，缺少 fixture 终态时必须保留恢复目录。

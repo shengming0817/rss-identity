@@ -16,10 +16,10 @@ class UiReceiptTests(unittest.TestCase):
             self.assertFalse(path.with_name(path.name + '.tmp').exists())
 
     @patch('ui.subprocess.run', return_value=subprocess.CompletedProcess([], 0, stdout=''))
-    def test_absence_requires_a_confirmed_create(self, run):
+    def test_absence_requires_confirmed_removal(self, run):
         name = 'identity-t2-' + 'a' * 32
-        self.assertEqual(ui.verify_cleanup({name: True})['status'], 'passed')
-        result = ui.verify_cleanup({name: False})
+        self.assertEqual(ui.verify_cleanup({name: 'removed'})['status'], 'passed')
+        result = ui.verify_cleanup({name: 'precreate'})
         self.assertEqual(result['status'], 'failed')
         self.assertEqual(result['recovery_targets'], [name])
 
@@ -30,7 +30,7 @@ class UiReceiptTests(unittest.TestCase):
 
     @patch('ui.subprocess.run', side_effect=subprocess.TimeoutExpired('docker', 10))
     def test_unavailable_docker_never_proves_cleanup(self, run):
-        self.assertEqual(ui.verify_cleanup({'identity-t2-' + 'a' * 32: True})['status'], 'failed')
+        self.assertEqual(ui.verify_cleanup({'identity-t2-' + 'a' * 32: 'removed'})['status'], 'failed')
 
     def test_environment_failure_still_writes_cleanup_record(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -73,3 +73,24 @@ class UiReceiptTests(unittest.TestCase):
                 thread.return_value.is_alive.return_value = False
                 with self.assertRaises(SystemExit): ui.main()
             self.assertEqual(json.loads(receipt.read_text())['failure'], {'phase': 'cleanup', 'classification': 'environment'})
+
+    def test_container_settlement_drives_cleanup(self):
+        import providers
+        for startup_failed in (False, True):
+            for removal in (None, subprocess.TimeoutExpired('docker', 30), subprocess.CalledProcessError(1, 'docker')):
+                with self.subTest(startup_failed=startup_failed, removal=removal):
+                    states = {}; events = []
+                    def observe(name, state):
+                        states[name] = state
+                        events.append(state)
+                    with patch('providers.docker', side_effect=subprocess.TimeoutExpired('docker', 180) if startup_failed else None, return_value='cid'), patch('providers.diagnostics'), patch('providers.subprocess.run', side_effect=removal):
+                        if startup_failed or removal:
+                            with self.assertRaises(subprocess.TimeoutExpired if startup_failed else RuntimeError):
+                                with providers.container('fixture', [], on_container=observe): pass
+                        else:
+                            with providers.container('fixture', [], on_container=observe): pass
+                    self.assertEqual(events, ['precreate'] + ([] if startup_failed else ['created']) + ['remove-unknown' if removal else 'removed'])
+                    with patch('ui.subprocess.run', return_value=subprocess.CompletedProcess([], 0, stdout='')):
+                        self.assertEqual(ui.verify_cleanup(states)['status'], 'failed' if removal else 'passed')
+                    with patch('ui.subprocess.run', return_value=subprocess.CompletedProcess([], 0, stdout=next(iter(states)))):
+                        self.assertEqual(ui.verify_cleanup(states)['status'], 'failed')

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Isolated T2 providers. Loopback HTTP/plaintext is fixture-only, never production config."""
 import contextlib
+from enum import Enum
 import json
 import math
 import os
@@ -23,6 +24,12 @@ PG = IMAGES["postgres"]
 KEYCLOAK = IMAGES["keycloak"]
 HYDRA = IMAGES["hydra"]
 
+class ContainerState(str, Enum):
+    PRECREATE = 'precreate'
+    CREATED = 'created'
+    REMOVED = 'removed'
+    REMOVE_UNKNOWN = 'remove-unknown'
+
 def docker(*args):
     return subprocess.check_output(["docker", *args], text=True, stderr=subprocess.PIPE, timeout=180).strip()
 
@@ -42,9 +49,9 @@ def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), n
         command += ["-v", mount]
     failure = None
     try:
-        if on_container is not None: on_container(name, False)
+        if on_container is not None: on_container(name, ContainerState.PRECREATE)
         cid = docker(*command, image, *args)
-        if on_container is not None: on_container(name, True)
+        if on_container is not None: on_container(name, ContainerState.CREATED)
         mapped = {p: int(docker("port", cid, str(p)).rsplit(":", 1)[1]) for p in ports}
         yield cid, mapped
     except BaseException as error:
@@ -57,9 +64,12 @@ def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), n
             # Named before startup so even a timed-out run has a cleanup identity.
             subprocess.run(["docker", "rm", "-f", "-v", name], stdout=subprocess.DEVNULL, timeout=30, check=True)
         except (subprocess.SubprocessError, OSError) as cleanup_error:
+            if on_container is not None: on_container(name, ContainerState.REMOVE_UNKNOWN)
             if failure is None:
                 raise RuntimeError(f"fixture cleanup failed: {name}") from cleanup_error
             print(f"fixture cleanup also failed: {name}: {type(cleanup_error).__name__}", file=sys.stderr)
+        else:
+            if on_container is not None: on_container(name, ContainerState.REMOVED)
 
 def diagnostics(name, image, failure):
     # Never print raw logs/state/error text: providers can log credentials in arbitrary formats.
