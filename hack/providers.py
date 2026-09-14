@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Isolated T2 providers. Loopback HTTP/plaintext is fixture-only, never production config."""
 import contextlib
+from enum import Enum
 import json
 import math
 import os
@@ -23,11 +24,17 @@ PG = IMAGES["postgres"]
 KEYCLOAK = IMAGES["keycloak"]
 HYDRA = IMAGES["hydra"]
 
+class ContainerState(str, Enum):
+    PRECREATE = 'precreate'
+    CREATED = 'created'
+    REMOVED = 'removed'
+    REMOVE_UNKNOWN = 'remove-unknown'
+
 def docker(*args):
     return subprocess.check_output(["docker", *args], text=True, stderr=subprocess.PIPE, timeout=180).strip()
 
 @contextlib.contextmanager
-def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), network=None):
+def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), network=None, on_container=None):
     name = "identity-t2-" + uuid.uuid4().hex
     command = ["run", "-d", "--name", name]
     if network is not None: command += ["--network", network]
@@ -42,7 +49,9 @@ def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), n
         command += ["-v", mount]
     failure = None
     try:
+        if on_container is not None: on_container(name, ContainerState.PRECREATE)
         cid = docker(*command, image, *args)
+        if on_container is not None: on_container(name, ContainerState.CREATED)
         mapped = {p: int(docker("port", cid, str(p)).rsplit(":", 1)[1]) for p in ports}
         yield cid, mapped
     except BaseException as error:
@@ -53,11 +62,14 @@ def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), n
             diagnostics(name, image, failure)
         try:
             # Named before startup so even a timed-out run has a cleanup identity.
-            subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, timeout=30, check=True)
+            subprocess.run(["docker", "rm", "-f", "-v", name], stdout=subprocess.DEVNULL, timeout=30, check=True)
         except (subprocess.SubprocessError, OSError) as cleanup_error:
+            if on_container is not None: on_container(name, ContainerState.REMOVE_UNKNOWN)
             if failure is None:
                 raise RuntimeError(f"fixture cleanup failed: {name}") from cleanup_error
             print(f"fixture cleanup also failed: {name}: {type(cleanup_error).__name__}", file=sys.stderr)
+        else:
+            if on_container is not None: on_container(name, ContainerState.REMOVED)
 
 def diagnostics(name, image, failure):
     # Never print raw logs/state/error text: providers can log credentials in arbitrary formats.
@@ -99,6 +111,11 @@ def report_tests(package, test, expected, result):
         if name in expected:
             print(f'{package}/{test}: {name}: {status}')
     print(f'{package}/{test}: cargo exit={result.returncode}; raw output withheld')
+    if test == 'ui_host':
+        stages = {'environment','login','create','disable','reset','enable','providers','signout','member-negative','platform','tenant-login','platform-negative','federated-login','step-up'}
+        for stage, failure in re.findall(r'Identity browser failure: ([a-z-]+)/([a-z]+)', result.stdout + result.stderr):
+            if stage in stages and failure in {'environment','timeout','assertion'}:
+                print(f'Identity browser failure: {stage}/{failure}')
     if test == 'capacity_http':
         matrix={(op,c) for op in ('local_login','session_inspect','online_validation') for c in (1,4,16)} | {('cleanup_8_grants',1)}
         records={}
@@ -122,7 +139,7 @@ def report_tests(package, test, expected, result):
         for value in records.values():print('CAPACITY '+json.dumps(value,sort_keys=True))
 
 def cargo(package, test, env, features=()):
-    expected = {('rss-identity-http-axum','platform_cli'):{'real_cli_tls_login_provision_add_unknown_and_logout'},('rss-identity-http-axum','platform_http'):{'platform_http_enforces_roles_and_activates_created_tenants','cli_sso_code_is_single_use_pkce_bound_and_revocable'},('rss-identity-postgres','platform_atomic'):{'platform_last_administrator_changes_serialize','platform_initialization_roles_and_existing_accounts','platform_provisioning_concurrency_and_settlement','platform_dynamic_admission_and_restart'},('rss-identity-http-axum','capacity_http'): {'measure_single_consumer_identity_paths'},('rss-identity-http-axum','recovery_http'): {'physical_restore_preserves_the_selected_security_cut'},('rss-identity-app','clients'): {'clients_are_created_verified_and_drift_is_refused'},('rss-identity-app','installation'): {'installation_configuration_and_rollback_are_verified'},('rss-identity-http-axum','ui_host'): {'real_identity_ui_management_seam'},('rss-identity-http-axum','management_http'): {'management_accounts_sessions_and_boundaries','management_provider_operations_safe_and_scoped','callback_cancellation_consumes_only_bound_attempts','management_rechecks_inflight_provider_authority','provider_capacity_is_atomic_and_keeps_management_available'},('rss-identity-postgres','downstream_atomic'): {'downstream_prepare_admission_precedes_invalid_protocol_work','downstream_cleanup_failure_concurrency_and_unknown_settlement','downstream_cleanup_claim_rollback_and_final_unknown','downstream_readonly_rotation_and_revocation','downstream_unknown_commit_and_single_accept','downstream_remote_unknown_never_returns_authority','downstream_accept_rechecks_revocation_and_final_commit','downstream_claim_and_event_roll_back_together','downstream_federated_provider_revocation','downstream_prepare_budget_is_per_client_and_releases_expired'}, ('rss-identity-http-axum','downstream_http'): {'real_downstream_code_pkce_and_online_validation','downstream_body_deadline_and_caller_auth','real_totp_assurance_reaches_hydra_and_validation_client'}, ('rss-identity-http-axum','federated_http'): {'real_provider_management_and_encrypted_credentials','real_federated_login_and_linking','federated_http_rejects_mismatch_and_uncertain_commit','federated_tls_and_self_service_policy','real_step_up_rotates_only_the_bound_session','real_upstream_client_secret_rotation'}, ('rss-identity-postgres','federated_atomic'): {'federation_concurrent_linking_keeps_one_owner','federation_configuration_authorization_and_versions','federation_state_restart_expiry_and_replay','federation_jit_isolated_subjects_and_membership','federation_config_races_and_provider_revocation','federation_atomic_events_and_unknown_commit','federation_local_and_federated_linking','federation_link_conflict_logout_and_wrong_reauthentication','federation_concurrent_jit_rls_and_schema_drift','federation_step_up_binding_and_settlement', 'federation_step_up_unknown_commit_and_event_rollback', 'federation_assurance_change_revokes_attempts_and_sessions'}, ('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
+    expected = {('rss-identity-http-axum','platform_cli'):{'real_cli_tls_login_provision_add_unknown_and_logout'},('rss-identity-http-axum','platform_http'):{'platform_http_enforces_roles_and_activates_created_tenants','cli_sso_code_is_single_use_pkce_bound_and_revocable'},('rss-identity-postgres','platform_atomic'):{'platform_last_administrator_changes_serialize','platform_initialization_roles_and_existing_accounts','platform_provisioning_concurrency_and_settlement','platform_dynamic_admission_and_restart'},('rss-identity-http-axum','capacity_http'): {'measure_single_consumer_identity_paths'},('rss-identity-http-axum','recovery_http'): {'physical_restore_preserves_the_selected_security_cut'},('rss-identity-app','clients'): {'clients_are_created_verified_and_drift_is_refused'},('rss-identity-app','installation'): {'installation_configuration_and_rollback_are_verified'},('rss-identity-http-axum','ui_host'): {'real_identity_ui_management_seam'},('rss-identity-http-axum','management_http'): {'management_accounts_sessions_and_boundaries','management_provider_operations_safe_and_scoped','callback_cancellation_consumes_only_bound_attempts','management_rechecks_inflight_provider_authority','provider_capacity_is_atomic_and_keeps_management_available'},('rss-identity-postgres','downstream_atomic'): {'downstream_prepare_admission_precedes_invalid_protocol_work','downstream_cleanup_failure_concurrency_and_unknown_settlement','downstream_cleanup_claim_rollback_and_final_unknown','downstream_readonly_rotation_and_revocation','downstream_unknown_commit_and_single_accept','downstream_remote_unknown_never_returns_authority','downstream_accept_rechecks_revocation_and_final_commit','downstream_claim_and_event_roll_back_together','downstream_federated_provider_revocation','downstream_prepare_budget_is_per_client_and_releases_expired'}, ('rss-identity-http-axum','downstream_http'): {'real_downstream_code_pkce_and_online_validation','downstream_body_deadline_and_caller_auth','real_totp_assurance_reaches_hydra_and_validation_client'}, ('rss-identity-http-axum','federated_http'): {'real_provider_management_and_encrypted_credentials','real_federated_login_and_linking','federated_http_rejects_mismatch_and_uncertain_commit','federated_tls_and_self_service_policy','real_step_up_rotates_only_the_bound_session','real_upstream_client_secret_rotation'}, ('rss-identity-postgres','federated_atomic'): {'session_security_is_subject_bound_and_revocable', 'federation_concurrent_linking_keeps_one_owner','federation_configuration_authorization_and_versions','federation_state_restart_expiry_and_replay','federation_jit_isolated_subjects_and_membership','federation_config_races_and_provider_revocation','federation_atomic_events_and_unknown_commit','federation_local_and_federated_linking','federation_link_conflict_logout_and_wrong_reauthentication','federation_concurrent_jit_rls_and_schema_drift','federation_step_up_binding_and_settlement', 'federation_step_up_unknown_commit_and_event_rollback', 'federation_assurance_change_revokes_attempts_and_sessions'}, ('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
                 ('rss-identity-postgres', 'session_atomic'): {'session_rotation_and_revocation', 'session_isolation_replacement_and_restart', 'session_account_changes_fence_racing_credentials', 'session_settlement_and_event_failure_are_atomic', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations'},
                 ('rss-identity-http-axum', 'session_http'): {'session_http_login_cookie_csrf_and_replacement', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_recovery_current_logout_and_deadline', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_pending_commit_preserves_settlement'},
                 ('rss-identity-app', 'operator'): {'maintenance_file_and_settlement'},
@@ -144,8 +161,8 @@ def cargo(package, test, env, features=()):
         raise RuntimeError(f'{package}/{test}: canonical test execution incomplete')
 
 @contextlib.contextmanager
-def postgres():
-    with container(PG, [5432], [("POSTGRES_PASSWORD", "fixture-only")]) as (cid, ports):
+def postgres(on_container=None):
+    with container(PG, [5432], [("POSTGRES_PASSWORD", "fixture-only")], on_container=on_container) as (cid, ports):
         for _ in range(120):
             p = subprocess.run(["docker", "exec", cid, "pg_isready", "-U", "postgres"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
             if p.returncode == 0: break
@@ -197,7 +214,7 @@ def configure_totp(realm):
         user['credentials'].append({'type':'otp','userLabel':'fixture-totp','secretData':json.dumps({'value':'fixture-totp-secret-2339'}),'credentialData':json.dumps({'digits':6,'counter':0,'period':30,'algorithm':'HmacSHA1','subType':'totp'})})
 
 @contextlib.contextmanager
-def keycloak(redirect_uri="https://identity.example.test/api/v1/oidc/callback", database_env=(), network=None):
+def keycloak(redirect_uri="https://identity.example.test/api/v1/oidc/callback", database_env=(), network=None, on_container=None):
     realm = {"realm":"identity", "enabled":True, "sslRequired":"all", "duplicateEmailsAllowed":True,
              "loginWithEmailAllowed":False,
              "groups":[{"name":"staff"}],
@@ -220,7 +237,7 @@ def keycloak(redirect_uri="https://identity.example.test/api/v1/oidc/callback", 
         port=free_port();origin=f"https://127.0.0.1:{port}";issuer=origin+"/realms/identity"
         kc_id, _ = stack.enter_context(container(KEYCLOAK,{8443:port},env=[('KC_BOOTSTRAP_ADMIN_USERNAME','fixture-operator'),('KC_BOOTSTRAP_ADMIN_PASSWORD','fixture-operator-password'),*database_env],network=network,args=["start-dev","--import-realm","--http-enabled=false",f"--hostname={origin}",
             "--https-certificate-file=/opt/keycloak/conf/tls.crt","--https-certificate-key-file=/opt/keycloak/conf/tls.key"],
-            mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro",f"{cert}:/opt/keycloak/conf/tls.crt:ro",f"{key}:/opt/keycloak/conf/tls.key:ro"]))
+            mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro",f"{cert}:/opt/keycloak/conf/tls.crt:ro",f"{key}:/opt/keycloak/conf/tls.key:ro"], on_container=on_container))
         context=ssl.create_default_context(cafile=str(cert));deadline=time.monotonic()+120
         while time.monotonic()<deadline:
             try:

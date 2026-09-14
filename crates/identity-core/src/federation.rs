@@ -414,10 +414,18 @@ impl UpstreamClaims {
 pub type UpstreamFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, FederationError>> + Send + 'a>>;
 
+/// One deployment-approved interpretation and its supported authentication intent.
+/// The fingerprint retains its persisted identity; this descriptor is not browser authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssuranceProfile {
+    pub fingerprint: [u8; 32],
+    pub supports_step_up: bool,
+}
+
 /// Installed by trusted composition once. Tenant identity comes from the persisted flow.
 pub trait UpstreamOidc: Send + Sync {
     /// Identifies the host-approved interpretation of verified ACR/AMR, never provider admission.
-    fn assurance_profile(&self, tenant: TenantId, config: &ProviderSettings) -> [u8; 32];
+    fn assurance_profile(&self, tenant: TenantId, config: &ProviderSettings) -> AssuranceProfile;
     fn validate(
         &self,
         tenant: TenantId,

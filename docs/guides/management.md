@@ -22,8 +22,13 @@ IDENTITY_JOINT_RECORD=/tmp/identity-joint.json \
 pnpm test:identity:joint
 ```
 
-rss-web 自行构建实际 UI、选择同一源码内的 runner，记录两仓 commit/lock、UI 产物及 runner 摘要；后端仅提供 `make test-ui` 测试 fixture，不获取或构建消费者源码。fixture 创建临时 PG、测试 TLS gateway 与 in-process Router。浏览器验证账户写入、IdP 创建/更新/测试/启停、退出和普通成员拒绝。IdP 远程端口在此使用脚本实现，真实连接由 Keycloak 分组覆盖。该证明不是生产 binary/image/config T3。
+rss-web 自行构建实际 UI、选择同一源码内的 runner，记录两仓 commit/lock、UI 产物及 runner 摘要；后端仅提供 `make test-ui` 测试 fixture，不获取或构建消费者源码。fixture 创建临时 PG、测试 TLS gateway、in-process Router 与固定 Keycloak，使用真实 OIDC adapter。浏览器验证账户与 IdP 管理、平台开通、租户隔离以及 [当前会话认证事实和 step-up](assurance.md#浏览器当前会话投影2368)。该证明不是生产 binary/image/config T3。
 
 连接测试从剩余总预算中保留四分之一（最多一秒）用于权限/版本重检和审计结算，上游超时也须确认失败事件提交后才返回诊断；存储结算不确定仍返回不可用，不假定审计成功。重复本地登录名返回明确冲突，管理员会话不因此退出。
 
 平台角色只在专用系统域生效。系统域账户使用 member 账户形态，再通过平台 role API 显式授撤平台资格，不复用租户 administrator 标志。租户开通/增加管理员见[平台指南](platform.md)。
+
+联合入口通过受控进程组处理 SIGINT/SIGTERM；`make test-ui` 使用 ExitStack 删除自己的容器及匿名卷，
+并核实具名资源已经消失。`IDENTITY_UI_FIXTURE_RECORD` 是可选的测试协议输出，容器创建前记录定位，
+终止后原子写结果、浏览器失败分类与 cleanup。浏览器 Node、runner 与必需环境变量预检失败也写 environment 终态。容器跟踪 precreate、created、removed、remove-unknown；只有精确删除成功且核实容器及已记录匿名卷消失才确认清理，启动超时后删除成功可结算为已清理。创建或清理未知不冒称成功；固定消费者入口会将
+恢复目标并入最终记录。SIGKILL 不能承诺执行 finally，缺少 fixture 终态时必须保留恢复目录。

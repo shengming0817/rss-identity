@@ -18,6 +18,7 @@ type Hook = Box<dyn FnOnce() -> UpstreamFuture<'static, ()> + Send>;
 pub struct ScriptedOidc {
     pub fail: AtomicBool,
     pub trusted_assurance: AtomicBool,
+    pub step_up_disabled: AtomicBool,
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
@@ -31,6 +32,7 @@ impl ScriptedOidc {
         Arc::new(Self {
             fail: AtomicBool::new(false),
             trusted_assurance: AtomicBool::new(true),
+            step_up_disabled: AtomicBool::new(false),
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
@@ -42,8 +44,12 @@ impl ScriptedOidc {
     }
 }
 impl UpstreamOidc for ScriptedOidc {
-    fn assurance_profile(&self, _tenant: TenantId, _c: &ProviderSettings) -> [u8; 32] {
-        [u8::from(self.trusted_assurance.load(Ordering::SeqCst)); 32]
+    fn assurance_profile(&self, _tenant: TenantId, _c: &ProviderSettings) -> AssuranceProfile {
+        let approved = self.trusted_assurance.load(Ordering::SeqCst);
+        AssuranceProfile {
+            fingerprint: [u8::from(approved); 32],
+            supports_step_up: approved && !self.step_up_disabled.load(Ordering::SeqCst),
+        }
     }
     fn validate(
         &self,

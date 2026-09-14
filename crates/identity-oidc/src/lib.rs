@@ -329,8 +329,12 @@ fn verify<'a>(
 }
 
 impl UpstreamOidc for HttpOidc {
-    fn assurance_profile(&self, tenant: TenantId, c: &ProviderSettings) -> [u8; 32] {
-        assurance::profile_identity(self.trusted(tenant, c))
+    fn assurance_profile(&self, tenant: TenantId, c: &ProviderSettings) -> AssuranceProfile {
+        let approved = self.trusted(tenant, c);
+        AssuranceProfile {
+            fingerprint: assurance::profile_identity(approved),
+            supports_step_up: approved,
+        }
     }
     fn validate(
         &self,
@@ -361,7 +365,9 @@ impl UpstreamOidc for HttpOidc {
         mode: AuthenticationMode,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
-            if mode == AuthenticationMode::StepUp && !self.trusted(tenant, c) {
+            if mode == AuthenticationMode::StepUp
+                && !self.assurance_profile(tenant, c).supports_step_up
+            {
                 return Err(FederationError::Configuration);
             }
             let (metadata, _) = self.discover(tenant, c, credentials).await?;
