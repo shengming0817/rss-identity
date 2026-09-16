@@ -1607,13 +1607,21 @@ async fn federation_group_snapshot_storage_bounds() -> anyhow::Result<()> {
     );
     *upstream.groups.lock().unwrap() = vec!["staff".into()];
     // An external identity from a different principal cannot be attached as this session's source.
-    sqlx::query("UPDATE identity_authority.sessions SET external_identity_id=(SELECT external_identity_id FROM identity_authority.sessions WHERE session_id=$1::uuid) WHERE session_id=$2::uuid")
-        .bind(sized.view().id.to_string()).bind(exact.view().id.to_string()).execute(&f.owner).await?;
+    let mismatch = sqlx::query("UPDATE identity_authority.sessions SET external_identity_id=(SELECT external_identity_id FROM identity_authority.sessions WHERE session_id=$1::uuid) WHERE session_id=$2::uuid")
+        .bind(sized.view().id.to_string()).bind(exact.view().id.to_string()).execute(&f.owner).await.unwrap_err();
+    assert_eq!(
+        mismatch
+            .as_database_error()
+            .and_then(|e| e.code())
+            .as_deref(),
+        Some("23503"),
+        "the source/principal foreign key rejects mismatched authority"
+    );
     assert!(
         f.store
             .inspect_session(f.key.tenant, secret(&exact), deadline())
             .await
-            .is_err()
+            .is_ok()
     );
     f.close().await;
     Ok(())
