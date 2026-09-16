@@ -34,14 +34,14 @@ I01 协议 owner：#2331；internal validate 和下游 bridge 的实现 owner �
 | status | 字段与语义 |
 | --- | --- |
 | available | 上述完整字段。`values=[]` 表示真实已验证空组；最多 100 项，每项最多 256 UTF-8 字节，精确排序去重，不裁剪、不展开父组。 |
-| unavailable | 仅 `version/status/reason`；reason 为 `local_identity`、`not_configured` 或 `claim_missing`（包括 null）。 |
+| unavailable | 仅 `version/status/reason`；reason 为 `local_identity`、`not_configured`、`claim_missing`（包括 null）或 `not_yet_valid`（本地时间尚未到签发时间）。 |
 | expired | 仅 `version/status`，根据当前时间派生，不持久化此状态，不返回旧组集合。 |
 
-观察时间是已验签上游 ID token 的 `iat`，截止时间固定为 `min(iat + oidc.group_facts_max_age_seconds, exp)`，Unix 秒；`now >= expires_at` 即到期。配置样例为 300 秒，必填策略仅允许 1–300 秒，变更只影响新采集。旧会话各自保持原期限；普通 refresh、CLI code 兑换、下游授权及在线验证不重新采集或延寿。普通登录、step-up、关联过程实际完成的来源重新认证才产生新的 snapshot ID。关联仅继承来源事实，目标 provider 的组不进入来源会话。
+观察时间是已验签上游 ID token 的 `iat`，截止时间固定为 `min(iat + oidc.group_facts_max_age_seconds, exp)`，Unix 秒；`now >= expires_at` 即到期。上游/消费方最多接受 30 秒未来签发偏差，超过则拒绝验证；偏差内基础身份可用，但本地 `now < iat` 时组投影为 `unavailable/not_yet_valid`，不带组集合。到 `iat` 后才可用，不因接受偏差而重算期限。此状态由当前时间派生，不持久化。配置样例为 300 秒，必填策略仅允许 1–300 秒，变更只影响新采集。旧会话各自保持原期限；普通 refresh、CLI code 兑换、下游授权及在线验证不重新采集或延寿。普通登录、step-up、关联过程实际完成的来源重新认证才产生新的 snapshot ID。关联仅继承来源事实，目标 provider 的组不进入来源会话。
 
 `source` 来自当前已验证的外部身份关联，不从持久快照或浏览器复制第二份 authority。`snapshot_id` 只是一次采集的不透明身份，不是单调组成员版本；`provider_config_version` 只解释当时的 claim 配置，MDM 授权映射版本由 MDM 自己维护。tenant/client/subject/session 绑定沿用外层身份；所有同租户合法注册 client 都可以取得事实，不增加输出开关。
 
-账户、成员、会话、provider 配置/epoch 或启停检查失败仍拒绝整次验证；组缺失和到期只撤去组事实。上游撤组不会实时通知 Identity，最大陈旧窗口为该快照的固定期限（最长 300 秒）；立即撤销使用已有会话/provider 撤销机制，重新启用不复活旧 epoch。PG/Hydra 不可用时整次验证失败；Keycloak 不可用时不能新采集，但既有有效会话仍按其原期限在线验证。
+账户、成员、会话、provider 配置/epoch 或启停检查失败仍拒绝整次验证；组缺失和到期只撤去组事实。上游撤组不会实时通知 Identity，组窗口相对签名 `iat` 最长 300 秒，跨系统墙钟还受上述允许偏差约束；立即撤销使用已有会话/provider 撤销机制，重新启用不复活旧 epoch。PG/Hydra 不可用时整次验证失败；Keycloak 不可用时不能新采集，但既有有效会话仍按其原期限在线验证。
 
 SDK 在返回及 `VerifiedIdentity::groups()` 访问时复核时间；`TrustedGroups` 只有私有构造且借用当前身份，不可由 DTO/组名反序列化为可信凭证。若响应在传输中跨过组期限，基础身份仍有效，groups 返回 Expired。产品每请求在线验证，只在本请求内使用该借用；不能缓存组集合来绕过到期或自行推导产品权限。组集合、凭据和上游原文不进入诊断日志。
 

@@ -1,6 +1,27 @@
 //! Required online groups contract, version 1. DTOs alone confer no trust.
 use serde::{Deserialize, Serialize};
 pub const VERSION: u32 = 1;
+/// Deployment TTL and persisted/wire snapshot window share these bounds.
+pub const MIN_TTL_SECONDS: i64 = 1;
+pub const MAX_TTL_SECONDS: i64 = 300;
+/// A future observation may authenticate, but never grants groups before its iat.
+pub const MAX_FUTURE_SKEW_SECONDS: i64 = 30;
+pub fn valid_max_age(seconds: i64) -> bool {
+    (MIN_TTL_SECONDS..=MAX_TTL_SECONDS).contains(&seconds)
+}
+pub fn valid_snapshot_window(observed_at: i64, expires_at: i64) -> bool {
+    observed_at > 0
+        && expires_at
+            .checked_sub(observed_at)
+            .is_some_and(valid_max_age)
+}
+pub fn acceptable_observation(observed_at: i64, now: i64) -> bool {
+    observed_at > 0
+        && now > 0
+        && observed_at
+            .checked_sub(now)
+            .is_some_and(|ahead| ahead <= MAX_FUTURE_SKEW_SECONDS)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -8,6 +29,7 @@ pub enum UnavailableReason {
     LocalIdentity,
     NotConfigured,
     ClaimMissing,
+    NotYetValid,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,12 +89,8 @@ impl Groups {
                     && !source.provider_id.is_nil()
                     && !snapshot_id.is_nil()
                     && *provider_config_version > 0
-                    && *observed_at > 0
-                    && *observed_at <= now
-                    && *expires_at > *observed_at
-                    && expires_at
-                        .checked_sub(*observed_at)
-                        .is_some_and(|v| v <= 300)
+                    && acceptable_observation(*observed_at, now)
+                    && valid_snapshot_window(*observed_at, *expires_at)
                     && canonical_values(values)
                     && valid_issuer(&source.issuer)
             }

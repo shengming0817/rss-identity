@@ -18,7 +18,7 @@ fn group_policy_bounds_signed_observation_without_callback_extension() {
     for (iat, exp, now) in [
         (0, 100, 1),
         (100, 100, 100),
-        (101, 200, 100),
+        (131, 200, 100),
         (100, 200, 200),
         (i64::MAX - 1, i64::MAX, i64::MAX - 1),
     ] {
@@ -60,4 +60,16 @@ fn group_values_are_exact_bounded_sets_and_missing_is_not_empty() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn signed_observation_tolerates_bounded_skew_without_extending_deadline() {
+    let policy = GroupFactsMaxAge::new(10).unwrap();
+    for ahead in [1, 30] {
+        assert_eq!(
+            policy.expires_at(1000 + ahead, 2000, 1000).unwrap(),
+            1010 + ahead
+        );
+    }
+    assert!(policy.expires_at(1031, 2000, 1000).is_err());
 }

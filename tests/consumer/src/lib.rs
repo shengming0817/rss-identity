@@ -248,9 +248,17 @@ mod tests {
                         anyhow::bail!("consumer groups unavailable");
                     };
                     assert_eq!(groups.values(), &["/staff"]);
+                    let source: &rss_identity_client::GroupSource = groups.source();
+                    assert!(!source.provider_id.is_nil());
                     assert!(!groups.snapshot_id().is_nil());
                     assert!(groups.provider_config_version() > 0);
                 }
+                "missing" => assert!(matches!(
+                    proof.groups()?,
+                    rss_identity_client::VerifiedGroups::Unavailable(
+                        rss_identity_client::UnavailableReason::ClaimMissing
+                    )
+                )),
                 "expired" => assert!(matches!(
                     proof.groups()?,
                     rss_identity_client::VerifiedGroups::Expired
@@ -317,7 +325,9 @@ mod tests {
         let session = product.exchange(pending, &callback).await?;
         assert!(matches!(
             product.verify(&session).await?.groups()?,
-            rss_identity_client::VerifiedGroups::Unavailable(_)
+            rss_identity_client::VerifiedGroups::Unavailable(
+                rss_identity_client::UnavailableReason::LocalIdentity
+            )
         ));
         product.verify(&session).await?;
         let logout = http

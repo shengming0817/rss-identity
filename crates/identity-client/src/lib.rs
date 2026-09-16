@@ -1,5 +1,8 @@
 //! Request-scoped Identity validation client. No OIDC flow, database dependency, or success cache.
-pub use rss_identity_contracts::{Acr, Amr};
+pub use rss_identity_contracts::{
+    Acr, Amr,
+    groups::{GroupSource, UnavailableReason},
+};
 use rss_identity_contracts::{
     IdentityFacts, ValidationFailure, ValidationFailureCode, ValidationRequest,
 };
@@ -95,7 +98,7 @@ pub struct VerifiedIdentity(IdentityFacts, Arc<dyn Clock>, i64);
 /// Groups are borrowed from a currently checked identity; there is no standalone proof constructor.
 pub enum VerifiedGroups<'a> {
     Available(TrustedGroups<'a>),
-    Unavailable(rss_identity_contracts::groups::UnavailableReason),
+    Unavailable(UnavailableReason),
     Expired,
 }
 /// Neither wire deserialization nor consumer-owned group names construct trusted groups.
@@ -103,7 +106,7 @@ pub enum VerifiedGroups<'a> {
 /// let groups: rss_identity_client::TrustedGroups<'_> = serde_json::from_str("{}").unwrap();
 /// ```
 pub struct TrustedGroups<'a> {
-    source: &'a rss_identity_contracts::groups::GroupSource,
+    source: &'a GroupSource,
     snapshot_id: uuid::Uuid,
     provider_config_version: i64,
     observed_at: i64,
@@ -111,7 +114,7 @@ pub struct TrustedGroups<'a> {
     values: &'a [String],
 }
 impl TrustedGroups<'_> {
-    pub fn source(&self) -> &rss_identity_contracts::groups::GroupSource {
+    pub fn source(&self) -> &GroupSource {
         self.source
     }
     pub fn snapshot_id(&self) -> uuid::Uuid {
@@ -145,6 +148,9 @@ impl VerifiedIdentity {
             Groups::Unavailable { reason, .. } => VerifiedGroups::Unavailable(*reason),
             Groups::Expired { .. } => VerifiedGroups::Expired,
             Groups::Available { expires_at, .. } if now >= *expires_at => VerifiedGroups::Expired,
+            Groups::Available { observed_at, .. } if now < *observed_at => {
+                VerifiedGroups::Unavailable(UnavailableReason::NotYetValid)
+            }
             Groups::Available {
                 source,
                 snapshot_id,
@@ -469,7 +475,7 @@ mod response_tests {
         }
         for (field, value) in [
             ("version", json!(2)),
-            ("observed_at", json!(1001)),
+            ("observed_at", json!(1031)),
             ("expires_at", json!(1291)),
             ("snapshot_id", json!(uuid::Uuid::nil())),
             ("provider_config_version", json!(0)),
@@ -501,6 +507,36 @@ mod response_tests {
             response(200, HEADERS, body.to_string(), false).await,
             Err(Error::Rejected)
         ));
+    }
+    #[tokio::test]
+    async fn future_groups_preserve_identity_but_cannot_be_used_early() {
+        for ahead in [1, 30] {
+            let mut body = facts();
+            body["groups"] = available_groups();
+            body["groups"]["observed_at"] = json!(1000 + ahead);
+            body["groups"]["expires_at"] = json!(1001 + ahead);
+            let times = [1000, 1000, 1000, 1000 + ahead, 1001 + ahead];
+            let clock = Arc::new(SequenceClock(std::sync::Mutex::new(times.into())));
+            let proof = response_clock(200, HEADERS, body.to_string(), false, clock)
+                .await
+                .unwrap();
+            assert_eq!(proof.subject(), "pairwise-subject");
+            assert!(matches!(
+                proof.groups().unwrap(),
+                VerifiedGroups::Unavailable(UnavailableReason::NotYetValid)
+            ));
+            assert!(matches!(
+                proof.groups().unwrap(),
+                VerifiedGroups::Available(_)
+            ));
+            assert!(matches!(proof.groups().unwrap(), VerifiedGroups::Expired));
+            body["groups"]["observed_at"] = json!(1031);
+            body["groups"]["expires_at"] = json!(1032);
+            assert!(matches!(
+                response(200, HEADERS, body.to_string(), false).await,
+                Err(Error::Rejected)
+            ));
+        }
     }
     #[tokio::test]
     async fn client_rejects_each_invalid_success_binding() {

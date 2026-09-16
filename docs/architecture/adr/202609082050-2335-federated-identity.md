@@ -34,7 +34,7 @@ JIT 默认关闭；显式启用后，未知外部键 `(tenant,provider,issuer,su
 
 link stage 使用闭合集合与带预期前态的推进操作。link intent 绑定 principal、session ID、auth/member epoch、browser、原认证来源、目标 provider/version 和总期限。cookie digest 不作为长期 intent 身份：正常 refresh 的新 cookie 可继续；旧 cookie、current/all logout、禁用/成员变化、source provider 撤销都使关联失败。两阶段复用同一 OIDC attempt 机制，不新增 session 授权票据。目标 key 属于本人时报告 already-linked；属于别人时报告不泄漏归属的 conflict，不合并账户。
 
-成功关联推进 auth_epoch、创建新 session 并写事件；新 session 来源继承本轮原账户重新认证（密码为 local，联合为原 identity）。联合 session 保存 external_identity_id、provider epoch 和有界 claims 快照。每次认证/刷新/列表统一校验来源，provider 停用永久失效其旧 session；重新启用不复活，本地 session 不受影响。普通配置编辑不比较 session config_version，不撤销既有会话。不声明 Keycloak/Hydra 全局退出。
+成功关联推进 auth_epoch、创建新 session 并写事件；新 session 来源继承本轮原账户重新认证（密码为 local，联合为原 identity）。联合 session 保存 external_identity_id、provider epoch 和有界 claims 快照。每次认证/刷新/列表统一校验来源，provider 停用永久失效其旧 session；重新启用不复活，本地 session 不受影响。#2433 按当前来源配置版本与 provider epoch 共同复核：provider 配置版本变化使旧联合会话及其关联 grant 拒绝，不能继续使用旧解释采集的事实。此决定替换 I05 初稿的“普通配置编辑不撤销既有会话”；部署级组 TTL 调整只影响后续采集，不改变 provider 版本，也不重算已有快照期限。不声明 Keycloak/Hydra 全局退出。
 
 ## 结算、权限与验证
 

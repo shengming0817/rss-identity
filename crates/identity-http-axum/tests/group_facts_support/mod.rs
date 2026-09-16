@@ -171,6 +171,7 @@ pub async fn lifecycle(
         ),
         "Keycloak 26.7.3 omits the claim for zero memberships"
     );
+    consumer(&removed_token, "missing").await?;
     staff_membership(true).await?;
     let expiry = [&first, &second]
         .into_iter()

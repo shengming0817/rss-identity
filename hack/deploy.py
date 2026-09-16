@@ -41,6 +41,8 @@ def compose_literals(value):
  if isinstance(value,list):return [compose_literals(item) for item in value]
  if isinstance(value,dict):return {key:compose_literals(item) for key,item in value.items()}
  return value
+def valid_group_facts_max_age(ttl):
+ return type(ttl) is int and 1<=ttl<=300
 def render(data,out,candidate):
  images=candidate['providers'];artifacts=candidate['images']
  require(set(images)==set(IMAGES) and set(artifacts)=={'server','operator','gateway'},'incomplete candidate images')
@@ -51,7 +53,7 @@ def render(data,out,candidate):
  fields(data,{'runtime','owner_password_file','maintenance_password_file','hydra_database_password_file','keycloak_database_password_file','hydra_system_secret_files','hydra_cookie_secret_files','tls_certificate_file','tls_key_file','hydra_admin_certificate_file','hydra_admin_key_file','keycloak_certificate_file','keycloak_key_file','postgres_certificate_file','postgres_key_file','backend_subnet','protocol_subnet','consumer_network','keycloak'},'deployment')
  require(data['runtime']['format_version']==2,'unsupported runtime configuration')
  ttl=data['runtime']['oidc']['group_facts_max_age_seconds']
- require(type(ttl) is int and 1<=ttl<=300,'invalid group facts max age')
+ require(valid_group_facts_max_age(ttl),'invalid group facts max age')
  fields(data['keycloak'],{'public_origin','ca_file','realm_files'},'keycloak')
  for profile in data['runtime']['oidc']['assurance_profiles']:
   require(type(profile.get('keycloak_totp')) is bool,'invalid keycloak_totp profile')

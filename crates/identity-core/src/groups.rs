@@ -5,8 +5,10 @@ use crate::federation::FederationError;
 #[derive(Clone, Copy)]
 pub struct GroupFactsMaxAge(i64);
 impl GroupFactsMaxAge {
+    pub const MIN_SECONDS: i64 = rss_identity_contracts::groups::MIN_TTL_SECONDS;
+    pub const MAX_SECONDS: i64 = rss_identity_contracts::groups::MAX_TTL_SECONDS;
     pub fn new(seconds: i64) -> Result<Self, FederationError> {
-        if !(1..=300).contains(&seconds) {
+        if !rss_identity_contracts::groups::valid_max_age(seconds) {
             return Err(FederationError::Configuration);
         }
         Ok(Self(seconds))
@@ -19,7 +21,10 @@ impl GroupFactsMaxAge {
         expires_at: i64,
         now: i64,
     ) -> Result<i64, FederationError> {
-        if issued_at <= 0 || issued_at > now || expires_at <= issued_at || expires_at <= now {
+        if !rss_identity_contracts::groups::acceptable_observation(issued_at, now)
+            || expires_at <= issued_at
+            || expires_at <= now
+        {
             return Err(FederationError::Claims);
         }
         Ok(issued_at

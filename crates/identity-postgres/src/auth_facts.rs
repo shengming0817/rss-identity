@@ -1,6 +1,8 @@
 //! The only persisted authentication-facts codec. Provider authority stays in Origin.
 use crate::transaction::{corrupt, reject};
-use rss_identity_contracts::groups::{GroupSource, Groups, UnavailableReason, VERSION};
+use rss_identity_contracts::groups::{
+    GroupSource, Groups, UnavailableReason, VERSION, acceptable_observation, valid_snapshot_window,
+};
 use rss_identity_core::{
     assurance::Assurance,
     federation::{FederationError, UpstreamClaims},
@@ -81,7 +83,7 @@ impl AuthenticationFacts {
         }
         match &facts.groups {
             Snapshot::Unavailable {
-                reason: UnavailableReason::LocalIdentity,
+                reason: UnavailableReason::LocalIdentity | UnavailableReason::NotYetValid,
             } => return Err(corrupt()),
             Snapshot::Available {
                 snapshot_id,
@@ -90,9 +92,7 @@ impl AuthenticationFacts {
                 values,
             } => {
                 if snapshot_id.is_nil()
-                    || *observed_at <= 0
-                    || *expires_at <= *observed_at
-                    || expires_at.checked_sub(*observed_at).is_none_or(|v| v > 300)
+                    || !valid_snapshot_window(*observed_at, *expires_at)
                     || !rss_identity_contracts::groups::canonical_values(values)
                 {
                     return Err(corrupt());
@@ -124,8 +124,11 @@ impl AuthenticationFacts {
                 expires_at,
                 values,
             } => {
-                if now < *observed_at {
+                if !acceptable_observation(*observed_at, now) {
                     return Err(reject());
+                }
+                if now < *observed_at {
+                    return Ok(Groups::unavailable(UnavailableReason::NotYetValid));
                 }
                 if now >= *expires_at {
                     return Ok(Groups::Expired { version: VERSION });
@@ -191,7 +194,7 @@ mod tests {
                 serde_json::json!({"version":1,"status":"expired"})
             );
         }
-        assert!(restored.project(source(), 999).is_err());
+        assert!(restored.project(source(), 969).is_err());
         for (groups, reason) in [
             (
                 UpstreamGroups::NotConfigured,
@@ -241,9 +244,54 @@ mod tests {
             input["groups"][key] = value;
             assert!(AuthenticationFacts::decode(input).is_err());
         }
+        for reason in ["local_identity", "not_yet_valid"] {
+            let mut input = base.clone();
+            input["groups"] = serde_json::json!({"status":"unavailable","reason":reason});
+            assert!(AuthenticationFacts::decode(input).is_err());
+        }
         assert!(
             AuthenticationFacts::decode(serde_json::json!({"groups":[],"mapping_version":2}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn future_observation_preserves_identity_and_withholds_groups_until_observed() {
+        for groups in [
+            UpstreamGroups::NotConfigured,
+            UpstreamGroups::Missing,
+            UpstreamGroups::present(vec![]).unwrap(),
+        ] {
+            let mut claims = claims(groups);
+            claims.issued_at = 1030;
+            claims.assurance = Assurance::password(1030).unwrap();
+            let facts =
+                AuthenticationFacts::collect(&claims, 1, GroupFactsMaxAge::new(1).unwrap(), 1000)
+                    .unwrap();
+            let encoded = serde_json::to_value(&facts).unwrap();
+            let restored = AuthenticationFacts::decode(encoded.clone()).unwrap();
+            let before = serde_json::to_value(restored.project(source(), 1029).unwrap()).unwrap();
+            assert_eq!(before["status"], "unavailable");
+            assert!(before.get("values").is_none());
+            if claims.groups.values().is_some() {
+                assert_eq!(before["reason"], "not_yet_valid");
+                assert!(matches!(
+                    restored.project(source(), 1030).unwrap(),
+                    Groups::Available {
+                        expires_at: 1031,
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    restored.project(source(), 1031).unwrap(),
+                    Groups::Expired { .. }
+                ));
+            }
+            assert_eq!(serde_json::to_value(&restored).unwrap(), encoded);
+            assert!(
+                AuthenticationFacts::collect(&claims, 1, GroupFactsMaxAge::new(1).unwrap(), 999)
+                    .is_err()
+            );
+        }
     }
 }

@@ -1626,3 +1626,55 @@ async fn federation_group_snapshot_storage_bounds() -> anyhow::Result<()> {
     f.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn federation_signed_time_skew_preserves_identity() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let service = service(&f, upstream.clone());
+    let provider = enabled(&f, &service).await?;
+    upstream.issued_at_offset.store(10, Ordering::SeqCst);
+    let session = issued(
+        finish(
+            &service,
+            begin(&f, &service, &provider).await?,
+            "future-time",
+        )
+        .await?,
+    );
+    let snapshot = stored_facts(&f, &session).await?;
+    let now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    assert!(snapshot["groups"]["observed_at"].as_i64().unwrap() > now);
+    assert_eq!(
+        snapshot["groups"]["expires_at"].as_i64().unwrap()
+            - snapshot["groups"]["observed_at"].as_i64().unwrap(),
+        300
+    );
+    // Session loading projects future groups to unavailable without rejecting identity.
+    f.store
+        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .await?;
+    upstream.issued_at_offset.store(60, Ordering::SeqCst);
+    assert!(
+        finish(
+            &service,
+            begin(&f, &service, &provider).await?,
+            "beyond-skew"
+        )
+        .await
+        .is_err()
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.external_identities WHERE subject='beyond-skew'",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(count, 0);
+    f.close().await;
+    Ok(())
+}

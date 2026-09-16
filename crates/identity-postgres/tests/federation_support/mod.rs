@@ -7,7 +7,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -23,6 +23,7 @@ pub struct ScriptedOidc {
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
     pub groups: Mutex<Vec<String>>,
+    pub issued_at_offset: AtomicI64,
     pub gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     pub arrivals: AtomicUsize,
     pub hook: Mutex<Option<Hook>>,
@@ -37,6 +38,7 @@ impl ScriptedOidc {
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
             groups: Mutex::new(vec!["staff".into()]),
+            issued_at_offset: AtomicI64::new(0),
             gate: Mutex::new(None),
             arrivals: AtomicUsize::new(0),
             hook: Mutex::new(None),
@@ -107,7 +109,8 @@ impl UpstreamOidc for ScriptedOidc {
                 issued_at: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() as i64,
+                    .as_secs() as i64
+                    + self.issued_at_offset.load(Ordering::SeqCst),
                 expires_at: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()

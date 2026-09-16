@@ -69,3 +69,5 @@ credential_keyring 为 `{active_key_id, keys:[{key_id,path}]}`，各 path 文件
 ## 组事实有效期
 
 `runtime.oidc.group_facts_max_age_seconds` 必填，部署样例为 300 秒，允许 1–300。重启应用采用新策略后只影响新上游认证快照；不会重新计算已有会话期限。需要立即撤销时停用 provider 或撤销会话，不能仅缩短 TTL。未部署产品的本次替换不读取旧 `auth_facts` 格式；测试/候选使用新建数据库及当前固定源码，不提供历史数据转换。组到期仅使组事实不可用，组依赖操作需重新认证；账户/成员/provider 撤销仍拒绝整个身份。
+
+Identity、PG、IdP 和 SDK 宿主应同步时钟。组事实允许最多 30 秒未来签发偏差；在消费方本地时间到 `iat` 前仅组不可用，身份保留，超过偏差则拒绝验证。该固定容差不是部署配置，不能延长签名 `iat` 所确定的 TTL。

@@ -62,3 +62,5 @@ match identity.groups()? {
 ```
 
 独立 `tests/consumer` 在真实 PG＋Keycloak＋Hydra 链路验证 available 和 expired（后者基础身份仍有效），不导入服务端 crate。生产固定 Git pin/lock、候选摘要与实际运行结果以 #2433 PR 交付记录为准，不以本段说明替代执行证据。
+
+SDK 根导出 `GroupSource` 和 `UnavailableReason`；仅依赖 client 即可精确匹配 `VerifiedGroups::Unavailable(UnavailableReason::ClaimMissing)`。`NotYetValid` 表示允许偏差内的未来观察：基础身份可用，到本地 `iat` 前不能访问可信组。使用时重新调用 `groups()`；不缓存成功证明。
