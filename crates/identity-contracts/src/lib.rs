@@ -1,6 +1,7 @@
 //! Identity v1 wire data. Deserializing these values does not authenticate anyone.
 use serde::{Deserialize, Serialize};
 pub mod cli;
+pub mod groups;
 pub mod platform;
 pub mod session;
 /// Closed normalized authentication strength. ref: serde enum representations.
@@ -82,6 +83,7 @@ pub struct IdentityFacts {
     pub amr: Vec<Amr>,
     pub acr: Acr,
     pub expires_at: i64,
+    pub groups: groups::Groups,
 }
 /// Sanitized diagnostic, never a provider or database error message.
 #[derive(Debug, Serialize, Deserialize)]

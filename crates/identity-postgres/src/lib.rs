@@ -1,4 +1,5 @@
 //! Tenant-local account authority. SQL and event envelopes are private implementation details.
+mod auth_facts;
 mod deployment;
 pub use deployment::DeploymentIdentity;
 mod attempts;

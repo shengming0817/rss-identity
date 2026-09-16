@@ -155,6 +155,10 @@ pub(crate) async fn insert(
         db::close(c, key, id, now).await?;
     }
     let id = SessionId::generate();
+    let facts = match &origin {
+        Some(o) => Some(o.facts.encode(c).await?),
+        None => None,
+    };
     sqlx::query(concat!(
         "INSERT INTO identity_authority.sessions(tenant_id,principal_id,session_id,token_",
         "hash,auth_epoch,membership_epoch,auth_time,idle_expires_at,absolute_expires_at,e",
@@ -172,7 +176,7 @@ pub(crate) async fn insert(
     .bind(lifetime.absolute_expires_at())
     .bind(origin.as_ref().map(|o| o.identity))
     .bind(origin.as_ref().map(|o| o.epoch))
-    .bind(origin.map(|o| o.facts))
+    .bind(facts)
     .execute(c)
     .await?;
     Ok((

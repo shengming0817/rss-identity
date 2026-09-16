@@ -74,3 +74,22 @@ fn runtime_config_is_strict_and_contains_no_maintenance_secret_slot() {
         );
     }
 }
+
+#[test]
+fn group_facts_policy_is_required_and_deployment_scoped() {
+    use rss_identity_app::config::RuntimeConfig;
+    let example: serde_json::Value =
+        serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
+    for value in [1, 300, 0, 301, -1] {
+        let mut runtime = example["runtime"].clone();
+        runtime["oidc"]["group_facts_max_age_seconds"] = value.into();
+        let config: RuntimeConfig = serde_json::from_value(runtime).unwrap();
+        assert_eq!(config.validate().is_ok(), (1..=300).contains(&value));
+    }
+    let mut runtime = example["runtime"].clone();
+    runtime["oidc"]
+        .as_object_mut()
+        .unwrap()
+        .remove("group_facts_max_age_seconds");
+    assert!(serde_json::from_value::<RuntimeConfig>(runtime).is_err());
+}

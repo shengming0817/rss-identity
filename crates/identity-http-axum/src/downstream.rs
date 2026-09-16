@@ -361,6 +361,7 @@ async fn validate(
         )
         .await?;
     Ok(Json(rss_identity_contracts::IdentityFacts {
+        groups: proof.groups().clone(),
         subject: proof.subject().to_owned(),
         tenant_id: proof.tenant_id().to_owned(),
         session_id: proof.session_id().to_owned(),

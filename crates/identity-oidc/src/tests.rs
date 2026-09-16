@@ -284,3 +284,34 @@ async fn discovery_preserves_unavailable_and_protocol_failure() {
 fn tenant() -> rss_request_context::TenantId {
     rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap()
 }
+
+#[test]
+fn signed_group_claim_presence_and_exact_values_are_distinct() {
+    use rss_identity_core::groups::UpstreamGroups;
+    use serde_json::json;
+    assert!(matches!(
+        mapped_groups(None, &json!({"groups":["ignored"]})).unwrap(),
+        UpstreamGroups::NotConfigured
+    ));
+    for claims in [json!({}), json!({"groups":null})] {
+        assert!(matches!(
+            mapped_groups(Some("groups"), &claims).unwrap(),
+            UpstreamGroups::Missing
+        ));
+    }
+    assert_eq!(
+        mapped_groups(Some("groups"), &json!({"groups":[]}))
+            .unwrap()
+            .values(),
+        Some([].as_slice())
+    );
+    assert_eq!(
+        mapped_groups(Some("groups"), &json!({"groups":["/a/b"," a ","/a/b"]}))
+            .unwrap()
+            .values(),
+        Some([" a ".to_string(), "/a/b".to_string()].as_slice())
+    );
+    for value in [json!("group"), json!([null]), json!([1]), json!(["bad\n"])] {
+        assert!(mapped_groups(Some("groups"), &json!({"groups":value})).is_err());
+    }
+}

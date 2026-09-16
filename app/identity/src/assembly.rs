@@ -140,7 +140,13 @@ pub fn providers(c: &RuntimeConfig, a: Authority) -> Result<Providers, AppError>
             .map_err(|_| AppError::Configuration)?,
         );
     }
-    let federation = Federation::new(a.clone(), Arc::new(oidc), signer, targets)?;
+    let federation = Federation::new(
+        c.oidc.group_policy()?,
+        a.clone(),
+        Arc::new(oidc),
+        signer,
+        targets,
+    )?;
     let admission = Arc::new(PrepareAdmission::new(16, 120, Duration::from_secs(60))?);
     let downstream = Downstream::new(a, hydra.clone(), registrations, limits, admission)?;
     Ok(Providers {

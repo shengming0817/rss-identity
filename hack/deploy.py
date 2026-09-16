@@ -50,6 +50,8 @@ def render(data,out,candidate):
  require(not any(k in data for k in ('hydra_system_secret_file','hydra_cookie_secret_file')),'removed singular Hydra secret fields; use hydra_system_secret_files and hydra_cookie_secret_files')
  fields(data,{'runtime','owner_password_file','maintenance_password_file','hydra_database_password_file','keycloak_database_password_file','hydra_system_secret_files','hydra_cookie_secret_files','tls_certificate_file','tls_key_file','hydra_admin_certificate_file','hydra_admin_key_file','keycloak_certificate_file','keycloak_key_file','postgres_certificate_file','postgres_key_file','backend_subnet','protocol_subnet','consumer_network','keycloak'},'deployment')
  require(data['runtime']['format_version']==2,'unsupported runtime configuration')
+ ttl=data['runtime']['oidc']['group_facts_max_age_seconds']
+ require(type(ttl) is int and 1<=ttl<=300,'invalid group facts max age')
  fields(data['keycloak'],{'public_origin','ca_file','realm_files'},'keycloak')
  for profile in data['runtime']['oidc']['assurance_profiles']:
   require(type(profile.get('keycloak_totp')) is bool,'invalid keycloak_totp profile')

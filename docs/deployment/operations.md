@@ -64,3 +64,8 @@ credential_keyring 为 `{active_key_id, keys:[{key_id,path}]}`，各 path 文件
 参考拓扑的 `keycloak` 是独立 IdP 的运维输入，包含 public_origin、ca_file、realm_files。realm_files 是 IdP owner 准备的私有 JSON 文件，渲染后归 Keycloak UID；不由 Identity 租户或审批清单派生。其它 OIDC IdP 可直接由各租户配置。Identity 新增不发布端口的 egress 网络以访问自助 IdP；数据库和内部协议服务继续位于内部网络。
 
 系统域初始化完成后使用 identity-platform login、tenant create 或 tenant admin add。固定候选包含独立 identity-platform 二进制；网页必须消费新协议，旧 UI 不能作为新后端已验收的组合。
+
+
+## 组事实有效期
+
+`runtime.oidc.group_facts_max_age_seconds` 必填，部署样例为 300 秒，允许 1–300。重启应用采用新策略后只影响新上游认证快照；不会重新计算已有会话期限。需要立即撤销时停用 provider 或撤销会话，不能仅缩短 TTL。未部署产品的本次替换不读取旧 `auth_facts` 格式；测试/候选使用新建数据库及当前固定源码，不提供历史数据转换。组到期仅使组事实不可用，组依赖操作需重新认证；账户/成员/provider 撤销仍拒绝整个身份。

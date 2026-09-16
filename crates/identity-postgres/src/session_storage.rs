@@ -25,6 +25,7 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 
 pub(crate) struct Loaded {
     pub assurance: Assurance,
+    pub groups: rss_identity_contracts::groups::Groups,
     pub system_domain: bool,
     pub platform_administrator: bool,
     pub state: AccountState,
@@ -107,9 +108,10 @@ pub(crate) async fn by_id(
         return Err(reject());
     }
     let origin = crate::federation_storage::origin(c, tenant, session_id(&id)?).await?;
-    if let Some(origin) = &origin {
-        crate::federation_storage::check_origin(c, tenant, origin).await?;
-    }
+    let source = match &origin {
+        Some(origin) => Some(crate::federation_storage::check_origin(c, key, origin).await?),
+        None => None,
+    };
     let system_domain = crate::platform::system_domain(c).await? == Some(tenant);
     let platform_administrator = crate::platform::platform_role(c, key).await?;
     if system_domain && (state.administrator() || state.emergency()) {
@@ -126,18 +128,25 @@ pub(crate) async fn by_id(
     if !lifetime.valid_at(now) {
         return Err(reject());
     }
-    let assurance = match origin {
-        Some(origin) => serde_json::from_value::<Assurance>(
-            origin.facts.get("assurance").cloned().ok_or_else(corrupt)?,
-        )
-        .map_err(|_| corrupt())?,
-        None => Assurance::password(lifetime.auth_time()).map_err(|_| corrupt())?,
+    let (assurance, groups) = match (origin, source) {
+        (Some(origin), Some(source)) => (
+            origin.facts.assurance.clone(),
+            origin.facts.project(source, now)?,
+        ),
+        (None, None) => (
+            Assurance::password(lifetime.auth_time()).map_err(|_| corrupt())?,
+            rss_identity_contracts::groups::Groups::unavailable(
+                rss_identity_contracts::groups::UnavailableReason::LocalIdentity,
+            ),
+        ),
+        _ => return Err(corrupt()),
     };
     assurance
         .check(AuthenticationMode::Login, lifetime.auth_time(), now)
         .map_err(|_| reject())?;
     Ok(Loaded {
         assurance,
+        groups,
         system_domain,
         platform_administrator,
         state,

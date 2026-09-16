@@ -3,6 +3,7 @@ pub mod account;
 pub mod assurance;
 pub mod downstream;
 pub mod federation;
+pub mod groups;
 pub mod platform;
 pub mod session;
 use uuid::Uuid;

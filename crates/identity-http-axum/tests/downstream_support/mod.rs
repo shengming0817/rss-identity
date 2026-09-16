@@ -51,17 +51,31 @@ pub async fn flow(
     exchange_verifier: &str,
     replay: bool,
 ) -> anyhow::Result<(String, Value, String)> {
+    flow_for_client(c, origin, issuer, csrf, exchange_verifier, replay, "mdm").await
+}
+pub async fn flow_for_client(
+    c: &Client,
+    origin: &str,
+    issuer: &str,
+    csrf: &str,
+    exchange_verifier: &str,
+    replay: bool,
+    client: &str,
+) -> anyhow::Result<(String, Value, String)> {
+    let redirect = format!("https://{client}.example.test/auth/callback");
+    let audience = format!("{client}-api");
+    let secret = format!("fixture-oidc-{client}-secret");
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use sha2::{Digest, Sha256};
     let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let mut authorize = Url::parse(&format!("{issuer}oauth2/auth"))?;
     authorize.query_pairs_mut().extend_pairs([
-        ("client_id", "mdm"),
-        ("redirect_uri", "https://mdm.example.test/auth/callback"),
+        ("client_id", client),
+        ("redirect_uri", redirect.as_str()),
         ("response_type", "code"),
         ("scope", "openid"),
-        ("audience", "mdm-api"),
+        ("audience", audience.as_str()),
         ("state", "consumer-state-value"),
         ("nonce", "consumer-nonce-value"),
         ("code_challenge_method", "S256"),
@@ -117,11 +131,11 @@ pub async fn flow(
     let code = query(&callback, "code")?;
     let response = c
         .post(format!("{issuer}oauth2/token"))
-        .basic_auth("mdm", Some("fixture-oidc-mdm-secret"))
+        .basic_auth(client, Some(&secret))
         .form(&[
             ("grant_type", "authorization_code"),
             ("code", &code),
-            ("redirect_uri", "https://mdm.example.test/auth/callback"),
+            ("redirect_uri", redirect.as_str()),
             ("code_verifier", exchange_verifier),
         ])
         .send()
@@ -135,11 +149,11 @@ pub async fn flow(
     if replay {
         let replay = c
             .post(format!("{issuer}oauth2/token"))
-            .basic_auth("mdm", Some("fixture-oidc-mdm-secret"))
+            .basic_auth(client, Some(&secret))
             .form(&[
                 ("grant_type", "authorization_code"),
                 ("code", &code),
-                ("redirect_uri", "https://mdm.example.test/auth/callback"),
+                ("redirect_uri", redirect.as_str()),
                 ("code_verifier", exchange_verifier),
             ])
             .send()

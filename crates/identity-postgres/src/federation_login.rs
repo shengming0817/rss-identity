@@ -283,6 +283,7 @@ impl Federation {
         }
         let locator = self.signer.verify(&state)?;
         let commit_oidc = self.oidc.clone();
+        let group_policy = self.group_policy;
         self.authority.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
@@ -357,7 +358,7 @@ impl Federation {
                         .await?;
                         crate::federation_link::advance(c,tenant,intent.id,crate::federation_link::LinkStage::TargetReady).await?;
                         if let Some(origin) = &intent.origin {
-                            db::check_origin(c, tenant, origin).await?;
+                            db::check_origin(c, key, origin).await?;
                         }
                         (intent.origin, Some(intent.session))
                     } else {
@@ -370,7 +371,7 @@ impl Federation {
                             Some(db::Origin {
                                 identity: identity_id,
                                 epoch: view.revocation_epoch,
-                                facts: claims_facts(&claims, view.version),
+                                facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, now)?,
                             }),
                             attempt.replacement,
                         )
@@ -448,11 +449,6 @@ pub(crate) fn check_browser(browser: &str) -> Result<(), AuthorityError> {
 }
 fn hex_digest(browser: &str) -> String {
     digest(browser).iter().map(|b| format!("{b:02x}")).collect()
-}
-pub(crate) fn claims_facts(claims: &UpstreamClaims, version: i64) -> serde_json::Value {
-    serde_json::json!({
-    "email":claims.email,"email_verified":claims.email_verified,"groups":claims.groups,"mapping_version":version,"assurance":claims.assurance}
-    )
 }
 pub(crate) async fn check_actor(
     c: &mut sqlx::PgConnection,

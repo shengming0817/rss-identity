@@ -19,6 +19,19 @@ class Deployment(unittest.TestCase):
     p=root/Path(v).name;p.write_text(json.dumps({'realm':'identity','enabled':True,'clients':[]}) if p.suffix=='.json' else '08'*32 if p.name=='provider-key-hex' else 'TestSecret_'+p.stem.replace('-','_')+'_'*64);p.chmod(0o600);return str(p)
    return v
   return files(source)
+ def test_group_facts_ttl_is_required_and_bounded(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   for n,ttl in enumerate([0,301,-1,True,"300",None]):
+    data=self.data(root);data['runtime']['oidc']['group_facts_max_age_seconds']=ttl
+    with self.assertRaises(ValueError):deploy.render(data,root/('bad'+str(n)),self.candidate())
+   data=self.data(root);data['runtime']['oidc'].pop('group_facts_max_age_seconds')
+   with self.assertRaises(KeyError):deploy.render(data,root/'missing',self.candidate())
+   for ttl in [1,300]:
+    data=self.data(root);data['runtime']['oidc']['group_facts_max_age_seconds']=ttl
+    out=root/str(ttl);deploy.render(data,out,self.candidate())
+    self.assertEqual(json.loads((out/'runtime.json').read_text())['oidc']['group_facts_max_age_seconds'],ttl)
+
  def test_configuration_diagnostics_are_actionable_without_input_values(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp)

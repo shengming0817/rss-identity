@@ -1,6 +1,6 @@
 use crate::{
     federation::{Action, event},
-    federation_login::{check_actor, check_browser, claims_facts},
+    federation_login::{check_actor, check_browser},
     federation_storage as db,
     storage::*,
     transaction::{corrupt, reject},
@@ -43,10 +43,10 @@ pub(crate) async fn intent(
     let origin = r
         .try_get::<Option<Uuid>, _>("source_identity")?
         .map(|identity| {
-            Ok::<_, sqlx::Error>(db::Origin {
+            Ok::<_, rss_transactional_messaging_postgres::PgError>(db::Origin {
                 identity,
                 epoch: r.try_get("source_epoch")?,
-                facts: r.try_get("source_facts")?,
+                facts: crate::auth_facts::AuthenticationFacts::decode(r.try_get("source_facts")?)?,
             })
         })
         .transpose()?;
@@ -207,7 +207,7 @@ impl Federation {
                     .bind(account.membership_epoch())
                     .bind(origin.as_ref().map(|o| o.identity))
                     .bind(origin.as_ref().map(|o| o.epoch))
-                    .bind(origin.map(|o| o.facts))
+                    .bind(match &origin { Some(o) => Some(o.facts.encode(c).await?), None => None })
                     .bind(target.id.to_string())
                     .bind(target.version)
                     .bind(digest(&browser).as_slice())
@@ -292,6 +292,7 @@ impl Federation {
                 ),
             )
             .await?;
+        let group_policy = self.group_policy;
         self.authority
             .write_sql(tenant, budget.remaining(), move |c| {
                 Box::pin(async move {
@@ -302,7 +303,15 @@ impl Federation {
                     check_actor(c, tenant, &attempt, session).await?;
                     let i = intent(c, tenant, intent_id).await?;
                     let origin = i.origin.as_ref().ok_or_else(reject)?;
-                    db::check_origin(c, tenant, origin).await?;
+                    db::check_origin(
+                        c,
+                        rss_identity_core::account::AccountKey {
+                            tenant,
+                            principal: i.principal,
+                        },
+                        origin,
+                    )
+                    .await?;
                     let (source_id, issuer, subject) =
                         db::identity(c, tenant, origin.identity).await?;
                     let now = session_storage::now(c).await?;
@@ -322,7 +331,16 @@ impl Federation {
                     ))
                     .bind(tenant.to_string())
                     .bind(intent_id)
-                    .bind(claims_facts(&claims, source.version))
+                    .bind(
+                        crate::auth_facts::AuthenticationFacts::collect(
+                            &claims,
+                            source.version,
+                            group_policy,
+                            now,
+                        )?
+                        .encode(c)
+                        .await?,
+                    )
                     .execute(&mut *c)
                     .await?;
                     advance(c, tenant, intent_id, LinkStage::ReauthenticationRequired).await?;

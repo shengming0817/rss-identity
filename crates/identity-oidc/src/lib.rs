@@ -480,18 +480,7 @@ impl UpstreamOidc for HttpOidc {
                 _ => return Err(FederationError::Claims),
             };
 
-            let mut groups = match c.claims().groups.as_ref().and_then(|k| all.get(k)) {
-                None | Some(serde_json::Value::Null) => vec![],
-                Some(serde_json::Value::Array(v)) => v
-                    .iter()
-                    .map(|v| v.as_str().map(str::to_owned).ok_or(FederationError::Claims))
-                    .collect::<Result<Vec<_>, _>>()?,
-                _ => return Err(FederationError::Claims),
-            };
-
-            groups.sort();
-
-            groups.dedup();
+            let groups = mapped_groups(c.claims().groups.as_deref(), &all)?;
 
             let value = UpstreamClaims {
                 issuer: c.issuer().as_str().to_owned(),
@@ -500,6 +489,8 @@ impl UpstreamOidc for HttpOidc {
                 email_verified: c.claims().email.as_deref() == Some("email")
                     && claims.email_verified() == Some(true),
                 groups,
+                issued_at: claims.issue_time().timestamp(),
+                expires_at: claims.expiration().timestamp(),
                 assurance: assurance::normalize(
                     claims.auth_time().map(|v| v.timestamp()),
                     claims.auth_context_ref().map(|v| v.as_str()),
@@ -544,6 +535,26 @@ impl UpstreamOidc for HttpOidc {
                 authorization_response_issuer: true,
             })
         })
+    }
+}
+
+fn mapped_groups(
+    claim: Option<&str>,
+    claims: &serde_json::Value,
+) -> Result<rss_identity_core::groups::UpstreamGroups, FederationError> {
+    use rss_identity_core::groups::UpstreamGroups;
+    match claim {
+        None => Ok(UpstreamGroups::NotConfigured),
+        Some(key) => match claims.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(UpstreamGroups::Missing),
+            Some(serde_json::Value::Array(values)) => UpstreamGroups::present(
+                values
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_owned).ok_or(FederationError::Claims))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            _ => Err(FederationError::Claims),
+        },
     }
 }
 

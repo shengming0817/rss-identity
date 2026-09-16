@@ -101,7 +101,18 @@ impl UpstreamOidc for ScriptedOidc {
                 subject: code.to_string(),
                 email: Some("same@example.test".into()),
                 email_verified: self.email_verified.load(Ordering::SeqCst),
-                groups: self.groups.lock().unwrap().clone(),
+                groups: rss_identity_core::groups::UpstreamGroups::present(
+                    self.groups.lock().unwrap().clone(),
+                )?,
+                issued_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64,
+                expires_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+                    + 600,
                 assurance: self.assurance.lock().unwrap().clone().unwrap_or(
                     rss_identity_core::assurance::Assurance::new(
                         Some(
@@ -150,6 +161,7 @@ impl UpstreamOidc for ScriptedOidc {
 }
 pub fn service(f: &Fixture, oidc: Arc<dyn UpstreamOidc>) -> Federation {
     Federation::new(
+        rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
         f.store.clone(),
         oidc,
         StateSigner::new([7; 32], "https://identity.example.test").unwrap(),

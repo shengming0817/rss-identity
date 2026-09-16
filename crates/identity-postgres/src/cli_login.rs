@@ -59,8 +59,9 @@ pub(crate) async fn grant(
         return Err(FederationError::Unavailable.into());
     }
     let code = random_secret()?;
+    let facts = origin.facts.encode(c).await?;
     sqlx::query("INSERT INTO identity_authority.cli_grants(tenant_id,code_hash,binding,principal_id,auth_epoch,membership_epoch,external_identity_id,provider_epoch,auth_facts,created_at,expires_at) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
-        .bind(key.tenant.to_string()).bind(digest(&code).as_slice()).bind(serde_json::to_value(&binding).map_err(|_|corrupt())?).bind(key.principal.as_uuid()).bind(state.epoch()).bind(state.membership_epoch()).bind(origin.identity).bind(origin.epoch).bind(origin.facts).bind(now).bind(now+60).execute(c).await?;
+        .bind(key.tenant.to_string()).bind(digest(&code).as_slice()).bind(serde_json::to_value(&binding).map_err(|_|corrupt())?).bind(key.principal.as_uuid()).bind(state.epoch()).bind(state.membership_epoch()).bind(origin.identity).bind(origin.epoch).bind(facts).bind(now).bind(now+60).execute(c).await?;
     Ok(binding
         .result_url("code", &code)
         .map_err(|_| FederationError::Configuration)?)
@@ -92,8 +93,8 @@ impl Authority {
                 let key=AccountKey{tenant:system,principal:principal(&r.try_get::<uuid::Uuid,_>("principal_id")?.to_string())?};
                 let state=load(c,key).await?.state;
                 if !state.active() || state.epoch()!=r.try_get::<i64,_>("auth_epoch")? || state.membership_epoch()!=r.try_get::<i64,_>("membership_epoch")? || !crate::platform::platform_role(c,key).await?{return Err(reject().into());}
-                let origin=db::Origin{identity:r.try_get("external_identity_id")?,epoch:r.try_get("provider_epoch")?,facts:r.try_get("auth_facts")?};
-                db::check_origin(c,system,&origin).await?;
+                let origin=db::Origin{identity:r.try_get("external_identity_id")?,epoch:r.try_get("provider_epoch")?,facts:crate::auth_facts::AuthenticationFacts::decode(r.try_get("auth_facts")?)?};
+                db::check_origin(c,key,&origin).await?;
                 sqlx::query("DELETE FROM identity_authority.cli_grants WHERE tenant_id=$1::uuid AND code_hash=$2").bind(system.to_string()).bind(digest(&code).as_slice()).execute(&mut *c).await?;
                 sessions::insert(c,state,None,Some(origin),now).await
             })).await
