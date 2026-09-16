@@ -15,3 +15,5 @@
 
 - [#2342 联合 SSO 独立 T3](../../t3/identity-federated-sso/README.md)：固定候选、浏览器、下游验证与撤销清理；运行结论由 PR 证据持有。
 系统域、动态租户、IdP keyring 和 CLI 使用[平台指南](../guides/platform.md)，配置格式及安装见[运维步骤](operations.md)。
+
+- [#2433 可信组事实：固定 SDK 与候选记录](202609162037-2433-trusted-groups.md)

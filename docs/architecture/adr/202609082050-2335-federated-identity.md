@@ -28,7 +28,7 @@ ProviderSettingsInput 仅作为编辑 DTO；构造/反序列化均产生字段�
 
 ## JIT、关联与会话来源
 
-JIT 默认关闭；显式启用后，未知外部键 `(tenant,provider,issuer,subject)` 原子创建新账户、有效普通成员、关联、session 和事件。已存在但失效的账户/成员拒绝，不自动恢复。邮箱仅作属性，即使 email_verified=true 也不查询邮箱合并账户。groups 有界规范化并记录 config_version 作为 mapping_version；不生成 MDM 资源权限。
+JIT 默认关闭；显式启用后，未知外部键 `(tenant,provider,issuer,subject)` 原子创建新账户、有效普通成员、关联、session 和事件。已存在但失效的账户/成员拒绝，不自动恢复。邮箱仅作属性，即使 email_verified=true 也不查询邮箱合并账户。#2433 以类型化认证事实替换历史扁平 groups/mapping_version；快照保留精确组值、随机采集 ID、provider 配置版本和由已验签 iat/exp 冻结的期限，JSON 仅由 PG 边界编解码。来源仍由已验证身份关联持有，不生成 MDM 资源权限或授权映射版本。当前语义见[联合身份指南](../../guides/federation.md)。
 
 显式关联必须有当前 session、Origin/CSRF 保护和原账户的新认证。本地账户重新验证本人密码；纯联合账户固定原 session 的 exact external identity，用 prompt=login/max_age=0 重新认证并检查 auth_time（与本轮请求比较，允许 30 秒上游时钟偏差），之后才启动目标 provider 认证。
 

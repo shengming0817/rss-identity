@@ -11,7 +11,7 @@ Identity 自有 AuthN、Principal、TenantMembership、联合身份、中央认�
 ## 主体与信任
 
 - Principal 是全局、不透明、非空 UUID；TenantMembership 明确关联 tenant/principal，带有效性和单调 epoch。认证 session 固定一个 tenant；切租户必须重新形成该租户的授权上下文。
-- 联合身份键为 tenant/provider/issuer/subject；email 不是身份键，不自动合并。groups 带来源和 mapping version，仅供 MDM 自行授权。
+- 联合身份键为 tenant/provider/issuer/subject；email 不是身份键，不自动合并。当前 groups v1 带经验证的来源、采集快照 ID、provider 配置版本和固定期限；MDM 自行持有授权映射及其版本，见[在线协议](../identity-wire-v1.md)。
 - 产品凭据绑定 issuer/client/audience/tenant/session；subject 为按 tenant/client 隔离的稳定不透明映射，不向产品暴露可跨产品关联的内部 PrincipalId。该映射由 [I06](202609090513-2336-downstream-identity.md) 持久化实现。
 - 客户端元数据不构成 DeviceContext，Identity 管理员不自动获得 MDM 权限。首期 MDM 单租户不接纳 MSP/M2M。
 
