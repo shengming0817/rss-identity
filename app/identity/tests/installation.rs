@@ -1,4 +1,8 @@
-//! Real TLS PostgreSQL installation, host policy and startup seams; no deployed artifact/T3 claim.
+#[path = "../../../crates/identity-postgres/tests/federation_support/mod.rs"]
+mod federation_support;
+#[path = "../../../crates/identity-postgres/tests/support/mod.rs"]
+mod support;
+// Real TLS PostgreSQL installation, host policy and startup seams; no deployed artifact/T3 claim.
 use rss_identity_app::{
     AppError, assembly,
     config::{MigrationConfig, RuntimeConfig},
@@ -154,6 +158,20 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .await?,
     );
     let authority = assembly::authority(&config, runtime.clone(), kdf.clone()).await?;
+    let federation = Federation::new(
+        rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
+        authority.clone(),
+        federation_support::ScriptedOidc::new(),
+        rss_identity_core::federation::StateSigner::new([7; 32], &config.public_origin)?,
+        FederationConfig {
+            callback: format!("{}/api/v2/oidc/callback", config.public_origin),
+            credential_keys: support::credential_keys(),
+            targets: std::collections::BTreeMap::from([(
+                "resume".into(),
+                format!("{}/auth/resume", config.public_origin),
+            )]),
+        },
+    )?;
     for key in &keys {
         let issued = authority
             .login_local(
@@ -169,6 +187,20 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())
                 .unwrap()
         };
+        let manager = authority
+            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .await?;
+        federation
+            .create_provider(
+                manager,
+                federation_support::settings(),
+                rss_identity_core::federation::ProviderCredentials::new(
+                    "private-rotation-test".into(),
+                    None,
+                )?,
+                assembly::deadline(),
+            )
+            .await?;
         let manager = authority
             .inspect_session(key.tenant, actor(), assembly::deadline())
             .await?;
@@ -234,6 +266,46 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             )
             .await?;
     }
+    // Real host transaction: first tenant changes, second tenant fails AAD authentication.
+    use std::os::unix::fs::PermissionsExt;
+    for (name, raw) in [("old-key", [8_u8; 32]), ("new-key", [2_u8; 32])] {
+        let p = root.join(name);
+        std::fs::write(&p, hex::encode(raw))?;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let ring = |only_new: bool| -> rss_identity_app::config::CredentialKeyringConfig {
+        let mut entries = vec![json!({"keyId":"next","path":root.join("new-key")})];
+        if !only_new {
+            entries.push(json!({"keyId":"fixture","path":root.join("old-key")}));
+        }
+        serde_json::from_value(json!({"activeKeyId":"next","keys":entries})).unwrap()
+    };
+    let before: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT sealed FROM identity_authority.provider_credentials ORDER BY tenant_id",
+    )
+    .fetch_all(&mut owner)
+    .await?;
+    assert_eq!(before.len(), 2);
+    sqlx::query("UPDATE identity_authority.provider_credentials SET credential_version=credential_version+1 WHERE tenant_id=$1::uuid").bind(keys[1].tenant.to_string()).execute(&mut owner).await?;
+    assert!(
+        rss_identity_app::rekey::run(install_config(), ring(false), false)
+            .await
+            .is_err()
+    );
+    let after: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT sealed FROM identity_authority.provider_credentials ORDER BY tenant_id",
+    )
+    .fetch_all(&mut owner)
+    .await?;
+    assert_eq!(before, after, "partial tenant updates must roll back");
+    sqlx::query("UPDATE identity_authority.provider_credentials SET credential_version=credential_version-1 WHERE tenant_id=$1::uuid").bind(keys[1].tenant.to_string()).execute(&mut owner).await?;
+    assert!(
+        rss_identity_app::rekey::run(install_config(), ring(true), true)
+            .await
+            .is_err()
+    );
+    rss_identity_app::rekey::run(install_config(), ring(false), false).await?;
+    rss_identity_app::rekey::run(install_config(), ring(true), true).await?;
     runtime.close().await;
     maintenance_runtime.close().await;
     kdf.close();

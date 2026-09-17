@@ -99,7 +99,7 @@ http {{
   add_header Cache-Control no-store always;
   location = /api/identity-host/v1/config.json {{ alias /run/config/ui.json; default_type application/json; }}
   location ^~ /api/v2/ {{ {proxy} }}
-  location ~ ^/api/identity-host/v1/tenants/[0-9a-f-]{{36}}/context$ {{ {proxy} }}
+  location ~ "^/api/identity-host/v1/tenants/[0-9a-f-]{{36}}/context$" {{ {proxy} }}
   location ^~ /internal/ {{ return 404; }}
   location = /livez {{ return 404; }}
   location = /readyz {{ return 404; }}
@@ -132,6 +132,7 @@ http {{
     services['gateway']=service(images['gateway'],['gateway.conf','ui.json','public-cert','public-key'],['-c','/run/config/gateway.conf'])
     services['gateway'].update(ports=['443:8443'],networks={'backend':{'ipv4_address':gateway},'public':{}},depends_on={'identity':{'condition':'service_healthy'}})
     services['volume-init']={'image':candidate['providers']['runtime'],'user':'0:0','network_mode':'none','profiles':['operator'],'entrypoint':['sh','-ec'],'command':['if [ -z "$(ls -A /volume)" ]; then chown 10001:10001 /volume; chmod 700 /volume; else test "$(stat -c %u:%g /volume)" = 10001:10001; fi'],'volumes':[{'type':'volume','source':'pg','target':'/volume','volume':{'nocopy':True}}]}
+    for name in ['identity','gateway','migrate','maintenance']:services[name]['platform']='linux/amd64'
     networks={'backend':{'internal':True,'ipam':{'config':[{'subnet':str(network)}]}},'public':{}}
     if c['oidc'] is not None:networks['egress']={}
     write('compose.json',json.dumps(compose_literals({'services':services,'networks':networks,'volumes':{'pg':{}}}),indent=2))

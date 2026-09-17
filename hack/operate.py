@@ -44,6 +44,27 @@ def check_backup(path):
     if record['sha256']!=sha(path) or record['schema']!=9:raise ValueError('backup identity')
     return record
 
+def authority_states(project):
+    rows=command(['docker','ps','--all','--filter','label=com.docker.compose.project='+project,'--format','{{.ID}} {{.Label "com.docker.compose.service"}}'],stdout=subprocess.PIPE).stdout.decode().splitlines()
+    states={}
+    for row in rows:
+        parts=row.split()
+        if len(parts)!=2:raise ValueError('container identity unknown')
+        container,service=parts
+        if service not in ['identity','gateway']:continue
+        if not re.fullmatch('[a-f0-9]{12,64}',container):raise ValueError('container identity unknown')
+        state=json.loads(command(['docker','inspect','--format','{{json .State}}',container],stdout=subprocess.PIPE).stdout)
+        states[container]=(service,state)
+    return states
+
+def require_closed(project,drained=False,expected=None):
+    states=authority_states(project)
+    if expected is not None and set(states)!=set(expected):raise ValueError('container identity changed during close')
+    for service,state in states.values():
+        if state['Status'] not in ['created','exited'] or any(state[k] for k in ['Running','Paused','Restarting']):raise ValueError('close ingress and identity first')
+        if drained and service=='identity' and state['Status']=='exited' and (state['ExitCode']!=0 or state['OOMKilled']):raise ValueError('identity drain not confirmed')
+    return states
+
 def operate(args):
     c=candidate(args.candidate.resolve())
     if args.command=='candidate':return
@@ -56,13 +77,14 @@ def operate(args):
         if spec['services'][name]['image']!=c['images'][image]:raise ValueError('deployment candidate mismatch')
     def run(*words,**kwargs):return command(compose+list(words),stdout=kwargs.pop('stdout',subprocess.DEVNULL),**kwargs)
     def migration(*words):run('run','--rm','migrate','--config','/run/config/migration.json',*words)
-    def closed():
-        active=run('ps','--status','running','--services',stdout=subprocess.PIPE).stdout.decode().splitlines()
-        if set(active)&{'identity','gateway'}:raise ValueError('close ingress and identity first')
+    def closed():return require_closed(args.project)
     if args.command=='install':
         closed();run('run','--rm','volume-init');run('up','-d','--wait','postgres');migration()
     elif args.command=='verify':migration('--verify')
-    elif args.command=='close':run('stop','gateway','identity')
+    elif args.command=='close':
+        before=authority_states(args.project)
+        run('stop','gateway');run('stop','identity')
+        require_closed(args.project,drained=True,expected=before)
     elif args.command=='open':
         migration('--verify');run('up','-d','--wait','identity');run('up','-d','--wait','gateway')
     elif args.command in ['initialize','recover']:
@@ -91,8 +113,7 @@ def operate(args):
         if record['project']==args.project:raise ValueError('restore requires a distinct isolated project')
         source=record['project']
         if not re.fullmatch('[a-z][a-z0-9_-]{2,47}',source):raise ValueError('source project identity')
-        active=command(['docker','ps','--filter','label=com.docker.compose.project='+source,'--filter','status=running','--format','{{.Label "com.docker.compose.service"}}'],stdout=subprocess.PIPE).stdout.decode().splitlines()
-        if set(active)&{'identity','gateway'}:raise ValueError('source authority must remain closed')
+        require_closed(source)
         config=json.loads((directory/'migration.json').read_text())
         if (config['instanceId'],config['storage'])!=(record['instanceId'],record['storage']):raise ValueError('restore binding mismatch')
         existing=run('ps','--all','--quiet',stdout=subprocess.PIPE).stdout

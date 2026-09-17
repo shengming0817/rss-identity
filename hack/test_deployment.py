@@ -51,6 +51,18 @@ class OperationTests(unittest.TestCase):
             root=Path(temp);images={k:'fixed/'+k for k in ['server','operator','gateway']}
             (root/'compose.json').write_text(json.dumps({'services':{s:{'image':images[i]} for s,i in [('identity','server'),('gateway','gateway'),('migrate','operator'),('maintenance','operator')]}}))
             args=argparse.Namespace(candidate=root,command='restore',project='identity-target',deployment=root,backup=root/'cut.dump')
-            with patch.object(operate,'candidate',return_value={'images':images}),patch.object(operate,'check_backup',return_value={'project':'identity-source'}),patch.object(operate,'command',return_value=subprocess.CompletedProcess([],0,stdout=b'identity\n')) as run:
+            with patch.object(operate,'candidate',return_value={'images':images}),patch.object(operate,'check_backup',return_value={'project':'identity-source'}),patch.object(operate,'require_closed',side_effect=ValueError('source authority')) as closed,patch.object(operate,'command') as run:
                 with self.assertRaisesRegex(ValueError,'source authority'):operate.operate(args)
-                self.assertEqual(run.call_count,1)
+                closed.assert_called_once_with('identity-source');run.assert_not_called()
+    def test_closed_requires_terminal_state_and_confirmed_drain(self):
+        import operate
+        stopped={'Status':'exited','Running':False,'Paused':False,'Restarting':False,'ExitCode':0,'OOMKilled':False}
+        for status in ['running','paused','restarting','dead','unknown']:
+            with self.subTest(status=status),patch.object(operate,'authority_states',return_value={'id':('identity',{**stopped,'Status':status})}):
+                with self.assertRaises(ValueError):operate.require_closed('fixture')
+        for extra in [{'ExitCode':1},{'ExitCode':137},{'OOMKilled':True}]:
+            with patch.object(operate,'authority_states',return_value={'id':('identity',{**stopped,**extra})}):
+                with self.assertRaisesRegex(ValueError,'drain'):operate.require_closed('fixture',drained=True)
+        with patch.object(operate,'authority_states',return_value={'id':('identity',stopped)}):
+            operate.require_closed('fixture',drained=True,expected={'id':None})
+            with self.assertRaisesRegex(ValueError,'identity changed'):operate.require_closed('fixture',expected={})
