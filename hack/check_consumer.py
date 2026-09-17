@@ -48,7 +48,7 @@ def check(metadata, revision, rss_revision, profile):
             require(len(found) == 1 and found[0]['version'] == version, 'public verification exception version drift')
             parents = {packages[n['id']]['name'] for n in metadata['resolve']['nodes'] if any(d['pkg'] == found[0]['id'] for d in n['deps'])}
             require(parents == {parent}, 'public verification exception path drift')
-    return {packages[n['id']]['name']: {'version': packages[n['id']]['version'], 'source': packages[n['id']]['source'], 'features': n['features']} for n in metadata['resolve']['nodes']}
+    return {n['id']: {'name': packages[n['id']]['name'], 'version': packages[n['id']]['version'], 'source': packages[n['id']]['source'], 'features': n['features']} for n in metadata['resolve']['nodes']}
 
 def source_hashes():
     # Production commit A and evidence commit B must have identical effective source/config.

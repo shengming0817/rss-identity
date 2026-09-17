@@ -392,68 +392,6 @@ impl Federation {
     }
 }
 
-#[cfg(test)]
-mod contract_tests {
-    use super::*;
-    #[test]
-    fn action_vocabulary_and_payload_match_schema() {
-        let schema: serde_json::Value =
-            serde_json::from_str(include_str!("federation-security-event-v2.json")).unwrap();
-        let actions = [
-            Action::ProviderCreated,
-            Action::ProviderUpdated,
-            Action::ProviderEnabled,
-            Action::ProviderDisabled,
-            Action::ProviderTested,
-            Action::ProviderTestFailed,
-            Action::JitCreated,
-            Action::LoggedIn,
-            Action::Linked,
-            Action::AlreadyLinked,
-            Action::Reauthenticated,
-            Action::SteppedUp,
-        ];
-        let values: Vec<_> = actions
-            .into_iter()
-            .map(|a| serde_json::to_value(a).unwrap())
-            .collect();
-        assert_eq!(
-            values,
-            *schema["properties"]["action"]["enum"].as_array().unwrap()
-        );
-        let event = FederationEvent {
-            tenant: Uuid::new_v4().to_string(),
-            action: Action::ProviderTestFailed,
-            provider_id: ProviderId::generate(),
-            config_version: 1,
-            principal: None,
-            diagnostic: Some(ProviderFailure {
-                stage: ProviderStage::Discovery,
-                reason: ProviderReason::Unavailable,
-            }),
-        };
-        let event = serde_json::to_value(event).unwrap();
-        for key in schema["required"].as_array().unwrap() {
-            assert!(event.get(key.as_str().unwrap()).is_some());
-        }
-        assert!(
-            event
-                .as_object()
-                .unwrap()
-                .keys()
-                .all(|k| schema["properties"].get(k).is_some())
-        );
-        for key in ["stage", "reason"] {
-            assert!(
-                schema["properties"]["diagnostic"]["properties"][key]["enum"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&event["diagnostic"][key])
-            );
-        }
-    }
-}
-
 impl Federation {
     pub async fn create_provider(
         &self,
@@ -555,7 +493,6 @@ impl Federation {
         })).await
     }
 }
-#[derive(Serialize)]
 pub struct LoginOption {
     pub provider_id: Uuid,
     pub label: String,
@@ -696,4 +633,66 @@ pub struct SessionSecurity {
     pub session_id: rss_identity_core::SessionId,
     pub assurance: rss_identity_core::assurance::Assurance,
     pub eligible_step_up_providers: Vec<LoginOption>,
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    #[test]
+    fn action_vocabulary_and_payload_match_schema() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("federation-security-event-v2.json")).unwrap();
+        let actions = [
+            Action::ProviderCreated,
+            Action::ProviderUpdated,
+            Action::ProviderEnabled,
+            Action::ProviderDisabled,
+            Action::ProviderTested,
+            Action::ProviderTestFailed,
+            Action::JitCreated,
+            Action::LoggedIn,
+            Action::Linked,
+            Action::AlreadyLinked,
+            Action::Reauthenticated,
+            Action::SteppedUp,
+        ];
+        let values: Vec<_> = actions
+            .into_iter()
+            .map(|a| serde_json::to_value(a).unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            *schema["properties"]["action"]["enum"].as_array().unwrap()
+        );
+        let event = FederationEvent {
+            tenant: Uuid::new_v4().to_string(),
+            action: Action::ProviderTestFailed,
+            provider_id: ProviderId::generate(),
+            config_version: 1,
+            principal: None,
+            diagnostic: Some(ProviderFailure {
+                stage: ProviderStage::Discovery,
+                reason: ProviderReason::Unavailable,
+            }),
+        };
+        let event = serde_json::to_value(event).unwrap();
+        for key in schema["required"].as_array().unwrap() {
+            assert!(event.get(key.as_str().unwrap()).is_some());
+        }
+        assert!(
+            event
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|k| schema["properties"].get(k).is_some())
+        );
+        for key in ["stage", "reason"] {
+            assert!(
+                schema["properties"]["diagnostic"]["properties"][key]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&event["diagnostic"][key])
+            );
+        }
+    }
 }

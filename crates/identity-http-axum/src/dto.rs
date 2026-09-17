@@ -65,3 +65,248 @@ impl From<rss_identity_postgres::SessionSecurity> for SessionSecurity {
         }
     }
 }
+
+#[derive(Serialize)]
+pub struct Account {
+    principal_id: String,
+    login: Option<String>,
+    enabled: bool,
+    member_active: bool,
+    has_local_password: bool,
+}
+impl From<rss_identity_postgres::AccountView> for Account {
+    fn from(v: rss_identity_postgres::AccountView) -> Self {
+        Self {
+            principal_id: v.principal_id.as_uuid().to_string(),
+            login: v.login,
+            enabled: v.enabled,
+            member_active: v.member_active,
+            has_local_password: v.has_local_password,
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct AccountPage {
+    accounts: Vec<Account>,
+    next_cursor: Option<String>,
+}
+impl From<rss_identity_postgres::AccountPage> for AccountPage {
+    fn from(v: rss_identity_postgres::AccountPage) -> Self {
+        Self {
+            accounts: v.accounts.into_iter().map(Into::into).collect(),
+            next_cursor: v.next_cursor.map(|id| id.as_uuid().to_string()),
+        }
+    }
+}
+impl From<&rss_identity_postgres::SessionView> for SessionInfo {
+    fn from(v: &rss_identity_postgres::SessionView) -> Self {
+        Self {
+            id: v.id.to_string(),
+            auth_time: v.auth_time,
+            idle_expires_at: v.idle_expires_at,
+            absolute_expires_at: v.absolute_expires_at,
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct SessionPage {
+    sessions: Vec<SessionInfo>,
+    next_cursor: Option<String>,
+}
+impl From<rss_identity_postgres::SessionPage> for SessionPage {
+    fn from(v: rss_identity_postgres::SessionPage) -> Self {
+        Self {
+            sessions: v.sessions.iter().map(Into::into).collect(),
+            next_cursor: v.next_cursor.map(|id| id.as_uuid().to_string()),
+        }
+    }
+}
+
+#[derive(serde::Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimMapping {
+    email: Option<String>,
+    groups: Option<String>,
+}
+#[derive(serde::Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSettings {
+    issuer: String,
+    client_id: String,
+    redirect_uri: String,
+    scopes: Vec<String>,
+    claims: ClaimMapping,
+    jit: bool,
+}
+impl ProviderSettings {
+    pub fn into_domain(
+        self,
+    ) -> Result<
+        rss_identity_core::federation::ProviderSettings,
+        rss_identity_core::federation::FederationError,
+    > {
+        rss_identity_core::federation::ProviderSettingsInput {
+            issuer: self.issuer,
+            client_id: self.client_id,
+            redirect_uri: self.redirect_uri,
+            scopes: self.scopes,
+            claims: rss_identity_core::federation::ClaimMapping {
+                email: self.claims.email,
+                groups: self.claims.groups,
+            },
+            jit: self.jit,
+        }
+        .try_into()
+    }
+}
+impl From<&rss_identity_core::federation::ProviderSettings> for ProviderSettings {
+    fn from(v: &rss_identity_core::federation::ProviderSettings) -> Self {
+        Self {
+            issuer: v.issuer().as_str().into(),
+            client_id: v.client_id().as_str().into(),
+            redirect_uri: v.redirect_uri().into(),
+            scopes: v.scopes().to_vec(),
+            claims: ClaimMapping {
+                email: v.claims().email.clone(),
+                groups: v.claims().groups.clone(),
+            },
+            jit: v.jit(),
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct Provider {
+    id: String,
+    version: i64,
+    enabled: bool,
+    revocation_epoch: i64,
+    settings: ProviderSettings,
+    credential_version: i64,
+}
+impl From<rss_identity_core::federation::ProviderView> for Provider {
+    fn from(v: rss_identity_core::federation::ProviderView) -> Self {
+        Self {
+            id: v.id.to_string(),
+            version: v.version,
+            enabled: v.enabled,
+            revocation_epoch: v.revocation_epoch,
+            settings: (&v.settings).into(),
+            credential_version: v.credential_version,
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct Providers {
+    pub providers: Vec<Provider>,
+}
+#[derive(Serialize)]
+pub struct LoginOptions {
+    pub providers: Vec<StepUpProvider>,
+}
+impl From<rss_identity_postgres::LoginOption> for StepUpProvider {
+    fn from(v: rss_identity_postgres::LoginOption) -> Self {
+        Self {
+            provider_id: v.provider_id,
+            label: v.label,
+        }
+    }
+}
+fn stage(v: rss_identity_core::federation::ProviderStage) -> &'static str {
+    use rss_identity_core::federation::ProviderStage::*;
+    match v {
+        Binding => "binding",
+        Discovery => "discovery",
+        Jwks => "jwks",
+        Exchange => "exchange",
+        Claims => "claims",
+    }
+}
+#[derive(Serialize)]
+pub struct ConnectionReport {
+    checks: Vec<&'static str>,
+    tls_verified: bool,
+    authorization_response_issuer: bool,
+}
+impl From<rss_identity_core::federation::ConnectionReport> for ConnectionReport {
+    fn from(v: rss_identity_core::federation::ConnectionReport) -> Self {
+        Self {
+            checks: v.checks.into_iter().map(stage).collect(),
+            tls_verified: v.tls_verified,
+            authorization_response_issuer: v.authorization_response_issuer,
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct ProviderDiagnostic {
+    stage: &'static str,
+    reason: &'static str,
+}
+impl From<rss_identity_core::federation::ProviderFailure> for ProviderDiagnostic {
+    fn from(v: rss_identity_core::federation::ProviderFailure) -> Self {
+        use rss_identity_core::federation::ProviderReason::*;
+        Self {
+            stage: stage(v.stage),
+            reason: match v.reason {
+                InvalidTrustAnchor => "invalid_trust_anchor",
+                EgressDenied => "egress_denied",
+                TlsRejected => "tls_rejected",
+                Unavailable => "unavailable",
+                Timeout => "timeout",
+                InvalidResponse => "invalid_response",
+                IssuerMismatch => "issuer_mismatch",
+                IssuerResponseUnsupported => "issuer_response_unsupported",
+                CodeRejected => "code_rejected",
+                InvalidToken => "invalid_token",
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn provider_wire_owns_fields_and_excludes_internal_assurance() {
+        let input = json!({"issuer":"https://idp.example.test","client_id":"host","redirect_uri":"https://host.example.test/api/v2/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":"groups"},"jit":true});
+        let settings = serde_json::from_value::<ProviderSettings>(input.clone())
+            .unwrap()
+            .into_domain()
+            .unwrap();
+        let provider = rss_identity_core::federation::ProviderView {
+            id: rss_identity_core::federation::ProviderId::generate(),
+            version: 2,
+            enabled: true,
+            revocation_epoch: 3,
+            settings,
+            assurance_profile: [7; 32],
+            credential_version: 4,
+        };
+        let expected = json!({"id":provider.id.to_string(),"version":2,"enabled":true,"revocation_epoch":3,"settings":input,"credential_version":4});
+        assert_eq!(
+            serde_json::to_value(Provider::from(provider)).unwrap(),
+            expected
+        );
+        let mut invalid = input;
+        invalid["assurance_profile"] = json!([7]);
+        assert!(serde_json::from_value::<ProviderSettings>(invalid).is_err());
+    }
+    #[test]
+    fn domain_ids_are_projected_by_the_http_adapter() {
+        let principal = rss_identity_core::PrincipalId::generate();
+        let page = rss_identity_postgres::AccountPage {
+            accounts: vec![rss_identity_postgres::AccountView {
+                principal_id: principal,
+                login: Some("member".into()),
+                enabled: true,
+                member_active: true,
+                has_local_password: true,
+            }],
+            next_cursor: Some(principal),
+        };
+        assert_eq!(
+            serde_json::to_value(AccountPage::from(page)).unwrap(),
+            json!({"accounts":[{"principal_id":principal.as_uuid().to_string(),"login":"member","enabled":true,"member_active":true,"has_local_password":true}],"next_cursor":principal.as_uuid().to_string()})
+        );
+    }
+}

@@ -10,7 +10,7 @@ use axum::{
     routing::get,
 };
 use rss_identity_core::account::PasswordKdf;
-use rss_identity_http_axum::{HttpConfig, federated_router, router};
+use rss_identity_http_axum::{HttpConfig, HttpFailure, federated_router, router};
 use rss_runtime::{
     AdmissionGate, AdmissionPermit, DynManagedResource, LifecycleScope, ManagedResource, ScopeExit,
     ShutdownError, TotalDrainBudget,
@@ -91,6 +91,17 @@ async fn admit(
             _permit: permit,
         })
     })
+}
+// HttpFailure contains only closed, non-secret classifications. Never log the request or body.
+fn record_failure(response: &Response, mut output: impl std::io::Write) {
+    if let Some(failure) = response.extensions().get::<HttpFailure>() {
+        let _ = writeln!(output, "component=identity-http failure={failure:?}");
+    }
+}
+async fn diagnose(request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    record_failure(&response, std::io::stderr().lock());
+    response
 }
 struct Health {
     config: Arc<RuntimeConfig>,
@@ -178,6 +189,7 @@ pub async fn serve(
                         app = app.merge(federated_router(federation, http)?);
                     }
                     let app = app
+                        .layer(middleware::from_fn(diagnose))
                         .layer(middleware::from_fn_with_state(gate.clone(), admit))
                         .layer(middleware::from_fn_with_state(
                             transport::Ingress {
@@ -232,6 +244,40 @@ pub async fn signal() -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn diagnostics_keep_settlement_classification_out_of_the_http_body() {
+        use rss_identity_postgres::{AuthorityError, StorageFailure};
+        for failure in [
+            HttpFailure::Authority(AuthorityError::CommitUnknown(StorageFailure::Transient)),
+            HttpFailure::Authority(AuthorityError::RollbackFailed(StorageFailure::Transient)),
+            HttpFailure::Authority(AuthorityError::Fenced),
+            HttpFailure::RequestTimeout,
+        ] {
+            let payload = r#"{"code":"identity_unavailable"}"#;
+            let mut response = (StatusCode::SERVICE_UNAVAILABLE, payload).into_response();
+            response.extensions_mut().insert(failure);
+            response
+                .headers_mut()
+                .insert("set-cookie", "private-cookie".parse().unwrap());
+            let mut output = Vec::new();
+            record_failure(&response, &mut output);
+            let log = String::from_utf8(output).unwrap();
+            assert_eq!(
+                log,
+                format!("component=identity-http failure={failure:?}\n")
+            );
+            assert!(!log.contains("private-cookie"));
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap(),
+                payload
+            );
+        }
+        let mut output = Vec::new();
+        record_failure(&StatusCode::OK.into_response(), &mut output);
+        assert!(output.is_empty());
+    }
     #[tokio::test]
     async fn response_body_retains_admission_until_consumed_or_dropped() {
         let mut stack = rss_runtime::ShutdownStack::try_new(

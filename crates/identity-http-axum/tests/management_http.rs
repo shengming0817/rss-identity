@@ -751,3 +751,42 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
     f.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn management_rejects_password_for_federated_only_account() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let (app, s, _) = app(&f);
+    let p = federation_support::enabled(&f, &s).await?;
+    let state = federation_support::begin(&f, &s, &p).await?;
+    let issued =
+        federation_support::issued(federation_support::finish(&s, state, "federated-only").await?);
+    assert!(!issued.identity().has_local_password);
+    let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
+    let response = app
+        .oneshot(req(
+            "POST",
+            &format!(
+                "/api/v2/tenants/{A}/accounts/{}/password",
+                issued.identity().principal_id.as_uuid()
+            ),
+            &cookie,
+            &csrf,
+            json!({"password":"new private member password"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(response).await?["code"], "malformed_request");
+    let actor = f
+        .store
+        .inspect_session(
+            f.key.tenant,
+            rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
+            deadline(),
+        )
+        .await?;
+    assert!(!actor.identity().has_local_password);
+    f.close().await;
+    Ok(())
+}

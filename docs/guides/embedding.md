@@ -8,7 +8,7 @@
 2. 宿主预建数据库角色，数据库 owner 先安装 RSS 消息 schema，再调用 `install(connection, instance)` 和 `grant_profile(connection, role, profile)`。Identity 只接受全新 v9 schema；v8/旧配置失败关闭，不升级、不双读。结构签名和有效权限检查独立于角色名称。
 3. Maintenance authority 仅用于一次性 `initialize` 与 `recover_local_password`。恢复只更换本地密码并推进 epoch，不自动启用账户或成员、不授予宿主权限。
 4. `Authority::connect_runtime` 必须提供 `ManagementPolicy`。调用 `login_local` 完成密码验证及原子签发；外部不能构造 AuthenticationCandidate 或调用底层签发函数。
-5. 每个业务请求调用 `inspect_session` 获得不可反序列化、不可克隆的 `AuthenticatedSession`。不要将前端 JSON 当作认证证明，也不要跨请求缓存该值。
+5. 每个宿主认定为用户活动的业务请求调用 `authenticate_session` 获得不可反序列化、不可克隆的 `AuthenticatedSession`。不要将前端 JSON 当作认证证明，也不要跨请求缓存该值。
 
 ```rust,ignore
 let authority = Authority::connect_runtime(
@@ -17,7 +17,7 @@ let authority = Authority::connect_runtime(
 let issued = authority.login_local(
     tenant, login, password, source, None, request_deadline,
 ).await?;
-let actor = authority.inspect_session(tenant, session_secret, request_deadline).await?;
+let actor = authority.authenticate_session(tenant, session_secret, request_deadline).await?;
 let account = actor.account();
 let groups = actor.groups()?;
 ```
@@ -46,3 +46,5 @@ let routes = rss_identity_http_axum::router(authority, http.clone())?
 本地 Router 和联邦 Router 分别挂载；宿主拥有 TLS listener、可信代理边界、连接来源、日志脱敏和 graceful drain。HTTP DTO 是适配器私有实现。不要用通用同截止点 timeout 丢弃数据库写 future；让组件/RSS 返回精确 settlement 分类。
 
 安全事件版本为 account v3、federation v2、session v1。事件不含密码、cookie、code、verifier、上游 token；消费者须按新事件 schema 更新，旧事件定义不再作为活动协议。
+
+`authenticate_session` 验证并延长 idle，不改变原 absolute deadline；宿主须先实施请求/CSRF 与用户活动策略，不能让后台心跳无限续期。`inspect_session` 只读验证，用于登录替换前检查、浏览器 GET session 和不应续期的被动查询。HTTP POST refresh 显式续期并旋转凭据；两种验证入口都重新检查权威状态。

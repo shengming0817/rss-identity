@@ -45,7 +45,7 @@ fn project_session(
     use crate::dto::{Identity, Issued, SessionInfo};
     Issued {
         identity: Identity {
-            principal_id: identity.principal_id.to_string(),
+            principal_id: identity.principal_id.as_uuid().to_string(),
             has_local_password: identity.has_local_password,
         },
         session: SessionInfo {
@@ -202,7 +202,7 @@ pub(crate) async fn list(
         .authority
         .inspect_session(tenant(&raw)?, secret, budget.remaining())
         .await?;
-    Ok(Json(
+    Ok(Json(crate::dto::SessionPage::from(
         state
             .authority
             .list_sessions(
@@ -212,7 +212,7 @@ pub(crate) async fn list(
                 budget.remaining(),
             )
             .await?,
-    )
+    ))
     .into_response())
 }
 

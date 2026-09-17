@@ -40,6 +40,16 @@ schema owner 导出 fresh install 与有效权限 profile 授权函数；宿主�
 
 [#2436](https://dev.azure.com/shengming0923/rss/_workitems/edit/2436) 承接完整 reference app 部署、UI candidate、运维迁移及独立 T3；本次只保证参考宿主最小装配。MDM 迁移归 [#2437](https://dev.azure.com/shengming0923/rss/_workitems/edit/2437)，Web UI 归 [#2368](https://dev.azure.com/shengming0923/rss/_workitems/edit/2368)。不修改 MDM/Web，不引入新 MFA/passkey、多存储或 OAuth 授权服务器。
 
+## ASP.NET Core Identity 能力对照
+
+| 上游职责 | 本次对应 | 保留差异 / 范围 |
+| --- | --- | --- |
+| UserManager 账户操作 | Authority 创建/启停/成员/改密，Maintenance 初始化/恢复 | 角色和防锁死由宿主策略持有，不复制全套用户管理框架。 |
+| SignInManager 登录及重新认证 | login_local / reauthenticate_local / Federation | facade 完成限流、验证及事务签发；宿主不拆拼流程。 |
+| Store 持久化扩展 | 第一个正式 PG 实现及宿主 migration 接缝 | 不提前建立多数据库 Store/DI 框架；账户、会话和安全事件同事务。 |
+| 宿主 authentication/authorization | AuthenticatedSession / 可组合 Axum Router / ManagementPolicy | 每请求读取当前权威状态；不采用 SecurityStamp 成功缓存窗口。 |
+| 用户确认、邮件恢复、原生 TOTP/恢复码、Passkey | 本次不新增 | OIDC step-up 继续复用上游已验证 assurance；本地恢复是受控维护操作。 |
+
 ## 对标来源
 
 - [ASP.NET Core v10.0.0 UserManager](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Extensions.Core/src/UserManager.cs)、[SignInManager](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Core/src/SignInManager.cs)：区分账户操作、登录流程与宿主策略；不复制 SecurityStamp 的缓存窗口。

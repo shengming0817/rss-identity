@@ -182,7 +182,7 @@ impl Host {
     pub async fn actor(&self, s: &IssuedSession) -> anyhow::Result<AuthenticatedSession> {
         Ok(self
             .authority
-            .inspect_session(self.key.tenant, secret(s), deadline())
+            .authenticate_session(self.key.tenant, secret(s), deadline())
             .await?)
     }
     pub async fn close(self) {

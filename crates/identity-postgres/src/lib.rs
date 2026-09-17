@@ -125,6 +125,7 @@ impl Authority {
         policy: Arc<dyn ManagementPolicy>,
         deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
+        let budget = Budget::new(deadline)?;
         let tenant = config.tenants[0];
         let instance = config.instance;
         let authority = Self {
@@ -143,7 +144,7 @@ impl Authority {
         let valid = Self::read_bundle(
             authority.runtimes.snapshot()?,
             tenant,
-            deadline,
+            budget.remaining(),
             false,
             move |tx| {
                 Box::pin(async move {
@@ -156,6 +157,14 @@ impl Authority {
         )
         .await;
         check_probe(valid)?;
+        let bundle = authority.runtimes.snapshot()?;
+        // Schema/profile are global, but every declared tenant has its own runtime fence.
+        for tenant in bundle.tenants.iter().skip(1) {
+            Self::read_bundle(bundle.clone(), *tenant, budget.remaining(), true, |_| {
+                Box::pin(async { Ok(()) })
+            })
+            .await?;
+        }
         Ok(authority)
     }
     pub fn instance(&self) -> InstanceId {

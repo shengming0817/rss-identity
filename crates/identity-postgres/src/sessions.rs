@@ -14,7 +14,7 @@ use sqlx::Row;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct SessionView {
     pub id: SessionId,
     pub auth_time: i64,
@@ -31,7 +31,7 @@ impl SessionView {
         }
     }
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct SessionPage {
     pub sessions: Vec<SessionView>,
     pub next_cursor: Option<SessionId>,
@@ -290,6 +290,9 @@ impl Authority {
     ) -> Result<AuthenticatedSession, AuthorityError> {
         self.session_proof(tenant, secret, deadline, false).await
     }
+    /// Authenticate a host-designated activity request and renew idle within the original absolute limit.
+    /// The host must apply its request/CSRF policy first; passive checks use `inspect_session`.
+    /// This does not rotate the credential. `refresh_session` performs explicit rotation.
     pub async fn authenticate_session(
         &self,
         tenant: TenantId,
@@ -466,15 +469,15 @@ mod contract_tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct SessionIdentity {
-    pub principal_id: String,
+    pub principal_id: rss_identity_core::PrincipalId,
     pub has_local_password: bool,
 }
 impl SessionIdentity {
     pub(crate) fn from_state(state: AccountState) -> Self {
         Self {
-            principal_id: state.key().principal.as_uuid().to_string(),
+            principal_id: state.key().principal,
             has_local_password: state.has_local_password(),
         }
     }

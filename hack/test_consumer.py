@@ -20,6 +20,17 @@ class ConsumerBoundary(unittest.TestCase):
             if change=='oidc': data['packages'].append({'id':'reqwest','name':'reqwest','source':c.REGISTRY,'version':'0.12.28'})
             with self.subTest(change=change),self.assertRaises(ValueError):c.check(data,'a'*40,'b'*40,'local')
 
+    def test_report_keeps_same_name_multiple_versions(self):
+        data=self.fixture()
+        for version in ['1.0.0','2.0.0']:
+            package_id='registry+example#shared@'+version
+            data['packages'].append({'id':package_id,'name':'shared','version':version,'source':c.REGISTRY})
+            data['resolve']['nodes'].append({'id':package_id,'features':[version],'deps':[]})
+        closure=c.check(data,'a'*40,'b'*40,'local')
+        shared=[v for v in closure.values() if v['name']=='shared']
+        self.assertEqual({v['version'] for v in shared},{'1.0.0','2.0.0'})
+        self.assertEqual({tuple(v['features']) for v in shared},{('1.0.0',),('2.0.0',)})
+
     def test_manifest_is_standalone_fixed_git_without_source_override(self):
         import tomllib
         for profile in ['local','oidc']:

@@ -328,15 +328,15 @@ impl Authority {
                 let state=load(c,AccountKey{tenant:actor.key.tenant,principal}).await?.state;
                 accounts.push(AccountView::new(state,login));
             }
-            let next_cursor=if more {accounts.last().map(|a|a.principal_id.clone())} else {None};
+            let next_cursor=if more {accounts.last().map(|a|a.principal_id)} else {None};
             Ok(AccountPage{accounts,next_cursor})
         })).await
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone)]
 pub struct AccountView {
-    pub principal_id: String,
+    pub principal_id: PrincipalId,
     pub login: Option<String>,
     pub enabled: bool,
     pub member_active: bool,
@@ -345,7 +345,7 @@ pub struct AccountView {
 impl AccountView {
     pub fn new(state: AccountState, login: Option<String>) -> Self {
         Self {
-            principal_id: state.key().principal.as_uuid().to_string(),
+            principal_id: state.key().principal,
             login,
             enabled: state.enabled(),
             member_active: state.member_active(),
@@ -353,8 +353,12 @@ impl AccountView {
         }
     }
 }
-#[derive(Debug, serde::Serialize)]
+/// Domain results are mapped to wire DTOs by the hosting adapter.
+/// ```compile_fail
+/// fn serialize(page: rss_identity_postgres::AccountPage) { let _ = serde_json::to_value(page); }
+/// ```
+#[derive(Debug)]
 pub struct AccountPage {
     pub accounts: Vec<AccountView>,
-    pub next_cursor: Option<String>,
+    pub next_cursor: Option<PrincipalId>,
 }

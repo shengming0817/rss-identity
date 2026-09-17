@@ -2,6 +2,7 @@
 use crate::{
     AppState, HttpConfig,
     boundary::*,
+    dto,
     management::{Error, body},
 };
 use axum::{
@@ -75,7 +76,16 @@ async fn options(
     Path(t): Path<String>,
     Extension(b): Extension<RequestBudget>,
 ) -> Result<Response> {
-    Ok(Json(serde_json::json!({"providers":s.federation.login_options(tenant(&t)?,b.remaining()).await?})).into_response())
+    Ok(Json(dto::LoginOptions {
+        providers: s
+            .federation
+            .login_options(tenant(&t)?, b.remaining())
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    })
+    .into_response())
 }
 async fn providers(
     State(s): State<Management>,
@@ -84,15 +94,21 @@ async fn providers(
     h: HeaderMap,
 ) -> Result<Response> {
     let actor = actor(&s, &t, &h, b, false).await?;
-    Ok(Json(
-        serde_json::json!({"providers":s.federation.list_providers(actor,b.remaining()).await?}),
-    )
+    Ok(Json(dto::Providers {
+        providers: s
+            .federation
+            .list_providers(actor, b.remaining())
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    })
     .into_response())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateProvider {
-    settings: ProviderSettingsInput,
+    settings: dto::ProviderSettings,
     client_secret: String,
     ca_pem: Option<String>,
 }
@@ -106,14 +122,14 @@ async fn create_provider(
     let v: CreateProvider = body(r, b).await?;
     let credentials =
         ProviderCredentials::new(v.client_secret, v.ca_pem).map_err(AuthorityError::from)?;
-    let settings = ProviderSettings::try_from(v.settings).map_err(AuthorityError::from)?;
+    let settings = v.settings.into_domain().map_err(AuthorityError::from)?;
     Ok((
         StatusCode::CREATED,
-        Json(
+        Json(dto::Provider::from(
             s.federation
                 .create_provider(actor, settings, credentials, b.remaining())
                 .await?,
-        ),
+        )),
     )
         .into_response())
 }
@@ -121,7 +137,7 @@ async fn create_provider(
 #[serde(deny_unknown_fields)]
 struct UpdateProvider {
     expected_version: i64,
-    settings: ProviderSettingsInput,
+    settings: dto::ProviderSettings,
     client_secret: String,
     ca_pem: Option<String>,
 }
@@ -135,8 +151,8 @@ async fn update_provider(
     let v: UpdateProvider = body(r, b).await?;
     let credentials =
         ProviderCredentials::new(v.client_secret, v.ca_pem).map_err(AuthorityError::from)?;
-    let settings = ProviderSettings::try_from(v.settings).map_err(AuthorityError::from)?;
-    Ok(Json(
+    let settings = v.settings.into_domain().map_err(AuthorityError::from)?;
+    Ok(Json(dto::Provider::from(
         s.federation
             .update_provider(
                 actor,
@@ -147,7 +163,7 @@ async fn update_provider(
                 b.remaining(),
             )
             .await?,
-    )
+    ))
     .into_response())
 }
 #[derive(Deserialize)]
@@ -164,11 +180,11 @@ async fn provider_enabled(
 ) -> Result<Response> {
     let actor = actor(&s, &t, r.headers(), b, true).await?;
     let v: ProviderToggle = body(r, b).await?;
-    Ok(Json(
+    Ok(Json(dto::Provider::from(
         s.federation
             .enable_provider(actor, p, v.expected_version, v.enabled, b.remaining())
             .await?,
-    )
+    ))
     .into_response())
 }
 async fn test_provider(
@@ -179,11 +195,11 @@ async fn test_provider(
 ) -> Result<Response> {
     let actor = actor(&s, &t, &h, b, true).await?;
     match s.federation.test_provider(actor, p, b.remaining()).await {
-        Ok(report) => Ok(Json(serde_json::json!({"passed":true,"report":report})).into_response()),
+        Ok(report) => Ok(Json(serde_json::json!({"passed":true,"report":dto::ConnectionReport::from(report)})).into_response()),
         Err(AuthorityError::Federation(
             error @ (FederationError::Provider(_) | FederationError::Unavailable),
         )) => Ok(
-            Json(serde_json::json!({"passed":false,"diagnostic":error.diagnostic()}))
+            Json(serde_json::json!({"passed":false,"diagnostic":dto::ProviderDiagnostic::from(error.diagnostic())}))
                 .into_response(),
         ),
         Err(error) => Err(error.into()),

@@ -52,9 +52,48 @@ pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
         tx.commit().await
     })
     .await;
-    let closed = c.close().await;
-    result
-        .map_err(|_| AppError::Migration)?
-        .map_err(|_| AppError::Migration)?;
-    closed.map_err(|_| AppError::Migration)
+    let outcome = result
+        .map_err(|_| AppError::Migration)
+        .and_then(|r| r.map_err(|_| AppError::Migration));
+    finish_installation(outcome, c.close()).await
+}
+
+async fn finish_installation(
+    outcome: Result<(), AppError>,
+    close: impl std::future::Future<Output = Result<(), sqlx::Error>>,
+) -> Result<(), AppError> {
+    // Connection shutdown is independent of commit acknowledgement. Never rewrite settlement.
+    if !matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), close).await,
+        Ok(Ok(()))
+    ) {
+        eprintln!("component=migration cleanup=unconfirmed");
+    }
+    outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn cleanup_failure_preserves_confirmed_and_unknown_installation_outcomes() {
+        assert!(
+            finish_installation(Ok(()), async { Err(sqlx::Error::PoolClosed) })
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            finish_installation(Err(AppError::Migration), async { Ok(()) }).await,
+            Err(AppError::Migration)
+        ));
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                finish_installation(Ok(()), std::future::pending())
+            )
+            .await
+            .unwrap()
+            .is_ok()
+        );
+    }
 }

@@ -14,7 +14,21 @@ mod tests {
     async fn local_host_authentication_and_router_composition() -> anyhow::Result<()> {
         let host = Host::start().await?;
         let first = host.login().await?;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let inspected = host
+            .authority
+            .inspect_session(host.key.tenant, secret(&first), deadline())
+            .await?;
+        assert_eq!(
+            inspected.view().idle_expires_at,
+            first.view().idle_expires_at
+        );
         let actor = host.actor(&first).await?;
+        assert!(actor.view().idle_expires_at > first.view().idle_expires_at);
+        assert_eq!(
+            actor.view().absolute_expires_at,
+            first.view().absolute_expires_at
+        );
         assert_eq!(actor.account(), host.key);
         assert!(matches!(
             actor.groups()?,

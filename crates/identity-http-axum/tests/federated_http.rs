@@ -711,7 +711,7 @@ async fn real_provider_management_and_encrypted_credentials() -> anyhow::Result<
         .create_provider(f.actor().await?, config()?, credentials(true)?, deadline())
         .await?;
     assert!(!p.enabled);
-    assert!(!serde_json::to_string(&p)?.contains("fixture-secret"));
+    assert!(!format!("{p:?}").contains("fixture-secret"));
     let sealed:Value=sqlx::query_scalar("SELECT sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(A).bind(p.id.to_string()).fetch_one(&f.owner).await?;
     assert!(!sealed.to_string().contains("fixture-secret"));
     sqlx::query("UPDATE identity_authority.provider_credentials SET sealed=jsonb_set(sealed,'{key_id}','\"missing\"') WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(A).bind(p.id.to_string()).execute(&f.owner).await?;

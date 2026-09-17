@@ -44,7 +44,8 @@ impl From<AuthorityError> for Error {
             AuthorityError::RuleRejected(AccountRuleError::ReauthenticationRequired) => {
                 (StatusCode::FORBIDDEN, "reauthentication_required")
             }
-            AuthorityError::Invalid
+            AuthorityError::RuleRejected(AccountRuleError::Rejected)
+            | AuthorityError::Invalid
             | AuthorityError::Federation(FederationError::Configuration) => {
                 (StatusCode::BAD_REQUEST, "malformed_request")
             }
@@ -144,7 +145,7 @@ fn password(s: String) -> Result<Password> {
     Password::new(s).map_err(|_| BAD.into())
 }
 fn account(state: rss_identity_core::account::AccountState) -> Response {
-    Json(AccountView::new(state, None)).into_response()
+    Json(crate::dto::Account::from(AccountView::new(state, None))).into_response()
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -161,7 +162,7 @@ async fn accounts(
 ) -> Result<Response> {
     let Query(page) = q.map_err(|_| BAD)?;
     let actor = actor(&s, &t, &h, b, false).await?;
-    Ok(Json(
+    Ok(Json(crate::dto::AccountPage::from(
         s.authority
             .list_accounts(
                 actor,
@@ -174,7 +175,7 @@ async fn accounts(
                 b.remaining(),
             )
             .await?,
-    )
+    ))
     .into_response())
 }
 #[derive(Deserialize)]
@@ -199,7 +200,10 @@ async fn create_account(
         .await?;
     Ok((
         StatusCode::CREATED,
-        Json(AccountView::new(state, Some(canonical_login))),
+        Json(crate::dto::Account::from(AccountView::new(
+            state,
+            Some(canonical_login),
+        ))),
     )
         .into_response())
 }
@@ -293,6 +297,11 @@ mod tests {
     #[test]
     fn management_rejections_are_not_login_failures() {
         for (error, status, code) in [
+            (
+                AuthorityError::RuleRejected(AccountRuleError::Rejected),
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+            ),
             (
                 AuthorityError::Rejected,
                 StatusCode::UNAUTHORIZED,

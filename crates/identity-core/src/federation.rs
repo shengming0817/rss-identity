@@ -196,14 +196,13 @@ impl ProviderSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct ProviderView {
     pub id: ProviderId,
     pub version: i64,
     pub enabled: bool,
     pub revocation_epoch: i64,
     pub settings: ProviderSettings,
-    #[serde(skip)]
     pub assurance_profile: [u8; 32],
     pub credential_version: i64,
 }
@@ -482,7 +481,7 @@ pub struct ProviderFailure {
     pub stage: ProviderStage,
     pub reason: ProviderReason,
 }
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionReport {
     pub checks: Vec<ProviderStage>,
     pub tls_verified: bool,
