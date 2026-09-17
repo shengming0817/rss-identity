@@ -45,7 +45,7 @@ impl From<AuthorityError> for Error {
                 (StatusCode::FORBIDDEN, "reauthentication_required")
             }
             AuthorityError::RuleRejected(AccountRuleError::Rejected)
-            | AuthorityError::Invalid
+            | AuthorityError::InvalidInput
             | AuthorityError::Federation(FederationError::Configuration) => {
                 (StatusCode::BAD_REQUEST, "malformed_request")
             }
@@ -148,7 +148,7 @@ fn account(state: rss_identity_core::account::AccountState) -> Response {
     Json(crate::dto::Account::from(AccountView::new(state, None))).into_response()
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Page {
     cursor: Option<String>,
     limit: Option<u16>,
@@ -179,7 +179,7 @@ async fn accounts(
     .into_response())
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateAccount {
     login: String,
     password: String,
@@ -208,7 +208,7 @@ async fn create_account(
         .into_response())
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Toggle {
     enabled: bool,
 }
@@ -241,7 +241,7 @@ async fn membership(
     ))
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Reset {
     password: String,
 }
@@ -260,7 +260,7 @@ async fn reset_password(
     ))
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChangePassword {
     current_password: String,
     password: String,
@@ -295,8 +295,38 @@ async fn own_password(
 mod tests {
     use super::*;
     #[test]
+    fn password_wire_rejects_retired_field_spelling() {
+        assert!(
+            serde_json::from_value::<ChangePassword>(
+                serde_json::json!({"currentPassword":"old", "password":"new"})
+            )
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<ChangePassword>(
+                serde_json::json!({"current_password":"old", "password":"new"})
+            )
+            .is_err()
+        );
+    }
+    #[test]
     fn management_rejections_are_not_login_failures() {
         for (error, status, code) in [
+            (
+                AuthorityError::Configuration,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_unavailable",
+            ),
+            (
+                AuthorityError::DeadlineElapsed,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_unavailable",
+            ),
+            (
+                AuthorityError::InvalidInput,
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+            ),
             (
                 AuthorityError::RuleRejected(AccountRuleError::Rejected),
                 StatusCode::BAD_REQUEST,

@@ -72,7 +72,7 @@ async fn successful_login(app: &Router) -> anyhow::Result<(String, String, Value
     let value = body(response).await?;
     Ok((
         header.split(';').next().unwrap().into(),
-        value["csrf_token"].as_str().unwrap().into(),
+        value["csrfToken"].as_str().unwrap().into(),
         value,
     ))
 }
@@ -117,7 +117,7 @@ async fn session_http_login_cookie_csrf_and_replacement() -> anyhow::Result<()> 
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    let csrf = replacement["csrf_token"].as_str().unwrap();
+    let csrf = replacement["csrfToken"].as_str().unwrap();
     let a = app.clone().oneshot(request(
         "POST",
         "session/refresh",
@@ -151,10 +151,10 @@ async fn session_http_login_cookie_csrf_and_replacement() -> anyhow::Result<()> 
     let rotated = body(success).await?;
     assert_eq!(rotated["session"]["id"], replacement["session"]["id"]);
     assert_eq!(
-        rotated["session"]["absolute_expires_at"],
-        replacement["session"]["absolute_expires_at"]
+        rotated["session"]["absoluteExpiresAt"],
+        replacement["session"]["absoluteExpiresAt"]
     );
-    let csrf = rotated["csrf_token"].as_str().unwrap();
+    let csrf = rotated["csrfToken"].as_str().unwrap();
     let list = body(
         app.clone()
             .oneshot(request("GET", "sessions", Some(&cookie), None, json!(null)))
@@ -339,7 +339,7 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response.headers().contains_key("set-cookie"));
     let after = body(response).await?;
-    assert_eq!(after["session"]["idle_expires_at"].as_i64().unwrap(), idle);
+    assert_eq!(after["session"]["idleExpiresAt"].as_i64().unwrap(), idle);
     // Lax cookies may accompany cross-site top-level navigation: safe methods cannot renew idle.
     for (method, path) in [
         ("GET", "session"),
@@ -379,7 +379,7 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
         .unwrap()
         .to_owned();
     let value = body(rotated).await?;
-    assert!(value["session"]["idle_expires_at"].as_i64().unwrap() > idle);
+    assert!(value["session"]["idleExpiresAt"].as_i64().unwrap() > idle);
     let response = app
         .clone()
         .oneshot(request(
@@ -692,8 +692,8 @@ async fn session_http_v2_reauthentication_is_bound_and_has_no_legacy_role_surfac
     let value = body(response).await?;
     assert_ne!(replacement, cookie);
     assert_eq!(
-        value["identity"]["principal_id"],
-        first["identity"]["principal_id"]
+        value["identity"]["principalId"],
+        first["identity"]["principalId"]
     );
     assert_ne!(value["session"]["id"], first["session"]["id"]);
     assert_eq!(

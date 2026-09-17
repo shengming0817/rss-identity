@@ -36,6 +36,7 @@ use rss_transactional_messaging::policy::{DeliveryBudget, OperationDeadline};
 use rss_transactional_messaging_postgres::PgRuntime;
 pub use schema::{
     MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_SIGNATURE_SQL, SCHEMA_VERSION, grant_profile, install,
+    verify_profile,
 };
 pub use sessions::{
     AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView, TrustedGroups,
@@ -64,7 +65,7 @@ impl AuthorityConfig {
             || tenants.len() > 128
             || tenants.windows(2).any(|pair| pair[0] == pair[1])
         {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::Configuration);
         }
         Ok(Self {
             instance,

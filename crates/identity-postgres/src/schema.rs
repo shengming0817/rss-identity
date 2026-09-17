@@ -1,5 +1,5 @@
 //! Identity owns its schema; host deployment owns database roles, RSS migrations and tenant fences.
-use crate::AuthorityProfile;
+use crate::{AuthorityError, AuthorityProfile};
 use rss_identity_core::InstanceId;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::PgConnection;
@@ -41,6 +41,20 @@ pub async fn grant_profile(
         .await?;
     Ok(())
 }
+/// Verify the current SQL role against the same storage contract used by authority startup.
+/// The host owns the connection, transaction and role selection; this does not commit anything.
+pub async fn verify_profile(
+    connection: &mut PgConnection,
+    profile: AuthorityProfile,
+    instance: InstanceId,
+) -> Result<(), AuthorityError> {
+    crate::check_probe(
+        probe(connection, profile, instance)
+            .await
+            .map_err(|_| AuthorityError::Unavailable),
+    )
+}
+
 pub(crate) async fn probe(
     connection: &mut PgConnection,
     profile: AuthorityProfile,

@@ -16,7 +16,7 @@
 
 宿主每次管理操作提供窄 `ManagementPolicy`。组件在 PG 事务中锁定并加载当前账户、成员、会话、epoch、provider 状态后调用策略；实例、租户、主体绑定与再认证期限由组件检查。序列化 JSON 不能构造 AuthenticatedSession、ManagementContext 或 TrustedGroups。组只表达来源明确、有期限的认证事实，不成为产品权限结论。
 
-参考宿主用配置的 bootstrap AccountKey 决定管理权限，并拒绝停用该账户或其成员关系。独立 Maintenance 权限仅执行每租户一次初始化和指定本地账户密码恢复；恢复推进 epoch，保留 enabled/member_active。没有在线角色提权票据。
+参考宿主用每租户唯一、完整覆盖的 bootstrapAccounts 决定管理权限，并拒绝停用该账户或其成员关系。独立 Maintenance 权限仅执行每租户一次初始化和指定本地账户密码恢复；恢复推进 epoch，保留 enabled/member_active。没有在线角色提权票据。
 
 HTTP DTO 由适配层私有持有。`router` 装配本地登录、会话及账户管理；`federated_router` 独立装配可选 OIDC/IdP 管理，宿主明确 merge。HTTP body 不接受服务端授权凭证。
 

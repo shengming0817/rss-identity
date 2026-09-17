@@ -15,6 +15,7 @@ pub enum ManagementOperation {
     SetAccountEnabled(bool),
     SetMembership(bool),
     ResetPassword,
+    ChangeOwnPassword,
     ListProviders,
     CreateProvider,
     UpdateProvider(ProviderId),

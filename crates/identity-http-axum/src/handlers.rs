@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 type Result<T> = std::result::Result<T, HttpError>;
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Login {
     login: String,
     password: String,
@@ -184,7 +184,7 @@ pub(crate) async fn logout_all(
     Ok(clear_cookie())
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Pagination {
     cursor: Option<SessionId>,
     limit: Option<u16>,
@@ -217,7 +217,7 @@ pub(crate) async fn list(
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Reauthentication {
     password: String,
 }

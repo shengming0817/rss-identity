@@ -58,7 +58,40 @@ fn runtime_config_is_explicit_local_and_rejects_central_configuration() {
     let parsed: RuntimeConfig = serde_json::from_value(example.clone()).unwrap();
     parsed.validate().unwrap();
     assert!(parsed.oidc.is_none());
+    let mut missing_manager = example.clone();
+    missing_manager["storage"]["tenants"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("33333333-3333-4333-8333-333333333333"));
+    assert!(
+        serde_json::from_value::<RuntimeConfig>(missing_manager)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    let mut complete = example.clone();
+    complete["storage"]["tenants"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("33333333-3333-4333-8333-333333333333"));
+    complete["bootstrapAccounts"].as_array_mut().unwrap().push(serde_json::json!({"tenantId":"33333333-3333-4333-8333-333333333333", "principalId":"44444444-4444-4444-8444-444444444444"}));
+    assert!(
+        serde_json::from_value::<RuntimeConfig>(complete.clone())
+            .unwrap()
+            .validate()
+            .is_ok()
+    );
+    complete["bootstrapAccounts"][1] = complete["bootstrapAccounts"][0].clone();
+    assert!(
+        serde_json::from_value::<RuntimeConfig>(complete)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
     for key in [
+        "format_version",
+        "bootstrap",
+        "public_origin",
         "maintenance_password_file",
         "private_gateway",
         "hydra",
@@ -70,12 +103,12 @@ fn runtime_config_is_explicit_local_and_rejects_central_configuration() {
         assert!(serde_json::from_value::<RuntimeConfig>(value).is_err());
     }
     for (key, value) in [
-        ("format_version", serde_json::json!(2)),
+        ("formatVersion", serde_json::json!(2)),
         (
-            "instance_id",
+            "instanceId",
             serde_json::json!("00000000-0000-0000-0000-000000000000"),
         ),
-        ("public_gateway", serde_json::json!("0.0.0.0")),
+        ("publicGateway", serde_json::json!("0.0.0.0")),
     ] {
         let mut bad = example.clone();
         bad[key] = value;
@@ -87,7 +120,7 @@ fn runtime_config_is_explicit_local_and_rejects_central_configuration() {
         );
     }
     let mut wrong_tenant = example.clone();
-    wrong_tenant["bootstrap"]["tenant_id"] =
+    wrong_tenant["bootstrapAccounts"][0]["tenantId"] =
         serde_json::json!("22222222-2222-4222-8222-222222222222");
     assert!(
         serde_json::from_value::<RuntimeConfig>(wrong_tenant)
@@ -103,7 +136,7 @@ fn group_facts_policy_is_required_only_when_oidc_is_configured() {
     use rss_identity_core::groups::GroupFactsMaxAge;
     let mut example: serde_json::Value =
         serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
-    example["oidc"] = serde_json::json!({"group_facts_max_age_seconds":300,"assurance_profiles":[],"state_key_file":"/host/state.key","credential_keyring":{"active_key_id":"host","keys":[{"key_id":"host","path":"/host/credential.key"}]},"return_targets":{"home":"https://identity.example.test/"}});
+    example["oidc"] = serde_json::json!({"groupFactsMaxAgeSeconds":300,"assuranceProfiles":[],"stateKeyFile":"/host/state.key","credentialKeyring":{"activeKeyId":"host","keys":[{"keyId":"host","path":"/host/credential.key"}]},"returnTargets":{"home":"https://identity.example.test/"}});
     for value in [
         GroupFactsMaxAge::MIN_SECONDS - 1,
         GroupFactsMaxAge::MIN_SECONDS,
@@ -111,7 +144,7 @@ fn group_facts_policy_is_required_only_when_oidc_is_configured() {
         GroupFactsMaxAge::MAX_SECONDS + 1,
     ] {
         let mut runtime = example.clone();
-        runtime["oidc"]["group_facts_max_age_seconds"] = value.into();
+        runtime["oidc"]["groupFactsMaxAgeSeconds"] = value.into();
         assert_eq!(
             serde_json::from_value::<RuntimeConfig>(runtime)
                 .unwrap()
@@ -123,6 +156,6 @@ fn group_facts_policy_is_required_only_when_oidc_is_configured() {
     example["oidc"]
         .as_object_mut()
         .unwrap()
-        .remove("group_facts_max_age_seconds");
+        .remove("groupFactsMaxAgeSeconds");
     assert!(serde_json::from_value::<RuntimeConfig>(example).is_err());
 }

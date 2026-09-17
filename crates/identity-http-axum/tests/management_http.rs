@@ -14,6 +14,9 @@ use serde_json::{Value, json};
 use std::{sync::atomic::Ordering, time::Duration};
 use support::*;
 use tower::ServiceExt;
+fn settings_wire(v: &rss_identity_core::federation::ProviderSettingsInput) -> Value {
+    json!({"issuer":v.issuer,"clientId":v.client_id,"redirectUri":v.redirect_uri,"scopes":v.scopes,"claims":{"email":v.claims.email,"groups":v.claims.groups},"jit":v.jit})
+}
 const ORIGIN: &str = "https://identity.example.test";
 fn app(
     f: &Fixture,
@@ -77,8 +80,8 @@ async fn login_as(app: &Router, name: &str, pw: &str) -> anyhow::Result<(String,
         .unwrap()
         .to_owned();
     let v = json_body(r).await?;
-    assert!(v["identity"]["principal_id"].is_string());
-    Ok((cookie, v["csrf_token"].as_str().unwrap().into()))
+    assert!(v["identity"]["principalId"].is_string());
+    Ok((cookie, v["csrfToken"].as_str().unwrap().into()))
 }
 #[tokio::test]
 #[ignore = "requires make test-pg"]
@@ -108,7 +111,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     let facts = json_body(security).await?;
     assert_eq!(facts["authentication"]["acr"], "unspecified");
     assert_eq!(facts["authentication"]["amr"], json!(["pwd"]));
-    assert_eq!(facts["eligible_step_up_providers"], json!([]));
+    assert_eq!(facts["eligibleStepUpProviders"], json!([]));
     let absent = app
         .clone()
         .oneshot(req(
@@ -204,7 +207,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
         .await?;
     assert_eq!(r.status(), StatusCode::CREATED);
     let member = json_body(r).await?;
-    let id = member["principal_id"].as_str().unwrap();
+    let id = member["principalId"].as_str().unwrap();
     let (member_cookie, member_csrf) = login_as(&app, "member", PASSWORD).await?;
     let r = app
         .clone()
@@ -229,7 +232,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
         ))
         .await?;
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
-    let r=app.clone().oneshot(req("POST",&format!("{base}/account/password"),&member_cookie,&member_csrf,json!({"current_password":"wrong but sufficiently long","password":"new private member password"}))).await?;
+    let r=app.clone().oneshot(req("POST",&format!("{base}/account/password"),&member_cookie,&member_csrf,json!({"currentPassword":"wrong but sufficiently long","password":"new private member password"}))).await?;
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
     assert_eq!(json_body(r).await?["code"], "reauthentication_failed");
     let r = app
@@ -277,7 +280,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     assert_eq!(r.status(), StatusCode::OK);
     let v = json_body(r).await?;
     assert_eq!(v["enabled"], false);
-    assert_eq!(v["member_active"], false);
+    assert_eq!(v["memberActive"], false);
     assert!(v.get("administrator").is_none());
     assert_eq!(
         app.clone()
@@ -307,8 +310,12 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
             StatusCode::OK
         );
     }
+    f.policy.allow(rss_identity_core::account::AccountKey {
+        tenant: f.key.tenant,
+        principal: rss_identity_core::PrincipalId::parse(id)?,
+    });
     let (mc, mt) = login_as(&app, "member", "new private member password").await?;
-    let r=app.clone().oneshot(req("POST",&format!("{base}/account/password"),&mc,&mt,json!({"current_password":"new private member password","password":"another private member password"}))).await?;
+    let r=app.clone().oneshot(req("POST",&format!("{base}/account/password"),&mc,&mt,json!({"currentPassword":"new private member password","password":"another private member password"}))).await?;
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(
         app.clone()
@@ -329,15 +336,10 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
         .await?;
     let v = json_body(r).await?;
     assert_eq!(v["accounts"].as_array().unwrap().len(), 1);
-    assert!(v["next_cursor"].is_string());
+    assert!(v["nextCursor"].is_string());
     let mut seen = std::collections::BTreeSet::new();
-    seen.insert(
-        v["accounts"][0]["principal_id"]
-            .as_str()
-            .unwrap()
-            .to_owned(),
-    );
-    let mut cursor = v["next_cursor"].clone();
+    seen.insert(v["accounts"][0]["principalId"].as_str().unwrap().to_owned());
+    let mut cursor = v["nextCursor"].clone();
     while let Some(next) = cursor.as_str() {
         let response = app
             .clone()
@@ -352,9 +354,9 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
         assert_eq!(response.status(), StatusCode::OK);
         let page = json_body(response).await?;
         for account in page["accounts"].as_array().unwrap() {
-            assert!(seen.insert(account["principal_id"].as_str().unwrap().to_owned()));
+            assert!(seen.insert(account["principalId"].as_str().unwrap().to_owned()));
         }
-        cursor = page["next_cursor"].clone();
+        cursor = page["nextCursor"].clone();
     }
     let all = app
         .clone()
@@ -403,7 +405,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
             &format!("{base}/providers"),
             &cookie,
             &csrf,
-            json!({"settings": federation_support::settings().input(), "client_secret":"fixture-secret"}),
+            json!({"settings": settings_wire(&federation_support::settings().input()), "clientSecret":"fixture-secret"}),
         ))
         .await?;
     assert_eq!(r.status(), StatusCode::CREATED);
@@ -418,14 +420,14 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
             &format!("{base}/providers"),
             &cookie,
             &csrf,
-            json!({"settings": original, "client_secret":"fixture-secret"}),
+            json!({"settings": settings_wire(&original), "clientSecret":"fixture-secret"}),
         ))
         .await?;
     let second = json_body(created).await?;
     let second_path = format!("{base}/providers/{}", second["id"].as_str().unwrap());
     let mut changed = original;
     changed.client_id = "updated-client".into();
-    let update = json!({"expected_version":1,"settings":changed,"client_secret":"rotated-secret"});
+    let update = json!({"expectedVersion":1,"settings":settings_wire(&changed),"clientSecret":"rotated-secret"});
     let updated = app
         .clone()
         .oneshot(req("PUT", &second_path, &cookie, &csrf, update.clone()))
@@ -433,7 +435,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     assert_eq!(updated.status(), StatusCode::OK);
     let updated = json_body(updated).await?;
     assert_eq!(updated["version"], 2);
-    assert_eq!(updated["settings"]["client_id"], "updated-client");
+    assert_eq!(updated["settings"]["clientId"], "updated-client");
     assert_eq!(updated["enabled"], false);
     let stale = app
         .clone()
@@ -450,7 +452,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
             &format!("{url}/enabled"),
             &cookie,
             &csrf,
-            json!({"enabled":true,"expected_version":1}),
+            json!({"enabled":true,"expectedVersion":1}),
         ))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
@@ -461,7 +463,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
             &format!("{url}/enabled"),
             &cookie,
             &csrf,
-            json!({"enabled":false,"expected_version":1}),
+            json!({"enabled":false,"expectedVersion":1}),
         ))
         .await?;
     assert_eq!(r.status(), StatusCode::CONFLICT);
@@ -477,7 +479,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
         .await?;
     let options = json_body(r).await?;
     assert_eq!(options["providers"].as_array().unwrap().len(), 1);
-    assert!(!options.to_string().contains("client_secret"));
+    assert!(!options.to_string().contains("clientSecret"));
     let enabled = app
         .clone()
         .oneshot(req(
@@ -485,7 +487,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
             &format!("{second_path}/enabled"),
             &cookie,
             &csrf,
-            json!({"enabled":true,"expected_version":2}),
+            json!({"enabled":true,"expectedVersion":2}),
         ))
         .await?;
     assert_eq!(enabled.status(), StatusCode::OK);
@@ -541,7 +543,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
             &format!("{url}/enabled"),
             &cookie,
             &csrf,
-            json!({"enabled":false,"expected_version":2}),
+            json!({"enabled":false,"expectedVersion":2}),
         ))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
@@ -719,7 +721,7 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
     let settings = serde_json::to_value(federation_support::settings().input())?;
     sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2,decode(repeat('00',32),'hex'),1 FROM generate_series(1,99)")
         .bind(A).bind(&settings).execute(&f.owner).await?;
-    let settings = json!({"settings":settings,"client_secret":"fixture-secret"});
+    let settings = json!({"settings":settings_wire(&federation_support::settings().input()),"clientSecret":"fixture-secret"});
     let path = format!("/api/v2/tenants/{A}/providers");
     let (first, second) = tokio::join!(
         app.clone()
@@ -757,12 +759,33 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
 async fn management_rejects_password_for_federated_only_account() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let (app, s, _) = app(&f);
+    let (app, s, upstream) = app(&f);
+    *upstream.assurance.lock().unwrap() = Some(rss_identity_core::assurance::Assurance::new(
+        None,
+        rss_identity_core::assurance::Acr::Unspecified,
+        vec![],
+    )?);
     let p = federation_support::enabled(&f, &s).await?;
     let state = federation_support::begin(&f, &s, &p).await?;
     let issued =
         federation_support::issued(federation_support::finish(&s, state, "federated-only").await?);
     assert!(!issued.identity().has_local_password);
+    let security = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/api/v2/tenants/{A}/session/security"),
+            &format!("__Host-identity-session={}", issued.secret().expose()),
+            "",
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(security.status(), StatusCode::OK);
+    assert_eq!(security.headers()["cache-control"], "no-store");
+    assert_eq!(
+        json_body(security).await?["authentication"],
+        json!({"authTime":null,"acr":"unspecified","amr":[]})
+    );
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let response = app
         .oneshot(req(

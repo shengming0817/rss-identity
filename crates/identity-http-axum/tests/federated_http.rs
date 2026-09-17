@@ -151,9 +151,9 @@ async fn begin(
     link: bool,
 ) -> anyhow::Result<String> {
     let payload = if link {
-        json!({"return_target":"home","password":password})
+        json!({"returnTarget":"home","password":password})
     } else {
-        json!({"return_target":"home"})
+        json!({"returnTarget":"home"})
     };
     let response = app
         .clone()
@@ -170,7 +170,7 @@ async fn begin(
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
-    Ok(body(response).await?["authorization_url"]
+    Ok(body(response).await?["authorizationUrl"]
         .as_str()
         .unwrap()
         .into())
@@ -222,7 +222,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
     let path = format!("/api/v2/tenants/{A}/oidc/{}/step-up", p.id);
     let browser = format!("{BROWSER}; {original}");
     let csrf = secret(&original).csrf();
-    let input = json!({"return_target":"home"});
+    let input = json!({"returnTarget":"home"});
     for (cookies, token) in [(BROWSER, None), (browser.as_str(), None)] {
         let r = app
             .clone()
@@ -236,7 +236,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         .oneshot(request("POST", &path, &browser, Some(&csrf), input.clone()))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
-    let url = body(r).await?["authorization_url"]
+    let url = body(r).await?["authorizationUrl"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -269,7 +269,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         .clone()
         .oneshot(request("POST", &path, &browser, Some(&csrf), input.clone()))
         .await?;
-    let url = body(r).await?["authorization_url"]
+    let url = body(r).await?["authorizationUrl"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -281,7 +281,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         .clone()
         .oneshot(request("POST", &path, &browser, Some(&csrf), input))
         .await?;
-    let url = body(r).await?["authorization_url"]
+    let url = body(r).await?["authorizationUrl"]
         .as_str()
         .unwrap()
         .to_owned();

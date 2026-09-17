@@ -409,7 +409,7 @@ impl Authority {
     ) -> Result<SessionPage, AuthorityError> {
         self.require_runtime()?;
         if !(1..=100).contains(&limit) {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::InvalidInput);
         }
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);

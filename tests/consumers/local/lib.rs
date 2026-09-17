@@ -66,11 +66,54 @@ mod tests {
                 std::time::Duration::from_secs(10),
             )?,
         )?;
+        let login_request = || {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v2/tenants/{}/login", host.key.tenant))
+                .header("origin", "https://local.example.test")
+                .header("x-identity-request", "1")
+                .header("content-type", "application/json")
+                .header("x-forwarded-for", "203.0.113.99")
+                .extension(axum::extract::ConnectInfo(
+                    "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                ))
+                .body(Body::from(format!(
+                    r#"{{"login":"operator","password":"{PASSWORD}"}}"#
+                )))
+                .unwrap()
+        };
+        let response = routes.clone().oneshot(login_request()).await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // The accepted connection is host-owned; a browser's forwarded header is ignored.
+        let routes = routes.layer(axum::middleware::from_fn(
+            |axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+             mut request: axum::extract::Request,
+             next: axum::middleware::Next| async move {
+                request
+                    .extensions_mut()
+                    .insert(rss_identity_http_axum::ClientAddress(peer.ip()));
+                next.run(request).await
+            },
+        ));
+        let response = routes.clone().oneshot(login_request()).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key("set-cookie"));
+        let body = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await?
+                .to_vec(),
+        )?;
+        assert!(body.contains("\"principalId\""));
+        assert!(body.contains("\"csrfToken\""));
+        assert!(!body.contains("principal_id"));
         // Local auth has no OIDC router, keys, state signer, reference process or network service.
         let response = routes
             .oneshot(
                 Request::builder()
                     .uri("/api/v2/oidc/callback")
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                    ))
                     .body(Body::empty())?,
             )
             .await?;

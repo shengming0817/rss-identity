@@ -163,7 +163,7 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<AccountState, AuthorityError> {
         if actor.key == target {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::InvalidInput);
         }
         self.apply_account_change(
             actor,
@@ -279,6 +279,9 @@ impl Authority {
         let policy = self.policy.clone();
         let instance = self.instance;
         let operation = match change {
+            LocalChange::Password if reauthentication.is_some() => {
+                ManagementOperation::ChangeOwnPassword
+            }
             LocalChange::Password => ManagementOperation::ResetPassword,
             LocalChange::Enabled(v) => ManagementOperation::SetAccountEnabled(v),
             LocalChange::Membership(v) => ManagementOperation::SetMembership(v),
@@ -288,7 +291,8 @@ impl Authority {
             if let Some(proof) = reauthentication {
                 if proof.account() != actor.key || target != actor.key { return Err(crate::transaction::reject().into()); }
                 current(c, &proof).await?;
-            } else { crate::management::authorize(policy.as_ref(),instance,&loaded,operation,Some(target))?; }
+            }
+            crate::management::authorize(policy.as_ref(),instance,&loaded,operation,Some(target))?;
             let old = load(c, target).await?.state;
             let (next, action) = old.change(change)?;
             sqlx::query("UPDATE identity_authority.accounts SET enabled=$3,auth_epoch=$4 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
@@ -311,7 +315,7 @@ impl Authority {
     ) -> Result<AccountPage, AuthorityError> {
         self.require_runtime()?;
         if !(1..=100).contains(&limit) {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::InvalidInput);
         }
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);

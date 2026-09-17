@@ -106,7 +106,7 @@ async fn providers(
     .into_response())
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateProvider {
     settings: dto::ProviderSettings,
     client_secret: String,
@@ -134,7 +134,7 @@ async fn create_provider(
         .into_response())
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateProvider {
     expected_version: i64,
     settings: dto::ProviderSettings,
@@ -167,7 +167,7 @@ async fn update_provider(
     .into_response())
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProviderToggle {
     expected_version: i64,
     enabled: bool,

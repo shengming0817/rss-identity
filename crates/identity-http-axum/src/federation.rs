@@ -94,13 +94,13 @@ async fn security(
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Begin {
     return_target: String,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Link {
     return_target: String,
     password: Option<String>,
@@ -179,7 +179,7 @@ fn redirect_response(
     created: bool,
 ) -> Result<Response, HttpError> {
     let mut response = Json(serde_json::json!({
-    "authorization_url":redirect.url}
+    "authorizationUrl":redirect.url}
     ))
     .into_response();
 
@@ -322,7 +322,7 @@ async fn link(
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Callback {
     state: String,
     code: Option<String>,

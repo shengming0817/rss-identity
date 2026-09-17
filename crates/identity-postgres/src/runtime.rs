@@ -20,10 +20,11 @@ impl RuntimeState {
     ) -> Result<Self, AuthorityError> {
         let outbox = PgOutboxStore::new(
             runtime.clone(),
-            MessagingDomain::parse("identity.security").map_err(|_| AuthorityError::Invalid)?,
+            MessagingDomain::parse("identity.security")
+                .map_err(|_| AuthorityError::Configuration)?,
             budget,
         )
-        .map_err(|_| AuthorityError::Invalid)?;
+        .map_err(|_| AuthorityError::Configuration)?;
         Ok(Self(Arc::new(RuntimeBundle {
             runtime,
             outbox: Arc::new(outbox),

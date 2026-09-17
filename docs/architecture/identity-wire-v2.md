@@ -1,6 +1,6 @@
 # Instance-local HTTP v2
 
-`rss-identity-http-axum` 提供可挂载 Router。宿主提供 canonical HTTPS origin、TLS 和可信代理/连接来源；不能直接信任浏览器转发头。仅 `/api/v2`，旧中央/internal/platform/CLI/v1 路由不存在。DTO 留在 HTTP adapter 内，浏览器响应不能作为宿主 Rust 认证证明。
+`rss-identity-http-axum` 提供可挂载 Router。宿主提供 canonical HTTPS origin、TLS 和可信代理/连接来源；不能直接信任浏览器转发头。仅 `/api/v2`，旧中央/internal/platform/CLI/v1 路由不存在。应用 JSON 字段使用 camelCase，旧 snake_case 字段拒绝；OIDC callback 标准参数 `error_description` / `error_uri` / `session_state` 保留上游协议拼写。DTO 留在 HTTP adapter 内，浏览器响应不能作为宿主 Rust 认证证明。
 
 ## 本地会话
 
@@ -11,7 +11,7 @@
 | POST `/login` | `{login,password}`；完整验证、签发，已有有效 cookie 时需 CSRF 才能替换。 |
 | GET `/session` | 当前身份/会话，不续期。 |
 | POST `/session/reauthenticate` | `{password}`；绑定当前账户，不接受 login/角色字段，成功旋转会话。 |
-| POST `/session/refresh` | 当前 cookie + CSRF；旋转，保留原 auth_time/绝对期限。 |
+| POST `/session/refresh` | 当前 cookie + CSRF；旋转，保留原 authTime/绝对期限。 |
 | POST `/session/logout` | 撤销当前会话，清 cookie。 |
 | POST `/sessions/logout-all` | 撤销账户全部会话，清 cookie。 |
 | GET `/sessions` | 有界分页；`cursor`/`limit`。 |
@@ -19,22 +19,22 @@
 成功登录/查询/refresh/重新认证响应：
 
 ```json
-{"identity":{"principal_id":"22222222-2222-4222-8222-222222222222","has_local_password":true},"session":{"id":"33333333-3333-4333-8333-333333333333","auth_time":1800000000,"idle_expires_at":1800000900,"absolute_expires_at":1800014400},"csrf_token":"opaque"}
+{"identity":{"principalId":"22222222-2222-4222-8222-222222222222","hasLocalPassword":true},"session":{"id":"33333333-3333-4333-8333-333333333333","authTime":1800000000,"idleExpiresAt":1800000900,"absoluteExpiresAt":1800014400},"csrfToken":"opaque"}
 ```
 
 bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=...` 传递。响应 no-store。写请求检查精确 Origin；登录、重新认证和管理写入要求 `x-identity-request: 1`，已认证修改须 `x-csrf-token`。拒绝重复/畸形凭据头。日志不得记录 Cookie、Set-Cookie、密码、CSRF 或回调参数。
 
 ## 账户管理
 
-同一 tenant 前缀：GET/POST `/accounts`（分页 / `{login,password}`）；POST `/accounts/{principal}/enabled`、`/membership`（`{enabled}`）；POST `/accounts/{principal}/password`（`{password}`）；POST `/account/password`（`{current_password,password}`）。管理角色与防锁死由宿主 ManagementPolicy 提供，每次事务重查；没有 administrator 字段/路由。
+同一 tenant 前缀：GET/POST `/accounts`（分页 / `{login,password}`）；POST `/accounts/{principal}/enabled`、`/membership`（`{enabled}`）；POST `/accounts/{principal}/password`（`{password}`）；POST `/account/password`（`{currentPassword,password}`）。管理角色与防锁死由宿主 ManagementPolicy 提供，每次事务重查；没有 administrator 字段/路由。
 
 ## 可选 OIDC Router
 
-仅合并 `federated_router` 后可用。同一 tenant 前缀：GET `/login-options`；POST `/oidc/{provider}/login`（`{return_target}`）、`/link`（重新认证与受控目标）、`/step-up`（受控目标）；GET `/session/security`。后者只提供当前 auth_time/acr/amr 和可用 step-up provider，不返回管理角色。
+仅合并 `federated_router` 后可用。同一 tenant 前缀：GET `/login-options`；POST `/oidc/{provider}/login`（`{returnTarget}`）、`/link`（重新认证与受控目标）、`/step-up`（受控目标）；GET `/session/security`。后者提供 `authentication:{authTime,acr,amr}` 和 `eligibleStepUpProviders:[{providerId,label}]`；普通 OIDC 未提供认证时间时 `authTime:null`，不回填 iat。它只提供认证事实，不返回管理角色。
 
-唯一回调 GET `/api/v2/oidc/callback`：state/code/iss 与独立 HttpOnly browser cookie 绑定；拒绝重放、过期、不匹配和不确定结算，不释放 cookie。return_target 是宿主白名单键，不接受任意 URL；不再接受中央 client_id。
+唯一回调 GET `/api/v2/oidc/callback`：state/code/iss 与独立 HttpOnly browser cookie 绑定；拒绝重放、过期、不匹配和不确定结算，不释放 cookie。returnTarget 是宿主白名单键，不接受任意 URL；不再接受中央 clientId。
 
-IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/providers/{provider}/enabled`、`/test`。写入使用 expected_version 乐观并发；创建初始配置不需要该字段。凭据只写，加密存储，不返回明文。provider 设置与上游协议字段见 core 的 ProviderSettingsInput；资源授权仍归宿主。
+IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/providers/{provider}/enabled`、`/test`。写入使用 expectedVersion 乐观并发；创建初始配置不需要该字段。凭据只写，加密存储，不返回明文。provider 设置为 `{issuer,clientId,redirectUri,scopes,claims:{email,groups},jit}`；只写凭据字段为 `clientSecret` / `caPem`，与领域持久化形状分别由各自 owner 持有；资源授权仍归宿主。
 
 ## 失败与可信边界
 

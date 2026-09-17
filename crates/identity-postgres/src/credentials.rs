@@ -40,7 +40,7 @@ struct Context<'a> {
 impl CredentialKeys {
     pub fn new(active: String, keys: Vec<(String, [u8; 32])>) -> Result<Self, AuthorityError> {
         if keys.is_empty() || keys.len() > 8 {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::Configuration);
         }
         let mut values = BTreeMap::new();
         let mut digests = std::collections::BTreeSet::new();
@@ -57,16 +57,16 @@ impl CredentialKeys {
                     <[u8; 32]>::from(sha2::Sha256::digest(raw.as_ref()))
                 })
             {
-                return Err(AuthorityError::Invalid);
+                return Err(AuthorityError::Configuration);
             }
             let key = aead::UnboundKey::new(&aead::AES_256_GCM, raw.as_ref())
-                .map_err(|_| AuthorityError::Invalid)?;
+                .map_err(|_| AuthorityError::Configuration)?;
             if values.insert(id, aead::LessSafeKey::new(key)).is_some() {
-                return Err(AuthorityError::Invalid);
+                return Err(AuthorityError::Configuration);
             }
         }
         if !values.contains_key(&active) {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::Configuration);
         }
         Ok(Self {
             active,
@@ -107,7 +107,7 @@ impl CredentialKeys {
         version: i64,
     ) -> Result<Vec<u8>, AuthorityError> {
         if version < 1 {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::InvalidInput);
         }
         serde_json::to_vec(&Context {
             authority,
@@ -116,7 +116,7 @@ impl CredentialKeys {
             credential_version: version,
             purpose: "oidc-client-secret",
         })
-        .map_err(|_| AuthorityError::Invalid)
+        .map_err(|_| AuthorityError::Unavailable)
     }
     pub(crate) fn seal(
         &self,

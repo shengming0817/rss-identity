@@ -12,7 +12,7 @@ use std::{
 };
 
 #[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DatabaseConfig {
     pub host: String,
     pub port: u16,
@@ -54,7 +54,7 @@ impl DatabaseConfig {
     }
 }
 #[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StorageConfig {
     pub target: [u8; 16],
     pub lineage: [u8; 16],
@@ -95,7 +95,7 @@ impl StorageConfig {
     }
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssuranceProfileConfig {
     pub tenant_id: String,
     pub issuer: String,
@@ -103,13 +103,13 @@ pub struct AssuranceProfileConfig {
     pub keycloak_totp: bool,
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialKeyFile {
     pub key_id: String,
     pub path: String,
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialKeyringConfig {
     pub active_key_id: String,
     pub keys: Vec<CredentialKeyFile>,
@@ -130,7 +130,7 @@ impl CredentialKeyringConfig {
     }
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OidcConfig {
     pub group_facts_max_age_seconds: i64,
     pub assurance_profiles: Vec<AssuranceProfileConfig>,
@@ -145,7 +145,7 @@ impl OidcConfig {
     }
 }
 #[derive(Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Budgets {
     pub request_seconds: u64,
     pub drain_seconds: u64,
@@ -174,12 +174,12 @@ impl Budgets {
     }
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub format_version: u32,
     pub instance_id: String,
     pub public_origin: String,
-    pub bootstrap: Bootstrap,
+    pub bootstrap_accounts: Vec<Bootstrap>,
     pub database: DatabaseConfig,
     pub storage: StorageConfig,
     pub listen: SocketAddr,
@@ -204,10 +204,7 @@ impl RuntimeConfig {
         self.budgets.validate()?;
         self.storage.binding()?;
         self.instance()?;
-        let bootstrap = self.bootstrap.key()?;
-        if !self.storage.tenants()?.contains(&bootstrap.tenant) {
-            return Err(AppError::Tenant);
-        }
+        self.bootstrap_keys()?;
         rss_identity_http_axum::HttpConfig::new(&self.public_origin, self.budgets.request())
             .map_err(|_| AppError::Configuration)?;
         if let Some(oidc) = &self.oidc {
@@ -221,9 +218,25 @@ impl RuntimeConfig {
     pub fn instance(&self) -> Result<InstanceId, AppError> {
         InstanceId::parse(&self.instance_id).map_err(|_| AppError::Configuration)
     }
+    pub fn bootstrap_keys(&self) -> Result<Vec<AccountKey>, AppError> {
+        let tenants = self.storage.tenants()?;
+        let keys = self
+            .bootstrap_accounts
+            .iter()
+            .map(Bootstrap::key)
+            .collect::<Result<Vec<_>, _>>()?;
+        if keys.len() != tenants.len()
+            || tenants
+                .iter()
+                .any(|t| keys.iter().filter(|k| k.tenant == *t).count() != 1)
+        {
+            return Err(AppError::Tenant);
+        }
+        Ok(keys)
+    }
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Bootstrap {
     pub tenant_id: String,
     pub principal_id: String,
@@ -237,7 +250,7 @@ impl Bootstrap {
     }
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MigrationConfig {
     pub format_version: u32,
     pub instance_id: String,

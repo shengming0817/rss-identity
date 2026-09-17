@@ -17,6 +17,66 @@ fn secret(session: &IssuedSession) -> SessionSecret {
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
+async fn own_password_change_requires_current_host_policy() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let issued = f.login().await?;
+    f.policy.revoke(f.key);
+    let before = f.events().await?;
+    let actor = f
+        .store
+        .inspect_session(f.key.tenant, secret(&issued), deadline())
+        .await?;
+    assert_eq!(
+        f.store
+            .change_own_password(
+                actor,
+                password(),
+                rss_identity_core::account::Password::new("replacement private password".into())?,
+                source(),
+                deadline()
+            )
+            .await
+            .unwrap_err(),
+        AuthorityError::RuleRejected(AccountRuleError::InsufficientPrivilege)
+    );
+    assert_eq!(f.events().await?, before);
+    f.policy.allow(f.key);
+    *f.policy.recent.write().unwrap() =
+        ReauthenticationRequirement::RecentMfa(Duration::from_secs(300));
+    let actor = f
+        .store
+        .inspect_session(f.key.tenant, secret(&issued), deadline())
+        .await?;
+    assert_eq!(
+        f.store
+            .change_own_password(actor, password(), password(), source(), deadline())
+            .await
+            .unwrap_err(),
+        AuthorityError::RuleRejected(AccountRuleError::ReauthenticationRequired)
+    );
+    assert_eq!(f.events().await?, before);
+    *f.policy.recent.write().unwrap() = ReauthenticationRequirement::None;
+    let actor = f
+        .store
+        .inspect_session(f.key.tenant, secret(&issued), deadline())
+        .await?;
+    f.store
+        .change_own_password(actor, password(), password(), source(), deadline())
+        .await?;
+    assert_eq!(f.events().await?, before + 1);
+    assert!(
+        f.store
+            .inspect_session(f.key.tenant, secret(&issued), deadline())
+            .await
+            .is_err()
+    );
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
 async fn local_facade_reauthenticates_and_host_policy_is_current() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;

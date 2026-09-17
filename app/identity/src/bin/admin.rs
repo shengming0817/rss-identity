@@ -13,7 +13,7 @@ use rss_request_context::TenantId;
 use serde::Deserialize;
 use std::{path::Path, sync::Arc, time::Duration};
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Config {
     instance_id: String,
     database: DatabaseConfig,
@@ -54,30 +54,28 @@ async fn run() -> Result<(), AppError> {
     let command = parse_command(&args[1..])?;
     let raw = read_public_file(Path::new(&args[0]), 16384).map_err(|_| AppError::Configuration)?;
     let config: Config = serde_json::from_slice(&raw).map_err(|_| AppError::Json)?;
+    let authority_config = AuthorityConfig::new(
+        rss_identity_core::InstanceId::parse(&config.instance_id)
+            .map_err(|_| AppError::Configuration)?,
+        config.storage.tenants()?,
+        rss_identity_core::session::SessionPolicy::new(900, 14400).map_err(|_| AppError::Budget)?,
+        assembly::delivery_budget()?,
+    )?;
+    let database = config.database.pg()?;
+    let binding = config.storage.binding()?;
     let runtime = Arc::new(
         rss_transactional_messaging_postgres::PgRuntime::connect_producer(
-            config.database.pg()?,
+            database,
             assembly::Timer,
-            config.storage.binding()?,
+            binding,
         )
         .await
         .map_err(|_| AppError::Connection)?,
     );
     let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new());
-    let authority = Authority::connect_maintenance(
-        runtime.clone(),
-        kdf.clone(),
-        AuthorityConfig::new(
-            rss_identity_core::InstanceId::parse(&config.instance_id)
-                .map_err(|_| AppError::Configuration)?,
-            config.storage.tenants()?,
-            rss_identity_core::session::SessionPolicy::new(900, 14400)
-                .map_err(|_| AppError::Budget)?,
-            assembly::delivery_budget()?,
-        )?,
-        budget(),
-    )
-    .await;
+    let authority =
+        Authority::connect_maintenance(runtime.clone(), kdf.clone(), authority_config, budget())
+            .await;
     let result = match authority {
         Ok(authority) => execute(&authority, command).await,
         Err(error) => Err(error.into()),

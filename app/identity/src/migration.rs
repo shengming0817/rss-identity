@@ -29,6 +29,14 @@ pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
         sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
             .execute(&mut *tx)
             .await?;
+        // RSS leaves host default table/sequence ACLs to its migrator. Reject ambient PUBLIC
+        // grants before committing a producer installation; Identity revokes its own PUBLIC ACLs.
+        let public_grants: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE n.nspname='rss_transactional_messaging' AND a.grantee=0)",
+        ).fetch_one(&mut *tx).await?;
+        if public_grants {
+            return Err(sqlx::Error::Protocol("unexpected public storage privileges".into()));
+        }
         rss_identity_postgres::install(&mut tx, instance).await?;
         grant_profile(&mut tx, &config.runtime_role, AuthorityProfile::Runtime).await?;
         grant_profile(
@@ -48,6 +56,18 @@ pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
                 .bind(config.storage.generation)
                 .execute(&mut *tx)
                 .await?;
+        }
+        for (role, profile) in [
+            (&config.runtime_role, AuthorityProfile::Runtime),
+            (&config.maintenance_role, AuthorityProfile::Maintenance),
+        ] {
+            // grant_profile already validated the name; quote it as an SQL identifier again.
+            let switch = format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\""));
+            sqlx::raw_sql(sqlx::AssertSqlSafe(switch)).execute(&mut *tx).await?;
+            rss_identity_postgres::verify_profile(&mut tx, profile, instance)
+                .await
+                .map_err(|_| sqlx::Error::Protocol("installation profile verification failed".into()))?;
+            sqlx::raw_sql("SET LOCAL ROLE NONE").execute(&mut *tx).await?;
         }
         tx.commit().await
     })

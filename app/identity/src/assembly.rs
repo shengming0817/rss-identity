@@ -39,14 +39,23 @@ pub fn deadline() -> OperationDeadline {
 }
 
 /// Product policy, deliberately outside the authentication component.
-pub struct BootstrapPolicy(pub AccountKey);
+pub struct BootstrapPolicy(pub Vec<AccountKey>);
 impl ManagementPolicy for BootstrapPolicy {
     fn authorize(
         &self,
         context: &ManagementContext<'_>,
     ) -> Result<ReauthenticationRequirement, ManagementDenied> {
-        if context.actor() != self.0
-            || (context.target() == Some(self.0)
+        if context.operation() == ManagementOperation::ChangeOwnPassword
+            && context.target() == Some(context.actor())
+        {
+            return Ok(ReauthenticationRequirement::Recent(Duration::from_secs(
+                300,
+            )));
+        }
+        if !self.0.contains(&context.actor())
+            || (context
+                .target()
+                .is_some_and(|target| self.0.contains(&target))
                 && matches!(
                     context.operation(),
                     ManagementOperation::SetAccountEnabled(false)
@@ -77,7 +86,7 @@ pub async fn authority(
         runtime,
         kdf,
         authority_config(config)?,
-        Arc::new(BootstrapPolicy(config.bootstrap.key()?)),
+        Arc::new(BootstrapPolicy(config.bootstrap_keys()?)),
         deadline(),
     )
     .await?)

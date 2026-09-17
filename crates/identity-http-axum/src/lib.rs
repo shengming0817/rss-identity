@@ -20,8 +20,10 @@ struct AppState {
     config: HttpConfig,
 }
 
-/// Mount behind TLS at the configured origin. Supply Axum ConnectInfo<SocketAddr> from
-/// the accepted connection; a reverse proxy requires a separately trusted transport adapter.
+/// Mount behind TLS at the configured origin. Host middleware must insert [`ClientAddress`]
+/// from its trusted transport before entering these routes. Axum `ConnectInfo<SocketAddr>`
+/// alone is insufficient. For a direct connection use the accepted peer's IP; behind a
+/// proxy validate the peer before interpreting any forwarded header. See the embedding guide.
 pub fn router(authority: Authority, config: HttpConfig) -> Result<Router, AuthorityError> {
     authority.require_runtime()?;
     let management = management::management_router(authority.clone(), config.clone())?;
@@ -115,6 +117,8 @@ mod tests {
             AuthorityError::CommitUnknown(StorageFailure::Transient),
             AuthorityError::RollbackFailed(StorageFailure::Transient),
             AuthorityError::Fenced,
+            AuthorityError::Configuration,
+            AuthorityError::DeadlineElapsed,
         ] {
             let response = HttpError::from(error).into_response();
             assert_eq!(
@@ -135,6 +139,8 @@ mod tests {
 }
 
 /// Client attribution supplied by the hosting transport after its proxy trust check.
-/// This is not authenticated identity; the raw TCP peer remains in ConnectInfo.
+/// Required by password login, reauthentication and password changes. For direct TLS hosts,
+/// map accepted Axum `ConnectInfo<SocketAddr>` to this extension in host middleware. Forwarded
+/// headers are never interpreted by this adapter. The raw peer remains in `ConnectInfo`.
 #[derive(Clone, Copy, Debug)]
 pub struct ClientAddress(pub std::net::IpAddr);
