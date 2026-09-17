@@ -1,6 +1,6 @@
 //! The only persisted authentication-facts codec. Provider authority stays in Origin.
 use crate::transaction::{corrupt, reject};
-use rss_identity_contracts::groups::{
+use rss_identity_core::groups::{
     GroupSource, Groups, UnavailableReason, VERSION, acceptable_observation, valid_snapshot_window,
 };
 use rss_identity_core::{
@@ -93,7 +93,7 @@ impl AuthenticationFacts {
             } => {
                 if snapshot_id.is_nil()
                     || !valid_snapshot_window(*observed_at, *expires_at)
-                    || !rss_identity_contracts::groups::canonical_values(values)
+                    || !rss_identity_core::groups::canonical_values(values)
                 {
                     return Err(corrupt());
                 }

@@ -3,11 +3,8 @@ use rss_transactional_messaging::policy::OperationDeadline;
 use std::time::Instant;
 use uuid::Uuid;
 
-/// This owned, short-lived candidate is neither a session nor a bearer credential.
-/// ```compile_fail
-/// fn copy(c: rss_identity_postgres::AuthenticationCandidate) { let _ = c.clone(); }
-/// ```
-pub struct AuthenticationCandidate {
+/// Internal password verification evidence.
+pub(crate) struct AuthenticationCandidate {
     pub(crate) state: AccountState,
     pub(crate) authority: Uuid,
     pub(crate) expires: Instant,
@@ -43,12 +40,8 @@ impl AttemptSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorityError {
-    #[error(transparent)]
-    Platform(#[from] rss_identity_core::platform::PlatformError),
     #[error("invalid account input")]
     Invalid,
-    #[error(transparent)]
-    Downstream(#[from] rss_identity_core::downstream::DownstreamError),
     #[error(transparent)]
     Federation(#[from] rss_identity_core::federation::FederationError),
     #[error("authentication or operation rejected")]
@@ -79,9 +72,9 @@ pub enum AuthorityError {
 /// Non-secret deployment diagnostics, independent of provider/SQL error text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum StorageMismatch {
-    #[error("deployment environment or origin identity mismatch")]
+    #[error("authentication instance mismatch")]
     DeploymentIdentity,
-    #[error("unsupported schema version; check the development database rebuild guide")]
+    #[error("unsupported authentication schema version")]
     SchemaVersion,
     #[error(
         "database role does not match the operation; use the matching runtime or maintenance configuration"

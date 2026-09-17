@@ -1,3 +1,5 @@
+> 历史中央模式文档（基线 fa7019922162158704cc47c6ac7ad36a67c8ae5a），不适用于 #2435 的嵌入式组件。旧运行器已退役；保留验收/候选记录，不重标为本次成功。当前入口为 docs/guides/embedding.md，完整部署后续为 #2436。
+
 # 固定候选构建
 
 1. Identity 与 rss-web 都使用干净、固定完整 Git SHA。仅构建 rss-web/apps/identity：设置 RSS_IDENTITY_WEB_REVISION 为该仓 HEAD，运行 pnpm --filter @rss/identity-app build 和 pnpm check:identity-app:build。

@@ -1,201 +1,187 @@
-//! Tenant-local account authority. SQL and event envelopes are private implementation details.
-mod auth_facts;
-mod deployment;
-pub use deployment::DeploymentIdentity;
+//! Embeddable account/session services over a host-owned PostgreSQL runtime.
 mod attempts;
-mod downstream;
-mod downstream_cleanup;
-mod downstream_storage;
-pub use downstream::{Downstream, FlowHandle, PrepareAdmission, ValidatedIdentity};
+mod auth_facts;
+mod credentials;
 mod federation;
 mod federation_link;
 mod federation_login;
 mod federation_storage;
-pub use federation::{
-    FederatedOutcome, FederatedRedirect, Federation, LinkRequest, LinkResult, LoginRequest,
-};
-mod cli_login;
-mod credentials;
 mod maintenance;
-mod platform;
-pub use credentials::CredentialKeys;
-pub use platform::{
-    NewTenantAdministrator, PlatformOperation, PlatformOperationKind, TenantPage, TenantView,
-};
+mod management;
 mod operations;
-pub use operations::{AccountListEntry, AccountPage, AccountView, LocalAccountRole};
 mod runtime;
+mod schema;
 mod session_storage;
 mod sessions;
 mod storage;
 mod transaction;
-pub use runtime::RuntimeSource;
 mod types;
-pub use sessions::{
-    AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
+pub use credentials::CredentialKeys;
+pub use federation::{
+    FederatedOutcome, FederatedRedirect, Federation, FederationConfig, LinkRequest, LinkResult,
+    LoginOption, LoginRequest, SessionSecurity,
 };
-pub use types::*;
-pub const SCHEMA_VERSION: i32 = 8;
-pub const SCHEMA_SIGNATURE_SQL: &str = include_str!("schema-signature.sql");
-pub const SCHEMA_SIGNATURE: &str = include_str!("schema-signature.sha256");
-pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_authority.sql");
-use rss_identity_core::account::{AccountChange, AccountKey, AccountState};
-use rss_transactional_messaging::policy::DeliveryBudget;
+pub use management::{
+    ManagementContext, ManagementDenied, ManagementOperation, ManagementPolicy,
+    ReauthenticationRequirement,
+};
+pub use operations::{AccountPage, AccountView};
+use rss_identity_core::{
+    InstanceId,
+    account::{AccountChange, AccountKey, AccountState},
+    session::SessionPolicy,
+};
+use rss_request_context::TenantId;
+use rss_transactional_messaging::policy::{DeliveryBudget, OperationDeadline};
 use rss_transactional_messaging_postgres::PgRuntime;
+pub use schema::{
+    MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_SIGNATURE_SQL, SCHEMA_VERSION, grant_profile, install,
+};
+pub use sessions::{
+    AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView, TrustedGroups,
+    VerifiedGroups,
+};
 use std::sync::Arc;
+pub use types::*;
 
-/// All runtime dependencies are established before a usable authority can exist.
-pub struct RuntimeConfiguration {
-    source: RuntimeSource,
-    credential_keys: Arc<CredentialKeys>,
-}
-impl RuntimeConfiguration {
-    pub fn new(source: RuntimeSource, credential_keys: Arc<CredentialKeys>) -> Self {
-        Self {
-            source,
-            credential_keys,
-        }
-    }
-}
+/// Instance and admission are explicit; URLs and upstream credentials belong to adapters.
 #[derive(Clone)]
-enum AuthorityMode {
-    Runtime(Arc<RuntimeConfiguration>),
-    Maintenance,
+pub struct AuthorityConfig {
+    instance: InstanceId,
+    tenants: Vec<TenantId>,
+    sessions: SessionPolicy,
+    events: DeliveryBudget,
+}
+impl AuthorityConfig {
+    pub fn new(
+        instance: InstanceId,
+        mut tenants: Vec<TenantId>,
+        sessions: SessionPolicy,
+        events: DeliveryBudget,
+    ) -> Result<Self, AuthorityError> {
+        tenants.sort_by_key(|tenant| tenant.to_string());
+        if tenants.is_empty()
+            || tenants.len() > 128
+            || tenants.windows(2).any(|pair| pair[0] == pair[1])
+        {
+            return Err(AuthorityError::Invalid);
+        }
+        Ok(Self {
+            instance,
+            tenants,
+            sessions,
+            events,
+        })
+    }
 }
 #[derive(Clone)]
 pub struct Authority {
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
     runtimes: Arc<runtime::RuntimeState>,
-    mode: AuthorityMode,
-    system_domain: rss_request_context::TenantId,
-    identity_origin: String,
+    profile: AuthorityProfile,
+    instance: InstanceId,
+    session_policy: SessionPolicy,
+    policy: Arc<dyn ManagementPolicy>,
 }
 impl Authority {
-    /// Construct a runtime authority with its immutable external source and keyring.
     pub async fn connect_runtime(
         runtime: Arc<PgRuntime>,
         kdf: Arc<rss_identity_core::account::PasswordKdf>,
-        deployment: DeploymentIdentity,
-        budget: DeliveryBudget,
-        system: rss_request_context::TenantId,
-        configuration: RuntimeConfiguration,
-        deadline: rss_transactional_messaging::policy::OperationDeadline,
+        config: AuthorityConfig,
+        policy: Arc<dyn ManagementPolicy>,
+        deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
         Self::connect(
             runtime,
             kdf,
-            deployment,
-            budget,
-            system,
-            AuthorityMode::Runtime(Arc::new(configuration)),
+            config,
+            AuthorityProfile::Runtime,
+            policy,
             deadline,
         )
         .await
     }
-    /// Maintenance has no tenant-admission or IdP credential configuration.
     pub async fn connect_maintenance(
         runtime: Arc<PgRuntime>,
         kdf: Arc<rss_identity_core::account::PasswordKdf>,
-        deployment: DeploymentIdentity,
-        budget: DeliveryBudget,
-        system: rss_request_context::TenantId,
-        deadline: rss_transactional_messaging::policy::OperationDeadline,
+        config: AuthorityConfig,
+        deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
         Self::connect(
             runtime,
             kdf,
-            deployment,
-            budget,
-            system,
-            AuthorityMode::Maintenance,
+            config,
+            AuthorityProfile::Maintenance,
+            Arc::new(management::DenyManagement),
             deadline,
         )
         .await
     }
-    fn runtime_configuration(&self) -> Result<&RuntimeConfiguration, AuthorityError> {
-        match &self.mode {
-            AuthorityMode::Runtime(c) => Ok(c),
-            AuthorityMode::Maintenance => Err(AuthorityError::Rejected),
-        }
-    }
-    /// Validate the Identity schema and effective role before exposing an authority.
     async fn connect(
         runtime: Arc<PgRuntime>,
         kdf: Arc<rss_identity_core::account::PasswordKdf>,
-        deployment: DeploymentIdentity,
-        budget: DeliveryBudget,
-        tenant: rss_request_context::TenantId,
-        mode: AuthorityMode,
-        deadline: rss_transactional_messaging::policy::OperationDeadline,
+        config: AuthorityConfig,
+        profile: AuthorityProfile,
+        policy: Arc<dyn ManagementPolicy>,
+        deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
+        let tenant = config.tenants[0];
+        let instance = config.instance;
         let authority = Self {
             kdf,
-            runtimes: Arc::new(runtime::RuntimeState::new(runtime, budget, tenant)?),
-            mode,
-            system_domain: tenant,
-            identity_origin: deployment.identity_origin().to_owned(),
+            runtimes: Arc::new(runtime::RuntimeState::new(
+                runtime,
+                config.events,
+                config.tenants,
+                instance,
+            )?),
+            profile,
+            instance,
+            session_policy: config.sessions,
+            policy,
         };
-        let label = match &authority.mode {
-            AuthorityMode::Runtime(_) => "runtime",
-            AuthorityMode::Maintenance => "maintenance",
-        };
-        let valid = authority
-            .read(tenant, deadline, move |tx| {
+        let valid = Self::read_bundle(
+            authority.runtimes.snapshot()?,
+            tenant,
+            deadline,
+            false,
+            move |tx| {
                 Box::pin(async move {
-                    tx.with_connection(move |c| {
-                        Box::pin(async move {
-                            // The version table must be resolvable before PostgreSQL can plan
-                            // the contract query. Missing objects elsewhere use nullable OIDs.
-                            let inventory: String = sqlx::query_scalar(
-                                "SELECT CASE WHEN a.attnum IS NULL THEN 'schema-contract'
-                                 WHEN has_schema_privilege(current_user,n.oid,'USAGE') IS NOT TRUE
-                                   OR has_table_privilege(current_user,t.oid,'SELECT') IS NOT TRUE THEN 'privileges'
-                                 ELSE 'ok' END
-                                 FROM (VALUES (1)) AS required(dummy)
-                                 LEFT JOIN pg_namespace n ON n.nspname='identity_authority'
-                                 LEFT JOIN pg_class t ON t.relnamespace=n.oid AND t.relname='schema_version' AND t.relkind='r'
-                                 LEFT JOIN pg_attribute a ON a.attrelid=t.oid AND a.attname='version' AND a.atttypid='int4'::regtype AND a.attnum>0 AND NOT a.attisdropped",
-                            ).fetch_one(&mut *c).await?;
-                            if inventory != "ok" {
-                                return Ok(Some(inventory));
-                            }
-                            let versions:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *c).await?;
-                            if versions != [SCHEMA_VERSION] {return Ok(Some("schema-version".into()));}
-                            let signature:String=sqlx::query_scalar(include_str!("schema-signature.sql")).fetch_one(&mut *c).await?;
-                            if signature != include_str!("schema-signature.sha256").trim() { return Ok(Some("schema-contract".into())); }
-                            let identity_matches: bool = sqlx::query_scalar("SELECT count(*)=1 AND coalesce(bool_and(environment_id=$1 AND identity_config_version=$2 AND identity_public_origin=$3 AND product_public_origin=$4 AND (system_domain IS NULL OR system_domain=$5::uuid)),false) FROM identity_authority.deployment")
-                                .bind(deployment.environment_id).bind(deployment.config_version).bind(deployment.identity_public_origin).bind(deployment.product_public_origin).bind(tenant.to_string()).fetch_one(&mut *c).await?;
-                            if !identity_matches { return Ok(Some("deployment-identity".into())); }
-                            sqlx::query_scalar::<_, Option<String>>(include_str!("probe.sql"))
-                                .bind(label)
-                                .fetch_one(c)
-                                .await
-                        })
+                    transaction::connection(tx, move |c| {
+                        Box::pin(schema::probe(c, profile, instance))
                     })
                     .await
                 })
-            })
-            .await;
+            },
+        )
+        .await;
         check_probe(valid)?;
         Ok(authority)
     }
-
+    pub fn instance(&self) -> InstanceId {
+        self.instance
+    }
+    pub fn active_tenants(&self) -> Result<Vec<TenantId>, AuthorityError> {
+        Ok(self.runtimes.snapshot()?.tenants.clone())
+    }
+    pub fn tenant_active(&self, tenant: TenantId) -> bool {
+        self.runtimes
+            .snapshot()
+            .is_ok_and(|r| r.tenants.contains(&tenant))
+    }
     fn require_maintenance(&self) -> Result<(), AuthorityError> {
-        if !matches!(self.mode, AuthorityMode::Maintenance) {
+        if self.profile != AuthorityProfile::Maintenance {
             return Err(AuthorityError::Rejected);
         }
         Ok(())
     }
-
-    /// Reject maintenance-only authority when composing a runtime adapter.
     pub fn require_runtime(&self) -> Result<(), AuthorityError> {
-        if !matches!(self.mode, AuthorityMode::Runtime(_)) {
+        if self.profile != AuthorityProfile::Runtime {
             return Err(AuthorityError::Rejected);
         }
         Ok(())
     }
 }
-
 fn check_probe(result: Result<Option<String>, AuthorityError>) -> Result<(), AuthorityError> {
     let reason = match result?.as_deref() {
         Some("ok") => return Ok(()),
@@ -253,4 +239,55 @@ mod tests {
         );
         assert_eq!(check_probe(Ok(Some("ok".into()))), Ok(()));
     }
+}
+
+#[cfg(test)]
+extern crate self as rss_identity_postgres;
+#[cfg(test)]
+#[path = "tests/atomic.rs"]
+mod account_atomic;
+#[cfg(test)]
+#[path = "tests/federated_atomic.rs"]
+mod federated_atomic;
+#[cfg(test)]
+#[path = "../tests/federation_support/mod.rs"]
+mod federation_support;
+#[cfg(test)]
+#[path = "tests/session_atomic.rs"]
+mod session_atomic;
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod support;
+#[cfg(test)]
+impl support::Fixture {
+    async fn candidate(&self) -> anyhow::Result<AuthenticationCandidate> {
+        Ok(self
+            .store
+            .verify_password(
+                self.key.tenant,
+                support::login("admin"),
+                support::password(),
+                support::source(),
+                support::deadline(),
+            )
+            .await?)
+    }
+}
+
+#[cfg(test)]
+async fn session_actor(
+    store: &Authority,
+    candidate: AuthenticationCandidate,
+) -> anyhow::Result<AuthenticatedSession> {
+    let tenant = candidate.account().tenant;
+    let issued = store
+        .create_session(candidate, None, support::deadline())
+        .await?;
+    Ok(store
+        .inspect_session(
+            tenant,
+            rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
+            support::deadline(),
+        )
+        .await?)
 }

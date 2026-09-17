@@ -8,7 +8,7 @@ fn input() -> ProviderSettingsInput {
     ProviderSettingsInput {
         issuer: "https://idp.example.test".into(),
         client_id: "client".into(),
-        redirect_uri: "https://identity.example.test/api/v1/oidc/callback".into(),
+        redirect_uri: "https://identity.example.test/api/v2/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
             email: None,

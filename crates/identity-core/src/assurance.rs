@@ -1,8 +1,65 @@
 //! Normalized authentication facts, not authorization or a transferable proof.
 //! ref: openidconnect-rs src/verification/mod.rs@b639b5d39eac6903238867aeb2b29326502e6b26.
 use crate::federation::FederationError;
-pub use rss_identity_contracts::{Acr, Amr};
 use serde::{Deserialize, Serialize};
+
+/// Closed normalized authentication strength. ref: serde enum representations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Acr {
+    Unspecified,
+    Mfa,
+}
+impl Acr {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Mfa => "mfa",
+        }
+    }
+}
+impl std::str::FromStr for Acr {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "unspecified" => Ok(Self::Unspecified),
+            "mfa" => Ok(Self::Mfa),
+            _ => Err("unknown acr"),
+        }
+    }
+}
+/// Verified authentication methods, ordered by canonical wire spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Amr {
+    Mfa,
+    Otp,
+    Pwd,
+}
+impl Amr {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mfa => "mfa",
+            Self::Otp => "otp",
+            Self::Pwd => "pwd",
+        }
+    }
+}
+impl std::str::FromStr for Amr {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "mfa" => Ok(Self::Mfa),
+            "otp" => Ok(Self::Otp),
+            "pwd" => Ok(Self::Pwd),
+            _ => Err("unknown amr"),
+        }
+    }
+}
+/// The closed enum bounds cardinality; ordering also rejects duplicate methods.
+pub fn canonical_methods(methods: &[Amr]) -> bool {
+    methods.windows(2).all(|w| w[0] < w[1])
+}
 
 /// Exact request intent; reauthentication alone never asks for or proves MFA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +100,7 @@ impl TryFrom<Input> for Assurance {
     fn try_from(v: Input) -> Result<Self, Self::Error> {
         if v.auth_time.is_some_and(|t| t <= 0)
             || (v.acr == Acr::Mfa && v.auth_time.is_none())
-            || !rss_identity_contracts::canonical_methods(&v.amr)
+            || !canonical_methods(&v.amr)
         {
             return Err(FederationError::Claims);
         }

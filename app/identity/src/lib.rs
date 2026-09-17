@@ -1,10 +1,8 @@
 //! Identity executable composition and shared safe file boundary.
 pub mod assembly;
-pub mod clients;
 pub mod config;
 pub mod lifecycle;
 pub mod migration;
-pub mod rekey;
 pub mod transport;
 use rss_identity_postgres::AuthorityError;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};

@@ -18,7 +18,7 @@ impl Federation {
         request: LoginRequest,
         deadline: OperationDeadline,
     ) -> Result<FederatedRedirect, AuthorityError> {
-        self.begin_authentication(request, AuthenticationMode::Login, None, deadline)
+        self.begin_authentication(request, AuthenticationMode::Login, deadline)
             .await
     }
     /// Upgrade only an existing session for the same already-linked principal.
@@ -30,32 +30,26 @@ impl Federation {
         if request.replacement.is_none() {
             return Err(FederationError::Rejected.into());
         }
-        self.begin_authentication(request, AuthenticationMode::StepUp, None, deadline)
+        self.begin_authentication(request, AuthenticationMode::StepUp, deadline)
             .await
     }
     pub(crate) async fn begin_authentication(
         &self,
         request: LoginRequest,
         mode: AuthenticationMode,
-        cli: Option<rss_identity_contracts::cli::CliLoginBinding>,
         deadline: OperationDeadline,
     ) -> Result<FederatedRedirect, AuthorityError> {
         let LoginRequest {
             tenant,
             provider,
             browser,
-            client,
             target,
             replacement,
             source,
         } = request;
         check_browser(&browser)?;
         let budget = Budget::new(deadline)?;
-        let return_url = if let Some(binding) = &cli {
-            binding.redirect_uri().to_string()
-        } else {
-            self.target(&client, &target)?
-        };
+        let return_url = self.target(&target)?;
         let (view, replacement) = if mode == AuthenticationMode::StepUp {
             let actor = replacement.ok_or(FederationError::Rejected)?;
             let oidc = self.oidc.clone();
@@ -82,7 +76,6 @@ impl Federation {
         };
         self.check_assurance_profile(tenant, &view)?;
         let credentials = self
-            .authority
             .provider_credentials(tenant, view.id, view.credential_version, budget.remaining())
             .await?;
         if !view.enabled {
@@ -96,14 +89,7 @@ impl Federation {
                 budget.remaining(),
             )
             .await?;
-        let state = self.signer.issue(
-            tenant,
-            if cli.is_some() {
-                Purpose::CliLogin
-            } else {
-                Purpose::Login
-            },
-        )?;
+        let state = self.signer.issue(tenant, Purpose::Login)?;
         let locator = self.signer.verify(&state)?;
         let material = ProtocolMaterial::new(state)?;
         let url = self
@@ -146,13 +132,11 @@ impl Federation {
                             material,
                             provider: view,
                             browser,
-                            client,
                             return_url,
                             link: None,
                             replacement,
                             expiry: None,
                             mode,
-                            cli,
                         },
                     )
                     .await
@@ -169,7 +153,7 @@ impl Federation {
         response_issuer: String,
         session: Option<SessionSecret>,
         deadline: OperationDeadline,
-    ) -> Result<Option<String>, AuthorityError> {
+    ) -> Result<(), AuthorityError> {
         check_browser(&browser)?;
         let locator = self.signer.verify(&state)?;
         let tenant = locator.tenant();
@@ -186,11 +170,7 @@ impl Federation {
                     }
                     check_actor(c, tenant, &attempt, session).await?;
                     db::consume(c, &locator).await?;
-                    Ok(attempt
-                        .cli
-                        .map(|v| v.result_url("error", "access_denied"))
-                        .transpose()
-                        .map_err(|_| FederationError::Configuration)?)
+                    Ok(())
                 })
             })
             .await
@@ -243,16 +223,11 @@ impl Federation {
                         },
                     ))
                 }) }).await?;
-        let cli_binding = attempt.cli.clone();
-        let completed=async {
         self.check_assurance_profile(tenant, &view)?;
         let credentials = self
-            .authority
             .provider_credentials(tenant, view.id, view.credential_version, budget.remaining())
             .await?;
-        if attempt.purpose != Purpose::CliLogin
-            && !self.allowed_return(&attempt.client, &attempt.return_url)
-        {
+        if !self.allowed_return(&attempt.return_url) {
             return Err(FederationError::Rejected.into());
         }
         let claims = self
@@ -284,6 +259,7 @@ impl Federation {
         let locator = self.signer.verify(&state)?;
         let commit_oidc = self.oidc.clone();
         let group_policy = self.group_policy;
+        let session_policy = self.authority.session_policy;
         self.authority.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
@@ -316,7 +292,7 @@ impl Federation {
                             false,
                         )
                     } else {
-                        if crate::platform::system_domain(c).await? == Some(tenant) || attempt.mode == AuthenticationMode::StepUp || !view.settings.jit() {
+                        if attempt.mode == AuthenticationMode::StepUp || !view.settings.jit() {
                             return Err(FederationError::Rejected.into());
                         }
                         let key=AccountKey{tenant,principal:PrincipalId::generate()};
@@ -376,13 +352,7 @@ impl Federation {
                             attempt.replacement,
                         )
                     };
-                    if attempt.purpose==Purpose::CliLogin {
-                        if tenant != crate::platform::system_domain(c).await?.ok_or_else(reject)? { return Err(reject().into()); }
-                        let url=crate::cli_login::grant(c,key,state,attempt.cli.ok_or_else(reject)?,origin.ok_or_else(reject)?,now).await?;
-                        db::consume(c,&locator).await?;
-                        return Ok((FederatedOutcome::Redirect(FederatedRedirect{url}),vec![event(tenant,Action::CliAuthorized,&view,Some(key.principal))]));
-                    }
-                    let (issued, session_event) = sessions::insert(c, state, replaced, origin, now).await?;
+                    let (issued, session_event) = sessions::insert(c, state, replaced, origin, now, session_policy).await?;
                     if session_storage::now(c).await? >= attempt.expiry {
                         return Err(reject().into());
                     }
@@ -412,28 +382,6 @@ impl Federation {
                         ],
                     ))
                 }) }).await
-        }.await;
-        match (completed, cli_binding) {
-            (Err(error), Some(binding)) => {
-                let reason = match error {
-                    AuthorityError::Rejected
-                    | AuthorityError::Platform(_)
-                    | AuthorityError::Federation(
-                        FederationError::Rejected
-                        | FederationError::Claims
-                        | FederationError::StaleConfiguration,
-                    ) => "failed",
-                    _ => "unavailable",
-                };
-                Ok(FederatedOutcome::CliFailure {
-                    return_url: binding
-                        .result_url("error", reason)
-                        .map_err(|_| FederationError::Configuration)?,
-                    error,
-                })
-            }
-            (result, _) => result,
-        }
     }
 }
 pub(crate) fn check_browser(browser: &str) -> Result<(), AuthorityError> {

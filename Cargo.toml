@@ -1,5 +1,5 @@
 [workspace]
-members = ["app/identity-platform", "crates/identity-contracts", "crates/identity-client", "crates/identity-hydra", "crates/identity-core", "crates/identity-postgres", "crates/identity-oidc", "app/identity", "crates/identity-http-axum"]
+members = ["crates/identity-core", "crates/identity-postgres", "crates/identity-oidc", "app/identity", "crates/identity-http-axum"]
 resolver = "3"
 
 [workspace.package]
@@ -9,7 +9,6 @@ version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
-rss-identity-contracts = { path = "crates/identity-contracts" }
 rss-identity-core = { path = "crates/identity-core" }
 rss-runtime = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838", default-features = false }
 rss-axum = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838", default-features = false }

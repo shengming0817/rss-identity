@@ -79,7 +79,6 @@ impl Federation {
             target_provider,
             password,
             browser,
-            client,
             target,
             source,
         } = request;
@@ -87,7 +86,7 @@ impl Federation {
         let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
-        let return_url = self.target(&client, &target)?;
+        let return_url = self.target(&target)?;
         let (actor,account,origin,login)=self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
                     let origin = db::origin(c, tenant, actor.view.id).await?;
@@ -155,7 +154,6 @@ impl Federation {
         let material = ProtocolMaterial::new(state)?;
         self.check_assurance_profile(tenant, &provider)?;
         let credentials = self
-            .authority
             .provider_credentials(
                 tenant,
                 provider.id,
@@ -187,7 +185,7 @@ impl Federation {
                     let target_now = db::provider(c, tenant, target.id).await?;
                     db::exact(&target_now, target.version)?;
                     let origin = if let Some(candidate) = candidate {
-                        current(c, &candidate, false).await?;
+                        current(c, &candidate).await?;
                         None
                     } else {
                         origin
@@ -223,14 +221,12 @@ impl Federation {
                     db::insert_attempt(
                         c,
                         db::NewAttempt {
-                            cli: None,
                             mode: if purpose == Purpose::Reauthenticate { AuthenticationMode::Reauthenticate } else { AuthenticationMode::Login },
                             locator,
                             material,
                             provider,
                             browser,
-                            client,
-                            return_url,
+                                            return_url,
                             link: Some(id),
                             replacement: None,
                             expiry: Some(expiry),
@@ -272,7 +268,6 @@ impl Federation {
         let material = ProtocolMaterial::new(new_state)?;
         self.check_assurance_profile(tenant, &target)?;
         let credentials = self
-            .authority
             .provider_credentials(
                 tenant,
                 target.id,
@@ -348,13 +343,11 @@ impl Federation {
                     db::insert_attempt(
                         c,
                         db::NewAttempt {
-                            cli: None,
                             mode: AuthenticationMode::Login,
                             locator: new_locator,
                             material,
                             provider: target,
                             browser,
-                            client: attempt.client,
                             return_url: attempt.return_url,
                             link: Some(intent_id),
                             replacement: None,

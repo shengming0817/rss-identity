@@ -1,20 +1,17 @@
-//! Central Identity session HTTP adapter; no listener or forwarded-header trust.
+//! Instance-local authentication HTTP adapter; no listener or forwarded-header trust.
 //! ref: axum extract/state.rs @ c59208c86fded335cd85e388030ad59347b0e5ae.
 mod boundary;
-mod downstream;
-pub use downstream::{DownstreamDiagnostic, downstream_router};
+mod dto;
 mod federation;
 mod handlers;
 mod management;
-mod platform;
+mod provider_management;
 use axum::{
     Router, middleware,
     routing::{get, post},
 };
 pub use boundary::{HttpConfig, HttpConfigError, HttpFailure};
 pub use federation::federated_router;
-pub use management::management_router;
-pub use platform::platform_router;
 use rss_identity_postgres::{Authority, AuthorityError};
 
 #[derive(Clone)]
@@ -27,29 +24,35 @@ struct AppState {
 /// the accepted connection; a reverse proxy requires a separately trusted transport adapter.
 pub fn router(authority: Authority, config: HttpConfig) -> Result<Router, AuthorityError> {
     authority.require_runtime()?;
+    let management = management::management_router(authority.clone(), config.clone())?;
     let state = AppState { authority, config };
     Ok(Router::new()
-        .route("/api/v1/tenants/{tenant}/login", post(handlers::login))
-        .route("/api/v1/tenants/{tenant}/session", get(handlers::current))
+        .route("/api/v2/tenants/{tenant}/login", post(handlers::login))
         .route(
-            "/api/v1/tenants/{tenant}/session/refresh",
+            "/api/v2/tenants/{tenant}/session/reauthenticate",
+            post(handlers::reauthenticate),
+        )
+        .route("/api/v2/tenants/{tenant}/session", get(handlers::current))
+        .route(
+            "/api/v2/tenants/{tenant}/session/refresh",
             post(handlers::refresh),
         )
         .route(
-            "/api/v1/tenants/{tenant}/session/logout",
+            "/api/v2/tenants/{tenant}/session/logout",
             post(handlers::logout),
         )
         .route(
-            "/api/v1/tenants/{tenant}/sessions/logout-all",
+            "/api/v2/tenants/{tenant}/sessions/logout-all",
             post(handlers::logout_all),
         )
-        .route("/api/v1/tenants/{tenant}/sessions", get(handlers::list))
+        .route("/api/v2/tenants/{tenant}/sessions", get(handlers::list))
         .layer(axum::extract::DefaultBodyLimit::max(4096))
-        .layer(middleware::from_fn_with_state(
+        .route_layer(middleware::from_fn_with_state(
             state.clone(),
             boundary::request_boundary,
         ))
-        .with_state(state))
+        .with_state(state)
+        .merge(management))
 }
 #[cfg(test)]
 mod tests {

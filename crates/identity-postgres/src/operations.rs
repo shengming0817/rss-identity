@@ -8,7 +8,24 @@ use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
 
 impl Authority {
-    pub async fn verify_password(
+    /// Verify credentials and issue a session only after the atomic security event commits.
+    pub async fn login_local(
+        &self,
+        tenant: TenantId,
+        login: LoginKey,
+        password: Password,
+        source: AttemptSource,
+        replacement: Option<AuthenticatedSession>,
+        deadline: OperationDeadline,
+    ) -> Result<IssuedSession, AuthorityError> {
+        let budget = Budget::new(deadline)?;
+        let candidate =
+            Box::pin(self.verify_password(tenant, login, password, source, budget.remaining()))
+                .await?;
+        Box::pin(self.create_session(candidate, replacement, budget.remaining())).await
+    }
+
+    pub(crate) async fn verify_password(
         &self,
         tenant: TenantId,
         login: LoginKey,
@@ -53,7 +70,7 @@ impl Authority {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {
-                        current(c, &candidate, false).await?;
+                        current(c, &candidate).await?;
                         Ok(candidate)
                     })
                 })
@@ -68,35 +85,30 @@ impl Authority {
         actor: AuthenticatedSession,
         login: LoginKey,
         password: Password,
-        role: LocalAccountRole,
         deadline: OperationDeadline,
     ) -> Result<AccountState, AuthorityError> {
         self.require_runtime()?;
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
-        self.require_administrator(&actor)?;
+
         let hash = budget.password(self.kdf.hash(password)).await?;
         let key = AccountKey {
             tenant: actor.key.tenant,
             principal: PrincipalId::generate(),
         };
-        let (administrator, emergency) = role.flags();
+        let policy = self.policy.clone();
+        let instance = self.instance;
         self.write_sql(key.tenant, budget.remaining(), move |c| {
             Box::pin(async move {
                 let loaded = crate::session_storage::recheck(c, &actor).await?;
-                loaded.authorize_administration(key.tenant)?;
-                if loaded.system_domain && (administrator || emergency) {
-                    return Err(rss_identity_core::platform::PlatformError::Invalid.into());
-                }
-                insert_account(
-                    c,
-                    key,
-                    login.as_str(),
-                    hash.as_str(),
-                    administrator,
-                    emergency,
-                )
-                .await?;
+                crate::management::authorize(
+                    policy.as_ref(),
+                    instance,
+                    &loaded,
+                    ManagementOperation::CreateAccount,
+                    Some(key),
+                )?;
+                insert_account(c, key, login.as_str(), hash.as_str()).await?;
                 let state = load(c, key).await?.state;
                 Ok((
                     state,
@@ -122,22 +134,6 @@ impl Authority {
             actor,
             target,
             AccountChange::Enabled(enabled),
-            None,
-            deadline,
-        )
-        .await
-    }
-    pub async fn set_account_administrator(
-        &self,
-        actor: AuthenticatedSession,
-        target: AccountKey,
-        administrator: bool,
-        deadline: OperationDeadline,
-    ) -> Result<AccountState, AuthorityError> {
-        self.apply_account_change(
-            actor,
-            target,
-            AccountChange::Administrator(administrator),
             None,
             deadline,
         )
@@ -189,14 +185,7 @@ impl Authority {
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
         let key = actor.key;
-        let login = self.read_sql(key.tenant, budget.remaining(), move |c| Box::pin(async move {
-            crate::session_storage::recheck(c, &actor).await?;
-            let name: Option<String> = sqlx::query_scalar("SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
-                .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_optional(c).await?;
-            Ok((actor, name))
-        })).await?;
-        let (actor, login) = login;
-        let login = LoginKey::parse(&login.ok_or(AuthorityError::ReauthenticationFailed)?)?;
+        let (actor, login) = self.local_login_key(actor, budget.remaining()).await?;
         let candidate = self
             .verify_password(
                 key.tenant,
@@ -225,6 +214,43 @@ impl Authority {
         )
         .await
     }
+    /// Password reauthentication rotates only the currently authenticated account's session.
+    pub async fn reauthenticate_local(
+        &self,
+        actor: AuthenticatedSession,
+        password: Password,
+        source: AttemptSource,
+        deadline: OperationDeadline,
+    ) -> Result<IssuedSession, AuthorityError> {
+        let mut budget = Budget::new(deadline)?;
+        budget.0 = budget.0.min(actor.expires);
+        let key = actor.key;
+        let (actor, login) = self.local_login_key(actor, budget.remaining()).await?;
+        Box::pin(self.login_local(
+            key.tenant,
+            login,
+            password,
+            source,
+            Some(actor),
+            budget.remaining(),
+        ))
+        .await
+    }
+    async fn local_login_key(
+        &self,
+        actor: AuthenticatedSession,
+        deadline: OperationDeadline,
+    ) -> Result<(AuthenticatedSession, LoginKey), AuthorityError> {
+        let key = actor.key;
+        let (actor, name) = self.read_sql(key.tenant, deadline, move |c|Box::pin(async move {
+            crate::session_storage::recheck(c,&actor).await?;
+            let name:Option<String> = sqlx::query_scalar("SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2")
+                .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_optional(c).await?;
+            Ok((actor,name))
+        })).await?;
+        let login = LoginKey::parse(&name.ok_or(AuthorityError::ReauthenticationFailed)?)?;
+        Ok((actor, login))
+    }
     async fn apply_account_change(
         &self,
         actor: AuthenticatedSession,
@@ -242,40 +268,31 @@ impl Authority {
         if let Some(proof) = &reauthentication {
             budget.0 = budget.0.min(proof.expires);
         }
-        if reauthentication.is_none() {
-            self.require_administrator(&actor)?;
-        }
         let (change, hash) = match change {
             AccountChange::Password(password) => (
                 LocalChange::Password,
                 Some(budget.password(self.kdf.hash(password)).await?),
             ),
             AccountChange::Enabled(v) => (LocalChange::Enabled(v), None),
-            AccountChange::Administrator(v) => (LocalChange::Administrator(v), None),
             AccountChange::Membership(v) => (LocalChange::Membership(v), None),
+        };
+        let policy = self.policy.clone();
+        let instance = self.instance;
+        let operation = match change {
+            LocalChange::Password => ManagementOperation::ResetPassword,
+            LocalChange::Enabled(v) => ManagementOperation::SetAccountEnabled(v),
+            LocalChange::Membership(v) => ManagementOperation::SetMembership(v),
         };
         self.write_sql(target.tenant, budget.remaining(), move |c| Box::pin(async move {
             let loaded = crate::session_storage::recheck(c, &actor).await?;
             if let Some(proof) = reauthentication {
                 if proof.account() != actor.key || target != actor.key { return Err(crate::transaction::reject().into()); }
-                current(c, &proof, false).await?;
-            } else { loaded.authorize_administration(target.tenant)?; }
+                current(c, &proof).await?;
+            } else { crate::management::authorize(policy.as_ref(),instance,&loaded,operation,Some(target))?; }
             let old = load(c, target).await?.state;
-            let (next, action) = if loaded.system_domain {
-                let platform = crate::platform::load_platform(c, target).await?;
-                let next = platform.change(change, crate::platform::platform_count(c,target.tenant).await?)?.account();
-                let action = match change {
-                    LocalChange::Enabled(true)=>SecurityAction::AccountEnabled,
-                    LocalChange::Enabled(false)=>SecurityAction::AccountDisabled,
-                    LocalChange::Membership(true)=>SecurityAction::MembershipEnabled,
-                    LocalChange::Membership(false)=>SecurityAction::MembershipDisabled,
-                    LocalChange::Password=>SecurityAction::PasswordChanged,
-                    LocalChange::Administrator(_)=>return Err(rss_identity_core::platform::PlatformError::Invalid.into()),
-                };
-                (next, action)
-            } else { old.change(&loaded.state, change, admin_count(c, target.tenant).await?)? };
-            sqlx::query("UPDATE identity_authority.accounts SET enabled=$3,administrator=$4,emergency=emergency AND $4,auth_epoch=$5 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
-                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(next.enabled()).bind(next.administrator()).bind(next.epoch()).execute(&mut *c).await?;
+            let (next, action) = old.change(change)?;
+            sqlx::query("UPDATE identity_authority.accounts SET enabled=$3,auth_epoch=$4 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
+                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(next.enabled()).bind(next.epoch()).execute(&mut *c).await?;
             if let Some(hash) = hash {
                 sqlx::query("UPDATE identity_authority.local_credentials SET password_hash=$3 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
                     .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(hash.as_str()).execute(&mut *c).await?;
@@ -284,23 +301,6 @@ impl Authority {
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(next.member_active()).bind(next.membership_epoch()).execute(&mut *c).await?;
             Ok((next, vec![SecurityEvent::account(action, next, Some(actor.key))]))
         })).await
-    }
-    pub(crate) fn require_administrator(
-        &self,
-        actor: &AuthenticatedSession,
-    ) -> Result<(), AuthorityError> {
-        self.require_runtime()?;
-        // Early resource rejection only; every SQL operation must still recheck current authority.
-        if !(if actor.key.tenant == self.system_domain {
-            actor.identity.platform_administrator
-        } else {
-            actor.identity.administrator
-        }) {
-            return Err(AuthorityError::RuleRejected(
-                rss_identity_core::account::AccountRuleError::InsufficientPrivilege,
-            ));
-        }
-        Ok(())
     }
     pub async fn list_accounts(
         &self,
@@ -315,45 +315,30 @@ impl Authority {
         }
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
+        let policy = self.policy.clone();
+        let instance = self.instance;
         self.read_sql(actor.key.tenant, budget.remaining(), move |c| Box::pin(async move {
-            crate::session_storage::recheck(c, &actor).await?.authorize_administration(actor.key.tenant)?;
-            let rows:Vec<(uuid::Uuid,Option<String>,bool)>=sqlx::query_as("SELECT a.principal_id,l.login_key,EXISTS(SELECT FROM identity_authority.platform_administrators p JOIN identity_authority.deployment d ON d.system_domain=p.tenant_id WHERE p.tenant_id=a.tenant_id AND p.principal_id=a.principal_id) FROM identity_authority.accounts a LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND ($2::uuid IS NULL OR a.principal_id>$2) ORDER BY a.principal_id LIMIT $3")
+            let loaded = crate::session_storage::recheck(c, &actor).await?;
+            crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListAccounts,None)?;
+            let rows:Vec<(uuid::Uuid,Option<String>)>=sqlx::query_as("SELECT a.principal_id,l.login_key FROM identity_authority.accounts a LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND ($2::uuid IS NULL OR a.principal_id>$2) ORDER BY a.principal_id LIMIT $3")
                 .bind(actor.key.tenant.to_string()).bind(cursor.map(|id|id.as_uuid())).bind(i64::from(limit)+1).fetch_all(&mut *c).await?;
             let more=rows.len()>usize::from(limit); let mut accounts=Vec::new();
-            for (id,login,platform_administrator) in rows.into_iter().take(usize::from(limit)) {
+            for (id,login) in rows.into_iter().take(usize::from(limit)) {
                 let principal=principal(&id.to_string())?;
                 let state=load(c,AccountKey{tenant:actor.key.tenant,principal}).await?.state;
-                accounts.push(AccountListEntry{account:AccountView::new(state,login),platform_administrator});
+                accounts.push(AccountView::new(state,login));
             }
-            let next_cursor=if more {accounts.last().map(|a|a.account.principal_id.clone())} else {None};
+            let next_cursor=if more {accounts.last().map(|a|a.principal_id.clone())} else {None};
             Ok(AccountPage{accounts,next_cursor})
         })).await
     }
 }
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LocalAccountRole {
-    Member,
-    Administrator,
-    Emergency,
-}
-impl LocalAccountRole {
-    fn flags(self) -> (bool, bool) {
-        match self {
-            Self::Member => (false, false),
-            Self::Administrator => (true, false),
-            Self::Emergency => (true, true),
-        }
-    }
-}
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AccountView {
     pub principal_id: String,
     pub login: Option<String>,
     pub enabled: bool,
-    pub administrator: bool,
-    pub emergency: bool,
     pub member_active: bool,
     pub has_local_password: bool,
 }
@@ -363,21 +348,13 @@ impl AccountView {
             principal_id: state.key().principal.as_uuid().to_string(),
             login,
             enabled: state.enabled(),
-            administrator: state.administrator(),
-            emergency: state.emergency(),
             member_active: state.member_active(),
             has_local_password: state.has_local_password(),
         }
     }
 }
 #[derive(Debug, serde::Serialize)]
-pub struct AccountListEntry {
-    #[serde(flatten)]
-    pub account: AccountView,
-    pub platform_administrator: bool,
-}
-#[derive(Debug, serde::Serialize)]
 pub struct AccountPage {
-    pub accounts: Vec<AccountListEntry>,
+    pub accounts: Vec<AccountView>,
     pub next_cursor: Option<String>,
 }

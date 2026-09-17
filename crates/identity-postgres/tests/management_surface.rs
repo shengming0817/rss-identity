@@ -17,7 +17,6 @@ impl<'a> Visit<'a> for References {
 }
 struct Surface<'a> {
     aliases: &'a BTreeSet<String>,
-    session_file: bool,
     checked: usize,
     rejected: Vec<String>,
 }
@@ -32,8 +31,8 @@ impl Surface<'_> {
         for arg in &sig.inputs {
             refs.visit_fn_arg(arg);
         }
-        if !(refs.0.is_disjoint(self.aliases) || self.session_file && sig.ident == "create_session")
-        {
+        refs.visit_return_type(&sig.output);
+        if !refs.0.is_disjoint(self.aliases) {
             self.rejected.push(sig.ident.to_string());
         }
     }
@@ -95,7 +94,6 @@ fn check(files: &[(PathBuf, String)]) -> (usize, Vec<String>) {
     for ((path, _), tree) in files.iter().zip(trees.iter()) {
         let mut surface = Surface {
             aliases: &aliases,
-            session_file: path == Path::new("sessions.rs"),
             checked: 0,
             rejected: vec![],
         };
@@ -142,7 +140,7 @@ fn guard_detects_new_modules_parameter_renames_aliases_and_sync_functions() {
         "sessions.rs".into(),
         "impl Authority { pub fn create_session(&self, proof: AuthenticationCandidate) {} }".into(),
     )]);
-    assert!(rejected.is_empty());
+    assert_eq!(rejected.len(), 1);
 }
 
 #[test]

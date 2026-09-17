@@ -1,3 +1,5 @@
+> 历史中央模式文档（基线 fa7019922162158704cc47c6ac7ad36a67c8ae5a），不适用于 #2435 的嵌入式组件。旧运行器已退役；保留验收/候选记录，不重标为本次成功。当前入口为 docs/guides/embedding.md，完整部署后续为 #2436。
+
 # #2342 Identity 联合 SSO T3
 
 本 carrier 验证固定产品候选的正式网关、Identity binary、平台 API/CLI、Keycloak、Hydra、独立消费端、撤销调度与 Outbox 的部署连接。源码及测试实现不等于运行通过；实际结果由对应 PR 的同 HEAD 运行记录持有。

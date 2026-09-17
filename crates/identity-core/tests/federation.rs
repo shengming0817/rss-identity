@@ -13,28 +13,15 @@ fn federated_accounts_are_members_without_local_credentials() {
     let member = AccountState::new_federated(key).unwrap();
     assert!(member.active());
     assert!(!member.has_local_password());
-    assert!(!member.administrator());
-    assert!(!member.emergency());
-    let admin = AccountState::new_local(
-        AccountKey {
-            principal: PrincipalId::generate(),
-            ..key
-        },
-        true,
-        false,
-    )
-    .unwrap();
-    let (federated_admin, _) = member
-        .change(&admin, LocalChange::Administrator(true), 1)
-        .unwrap();
-    assert!(!federated_admin.available_local_administrator());
     assert!(
-        admin
-            .change(&admin, LocalChange::Enabled(false), 1)
-            .is_err()
+        !member
+            .change(LocalChange::Enabled(false))
+            .unwrap()
+            .0
+            .enabled()
     );
-    assert!(member.change(&admin, LocalChange::Password, 1).is_err());
-    assert!(federated_admin.recover().is_err());
+    assert!(member.change(LocalChange::Password).is_err());
+    assert!(member.recover().is_err());
 }
 
 #[test]

@@ -1,7 +1,6 @@
 //! Real PG management/router seam, independent of production assembly.
 #[path = "../../identity-postgres/tests/federation_support/mod.rs"]
 mod federation_support;
-#[allow(dead_code)]
 #[path = "../../identity-postgres/tests/support/mod.rs"]
 mod support;
 use axum::{
@@ -9,7 +8,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, Response, StatusCode},
 };
-use rss_identity_http_axum::{HttpConfig, federated_router, management_router};
+use rss_identity_http_axum::{HttpConfig, federated_router, router};
 use rss_identity_postgres::*;
 use serde_json::{Value, json};
 use std::{sync::atomic::Ordering, time::Duration};
@@ -29,7 +28,7 @@ fn app(
     (
         federated_router(service.clone(), config.clone())
             .unwrap()
-            .merge(management_router(service.clone(), config).unwrap()),
+            .merge(router(f.store.clone(), config).unwrap()),
         service,
         upstream,
     )
@@ -64,7 +63,7 @@ async fn login_as(app: &Router, name: &str, pw: &str) -> anyhow::Result<(String,
         .clone()
         .oneshot(req(
             "POST",
-            &format!("/api/v1/tenants/{A}/login"),
+            &format!("/api/v2/tenants/{A}/login"),
             "",
             "",
             json!({"login":name,"password":pw}),
@@ -86,9 +85,10 @@ async fn login_as(app: &Router, name: &str, pw: &str) -> anyhow::Result<(String,
 async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
+    f.policy.protect(f.key);
     let (app, _, _) = app(&f);
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
-    let base = format!("/api/v1/tenants/{A}");
+    let base = format!("/api/v2/tenants/{A}");
     let security = app
         .clone()
         .oneshot(req(
@@ -124,7 +124,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
         .clone()
         .oneshot(req(
             "GET",
-            &format!("/api/v1/tenants/{B}/session/security"),
+            &format!("/api/v2/tenants/{B}/session/security"),
             &cookie,
             "",
             json!(null),
@@ -138,7 +138,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
             &format!("{base}/accounts"),
             &cookie,
             &csrf,
-            json!({"login":"admin","password":"different strong password","role":"member"}),
+            json!({"login":"admin","password":"different strong password"}),
         ))
         .await?;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
@@ -168,8 +168,8 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
             json!({"enabled":false}),
         ))
         .await?;
-    assert_eq!(r.status(), StatusCode::CONFLICT);
-    assert_eq!(json_body(r).await?["code"], "last_administrator");
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    assert_eq!(json_body(r).await?["code"], "insufficient_privilege");
     for (cookie_value, csrf_value, status) in [
         ("", "", StatusCode::UNAUTHORIZED),
         (&*cookie, "bad", StatusCode::FORBIDDEN),
@@ -181,7 +181,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
                 &format!("{base}/accounts"),
                 cookie_value,
                 csrf_value,
-                json!({"login":"member","password":PASSWORD,"role":"member"}),
+                json!({"login":"member","password":PASSWORD}),
             ))
             .await?;
         assert_eq!(r.status(), status);
@@ -199,7 +199,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
             &format!("{base}/accounts"),
             &cookie,
             &csrf,
-            json!({"login":"member","password":PASSWORD,"role":"member"}),
+            json!({"login":"member","password":PASSWORD}),
         ))
         .await?;
     assert_eq!(r.status(), StatusCode::CREATED);
@@ -228,7 +228,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
             json!({"enabled":true}),
         ))
         .await?;
-    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
     let r=app.clone().oneshot(req("POST",&format!("{base}/account/password"),&member_cookie,&member_csrf,json!({"current_password":"wrong but sufficiently long","password":"new private member password"}))).await?;
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
     assert_eq!(json_body(r).await?["code"], "reauthentication_failed");
@@ -243,7 +243,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
         ))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
-    let foreign = format!("/api/v1/tenants/{B}/accounts");
+    let foreign = format!("/api/v2/tenants/{B}/accounts");
     assert_eq!(
         app.clone()
             .oneshot(req("GET", &foreign, &cookie, "", json!(null)))
@@ -278,7 +278,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     let v = json_body(r).await?;
     assert_eq!(v["enabled"], false);
     assert_eq!(v["member_active"], false);
-    assert_eq!(v["administrator"], false);
+    assert!(v.get("administrator").is_none());
     assert_eq!(
         app.clone()
             .oneshot(req(
@@ -395,7 +395,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     f.bootstrap().await?;
     let (app, _, upstream) = app(&f);
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
-    let base = format!("/api/v1/tenants/{A}");
+    let base = format!("/api/v2/tenants/{A}");
     let r = app
         .clone()
         .oneshot(req(
@@ -554,7 +554,7 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let (app, s, upstream) = app(&f);
-    let oversized = format!("/api/v1/oidc/callback?state={}", "a".repeat(8192));
+    let oversized = format!("/api/v2/oidc/callback?state={}", "a".repeat(8192));
     let r = app
         .clone()
         .oneshot(req("GET", &oversized, "", "", json!(null)))
@@ -563,7 +563,7 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
     assert_eq!(r.headers()["location"], "/auth/error?reason=failed");
     let p = federation_support::enabled(&f, &s).await?;
     let state = federation_support::begin(&f, &s, &p).await?;
-    let mut url = url::Url::parse(&format!("{ORIGIN}/api/v1/oidc/callback"))?;
+    let mut url = url::Url::parse(&format!("{ORIGIN}/api/v2/oidc/callback"))?;
     url.query_pairs_mut()
         .append_pair("state", &state)
         .append_pair("error", "access_denied")
@@ -623,24 +623,31 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
                 f.actor().await?,
                 support::login("second"),
                 password(),
-                LocalAccountRole::Administrator,
                 deadline(),
             )
             .await?;
-        let proof = f
+        f.policy.allow(second.key());
+        let issued = f
             .store
-            .verify_password(
+            .login_local(
                 f.key.tenant,
                 support::login("second"),
                 password(),
                 source(),
+                None,
                 deadline(),
             )
             .await?;
-        let other = session_actor(&f.store, proof).await?;
-        assert_ne!(other.account(), f.key);
+        let other = f
+            .store
+            .inspect_session(
+                f.key.tenant,
+                rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
+                deadline(),
+            )
+            .await?;
         let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
-        let authority = f.store.clone();
+        let policy = f.policy.clone();
         let next = s.clone();
         let target = f.key;
         let id = p.id;
@@ -649,10 +656,7 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
         *upstream.hook.lock().unwrap() = Some(Box::new(move || {
             Box::pin(async move {
                 if revoke {
-                    authority
-                        .set_account_administrator(other, target, false, deadline())
-                        .await
-                        .map_err(|_| rss_identity_core::federation::FederationError::Unavailable)?;
+                    policy.revoke(target);
                 } else {
                     next.update_provider(
                         other,
@@ -676,7 +680,7 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
             .clone()
             .oneshot(req(
                 "POST",
-                &format!("/api/v1/tenants/{A}/providers/{}/test", p.id),
+                &format!("/api/v2/tenants/{A}/providers/{}/test", p.id),
                 &cookie,
                 &csrf,
                 json!({}),
@@ -685,7 +689,7 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
         assert_eq!(
             r.status(),
             if revoke {
-                StatusCode::UNAUTHORIZED
+                StatusCode::FORBIDDEN
             } else {
                 StatusCode::CONFLICT
             }
@@ -694,7 +698,7 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
         assert_eq!(
             value["code"],
             if revoke {
-                "invalid_credential"
+                "insufficient_privilege"
             } else {
                 "configuration_changed"
             }
@@ -716,7 +720,7 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
     sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2,decode(repeat('00',32),'hex'),1 FROM generate_series(1,99)")
         .bind(A).bind(&settings).execute(&f.owner).await?;
     let settings = json!({"settings":settings,"client_secret":"fixture-secret"});
-    let path = format!("/api/v1/tenants/{A}/providers");
+    let path = format!("/api/v2/tenants/{A}/providers");
     let (first, second) = tokio::join!(
         app.clone()
             .oneshot(req("POST", &path, &cookie, &csrf, settings.clone())),

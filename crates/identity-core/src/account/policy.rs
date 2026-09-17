@@ -12,8 +12,6 @@ pub struct AccountKey {
 pub struct AccountState {
     key: AccountKey,
     enabled: bool,
-    administrator: bool,
-    emergency: bool,
     member_active: bool,
     epoch: i64,
     has_local_password: bool,
@@ -22,14 +20,12 @@ pub struct AccountState {
 #[derive(Debug)]
 pub enum AccountChange {
     Enabled(bool),
-    Administrator(bool),
     Membership(bool),
     Password(Password),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum LocalChange {
     Enabled(bool),
-    Administrator(bool),
     Membership(bool),
     Password,
 }
@@ -39,12 +35,12 @@ pub enum AccountRuleError {
     InvalidState,
     #[error("account operation rejected")]
     Rejected,
-    #[error("administrator privilege required")]
+    #[error("management operation denied")]
     InsufficientPrivilege,
+    #[error("recent authentication required")]
+    ReauthenticationRequired,
     #[error("local login already exists in this tenant")]
     AlreadyExists,
-    #[error("last local administrator must remain available")]
-    LastAdministrator,
     #[error("account generation exhausted")]
     EpochExhausted,
 }
@@ -54,12 +50,10 @@ pub enum SecurityAction {
     AccountCreated,
     AccountEnabled,
     AccountDisabled,
-    AdministratorGranted,
-    AdministratorRevoked,
     MembershipEnabled,
     MembershipDisabled,
     PasswordChanged,
-    AdministratorRecovered,
+    PasswordRecovered,
 }
 impl SecurityAction {
     pub const fn as_str(self) -> &'static str {
@@ -68,12 +62,10 @@ impl SecurityAction {
             Self::AccountCreated => "account_created",
             Self::AccountEnabled => "account_enabled",
             Self::AccountDisabled => "account_disabled",
-            Self::AdministratorGranted => "administrator_granted",
-            Self::AdministratorRevoked => "administrator_revoked",
             Self::MembershipEnabled => "membership_enabled",
             Self::MembershipDisabled => "membership_disabled",
             Self::PasswordChanged => "password_changed",
-            Self::AdministratorRecovered => "administrator_recovered",
+            Self::PasswordRecovered => "password_recovered",
         }
     }
 }
@@ -82,45 +74,31 @@ impl AccountState {
     pub fn restore(
         key: AccountKey,
         enabled: bool,
-        administrator: bool,
-        emergency: bool,
         member_active: bool,
         epoch: i64,
         has_local_password: bool,
         membership_epoch: i64,
     ) -> Result<Self, AccountRuleError> {
-        if epoch < 1 || membership_epoch < 1 || (emergency && !administrator) {
+        if epoch < 1 || membership_epoch < 1 {
             return Err(AccountRuleError::InvalidState);
         }
         Ok(Self {
             key,
             enabled,
-            administrator,
-            emergency,
             member_active,
             epoch,
             has_local_password,
             membership_epoch,
         })
     }
-    pub fn new_local(
-        key: AccountKey,
-        administrator: bool,
-        emergency: bool,
-    ) -> Result<Self, AccountRuleError> {
-        Self::restore(key, true, administrator, emergency, true, 1, true, 1)
+    pub fn new_local(key: AccountKey) -> Result<Self, AccountRuleError> {
+        Self::restore(key, true, true, 1, true, 1)
     }
     pub fn key(self) -> AccountKey {
         self.key
     }
     pub fn enabled(self) -> bool {
         self.enabled
-    }
-    pub fn administrator(self) -> bool {
-        self.administrator
-    }
-    pub fn emergency(self) -> bool {
-        self.emergency
     }
     pub fn member_active(self) -> bool {
         self.member_active
@@ -132,10 +110,7 @@ impl AccountState {
         self.has_local_password
     }
     pub fn new_federated(key: AccountKey) -> Result<Self, AccountRuleError> {
-        Self::restore(key, true, false, false, true, 1, false, 1)
-    }
-    pub fn available_local_administrator(self) -> bool {
-        self.available_administrator() && self.has_local_password
+        Self::restore(key, true, true, 1, false, 1)
     }
     pub fn membership_epoch(self) -> i64 {
         self.membership_epoch
@@ -155,15 +130,6 @@ impl AccountState {
     pub fn active(self) -> bool {
         self.enabled && self.member_active
     }
-    pub fn available_administrator(self) -> bool {
-        self.active() && self.administrator
-    }
-    pub fn authorize_administration(self, tenant: TenantId) -> Result<(), AccountRuleError> {
-        if self.key.tenant != tenant || !self.available_administrator() {
-            return Err(AccountRuleError::InsufficientPrivilege);
-        }
-        Ok(())
-    }
     pub fn matches_verification(self, expected: Self) -> bool {
         self.active()
             && self.key == expected.key
@@ -171,36 +137,9 @@ impl AccountState {
             && self.has_local_password == expected.has_local_password
             && self.membership_epoch == expected.membership_epoch
     }
-    pub fn change(
-        self,
-        actor: &Self,
-        change: LocalChange,
-        available_admins: i64,
-    ) -> Result<(Self, SecurityAction), AccountRuleError> {
-        if matches!(change, LocalChange::Password) && !self.has_local_password {
-            return Err(AccountRuleError::Rejected);
-        }
-        if available_admins < 0 {
-            return Err(AccountRuleError::InvalidState);
-        }
-        if !(matches!(change, LocalChange::Password) && actor.key == self.key && actor.active()) {
-            actor.authorize_administration(self.key.tenant)?;
-        }
-        let (next, action) = self.transition(change)?;
-        if !next.available_local_administrator()
-            && available_admins - i64::from(self.available_local_administrator()) < 1
-        {
-            return Err(AccountRuleError::LastAdministrator);
-        }
-        Ok((next, action))
-    }
-    pub(crate) fn advance_epoch(self) -> Result<Self, AccountRuleError> {
-        let mut next = self;
-        next.epoch = next
-            .epoch
-            .checked_add(1)
-            .ok_or(AccountRuleError::EpochExhausted)?;
-        Ok(next)
+    /// Pure transition; the application service separately verifies the actor and host policy.
+    pub fn change(self, change: LocalChange) -> Result<(Self, SecurityAction), AccountRuleError> {
+        self.transition(change)
     }
     pub(crate) fn transition(
         self,
@@ -223,15 +162,6 @@ impl AccountState {
                     SecurityAction::AccountDisabled
                 }
             }
-            LocalChange::Administrator(v) => {
-                next.administrator = v;
-                next.emergency &= v;
-                if v {
-                    SecurityAction::AdministratorGranted
-                } else {
-                    SecurityAction::AdministratorRevoked
-                }
-            }
             LocalChange::Membership(v) => {
                 if v != next.member_active {
                     next.membership_epoch = next
@@ -252,7 +182,7 @@ impl AccountState {
     }
     /// The adapter must verify maintenance authority before persisting this result.
     pub fn recover(self) -> Result<(Self, SecurityAction), AccountRuleError> {
-        if !self.administrator || !self.has_local_password {
+        if !self.has_local_password {
             return Err(AccountRuleError::Rejected);
         }
         let mut next = self;
@@ -260,6 +190,6 @@ impl AccountState {
             .epoch
             .checked_add(1)
             .ok_or(AccountRuleError::EpochExhausted)?;
-        Ok((next, SecurityAction::AdministratorRecovered))
+        Ok((next, SecurityAction::PasswordRecovered))
     }
 }

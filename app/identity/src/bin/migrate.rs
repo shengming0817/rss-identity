@@ -15,22 +15,7 @@ async fn main() {
         return;
     }
     if args == ["--help"] {
-        println!("identity-migrate --config FILE\nidentity-migrate --rekey --config FILE");
-        return;
-    }
-    if args.len() == 3 && args[0] == "--rekey" && args[1] == "--config" {
-        let result = async {
-            let config = rss_identity_app::config::load(std::path::Path::new(&args[2]))?;
-            rss_identity_app::rekey::run(config).await
-        }
-        .await;
-        match result {
-            Ok(n) => println!("rewritten={n}; repeat until rewritten=0 before retiring old keys"),
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        }
+        println!("identity-migrate --config FILE");
         return;
     }
     let result = async {

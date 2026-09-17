@@ -1,6 +1,6 @@
 //! Provider credential storage. ref: ring 0.17.14 src/aead/less_safe_key.rs.
 use crate::{
-    Authority, AuthorityError,
+    AuthorityError,
     storage::authority_id,
     transaction::{MutationError, corrupt},
 };
@@ -192,18 +192,15 @@ impl CredentialKeys {
         ProviderCredentials::new(value.secret, value.ca).map_err(|_| AuthorityError::Unavailable)
     }
 }
-impl Authority {
-    pub(crate) fn credential_keys(&self) -> Result<std::sync::Arc<CredentialKeys>, AuthorityError> {
-        Ok(self.runtime_configuration()?.credential_keys.clone())
-    }
+impl crate::Federation {
     pub async fn check_credential_keys(
         &self,
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
-        let keys = self.credential_keys()?;
-        for tenant in self.active_tenants()? {
+        let keys = self.credential_keys.clone();
+        for tenant in self.authority.active_tenants()? {
             let keys = keys.clone();
-            self.read_sql(tenant,deadline,move|c|Box::pin(async move {
+            self.authority.read_sql(tenant,deadline,move|c|Box::pin(async move {
                 let authority=authority_id(c).await?;
                 let rows:Vec<(Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid LIMIT 101").bind(tenant.to_string()).fetch_all(c).await?;
                 if rows.len()>100 {return Err(corrupt().into());}
@@ -224,8 +221,8 @@ impl Authority {
         version: i64,
         deadline: OperationDeadline,
     ) -> Result<ProviderCredentials, AuthorityError> {
-        let keys = self.credential_keys()?;
-        self.read_sql(tenant,deadline,move|c|Box::pin(async move {
+        let keys = self.credential_keys.clone();
+        self.authority.read_sql(tenant,deadline,move|c|Box::pin(async move {
             let authority=authority_id(c).await?;
             let row:Option<(i64,serde_json::Value)>=sqlx::query_as("SELECT credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(tenant.to_string()).bind(provider.to_string()).fetch_optional(c).await?;
             let (current,sealed)=row.ok_or(FederationError::Rejected)?;

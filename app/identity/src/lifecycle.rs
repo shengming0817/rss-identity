@@ -10,12 +10,10 @@ use axum::{
     routing::get,
 };
 use rss_identity_core::account::PasswordKdf;
-use rss_identity_http_axum::{
-    HttpConfig, downstream_router, federated_router, management_router, platform_router,
-};
+use rss_identity_http_axum::{HttpConfig, federated_router, router};
 use rss_runtime::{
-    AdmissionGate, AdmissionPermit, DynManagedResource, LifecycleScope, ManagedResource,
-    ManagedTask, ScopeExit, ShutdownError, TotalDrainBudget,
+    AdmissionGate, AdmissionPermit, DynManagedResource, LifecycleScope, ManagedResource, ScopeExit,
+    ShutdownError, TotalDrainBudget,
 };
 use rss_transactional_messaging_postgres::PgRuntime;
 use std::{
@@ -26,7 +24,6 @@ use std::{
 };
 
 pub struct PoolResource {
-    pub authority: Arc<OnceLock<rss_identity_postgres::Authority>>,
     pub pool: Arc<PgRuntime>,
     pub timeout: Duration,
 }
@@ -35,11 +32,7 @@ impl ManagedResource for PoolResource {
         "postgres"
     }
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        if let Some(a) = self.authority.get() {
-            a.close().await;
-        } else {
-            self.pool.close().await;
-        }
+        self.pool.close().await;
         Ok(())
     }
     fn shutdown_timeout(&self) -> Duration {
@@ -101,9 +94,8 @@ async fn admit(
 }
 struct Health {
     config: Arc<RuntimeConfig>,
-    authority: rss_identity_postgres::Authority,
+    pool: Arc<PgRuntime>,
     kdf: Arc<PasswordKdf>,
-    hydra: Arc<rss_identity_hydra::Hydra>,
     gate: Arc<OnceLock<AdmissionGate>>,
     probe: tokio::sync::Semaphore,
 }
@@ -115,15 +107,9 @@ async fn ready(State(h): State<Arc<Health>>) -> StatusCode {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
     let result = tokio::time::timeout(Duration::from_secs(10), async {
-        if let Err(error) =
-            assembly::authority(&h.config, h.authority.runtime()?, h.kdf.clone()).await
-        {
+        if let Err(error) = assembly::authority(&h.config, h.pool.clone(), h.kdf.clone()).await {
             eprintln!("component=postgres readiness=failed reason={error}");
             return Err(error);
-        }
-        if !h.config.hydra.clients.is_empty() && h.hydra.ready().await.is_err() {
-            eprintln!("component=hydra readiness=unavailable");
-            return Err(AppError::Provider);
         }
         Ok(())
     })
@@ -149,56 +135,88 @@ pub async fn serve(
         TotalDrainBudget::new(total).map_err(|_| AppError::Budget)?,
     )
     .map_err(|_| AppError::Shutdown)?;
-    let outcome=scope.drive(|mut startup|Box::pin(async move {
-        // Register each owned resource before any subsequent cancellable await.
-        let pool=Arc::new(PgRuntime::connect_producer(config.database.pg()?,assembly::Timer,config.storage.binding()?).await.map_err(|_|AppError::Connection)?);
-        let pool_owner=Arc::new(OnceLock::new());
-        startup.stage_resource(DynManagedResource::new_box(PoolResource{pool:pool.clone(),timeout:per,authority:pool_owner.clone()}));
-        let kdf=Arc::new(PasswordKdf::new());
-        startup.stage_resource(DynManagedResource::new_box(KdfResource{kdf:kdf.clone(),timeout:per}));
-        let authority=assembly::authority(&config,pool.clone(),kdf.clone()).await?;
-        pool_owner.set(authority.clone()).map_err(|_|AppError::Shutdown)?;
-        authority.activate_registered_tenants(assembly::deadline()).await?;
-        authority.check_credential_keys(assembly::deadline()).await?;
-        let providers=assembly::providers(&config,authority.clone())?;
-        for tenant in authority.active_tenants()? {
-            providers.federation.reconcile_assurance_profiles(tenant,assembly::deadline()).await?;
-        }
-        let http=HttpConfig::new(config.identity_origin.identity_origin(),config.budgets.request()).map_err(|_|AppError::Configuration)?;
-        let gate=Arc::new(OnceLock::new());
-        let app=platform_router(authority.clone(),http.clone())?.merge(federated_router(providers.federation.clone(),http.clone())?)
-            .merge(management_router(providers.federation,http.clone())?)
-            .merge(downstream_router(providers.downstream.clone(),http,providers.validation_secrets)?)
-            .layer(middleware::from_fn_with_state(gate.clone(),admit))
-            .layer(middleware::from_fn_with_state(transport::Ingress{public:config.public_gateway,private:config.private_gateway},transport::trusted));
-        let health=Arc::new(Health{config:config.clone(),authority:authority.clone(),kdf,hydra:providers.hydra,gate:gate.clone(),probe:tokio::sync::Semaphore::new(1)});
-        let app=app.merge(Router::new().route("/livez",get(||async{StatusCode::OK})).route("/readyz",get(ready)).with_state(health));
-        let cleanup=providers.downstream;
-        let(worker,_)=ManagedTask::prepare("downstream-cleanup",per);
-        startup.stage_deferred_task_with_token(worker.into_registration(move |token|async move {
-            loop {
-                // The in-flight pass owns its bounded settlement. Cancellation only stops new passes.
-                if let Err(error)=authority.activate_registered_tenants(assembly::deadline()).await {
-                    let reason=match error {rss_identity_postgres::AuthorityError::Busy=>"draining",rss_identity_postgres::AuthorityError::Fenced=>"fenced",_=>"unavailable"};
-                    eprintln!("component=tenant_activation result=pending reason={reason}");
-                }
-                let tenants=authority.active_tenants().map_err(ShutdownError::new)?;
-                for tenant in &tenants {
-                    if token.is_cancelled(){return Ok(());}
-                    if cleanup.cleanup_once(*tenant,128,assembly::deadline()).await.is_err(){eprintln!("component=downstream_cleanup result=unavailable");}
-                }
-                tokio::select!{_ = token.cancelled()=>return Ok(()), _=tokio::time::sleep(Duration::from_secs(30))=>{}}
-            }
-        }).critical());
-        let listener=tokio::net::TcpListener::bind(config.listen).await.map_err(|_|AppError::Connection)?;
-        let mut launch=startup.commit();
-        launch.stage_task_with_token(rss_axum::serve_http1_registration(listener,app,"identity-http",per).critical());
-        let(control,admission)=launch.finish_with_admission("requests",per);
-        gate.set(admission).map_err(|_|AppError::Shutdown)?;
-        control.open().map_err(|_|AppError::Shutdown)?;
-        let _control=control;
-        std::future::pending().await
-    }),stop).await.map_err(|_|AppError::Shutdown)?;
+    let outcome = scope
+        .drive(
+            |mut startup| {
+                Box::pin(async move {
+                    // Register each owned resource before any subsequent cancellable await.
+                    let pool = Arc::new(
+                        PgRuntime::connect_producer(
+                            config.database.pg()?,
+                            assembly::Timer,
+                            config.storage.binding()?,
+                        )
+                        .await
+                        .map_err(|_| AppError::Connection)?,
+                    );
+                    startup.stage_resource(DynManagedResource::new_box(PoolResource {
+                        pool: pool.clone(),
+                        timeout: per,
+                    }));
+                    let kdf = Arc::new(PasswordKdf::new());
+                    startup.stage_resource(DynManagedResource::new_box(KdfResource {
+                        kdf: kdf.clone(),
+                        timeout: per,
+                    }));
+                    let authority = assembly::authority(&config, pool.clone(), kdf.clone()).await?;
+                    let federation = assembly::federation(&config, authority.clone())?;
+                    if let Some(federation) = &federation {
+                        federation
+                            .check_credential_keys(assembly::deadline())
+                            .await?;
+                        for tenant in authority.active_tenants()? {
+                            federation
+                                .reconcile_assurance_profiles(tenant, assembly::deadline())
+                                .await?;
+                        }
+                    }
+                    let http = HttpConfig::new(&config.public_origin, config.budgets.request())
+                        .map_err(|_| AppError::Configuration)?;
+                    let gate = Arc::new(OnceLock::new());
+                    let mut app = router(authority, http.clone())?;
+                    if let Some(federation) = federation {
+                        app = app.merge(federated_router(federation, http)?);
+                    }
+                    let app = app
+                        .layer(middleware::from_fn_with_state(gate.clone(), admit))
+                        .layer(middleware::from_fn_with_state(
+                            transport::Ingress {
+                                public: config.public_gateway,
+                            },
+                            transport::trusted,
+                        ));
+                    let health = Arc::new(Health {
+                        config: config.clone(),
+                        pool,
+                        kdf,
+                        gate: gate.clone(),
+                        probe: tokio::sync::Semaphore::new(1),
+                    });
+                    let app = app.merge(
+                        Router::new()
+                            .route("/livez", get(|| async { StatusCode::OK }))
+                            .route("/readyz", get(ready))
+                            .with_state(health),
+                    );
+                    let listener = tokio::net::TcpListener::bind(config.listen)
+                        .await
+                        .map_err(|_| AppError::Connection)?;
+                    let mut launch = startup.commit();
+                    launch.stage_task_with_token(
+                        rss_axum::serve_http1_registration(listener, app, "identity-http", per)
+                            .critical(),
+                    );
+                    let (control, admission) = launch.finish_with_admission("requests", per);
+                    gate.set(admission).map_err(|_| AppError::Shutdown)?;
+                    control.open().map_err(|_| AppError::Shutdown)?;
+                    let _control = control;
+                    std::future::pending().await
+                })
+            },
+            stop,
+        )
+        .await
+        .map_err(|_| AppError::Shutdown)?;
     let clean = outcome.shutdown().as_ref().is_ok_and(|r| r.is_clean());
     match outcome.exit() {
         ScopeExit::StopRequested(Ok(())) if clean => Ok(()),

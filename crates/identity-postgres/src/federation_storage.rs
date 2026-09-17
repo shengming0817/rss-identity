@@ -108,10 +108,7 @@ pub(crate) async fn check_origin(
     c: &mut PgConnection,
     key: AccountKey,
     origin: &Origin,
-) -> Result<
-    rss_identity_contracts::groups::GroupSource,
-    rss_transactional_messaging_postgres::PgError,
-> {
+) -> Result<rss_identity_core::groups::GroupSource, rss_transactional_messaging_postgres::PgError> {
     let row = sqlx::query(concat!(
         "SELECT e.provider_id,e.issuer FROM identity_authority.external_identities e JOIN identity",
         "_authority.providers p USING(tenant_id,provider_id) WHERE e.tenant_id=$1::uuid A",
@@ -120,7 +117,7 @@ pub(crate) async fn check_origin(
     .bind(key.tenant.to_string()).bind(origin.identity).bind(origin.epoch)
     .bind(origin.facts.provider_config_version).bind(key.principal.as_uuid())
     .fetch_optional(c).await?.ok_or_else(reject)?;
-    Ok(rss_identity_contracts::groups::GroupSource {
+    Ok(rss_identity_core::groups::GroupSource {
         provider_id: row.try_get("provider_id")?,
         issuer: row.try_get("issuer")?,
     })
@@ -145,7 +142,6 @@ pub(crate) async fn identity(
     ))
 }
 pub(crate) struct Attempt {
-    pub cli: Option<rss_identity_contracts::cli::CliLoginBinding>,
     pub mode: AuthenticationMode,
     pub browser: [u8; 32],
     pub provider: ProviderId,
@@ -153,7 +149,6 @@ pub(crate) struct Attempt {
     pub purpose: Purpose,
     pub expiry: i64,
     pub created: i64,
-    pub client: String,
     pub return_url: String,
     pub link: Option<Uuid>,
     pub replacement: Option<rss_identity_core::SessionId>,
@@ -192,11 +187,6 @@ pub(crate) async fn attempt(
     };
     Ok((
         Attempt {
-            cli: r
-                .try_get::<Option<serde_json::Value>, _>("cli_binding")?
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|_| corrupt())?,
             mode: AuthenticationMode::from_storage(r.try_get("authentication_mode")?)
                 .map_err(|_| corrupt())?,
             browser: digest(browser),
@@ -206,7 +196,6 @@ pub(crate) async fn attempt(
             purpose: locator.purpose(),
             expiry: r.try_get("expires_at")?,
             created: r.try_get("created_at")?,
-            client: r.try_get("target_client")?,
             return_url: r.try_get("return_url")?,
             link: r.try_get("link_intent")?,
             replacement: r
@@ -220,13 +209,11 @@ pub(crate) async fn attempt(
     ))
 }
 pub(crate) struct NewAttempt {
-    pub cli: Option<rss_identity_contracts::cli::CliLoginBinding>,
     pub mode: AuthenticationMode,
     pub locator: StateLocator,
     pub material: ProtocolMaterial,
     pub provider: ProviderView,
     pub browser: String,
-    pub client: String,
     pub return_url: String,
     pub link: Option<Uuid>,
     pub replacement: Option<rss_identity_core::SessionId>,
@@ -276,8 +263,8 @@ pub(crate) async fn insert_attempt(
     sqlx::query(concat!(
         "INSERT INTO identity_authority.oidc_transactions(tenant_id,attempt_id,provider_i",
         "d,config_version,state_hash,browser_hash,purpose,nonce,verifier,created_at,expir",
-        "es_at,target_client,return_url,link_intent,replacement_session,authentication_mode,cli_binding) VALUES($1::uuid,",
-        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid,$16,$17)"
+        "es_at,return_url,link_intent,replacement_session,authentication_mode) VALUES($1::uuid,",
+        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::uuid,$15)"
     ))
     .bind(tenant.to_string())
     .bind(input.locator.id().as_slice())
@@ -290,12 +277,10 @@ pub(crate) async fn insert_attempt(
     .bind(input.material.verifier.as_str())
     .bind(now)
     .bind(expiry)
-    .bind(input.client)
     .bind(input.return_url)
     .bind(input.link)
     .bind(input.replacement.map(|v| v.to_string()))
     .bind(input.mode as i16)
-    .bind(input.cli.map(serde_json::to_value).transpose().map_err(|_|corrupt())?)
     .execute(c)
     .await?;
     Ok(())

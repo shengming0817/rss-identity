@@ -1,0 +1,14 @@
+GRANT USAGE ON SCHEMA identity_authority TO {role};
+GRANT SELECT ON identity_authority.schema_version TO {role};
+GRANT SELECT ON identity_authority.deployment TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.guard TO {role};
+GRANT SELECT,INSERT ON identity_authority.accounts TO {role};
+GRANT SELECT,INSERT ON identity_authority.memberships TO {role};
+GRANT SELECT,INSERT ON identity_authority.local_credentials TO {role};
+GRANT UPDATE(auth_epoch) ON identity_authority.accounts TO {role};
+GRANT UPDATE(password_hash) ON identity_authority.local_credentials TO {role};
+GRANT USAGE ON SCHEMA rss_transactional_messaging TO {role};
+GRANT SELECT ON rss_transactional_messaging.policy TO {role};
+GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO {role};
+GRANT USAGE ON SEQUENCE rss_transactional_messaging.outbox_seq_seq TO {role};
+GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO {role};

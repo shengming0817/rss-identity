@@ -19,26 +19,20 @@ class Gates(unittest.TestCase):
 
     def test_workspace_identity_and_binary(self):
         members = [p for p in self.metadata['packages'] if p['id'] in self.metadata['workspace_members']]
-        self.assertEqual({p['name'] for p in members}, {'rss-identity-platform', 'rss-identity-core', 'rss-identity-postgres', 'rss-identity-oidc', 'rss-identity-app', 'rss-identity-http-axum', 'rss-identity-hydra', 'rss-identity-contracts', 'rss-identity-client'})
+        self.assertEqual({p['name'] for p in members}, {'rss-identity-core', 'rss-identity-postgres', 'rss-identity-oidc', 'rss-identity-app', 'rss-identity-http-axum'})
         binaries = [t['name'] for p in members for t in p['targets'] if 'bin' in t['kind']]
-        self.assertEqual(set(binaries), {'identity-platform','identity-admin','identity-server','identity-migrate','identity-clients'})
+        self.assertEqual(set(binaries), {'identity-admin','identity-server','identity-migrate'})
 
-    def test_platform_cli_dependency_graph_is_http_only(self):
+    def test_local_component_closure_excludes_concrete_oidc_and_reference_host(self):
         packages={p['id']:p['name'] for p in self.metadata['packages']}
-        nodes={n['id']:n['dependencies'] for n in self.metadata['resolve']['nodes']}
-        pending=[next(i for i,n in packages.items() if n=='rss-identity-platform')];seen=set()
+        nodes={n['id']:n['deps'] for n in self.metadata['resolve']['nodes']}
+        pending=[next(i for i,n in packages.items() if n=='rss-identity-postgres')];seen=set()
         while pending:
             current=pending.pop()
             if current in seen:continue
-            seen.add(current);pending.extend(nodes[current])
-        self.assertTrue({'rss-identity-postgres','rss-identity-app','rss-identity-core','argon2','sqlx'}.isdisjoint({packages[i] for i in seen}))
-
-    def test_independent_consumer_rejects_server_dependencies(self):
-        import check_consumer
-        metadata=json.loads(subprocess.check_output(['cargo','metadata','--locked','--format-version','1','--manifest-path','tests/consumer/Cargo.toml']))
-        check_consumer.check(metadata)
-        metadata['packages'].append({'id':'forbidden','name':'rss-identity-postgres','source':None})
-        with self.assertRaises(ValueError):check_consumer.check(metadata)
+            seen.add(current)
+            pending.extend(d['pkg'] for d in nodes[current] if any(k['kind'] is None for k in d['dep_kinds']))
+        self.assertTrue({'rss-identity-oidc','rss-identity-app','openidconnect','reqwest'}.isdisjoint({packages[i] for i in seen}))
 
     def test_local_identity_packages_preserve_rss_source_checks(self):
         deps.check(self.metadata, self.manifest)

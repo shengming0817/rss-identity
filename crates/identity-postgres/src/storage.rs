@@ -8,15 +8,6 @@ use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
-/// Explicit write-side tenant creation; authentication uses lock_guard instead.
-pub(crate) async fn guard(c: &mut PgConnection, tenant: TenantId) -> Result<(), PgError> {
-    sqlx::query("INSERT INTO identity_authority.guard VALUES($1::uuid) ON CONFLICT DO NOTHING")
-        .bind(tenant.to_string())
-        .execute(&mut *c)
-        .await?;
-    lock_guard(c, tenant).await
-}
-
 /// Lock a provisioned tenant without attempting INSERT, even on a missing credential.
 pub(crate) async fn lock_guard(c: &mut PgConnection, tenant: TenantId) -> Result<(), PgError> {
     sqlx::query(
@@ -36,7 +27,7 @@ pub(crate) async fn load(c: &mut PgConnection, key: AccountKey) -> Result<Stored
     // Serialize the account/membership/local-credential snapshot with every credential writer.
     lock_guard(c, key.tenant).await?;
     let r = sqlx::query(concat!(
-        "SELECT a.enabled,a.administrator,a.emergency,a.auth_epoch,(l.principal_id IS NOT",
+        "SELECT a.enabled,a.auth_epoch,(l.principal_id IS NOT",
         " NULL) AS has_local_password,l.password_hash,m.active,m.epoch FROM identity_auth",
         "ority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal",
         "_id) LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_",
@@ -57,7 +48,7 @@ pub(crate) async fn load_for_maintenance(
     key: AccountKey,
 ) -> Result<Stored, PgError> {
     let row = sqlx::query(concat!(
-        "SELECT a.enabled,a.administrator,a.emergency,a.auth_epoch,(l.principal_id IS NOT",
+        "SELECT a.enabled,a.auth_epoch,(l.principal_id IS NOT",
         " NULL) AS has_local_password,l.password_hash,m.active,m.epoch FROM identity_auth",
         "ority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal",
         "_id) LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_",
@@ -76,8 +67,6 @@ fn decode(key: AccountKey, r: &sqlx::postgres::PgRow) -> Result<Stored, PgError>
         state: AccountState::restore(
             key,
             r.try_get("enabled")?,
-            r.try_get("administrator")?,
-            r.try_get("emergency")?,
             r.try_get("active")?,
             r.try_get("auth_epoch")?,
             r.try_get("has_local_password")?,
@@ -101,7 +90,6 @@ pub(crate) async fn authority_id(c: &mut PgConnection) -> Result<Uuid, PgError> 
 pub(crate) async fn current(
     c: &mut PgConnection,
     candidate: &AuthenticationCandidate,
-    admin: bool,
 ) -> Result<AccountState, PgError> {
     if candidate.expires <= std::time::Instant::now()
         || authority_id(c).await? != candidate.authority
@@ -109,12 +97,7 @@ pub(crate) async fn current(
         return Err(reject());
     }
     let now = load(c, candidate.state.key()).await?.state;
-    if !now.matches_verification(candidate.state)
-        || (admin
-            && now
-                .authorize_administration(candidate.state.key().tenant)
-                .is_err())
-    {
+    if !now.matches_verification(candidate.state) {
         return Err(reject());
     }
     Ok(now)
@@ -124,18 +107,13 @@ pub(crate) async fn insert_account(
     key: AccountKey,
     login: &str,
     hash: &str,
-    admin: bool,
-    emergency: bool,
 ) -> Result<(), crate::transaction::MutationError> {
-    AccountState::new_local(key, admin, emergency).map_err(|_| reject())?;
-    sqlx::query(concat!(
-        "INSERT INTO identity_authority.accounts(tenant_id,principal_id,administrator,eme",
-        "rgency) VALUES($1::uuid,$2::uuid,$3,$4)"
-    ))
+    AccountState::new_local(key).map_err(|_| reject())?;
+    sqlx::query(
+        "INSERT INTO identity_authority.accounts(tenant_id,principal_id) VALUES($1::uuid,$2::uuid)",
+    )
     .bind(key.tenant.to_string())
-    .bind(key.principal.as_uuid().to_string())
-    .bind(admin)
-    .bind(emergency)
+    .bind(key.principal.as_uuid())
     .execute(&mut *c)
     .await?;
     sqlx::query("INSERT INTO identity_authority.local_credentials VALUES($1::uuid,$2::uuid,$3,$4)")
@@ -160,18 +138,6 @@ pub(crate) async fn insert_account(
     sqlx::query("INSERT INTO identity_authority.memberships(tenant_id,principal_id) VALUES($1::uuid,$2::uuid)").bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).execute(c).await?;
     Ok(())
 }
-pub(crate) async fn admin_count(c: &mut PgConnection, tenant: TenantId) -> Result<i64, PgError> {
-    let n: i64 = sqlx::query_scalar(concat!(
-        "SELECT count(*) FROM identity_authority.accounts a JOIN identity_authority.membe",
-        "rships m USING(tenant_id,principal_id) LEFT JOIN identity_authority.local_creden",
-        "tials l USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND a.enabled A",
-        "ND a.administrator AND m.active AND l.principal_id IS NOT NULL"
-    ))
-    .bind(tenant.to_string())
-    .fetch_one(c)
-    .await?;
-    Ok(n)
-}
 pub(crate) fn principal(s: &str) -> Result<PrincipalId, PgError> {
     PrincipalId::parse(s).map_err(|_| corrupt())
 }
@@ -181,7 +147,7 @@ pub(crate) async fn insert_federated_account(
     key: AccountKey,
 ) -> Result<(), PgError> {
     let state = AccountState::new_federated(key).map_err(|_| corrupt())?;
-    sqlx::query("INSERT INTO identity_authority.accounts(tenant_id,principal_id,enabled,administrator,emergency,auth_epoch) VALUES($1::uuid,$2,$3,$4,$5,$6)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(state.enabled()).bind(state.administrator()).bind(state.emergency()).bind(state.epoch()).execute(&mut *c).await?;
+    sqlx::query("INSERT INTO identity_authority.accounts(tenant_id,principal_id,enabled,auth_epoch) VALUES($1::uuid,$2,$3,$4)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(state.enabled()).bind(state.epoch()).execute(&mut *c).await?;
     sqlx::query("INSERT INTO identity_authority.memberships(tenant_id,principal_id,active,epoch) VALUES($1::uuid,$2,$3,$4)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(state.member_active()).bind(state.membership_epoch()).execute(c).await?;
     Ok(())
 }

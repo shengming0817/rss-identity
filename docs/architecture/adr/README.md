@@ -19,3 +19,5 @@ I01 固定首期产品会话路径、协议 owner、租户模型与撤销承诺�
 - [#2339 Assurance 与原生恢复接缝](202609091607-2339-assurance-recovery.md)
 
 - [#2427/#2428 系统管理域、租户开通与受认证 CLI](202609130900-2427-platform-onboarding.md)
+
+- [#2435 内嵌认证组件与参考宿主](202609170001-2435-embedded-authentication.md) — 当前架构与实施 DAG。

@@ -1,3 +1,5 @@
+> 历史中央模式文档（基线 fa7019922162158704cc47c6ac7ad36a67c8ae5a），不适用于 #2435 的嵌入式组件。旧运行器已退役；保留验收/候选记录，不重标为本次成功。当前入口为 docs/guides/embedding.md，完整部署后续为 #2436。
+
 # #2433 外部审查修复后的固定 SDK 与候选
 
 本记录替代[首轮候选记录](202609162037-2433-trusted-groups.md)。交付 PR 为 [#1026](https://dev.azure.com/shengming0923/rss/_git/rss-identity/pullrequest/1026)，审查来源为 [F1–F4](https://dev.azure.com/shengming0923/rss/_git/rss-identity/pullrequest/1026?discussionId=14152)。本记录绑定实际完成的修复与 T1/T2、固定 Git consumer、Linux amd64 构建及运行冒烟；本轮最终 `make ci` 结果由 PR 验证评论追加。

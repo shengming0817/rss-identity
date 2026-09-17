@@ -209,7 +209,7 @@ pub(crate) async fn request_boundary(
     next: Next,
 ) -> Response {
     let callback = request.method() == axum::http::Method::GET
-        && request.uri().path() == "/api/v1/oidc/callback";
+        && request.uri().path() == "/api/v2/oidc/callback";
     let budget = RequestBudget(Instant::now() + state.config.timeout);
     request.extensions_mut().insert(budget);
     let origin = if request.uri().to_string().len() > 8192 {

@@ -1,3 +1,5 @@
+> 历史中央模式文档（基线 fa7019922162158704cc47c6ac7ad36a67c8ae5a），不适用于 #2435 的嵌入式组件。旧运行器已退役；保留验收/候选记录，不重标为本次成功。当前入口为 docs/guides/embedding.md，完整部署后续为 #2436。
+
 # 中央登录与日常管理
 
 前端源码属于 rss-web 的独立 `apps/identity`；Identity 提供 `federated_router`、`management_router` 和 `downstream_router`。前两者使用同一个 Federation/Authority，三个 Router 合并挂载于唯一 HTTPS origin，传入真实 ConnectInfo。生产 listener、TLS、provider 注入与静态资源装配由 #2338 实施。

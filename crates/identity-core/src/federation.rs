@@ -214,7 +214,6 @@ pub enum Purpose {
     Login,
     Reauthenticate,
     Link,
-    CliLogin,
 }
 
 impl Purpose {
@@ -223,7 +222,6 @@ impl Purpose {
             Self::Login => 0,
             Self::Reauthenticate => 1,
             Self::Link => 2,
-            Self::CliLogin => 3,
         }
     }
 
@@ -232,7 +230,6 @@ impl Purpose {
             0 => Ok(Self::Login),
             1 => Ok(Self::Reauthenticate),
             2 => Ok(Self::Link),
-            3 => Ok(Self::CliLogin),
             _ => Err(FederationError::Rejected),
         }
     }

@@ -20,7 +20,6 @@ def main():
     subprocess.run(['cargo', 'fetch', '--locked'], cwd=ROOT, env=fetch_env, check=True)
     # Also remove inherited runtime Git config: build scripts have no need for it.
     env = {k: v for k, v in env.items() if not k.startswith('GIT_CONFIG_')}
-    subprocess.run(['cargo', 'fetch', '--locked', '--manifest-path', 'tests/consumer/Cargo.toml'], cwd=ROOT, env=env, check=True)
     env['CARGO_NET_OFFLINE'] = 'true'
     subprocess.run(['make', 'ci', 'PYTHON=' + sys.executable], cwd=ROOT, env=env, check=True)
 

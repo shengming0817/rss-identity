@@ -1,64 +1,40 @@
 use rss_identity_app::{AppError, read_public_file, read_secret};
+use rss_identity_app::{
+    assembly,
+    config::{DatabaseConfig, StorageConfig},
+};
 use rss_identity_core::account::AccountKey;
 use rss_identity_core::{
     PrincipalId,
     account::{LoginKey, Password},
 };
 use rss_identity_postgres::*;
-use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
-use rss_transactional_messaging::{
-    fence::{Epoch, ExecutionBinding, StorageIdentity},
-    policy::{DeliveryBudget, OperationDeadline},
-};
-use rss_transactional_messaging_postgres::{PgConfig, PgPassword, PgPrivateCa, PgRuntime};
+use rss_request_context::TenantId;
 use serde::Deserialize;
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-
+use std::{path::Path, sync::Arc, time::Duration};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
-    identity_origin: DeploymentIdentity,
-    host: String,
-    port: u16,
-    database: String,
-    user: String,
-    password_file: String,
-    ca_file: String,
-    system_domain_id: String,
-    storage_target: [u8; 16],
-    storage_lineage: [u8; 16],
-    storage_generation: i64,
-}
-struct Timer;
-impl Clock for Timer {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-}
-impl ExecutionTimer for Timer {
-    async fn sleep_until(&self, deadline: Deadline) {
-        tokio::time::sleep(deadline.remaining(self.now()).unwrap_or_default()).await;
-    }
+    instance_id: String,
+    database: DatabaseConfig,
+    storage: StorageConfig,
 }
 fn password(path: &str) -> Result<Password, AppError> {
     Password::new(read_secret(Path::new(path))?.to_string()).map_err(|_| AppError::Password)
 }
-fn login(s: &str) -> Result<LoginKey, AppError> {
-    LoginKey::parse(s).map_err(|_| AppError::Login)
+fn login(value: &str) -> Result<LoginKey, AppError> {
+    LoginKey::parse(value).map_err(|_| AppError::Login)
 }
-fn key(tenant: TenantId, p: &str) -> Result<AccountKey, AppError> {
+fn key(tenant: &str, principal: &str) -> Result<AccountKey, AppError> {
     Ok(AccountKey {
-        tenant,
-        principal: PrincipalId::parse(p).map_err(|_| AppError::Principal)?,
+        tenant: TenantId::parse(tenant).map_err(|_| AppError::Tenant)?,
+        principal: PrincipalId::parse(principal).map_err(|_| AppError::Principal)?,
     })
 }
-fn budget() -> OperationDeadline {
-    OperationDeadline::from_remaining(Duration::from_secs(30))
+fn budget() -> rss_transactional_messaging::policy::OperationDeadline {
+    rss_transactional_messaging::policy::OperationDeadline::from_remaining(Duration::from_secs(30))
 }
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -78,61 +54,32 @@ async fn run() -> Result<(), AppError> {
     let command = parse_command(&args[1..])?;
     let raw = read_public_file(Path::new(&args[0]), 16384).map_err(|_| AppError::Configuration)?;
     let config: Config = serde_json::from_slice(&raw).map_err(|_| AppError::Json)?;
-    let tenant = TenantId::parse(&config.system_domain_id).map_err(|_| AppError::Tenant)?;
-    let ca = PgPrivateCa::from_pem(
-        read_public_file(Path::new(&config.ca_file), 1024 * 1024).map_err(|_| AppError::Ca)?,
-    )
-    .map_err(|_| AppError::Ca)?;
-    let pg = PgConfig::new(
-        config.host,
-        config.port,
-        config.database,
-        config.user,
-        PgPassword::new(read_secret(Path::new(&config.password_file))?.to_string()),
-        ca,
-    );
-    let mut tenants = vec![(
-        tenant,
-        Epoch::new(config.storage_generation).map_err(|_| AppError::StorageEpoch)?,
-    )];
-    if let Command::Recover(target, _, _) = command {
-        let target = TenantId::parse(target).map_err(|_| AppError::Tenant)?;
-        if target != tenant {
-            tenants.push((
-                target,
-                Epoch::new(config.storage_generation).map_err(|_| AppError::StorageEpoch)?,
-            ));
-        }
-    }
-    let binding = ExecutionBinding::new(
-        StorageIdentity::new(config.storage_target, config.storage_lineage)
-            .map_err(|_| AppError::StorageIdentity)?,
-        tenants,
-    )
-    .map_err(|_| AppError::StorageIdentity)?;
     let runtime = Arc::new(
-        PgRuntime::connect_producer(pg, Timer, binding)
-            .await
-            .map_err(|_| AppError::Connection)?,
+        rss_transactional_messaging_postgres::PgRuntime::connect_producer(
+            config.database.pg()?,
+            assembly::Timer,
+            config.storage.binding()?,
+        )
+        .await
+        .map_err(|_| AppError::Connection)?,
     );
     let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new());
     let authority = Authority::connect_maintenance(
         runtime.clone(),
         kdf.clone(),
-        config.identity_origin,
-        DeliveryBudget::new(
-            Duration::from_secs(60),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-        )
-        .map_err(|_| AppError::Budget)?,
-        tenant,
+        AuthorityConfig::new(
+            rss_identity_core::InstanceId::parse(&config.instance_id)
+                .map_err(|_| AppError::Configuration)?,
+            config.storage.tenants()?,
+            rss_identity_core::session::SessionPolicy::new(900, 14400)
+                .map_err(|_| AppError::Budget)?,
+            assembly::delivery_budget()?,
+        )?,
         budget(),
     )
     .await;
     let result = match authority {
-        Ok(authority) => execute(&authority, tenant, command).await,
+        Ok(authority) => execute(&authority, command).await,
         Err(error) => Err(error.into()),
     };
     kdf.close();
@@ -151,9 +98,9 @@ async fn run() -> Result<(), AppError> {
     }
     result
 }
-async fn execute(a: &Authority, tenant: TenantId, command: Command<'_>) -> Result<(), AppError> {
+async fn execute(a: &Authority, command: Command<'_>) -> Result<(), AppError> {
     let result = match command {
-        Command::Initialize(principal, name, pw) => {
+        Command::Initialize(tenant, principal, name, pw) => {
             a.initialize(
                 key(tenant, principal)?,
                 login(name)?,
@@ -163,15 +110,8 @@ async fn execute(a: &Authority, tenant: TenantId, command: Command<'_>) -> Resul
             .await
         }
         Command::Recover(target, principal, pw) => {
-            a.recover_administrator(
-                key(
-                    TenantId::parse(target).map_err(|_| AppError::Tenant)?,
-                    principal,
-                )?,
-                password(pw)?,
-                budget(),
-            )
-            .await
+            a.recover_local_password(key(target, principal)?, password(pw)?, budget())
+                .await
         }
     }?;
     println!(
@@ -184,16 +124,16 @@ async fn execute(a: &Authority, tenant: TenantId, command: Command<'_>) -> Resul
 
 #[derive(Debug)]
 enum Command<'a> {
-    Initialize(&'a str, &'a str, &'a str),
+    Initialize(&'a str, &'a str, &'a str, &'a str),
     Recover(&'a str, &'a str, &'a str),
 }
 fn usage() -> &'static str {
-    "Usage: identity-admin CONFIG COMMAND\n  initialize <principal> <login> <password-file>\n  recover <tenant> <principal> <password-file>"
+    "Usage: identity-admin CONFIG COMMAND\n  initialize <tenant> <principal> <login> <password-file>\n  recover <tenant> <principal> <password-file>"
 }
 fn parse_command(args: &[String]) -> Result<Command<'_>, AppError> {
     match args {
-        [name, principal, login, password] if name == "initialize" => {
-            Ok(Command::Initialize(principal, login, password))
+        [name, tenant, principal, login, password] if name == "initialize" => {
+            Ok(Command::Initialize(tenant, principal, login, password))
         }
         [name, tenant, principal, password] if name == "recover" => {
             Ok(Command::Recover(tenant, principal, password))
@@ -207,7 +147,10 @@ mod tests {
     use super::*;
     #[test]
     fn maintenance_commands_are_single_step() {
-        assert!(parse_command(&["initialize", "id", "login", "file"].map(String::from)).is_ok());
+        assert!(
+            parse_command(&["initialize", "tenant", "id", "login", "file"].map(String::from))
+                .is_ok()
+        );
         assert!(parse_command(&["recover", "tenant", "id", "file"].map(String::from)).is_ok());
         for command in [
             "create",

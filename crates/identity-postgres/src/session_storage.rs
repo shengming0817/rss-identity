@@ -7,7 +7,7 @@ use crate::{
 };
 use rss_identity_core::SessionId;
 use rss_identity_core::assurance::{Assurance, AuthenticationMode};
-use rss_identity_core::session::SessionLifetime;
+use rss_identity_core::session::{SessionLifetime, SessionPolicy};
 use rss_request_context::TenantId;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row};
@@ -25,32 +25,11 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 
 pub(crate) struct Loaded {
     pub assurance: Assurance,
-    pub groups: rss_identity_contracts::groups::Groups,
-    pub system_domain: bool,
-    pub platform_administrator: bool,
+    pub groups: rss_identity_core::groups::Groups,
     pub state: AccountState,
     pub view: SessionView,
     pub lifetime: SessionLifetime,
     pub now: i64,
-}
-impl Loaded {
-    pub fn authorize_administration(
-        &self,
-        tenant: TenantId,
-    ) -> Result<(), rss_identity_core::account::AccountRuleError> {
-        if self.state.key().tenant != tenant {
-            return Err(rss_identity_core::account::AccountRuleError::InsufficientPrivilege);
-        }
-        if self.system_domain {
-            if self.platform_administrator {
-                Ok(())
-            } else {
-                Err(rss_identity_core::account::AccountRuleError::InsufficientPrivilege)
-            }
-        } else {
-            self.state.authorize_administration(tenant)
-        }
-    }
 }
 pub(crate) async fn lookup(
     c: &mut PgConnection,
@@ -90,7 +69,7 @@ pub(crate) async fn by_id(
     let id = sid.to_string();
     let state = load(c, key).await?.state;
     let row = sqlx::query(concat!(
-        "SELECT principal_id,auth_epoch,membership_epoch,auth_time,idle_expires_at,absolute_expires_at",
+        "SELECT principal_id,auth_epoch,membership_epoch,auth_time,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at",
         ",revoked_at,token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
         " AND session_id=$2::uuid FOR UPDATE"
     ))
@@ -112,16 +91,11 @@ pub(crate) async fn by_id(
         Some(origin) => Some(crate::federation_storage::check_origin(c, key, origin).await?),
         None => None,
     };
-    let system_domain = crate::platform::system_domain(c).await? == Some(tenant);
-    let platform_administrator = crate::platform::platform_role(c, key).await?;
-    if system_domain && (state.administrator() || state.emergency()) {
-        return Err(corrupt());
-    }
     let lifetime = SessionLifetime::restore(
         row.try_get("auth_time")?,
         row.try_get("idle_expires_at")?,
         row.try_get("absolute_expires_at")?,
-        state.administrator() || platform_administrator,
+        lifetime_policy(&row)?,
     )
     .map_err(|_| corrupt())?;
     let now = session_storage::now(c).await?;
@@ -135,8 +109,8 @@ pub(crate) async fn by_id(
         ),
         (None, None) => (
             Assurance::password(lifetime.auth_time()).map_err(|_| corrupt())?,
-            rss_identity_contracts::groups::Groups::unavailable(
-                rss_identity_contracts::groups::UnavailableReason::LocalIdentity,
+            rss_identity_core::groups::Groups::unavailable(
+                rss_identity_core::groups::UnavailableReason::LocalIdentity,
             ),
         ),
         _ => return Err(corrupt()),
@@ -147,8 +121,6 @@ pub(crate) async fn by_id(
     Ok(Loaded {
         assurance,
         groups,
-        system_domain,
-        platform_administrator,
         state,
         view: SessionView::new(session_id(&id)?, lifetime),
         lifetime,
@@ -201,4 +173,12 @@ pub(crate) async fn close(
     .execute(c)
     .await?;
     Ok(())
+}
+
+pub(crate) fn lifetime_policy(row: &sqlx::postgres::PgRow) -> Result<SessionPolicy, PgError> {
+    SessionPolicy::new(
+        row.try_get("idle_timeout")?,
+        row.try_get("absolute_timeout")?,
+    )
+    .map_err(|_| corrupt())
 }

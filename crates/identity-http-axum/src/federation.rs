@@ -31,13 +31,14 @@ struct FederationState {
     local: AppState,
 }
 
-/// Mount the existing local session routes and persistent OIDC routes on the same authority.
+/// Optional OIDC routes; merge with `router` for local authentication.
 pub fn federated_router(
     federation: Federation,
     config: HttpConfig,
 ) -> Result<Router, AuthorityError> {
     let authority = federation.authority();
 
+    let management = crate::provider_management::router(federation.clone(), config.clone())?;
     let local = AppState {
         authority: authority.clone(),
         config: config.clone(),
@@ -49,30 +50,28 @@ pub fn federated_router(
     };
 
     let routes = Router::new()
-        .route("/api/v1/tenants/{tenant}/session/security", get(security))
-        .route("/api/v1/cli/sso/authorize", get(cli_authorize))
-        .route("/api/v1/cli/sso/exchange", post(cli_exchange))
+        .route("/api/v2/tenants/{tenant}/session/security", get(security))
         .route(
-            "/api/v1/tenants/{tenant}/oidc/{provider}/login",
+            "/api/v2/tenants/{tenant}/oidc/{provider}/login",
             post(begin),
         )
-        .route("/api/v1/tenants/{tenant}/oidc/{provider}/link", post(link))
+        .route("/api/v2/tenants/{tenant}/oidc/{provider}/link", post(link))
         .route(
-            "/api/v1/tenants/{tenant}/oidc/{provider}/step-up",
+            "/api/v2/tenants/{tenant}/oidc/{provider}/step-up",
             post(step_up),
         )
         .route(
-            "/api/v1/oidc/callback",
+            "/api/v2/oidc/callback",
             get(callback).head(|| async { StatusCode::METHOD_NOT_ALLOWED }),
         )
         .layer(axum::extract::DefaultBodyLimit::max(4096))
-        .layer(middleware::from_fn_with_state(
+        .route_layer(middleware::from_fn_with_state(
             local,
             boundary::request_boundary,
         ))
         .with_state(state);
 
-    Ok(router(authority, config)?.merge(routes))
+    Ok(routes.merge(management))
 }
 
 async fn security(
@@ -87,26 +86,22 @@ async fn security(
         .authority
         .inspect_session(tenant(&raw)?, secret, budget.remaining())
         .await?;
-    Ok(Json(
-        state
-            .federation
-            .current_session_security(actor, budget.remaining())
-            .await?,
-    )
-    .into_response())
+    let security = state
+        .federation
+        .current_session_security(actor, budget.remaining())
+        .await?;
+    Ok(Json(crate::dto::SessionSecurity::from(security)).into_response())
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Begin {
-    client_id: String,
     return_target: String,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Link {
-    client_id: String,
     return_target: String,
     password: Option<String>,
 }
@@ -229,7 +224,6 @@ async fn begin(
                 tenant,
                 provider,
                 browser: browser.clone(),
-                client: input.client_id,
                 target: input.return_target,
                 replacement: actor,
                 source,
@@ -270,7 +264,6 @@ async fn step_up(
                 tenant,
                 provider,
                 browser: browser.clone(),
-                client: input.client_id,
                 target: input.return_target,
                 replacement: actor,
                 source,
@@ -318,7 +311,6 @@ async fn link(
                 target_provider: provider,
                 password,
                 browser: browser.clone(),
-                client: input.client_id,
                 target: input.return_target,
                 source,
             },
@@ -378,7 +370,7 @@ async fn callback_result(
     let (browser, _) = browser(&headers, false)?;
 
     if let Some(error) = query.error {
-        let redirect = state
+        state
             .federation
             .cancel(
                 query.state,
@@ -388,9 +380,6 @@ async fn callback_result(
                 budget.remaining(),
             )
             .await?;
-        if let Some(url) = redirect {
-            return Ok(axum::response::Redirect::to(&url).into_response());
-        }
         return Ok(callback_failure(if error == "access_denied" {
             "cancelled"
         } else {
@@ -410,13 +399,6 @@ async fn callback_result(
         .await?;
 
     let (location, cookie) = match outcome {
-        FederatedOutcome::CliFailure { return_url, error } => {
-            let mut response = axum::response::Redirect::to(&return_url).into_response();
-            response
-                .extensions_mut()
-                .insert(crate::HttpFailure::Authority(error));
-            return Ok(response);
-        }
         FederatedOutcome::Redirect(redirect) => (redirect.url, None),
         FederatedOutcome::Session {
             issued,
@@ -455,80 +437,4 @@ async fn callback_result(
     }
 
     Ok(response)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CliAuthorize {
-    provider_id: ProviderId,
-    redirect_uri: String,
-    code_challenge: String,
-    state: String,
-}
-async fn cli_authorize(
-    State(s): State<FederationState>,
-    Extension(b): Extension<RequestBudget>,
-    Query(q): Query<CliAuthorize>,
-    r: Request,
-) -> Result<Response, HttpError> {
-    let binding = rss_identity_contracts::cli::CliLoginBinding::new(
-        q.redirect_uri,
-        q.code_challenge,
-        q.state,
-    )
-    .map_err(|_| BAD)?;
-    let (browser, created) = browser(r.headers(), true)?;
-    let redirect = s
-        .federation
-        .begin_cli_login(
-            q.provider_id,
-            binding,
-            browser.clone(),
-            source(&r)?,
-            b.remaining(),
-        )
-        .await?;
-    let mut response = axum::response::Redirect::to(&redirect.url).into_response();
-    if created {
-        response.headers_mut().insert(
-            header::SET_COOKIE,
-            format!("{BROWSER}={browser}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=3600")
-                .parse()
-                .map_err(|_| BAD)?,
-        );
-    }
-    Ok(response)
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CliExchange {
-    code: String,
-    verifier: String,
-    redirect_uri: String,
-}
-async fn cli_exchange(
-    State(s): State<FederationState>,
-    Extension(b): Extension<RequestBudget>,
-    r: Request,
-) -> Result<Response, HttpError> {
-    if unique(r.headers(), "x-identity-request")? != Some("1") {
-        return Err(FORBIDDEN);
-    }
-    let source = source(&r)?;
-    let Json(input) = tokio::time::timeout_at(b.cutoff(), Json::<CliExchange>::from_request(r, &s))
-        .await
-        .map_err(|_| HttpError::request_timeout())?
-        .map_err(|_| BAD)?;
-    crate::handlers::issued(
-        s.local
-            .authority
-            .exchange_cli_login(
-                Zeroizing::new(input.code),
-                Zeroizing::new(input.verifier),
-                input.redirect_uri,
-                source,
-                b.remaining(),
-            )
-            .await?,
-    )
 }

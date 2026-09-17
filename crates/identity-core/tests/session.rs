@@ -1,14 +1,15 @@
-use rss_identity_core::session::{SessionLifetime, SessionSecret};
+use rss_identity_core::session::{SessionLifetime, SessionPolicy, SessionSecret};
 
 #[test]
 fn session_expiry_and_activity_are_bounded() {
-    let mut ordinary = SessionLifetime::new(1_000, false).unwrap();
+    let mut ordinary =
+        SessionLifetime::new(1_000, SessionPolicy::new(1800, 28800).unwrap()).unwrap();
     assert_eq!(ordinary.idle_expires_at(), 2_800);
     assert_eq!(ordinary.absolute_expires_at(), 29_800);
     assert!(ordinary.renew(2_799).is_ok());
     assert_eq!(ordinary.idle_expires_at(), 4_599);
     assert!(ordinary.renew(4_599).is_err());
-    let mut admin = SessionLifetime::new(1_000, true).unwrap();
+    let mut admin = SessionLifetime::new(1_000, SessionPolicy::new(900, 14400).unwrap()).unwrap();
     assert_eq!(admin.idle_expires_at(), 1_900);
     assert_eq!(admin.absolute_expires_at(), 15_400);
     for now in (1_800..15_400).step_by(800) {
@@ -16,10 +17,18 @@ fn session_expiry_and_activity_are_bounded() {
     }
     assert_eq!(admin.idle_expires_at(), 15_400);
     assert!(admin.renew(15_400).is_err());
-    assert!(SessionLifetime::new(i64::MAX, false).is_err());
-    assert!(SessionLifetime::restore(1_000, 2_000, 40_000, false).is_err());
+    assert!(SessionLifetime::new(i64::MAX, SessionPolicy::new(1800, 28800).unwrap()).is_err());
     assert!(
-        SessionLifetime::new(1_000, false)
+        SessionLifetime::restore(
+            1_000,
+            2_000,
+            40_000,
+            SessionPolicy::new(1800, 28800).unwrap()
+        )
+        .is_err()
+    );
+    assert!(
+        SessionLifetime::new(1_000, SessionPolicy::new(1800, 28800).unwrap())
             .unwrap()
             .renew(999)
             .is_err()
@@ -56,15 +65,30 @@ fn session_id_wire_boundary_rejects_nil_and_round_trips() {
 }
 
 #[test]
-fn administrator_session_cannot_switch_renewal_window() {
-    let mut admin = SessionLifetime::new(1_000, true).unwrap();
+fn restored_session_preserves_selected_renewal_window() {
+    let mut admin = SessionLifetime::new(1_000, SessionPolicy::new(900, 14400).unwrap()).unwrap();
     admin.renew(1_800).unwrap();
     assert_eq!(admin.idle_expires_at(), 2_700);
-    let mut restored = SessionLifetime::restore(1_000, 1_900, 15_400, true).unwrap();
+    let mut restored = SessionLifetime::restore(
+        1_000,
+        1_900,
+        15_400,
+        SessionPolicy::new(900, 14400).unwrap(),
+    )
+    .unwrap();
     restored.renew(1_800).unwrap();
     assert_eq!(restored.idle_expires_at(), 2_700);
-    assert!(SessionLifetime::restore(1_000, 1_900, 15_400, false).is_err());
-    let mut ordinary = SessionLifetime::new(1_000, false).unwrap();
+    assert!(
+        SessionLifetime::restore(
+            1_000,
+            1_900,
+            15_400,
+            SessionPolicy::new(1800, 7200).unwrap()
+        )
+        .is_err()
+    );
+    let mut ordinary =
+        SessionLifetime::new(1_000, SessionPolicy::new(1800, 28800).unwrap()).unwrap();
     ordinary.renew(1_800).unwrap();
     assert_eq!(ordinary.idle_expires_at(), 3_600);
 }

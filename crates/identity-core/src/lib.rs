@@ -1,12 +1,30 @@
 //! Identity account, session and protocol policy. Authentication is owned by the authority.
 pub mod account;
 pub mod assurance;
-pub mod downstream;
 pub mod federation;
 pub mod groups;
-pub mod platform;
 pub mod session;
 use uuid::Uuid;
+
+/// Non-nil Identity InstanceId; bound to the persisted authentication instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceId(Uuid);
+impl InstanceId {
+    pub fn generate() -> Self {
+        Self(Uuid::new_v4())
+    }
+    pub fn as_uuid(self) -> Uuid {
+        self.0
+    }
+    /// Parse a non-nil UUID from the authoritative source.
+    pub fn parse(value: &str) -> Result<Self, ValidationError> {
+        let id = Uuid::parse_str(value).map_err(|_| ValidationError::InvalidValue)?;
+        if id.is_nil() {
+            return Err(ValidationError::InvalidValue);
+        }
+        Ok(Self(id))
+    }
+}
 
 /// Non-nil Identity PrincipalId; never inferred from browser claims.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,5 +129,11 @@ impl serde::Serialize for IssuerId {
 impl serde::Serialize for ClientId {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(self.as_str())
+    }
+}
+
+impl std::fmt::Display for InstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }

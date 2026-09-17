@@ -1,19 +1,19 @@
-//! Construct concrete providers once; the lifecycle owns every acquired resource.
-use crate::{AppError, config::RuntimeConfig, read_public_file, read_secret};
-use rss_identity_core::{downstream::*, federation::StateSigner};
-use rss_identity_hydra::Hydra;
+//! Minimal reference host: owns policy, runtime fencing, URLs and optional upstream configuration.
+use crate::{AppError, config::RuntimeConfig, read_secret};
+use rss_identity_core::{account::AccountKey, federation::StateSigner, session::SessionPolicy};
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
-use rss_identity_postgres::{Authority, Downstream, Federation, PrepareAdmission};
+use rss_identity_postgres::{
+    Authority, AuthorityConfig, Federation, FederationConfig, ManagementContext, ManagementDenied,
+    ManagementOperation, ManagementPolicy, ReauthenticationRequirement,
+};
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
 use rss_transactional_messaging::policy::{DeliveryBudget, OperationDeadline};
 use rss_transactional_messaging_postgres::PgRuntime;
 use std::{
-    collections::BTreeMap,
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
-
 pub struct Timer;
 impl Clock for Timer {
     fn now(&self) -> Instant {
@@ -37,40 +37,59 @@ pub fn delivery_budget() -> Result<DeliveryBudget, AppError> {
 pub fn deadline() -> OperationDeadline {
     OperationDeadline::from_remaining(Duration::from_secs(10))
 }
+
+/// Product policy, deliberately outside the authentication component.
+pub struct BootstrapPolicy(pub AccountKey);
+impl ManagementPolicy for BootstrapPolicy {
+    fn authorize(
+        &self,
+        context: &ManagementContext<'_>,
+    ) -> Result<ReauthenticationRequirement, ManagementDenied> {
+        if context.actor() != self.0
+            || (context.target() == Some(self.0)
+                && matches!(
+                    context.operation(),
+                    ManagementOperation::SetAccountEnabled(false)
+                        | ManagementOperation::SetMembership(false)
+                ))
+        {
+            return Err(ManagementDenied);
+        }
+        Ok(ReauthenticationRequirement::Recent(Duration::from_secs(
+            300,
+        )))
+    }
+}
+pub fn authority_config(config: &RuntimeConfig) -> Result<AuthorityConfig, AppError> {
+    Ok(AuthorityConfig::new(
+        config.instance()?,
+        config.storage.tenants()?,
+        SessionPolicy::new(900, 14400).map_err(|_| AppError::Configuration)?,
+        delivery_budget()?,
+    )?)
+}
 pub async fn authority(
     config: &RuntimeConfig,
     runtime: Arc<PgRuntime>,
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
 ) -> Result<Authority, AppError> {
-    let a = Authority::connect_runtime(
+    Ok(Authority::connect_runtime(
         runtime,
         kdf,
-        config.identity_origin.clone(),
-        delivery_budget()?,
-        config.storage.system()?,
-        rss_identity_postgres::RuntimeConfiguration::new(
-            rss_identity_postgres::RuntimeSource::new(
-                config.database.pg()?,
-                config.storage.identity()?,
-                config.storage.epoch()?,
-            ),
-            config.oidc.credential_keyring.load()?,
-        ),
+        authority_config(config)?,
+        Arc::new(BootstrapPolicy(config.bootstrap.key()?)),
         deadline(),
     )
-    .await?;
-    Ok(a)
+    .await?)
 }
-
-pub struct Providers {
-    pub federation: Federation,
-    pub downstream: Downstream,
-    pub hydra: Arc<Hydra>,
-    pub validation_secrets: BTreeMap<String, zeroize::Zeroizing<String>>,
-}
-pub fn providers(c: &RuntimeConfig, a: Authority) -> Result<Providers, AppError> {
+pub fn federation(
+    config: &RuntimeConfig,
+    authority: Authority,
+) -> Result<Option<Federation>, AppError> {
+    let Some(c) = &config.oidc else {
+        return Ok(None);
+    };
     let profiles = c
-        .oidc
         .assurance_profiles
         .iter()
         .map(|v| {
@@ -83,76 +102,20 @@ pub fn providers(c: &RuntimeConfig, a: Authority) -> Result<Providers, AppError>
         })
         .collect::<Result<Vec<_>, AppError>>()?;
     let oidc = HttpOidc::new(profiles).map_err(|_| AppError::Provider)?;
-    let raw = read_secret(Path::new(&c.oidc.state_key_file))?;
+    let raw = read_secret(Path::new(&c.state_key_file))?;
     let mut key = zeroize::Zeroizing::new([0; 32]);
     hex::decode_to_slice(raw.as_str(), key.as_mut()).map_err(|_| AppError::Configuration)?;
-    let signer = StateSigner::new(*key, c.identity_origin.identity_origin())
+    let signer = StateSigner::new(*key, &config.instance()?.to_string())
         .map_err(|_| AppError::Configuration)?;
-    let hydra = Arc::new(
-        Hydra::new(
-            &c.hydra.admin_url,
-            &c.identity_origin.issuer(),
-            c.hydra
-                .addresses
-                .iter()
-                .map(|a| a.parse().map_err(|_| AppError::Configuration))
-                .collect::<Result<_, _>>()?,
-            Secret::new(read_secret(Path::new(&c.hydra.service_secret_file))?.to_string())
-                .map_err(|_| AppError::Configuration)?,
-            Some(&read_public_file(Path::new(&c.hydra.ca_file), 1024 * 1024)?),
-        )
-        .map_err(|_| AppError::Provider)?,
-    );
-    let limits = Lifetimes::new(LifetimeLimits {
-        request: c.hydra.request_seconds,
-        code: c.hydra.code_seconds,
-        access_token: c.hydra.access_token_seconds,
-        clock_skew: c.hydra.clock_skew_seconds,
-    })
-    .map_err(|_| AppError::Configuration)?;
-    let mut registrations = Vec::new();
-    let mut validation_secrets = BTreeMap::new();
-    let mut targets = BTreeMap::new();
-    targets.insert(
-        ("identity-ui".into(), "resume".into()),
-        format!("{}/auth/resume", c.identity_origin.identity_origin()),
-    );
-    for client in &c.hydra.clients {
-        let oidc_secret = read_secret(Path::new(&client.oidc_secret_file))?;
-        let validation = read_secret(Path::new(&client.validation_secret_file))?;
-        if oidc_secret.len() < 32
-            || *oidc_secret == *validation
-            || validation_secrets
-                .insert(client.client_id.clone(), validation)
-                .is_some()
-        {
-            return Err(AppError::Configuration);
-        }
-        registrations.push(
-            Registration::new(RegistrationInput {
-                tenant: TenantId::parse(&client.tenant_id).map_err(|_| AppError::Tenant)?,
-                client: client.client_id.clone(),
-                audience: client.audience.clone(),
-                issuer: c.identity_origin.issuer(),
-                redirect: c.identity_origin.product_callback(),
-                version: client.config_version,
-            })
-            .map_err(|_| AppError::Configuration)?,
-        );
-    }
-    let federation = Federation::new(
-        c.oidc.group_policy()?,
-        a.clone(),
+    Ok(Some(Federation::new(
+        c.group_policy()?,
+        authority,
         Arc::new(oidc),
         signer,
-        targets,
-    )?;
-    let admission = Arc::new(PrepareAdmission::new(16, 120, Duration::from_secs(60))?);
-    let downstream = Downstream::new(a, hydra.clone(), registrations, limits, admission)?;
-    Ok(Providers {
-        federation,
-        downstream,
-        hydra,
-        validation_secrets,
-    })
+        FederationConfig {
+            callback: format!("{}/api/v2/oidc/callback", config.public_origin),
+            credential_keys: c.credential_keyring.load()?,
+            targets: c.return_targets.clone(),
+        },
+    )?))
 }
