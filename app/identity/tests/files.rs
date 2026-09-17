@@ -74,3 +74,47 @@ fn runtime_config_is_strict_and_contains_no_maintenance_secret_slot() {
         );
     }
 }
+
+#[test]
+fn group_facts_policy_is_required_and_deployment_scoped() {
+    use rss_identity_app::config::RuntimeConfig;
+    let example: serde_json::Value =
+        serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
+    use rss_identity_core::groups::GroupFactsMaxAge;
+    let values = [
+        GroupFactsMaxAge::MIN_SECONDS - 1,
+        GroupFactsMaxAge::MIN_SECONDS,
+        GroupFactsMaxAge::MAX_SECONDS,
+        GroupFactsMaxAge::MAX_SECONDS + 1,
+    ];
+    let expected: Vec<bool> = values
+        .iter()
+        .map(|v| GroupFactsMaxAge::new(*v).is_ok())
+        .collect();
+    // Exercise the deployment predicate with the Rust owner's boundaries, rather
+    // than letting the independent Python renderer drift to a different policy.
+    let output = std::process::Command::new("python3")
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hack"))
+        .args(["-c", "import deploy,json,sys; print(json.dumps([deploy.valid_group_facts_max_age(v) for v in json.loads(sys.argv[1])]))", &serde_json::to_string(&values).unwrap()])
+        .output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Vec<bool>>(&output.stdout).unwrap(),
+        expected
+    );
+    for value in values {
+        let mut runtime = example["runtime"].clone();
+        runtime["oidc"]["group_facts_max_age_seconds"] = value.into();
+        let config: RuntimeConfig = serde_json::from_value(runtime).unwrap();
+        assert_eq!(
+            config.validate().is_ok(),
+            GroupFactsMaxAge::new(value).is_ok()
+        );
+    }
+    let mut runtime = example["runtime"].clone();
+    runtime["oidc"]
+        .as_object_mut()
+        .unwrap()
+        .remove("group_facts_max_age_seconds");
+    assert!(serde_json::from_value::<RuntimeConfig>(runtime).is_err());
+}

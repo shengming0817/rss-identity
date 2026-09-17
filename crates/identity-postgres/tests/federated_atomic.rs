@@ -234,7 +234,18 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
         .await?;
     assert_eq!(before, after, "step-up must never JIT");
     let token = step_begin(&f, &s, &p, &old).await?;
+    let before_groups = stored_facts(&f, &old).await?;
+    *upstream.groups.lock().unwrap() = vec!["/step-up".into()];
     let upgraded = issued(step_finish(&s, token.clone(), &old, "alice").await?);
+    let after_groups = stored_facts(&f, &upgraded).await?;
+    assert_ne!(
+        before_groups["groups"]["snapshot_id"],
+        after_groups["groups"]["snapshot_id"]
+    );
+    assert_eq!(
+        after_groups["groups"]["values"],
+        serde_json::json!(["/step-up"])
+    );
     assert!(
         f.store
             .inspect_session(f.key.tenant, secret(&old), deadline())
@@ -460,7 +471,8 @@ async fn federation_state_restart_expiry_and_replay() -> anyhow::Result<()> {
 async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, ScriptedOidc::new());
+    let upstream = ScriptedOidc::new();
+    let s = service(&f, upstream.clone());
     let p = enabled(&f, &s).await?;
     f.store
         .create_local_account(
@@ -659,8 +671,8 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
         .bind(id.to_string())
         .fetch_one(&f.owner)
         .await?;
-        assert_eq!(facts["groups"], groups);
-        assert_eq!(facts["mapping_version"], version);
+        assert_eq!(facts["groups"]["values"], groups);
+        assert_eq!(facts["provider_config_version"], version);
     }
     let pending = begin(&f, &s, &edited).await?;
     let next = s.clone();
@@ -773,7 +785,8 @@ async fn federation_atomic_events_and_unknown_commit() -> anyhow::Result<()> {
 async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, ScriptedOidc::new());
+    let upstream = ScriptedOidc::new();
+    let s = service(&f, upstream.clone());
     let p = enabled(&f, &s).await?;
     let local = session(&f).await?;
     let proof = f
@@ -817,8 +830,29 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
             .account(),
         f.key
     );
+    let local_facts: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1::uuid",
+    )
+    .bind(linked.view().id.to_string())
+    .fetch_one(&f.owner)
+    .await?;
+    assert!(
+        local_facts.is_none(),
+        "target groups must not become local origin"
+    );
     let other = enabled(&f, &s).await?;
     let fed = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
+    let original = stored_facts(&f, &fed).await?;
+    let fed = f
+        .store
+        .refresh_session(f.key.tenant, secret(&fed), deadline())
+        .await?;
+    assert_eq!(
+        stored_facts(&f, &fed).await?,
+        original,
+        "refresh preserves the entire snapshot"
+    );
+    *upstream.groups.lock().unwrap() = vec!["/source/new".into()];
     let proof = f
         .store
         .inspect_session(f.key.tenant, secret(&fed), deadline())
@@ -853,6 +887,17 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         FederatedOutcome::Redirect(v) => state(v),
         _ => panic!("expected target authentication"),
     };
+    let source_facts: serde_json::Value = sqlx::query_scalar("SELECT source_facts FROM identity_authority.link_intents WHERE principal_id=$1 AND stage=1")
+        .bind(principal.principal.as_uuid()).fetch_one(&f.owner).await?;
+    assert_ne!(
+        source_facts["groups"]["snapshot_id"],
+        original["groups"]["snapshot_id"]
+    );
+    assert_eq!(
+        source_facts["groups"]["values"],
+        serde_json::json!(["/source/new"])
+    );
+    *upstream.groups.lock().unwrap() = vec!["/target/forbidden".into()];
     let linked = issued(
         s.complete(
             second,
@@ -876,6 +921,11 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
             .inspect_session(f.key.tenant, secret(&fed), deadline())
             .await
             .is_err()
+    );
+    assert_eq!(
+        stored_facts(&f, &linked).await?,
+        source_facts,
+        "link must copy the source snapshot unchanged"
     );
     f.close().await;
     Ok(())
@@ -1490,6 +1540,141 @@ async fn federation_assurance_change_revokes_attempts_and_sessions() -> anyhow::
     s.reconcile_assurance_profiles(f.key.tenant, deadline())
         .await?;
     assert_eq!(events(&f).await?.len(), before_batch + 9);
+    f.close().await;
+    Ok(())
+}
+
+async fn stored_facts(f: &Fixture, session: &IssuedSession) -> anyhow::Result<serde_json::Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1::uuid",
+    )
+    .bind(session.view().id.to_string())
+    .fetch_one(&f.owner)
+    .await?)
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn federation_group_snapshot_storage_bounds() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let s = service(&f, upstream.clone());
+    let p = enabled(&f, &s).await?;
+    *upstream.groups.lock().unwrap() = (0..100)
+        .map(|i| format!("{i:03}{}", "x".repeat(253)))
+        .collect();
+    let sized = issued(finish(&s, begin(&f, &s, &p).await?, "size-valid").await?);
+    assert_eq!(
+        stored_facts(&f, &sized).await?["groups"]["values"]
+            .as_array()
+            .unwrap()
+            .len(),
+        100
+    );
+    let sample = stored_facts(&f, &sized).await?;
+    let bytes: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
+        .bind(sample)
+        .fetch_one(&f.owner)
+        .await?;
+    let extra = 32768 - bytes;
+    let mut boundary: Vec<String> = (0..100)
+        .map(|i| format!("{i:03}{}", "x".repeat(253)))
+        .collect();
+    for n in 0..extra as usize {
+        boundary[n / 253].replace_range(3 + n % 253..4 + n % 253, "\"");
+    }
+    *upstream.groups.lock().unwrap() = boundary.clone();
+    let exact = issued(finish(&s, begin(&f, &s, &p).await?, "size-exact").await?);
+    let bytes: i32 = sqlx::query_scalar("SELECT octet_length(auth_facts::text) FROM identity_authority.sessions WHERE session_id=$1::uuid").bind(exact.view().id.to_string()).fetch_one(&f.owner).await?;
+    assert_eq!(bytes, 32768);
+    let n = extra as usize;
+    boundary[n / 253].replace_range(3 + n % 253..4 + n % 253, "\"");
+    *upstream.groups.lock().unwrap() = boundary;
+    assert!(
+        finish(&s, begin(&f, &s, &p).await?, "size-overflow")
+            .await
+            .is_err()
+    );
+    let overflow: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.external_identities WHERE subject='size-overflow'",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(
+        overflow, 0,
+        "oversized facts roll back the complete JIT write"
+    );
+    *upstream.groups.lock().unwrap() = vec!["staff".into()];
+    // An external identity from a different principal cannot be attached as this session's source.
+    let mismatch = sqlx::query("UPDATE identity_authority.sessions SET external_identity_id=(SELECT external_identity_id FROM identity_authority.sessions WHERE session_id=$1::uuid) WHERE session_id=$2::uuid")
+        .bind(sized.view().id.to_string()).bind(exact.view().id.to_string()).execute(&f.owner).await.unwrap_err();
+    assert_eq!(
+        mismatch
+            .as_database_error()
+            .and_then(|e| e.code())
+            .as_deref(),
+        Some("23503"),
+        "the source/principal foreign key rejects mismatched authority"
+    );
+    assert!(
+        f.store
+            .inspect_session(f.key.tenant, secret(&exact), deadline())
+            .await
+            .is_ok()
+    );
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn federation_signed_time_skew_preserves_identity() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let service = service(&f, upstream.clone());
+    let provider = enabled(&f, &service).await?;
+    upstream.issued_at_offset.store(10, Ordering::SeqCst);
+    let session = issued(
+        finish(
+            &service,
+            begin(&f, &service, &provider).await?,
+            "future-time",
+        )
+        .await?,
+    );
+    let snapshot = stored_facts(&f, &session).await?;
+    let now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    assert!(snapshot["groups"]["observed_at"].as_i64().unwrap() > now);
+    assert_eq!(
+        snapshot["groups"]["expires_at"].as_i64().unwrap()
+            - snapshot["groups"]["observed_at"].as_i64().unwrap(),
+        300
+    );
+    // Session loading projects future groups to unavailable without rejecting identity.
+    f.store
+        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .await?;
+    upstream.issued_at_offset.store(60, Ordering::SeqCst);
+    assert!(
+        finish(
+            &service,
+            begin(&f, &service, &provider).await?,
+            "beyond-skew"
+        )
+        .await
+        .is_err()
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.external_identities WHERE subject='beyond-skew'",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(count, 0);
     f.close().await;
     Ok(())
 }

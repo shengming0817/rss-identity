@@ -56,6 +56,11 @@ class Gateway(http.server.BaseHTTPRequestHandler):
     do_GET=do_POST=do_PUT=do_DELETE=handle_request
 
 def run(measure=False):
+    if not measure:
+        # Compile the isolated consumer before collecting a deliberately short-lived snapshot.
+        target=Path(os.environ.get('CARGO_TARGET_DIR', providers.ROOT/'target'))/'consumer'
+        providers.bounded_run(['cargo','test','--locked','--manifest-path',str(providers.ROOT/'tests/consumer/Cargo.toml'),'--no-run'], timeout=900,cwd=providers.ROOT,env={**os.environ,'CARGO_TARGET_DIR':str(target)},check=True)
+
     with tempfile.TemporaryDirectory(prefix='identity-downstream-') as tmp, contextlib.ExitStack() as stack:
         tmp=Path(tmp); cert=tmp/'tls.crt'; key=tmp/'tls.key'
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','2','-subj','/CN=identity-downstream-t2','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1','-addext','basicConstraints=critical,CA:FALSE','-addext','keyUsage=critical,digitalSignature,keyEncipherment','-addext','extendedKeyUsage=serverAuth'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)

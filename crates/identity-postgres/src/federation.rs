@@ -16,6 +16,7 @@ pub struct Federation {
     pub(crate) authority: Authority,
     pub(crate) oidc: Arc<dyn UpstreamOidc>,
     pub(crate) signer: Arc<StateSigner>,
+    pub(crate) group_policy: rss_identity_core::groups::GroupFactsMaxAge,
     targets: Arc<BTreeMap<(String, String), String>>,
 }
 /// Browser input plus transport attribution; the optional replacement is an authority-issued proof.
@@ -113,6 +114,7 @@ pub(crate) fn event(
 }
 impl Federation {
     pub fn new(
+        group_policy: rss_identity_core::groups::GroupFactsMaxAge,
         authority: Authority,
         oidc: Arc<dyn UpstreamOidc>,
         signer: StateSigner,
@@ -140,6 +142,7 @@ impl Federation {
             }
         }
         Ok(Self {
+            group_policy,
             authority,
             oidc,
             signer: Arc::new(signer),

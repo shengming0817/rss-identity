@@ -25,8 +25,12 @@ pub struct ValidatedIdentity {
     amr: Vec<Amr>,
     acr: Acr,
     expires_at: i64,
+    groups: rss_identity_contracts::groups::Groups,
 }
 impl ValidatedIdentity {
+    pub fn groups(&self) -> &rss_identity_contracts::groups::Groups {
+        &self.groups
+    }
     /// Validated subject for the current request.
     pub fn subject(&self) -> &str {
         &self.subject
@@ -475,6 +479,7 @@ impl Downstream {
                         return Err(DownstreamError::Rejected.into());
                     }
                     Ok(ValidatedIdentity {
+                        groups: loaded.groups,
                         subject: token.subject,
                         tenant_id: t.to_string(),
                         session_id: loaded.view.id.to_string(),

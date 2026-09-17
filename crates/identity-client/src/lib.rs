@@ -1,5 +1,8 @@
 //! Request-scoped Identity validation client. No OIDC flow, database dependency, or success cache.
-pub use rss_identity_contracts::{Acr, Amr};
+pub use rss_identity_contracts::{
+    Acr, Amr,
+    groups::{GroupSource, UnavailableReason},
+};
 use rss_identity_contracts::{
     IdentityFacts, ValidationFailure, ValidationFailureCode, ValidationRequest,
 };
@@ -91,8 +94,82 @@ pub struct IdentityClient(Arc<Inner>);
 /// ```compile_fail
 /// let proof: rss_identity_client::VerifiedIdentity = serde_json::from_str("{}").unwrap();
 /// ```
-pub struct VerifiedIdentity(IdentityFacts);
+pub struct VerifiedIdentity(IdentityFacts, Arc<dyn Clock>, i64);
+/// Groups are borrowed from a currently checked identity; there is no standalone proof constructor.
+pub enum VerifiedGroups<'a> {
+    Available(TrustedGroups<'a>),
+    Unavailable(UnavailableReason),
+    Expired,
+}
+/// Neither wire deserialization nor consumer-owned group names construct trusted groups.
+/// ```compile_fail
+/// let groups: rss_identity_client::TrustedGroups<'_> = serde_json::from_str("{}").unwrap();
+/// ```
+pub struct TrustedGroups<'a> {
+    source: &'a GroupSource,
+    snapshot_id: uuid::Uuid,
+    provider_config_version: i64,
+    observed_at: i64,
+    expires_at: i64,
+    values: &'a [String],
+}
+impl TrustedGroups<'_> {
+    pub fn source(&self) -> &GroupSource {
+        self.source
+    }
+    pub fn snapshot_id(&self) -> uuid::Uuid {
+        self.snapshot_id
+    }
+    pub fn provider_config_version(&self) -> i64 {
+        self.provider_config_version
+    }
+    pub fn observed_at(&self) -> i64 {
+        self.observed_at
+    }
+    pub fn expires_at(&self) -> i64 {
+        self.expires_at
+    }
+    pub fn values(&self) -> &[String] {
+        self.values
+    }
+}
 impl VerifiedIdentity {
+    /// Recheck time on each access. Expired groups leave the base identity intact.
+    pub fn groups(&self) -> Result<VerifiedGroups<'_>, Error> {
+        use rss_identity_contracts::groups::Groups;
+        let now = self.1.unix_seconds()?;
+        if now < self.2 {
+            return Err(Error::Unavailable);
+        }
+        if now >= self.0.expires_at {
+            return Err(Error::Rejected);
+        }
+        Ok(match &self.0.groups {
+            Groups::Unavailable { reason, .. } => VerifiedGroups::Unavailable(*reason),
+            Groups::Expired { .. } => VerifiedGroups::Expired,
+            Groups::Available { expires_at, .. } if now >= *expires_at => VerifiedGroups::Expired,
+            Groups::Available { observed_at, .. } if now < *observed_at => {
+                VerifiedGroups::Unavailable(UnavailableReason::NotYetValid)
+            }
+            Groups::Available {
+                source,
+                snapshot_id,
+                provider_config_version,
+                observed_at,
+                expires_at,
+                values,
+                ..
+            } => VerifiedGroups::Available(TrustedGroups {
+                source,
+                snapshot_id: *snapshot_id,
+                provider_config_version: *provider_config_version,
+                observed_at: *observed_at,
+                expires_at: *expires_at,
+                values,
+            }),
+        })
+    }
+
     pub fn subject(&self) -> &str {
         &self.0.subject
     }
@@ -230,7 +307,7 @@ impl IdentityClient {
         if status != reqwest::StatusCode::OK {
             return Err(Error::Unavailable);
         }
-        let facts: IdentityFacts = serde_json::from_slice(&bytes).map_err(|error| {
+        let mut facts: IdentityFacts = serde_json::from_slice(&bytes).map_err(|error| {
             if error.is_data() {
                 Error::Rejected
             } else {
@@ -252,10 +329,17 @@ impl IdentityClient {
             || facts.auth_time <= 0
             || facts.auth_time >= facts.expires_at
             || !rss_identity_contracts::canonical_methods(&facts.amr)
+            || !facts.groups.structurally_valid_at(now)
         {
             return Err(Error::Rejected);
         }
-        Ok(VerifiedIdentity(facts))
+        if matches!(&facts.groups, rss_identity_contracts::groups::Groups::Available { expires_at, .. } if *expires_at <= now)
+        {
+            facts.groups = rss_identity_contracts::groups::Groups::Expired {
+                version: rss_identity_contracts::groups::VERSION,
+            };
+        }
+        Ok(VerifiedIdentity(facts, c.clock.clone(), now))
     }
 }
 #[cfg(test)]
@@ -295,7 +379,7 @@ mod response_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     fn facts() -> Value {
         let now = 1000;
-        json!({"subject":"pairwise-subject","tenant_id":"11111111-1111-4111-8111-111111111111","session_id":"22222222-2222-4222-8222-222222222222","client_id":"mdm","audience":"mdm-api","issuer":"https://identity.test","auth_time":now-10,"expires_at":now+300,"amr":["pwd"],"acr":"unspecified"})
+        json!({"subject":"pairwise-subject","tenant_id":"11111111-1111-4111-8111-111111111111","session_id":"22222222-2222-4222-8222-222222222222","client_id":"mdm","audience":"mdm-api","issuer":"https://identity.test","auth_time":now-10,"expires_at":now+300,"amr":["pwd"],"acr":"unspecified","groups":{"version":1,"status":"unavailable","reason":"local_identity"}})
     }
     async fn response(
         status: u16,
@@ -363,6 +447,97 @@ mod response_tests {
         result
     }
     const HEADERS: &str = "Cache-Control: no-store\r\nContent-Type: application/json\r\n";
+    fn available_groups() -> Value {
+        json!({"version":1,"status":"available","source":{"provider_id":"33333333-3333-4333-8333-333333333333","issuer":"https://idp.test/realm"},"snapshot_id":"44444444-4444-4444-8444-444444444444","provider_config_version":7,"observed_at":990,"expires_at":1010,"values":["/staff"]})
+    }
+    #[tokio::test]
+    async fn trusted_groups_are_required_validated_and_rechecked_on_access() {
+        let mut body = facts();
+        body["groups"] = available_groups();
+        let proof = response(200, HEADERS, body.to_string(), false)
+            .await
+            .unwrap();
+        let VerifiedGroups::Available(groups) = proof.groups().unwrap() else {
+            panic!("groups absent");
+        };
+        assert_eq!(groups.values(), &["/staff"]);
+        assert_eq!(groups.provider_config_version(), 7);
+        assert_eq!(groups.observed_at(), 990);
+        assert_eq!(groups.expires_at(), 1010);
+        assert_eq!(groups.source().issuer, "https://idp.test/realm");
+        for times in [[1000, 1010, 1010], [1000, 1009, 1010]] {
+            let clock = Arc::new(SequenceClock(std::sync::Mutex::new(times.into())));
+            let proof = response_clock(200, HEADERS, body.to_string(), false, clock)
+                .await
+                .unwrap();
+            assert_eq!(proof.subject(), "pairwise-subject");
+            assert!(matches!(proof.groups().unwrap(), VerifiedGroups::Expired));
+        }
+        for (field, value) in [
+            ("version", json!(2)),
+            ("observed_at", json!(1031)),
+            ("expires_at", json!(1291)),
+            ("snapshot_id", json!(uuid::Uuid::nil())),
+            ("provider_config_version", json!(0)),
+            ("values", json!(["b", "a"])),
+            ("values", json!(["a", "a"])),
+            ("extra", json!(true)),
+            (
+                "source",
+                json!({"provider_id":uuid::Uuid::nil(),"issuer":"https://idp.test"}),
+            ),
+        ] {
+            let mut invalid = body.clone();
+            invalid["groups"][field] = value;
+            assert!(
+                matches!(
+                    response(200, HEADERS, invalid.to_string(), false).await,
+                    Err(Error::Rejected)
+                ),
+                "{field}"
+            );
+        }
+        body.as_object_mut().unwrap().remove("groups");
+        assert!(matches!(
+            response(200, HEADERS, body.to_string(), false).await,
+            Err(Error::Rejected)
+        ));
+        body["groups"] = json!({"status":"expired","version":1,"values":["old"]});
+        assert!(matches!(
+            response(200, HEADERS, body.to_string(), false).await,
+            Err(Error::Rejected)
+        ));
+    }
+    #[tokio::test]
+    async fn future_groups_preserve_identity_but_cannot_be_used_early() {
+        for ahead in [1, 30] {
+            let mut body = facts();
+            body["groups"] = available_groups();
+            body["groups"]["observed_at"] = json!(1000 + ahead);
+            body["groups"]["expires_at"] = json!(1001 + ahead);
+            let times = [1000, 1000, 1000, 1000 + ahead, 1001 + ahead];
+            let clock = Arc::new(SequenceClock(std::sync::Mutex::new(times.into())));
+            let proof = response_clock(200, HEADERS, body.to_string(), false, clock)
+                .await
+                .unwrap();
+            assert_eq!(proof.subject(), "pairwise-subject");
+            assert!(matches!(
+                proof.groups().unwrap(),
+                VerifiedGroups::Unavailable(UnavailableReason::NotYetValid)
+            ));
+            assert!(matches!(
+                proof.groups().unwrap(),
+                VerifiedGroups::Available(_)
+            ));
+            assert!(matches!(proof.groups().unwrap(), VerifiedGroups::Expired));
+            body["groups"]["observed_at"] = json!(1031);
+            body["groups"]["expires_at"] = json!(1032);
+            assert!(matches!(
+                response(200, HEADERS, body.to_string(), false).await,
+                Err(Error::Rejected)
+            ));
+        }
+    }
     #[tokio::test]
     async fn client_rejects_each_invalid_success_binding() {
         assert!(

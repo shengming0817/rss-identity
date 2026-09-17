@@ -7,7 +7,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -23,6 +23,7 @@ pub struct ScriptedOidc {
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
     pub groups: Mutex<Vec<String>>,
+    pub issued_at_offset: AtomicI64,
     pub gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     pub arrivals: AtomicUsize,
     pub hook: Mutex<Option<Hook>>,
@@ -37,6 +38,7 @@ impl ScriptedOidc {
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
             groups: Mutex::new(vec!["staff".into()]),
+            issued_at_offset: AtomicI64::new(0),
             gate: Mutex::new(None),
             arrivals: AtomicUsize::new(0),
             hook: Mutex::new(None),
@@ -101,7 +103,19 @@ impl UpstreamOidc for ScriptedOidc {
                 subject: code.to_string(),
                 email: Some("same@example.test".into()),
                 email_verified: self.email_verified.load(Ordering::SeqCst),
-                groups: self.groups.lock().unwrap().clone(),
+                groups: rss_identity_core::groups::UpstreamGroups::present(
+                    self.groups.lock().unwrap().clone(),
+                )?,
+                issued_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+                    + self.issued_at_offset.load(Ordering::SeqCst),
+                expires_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+                    + 600,
                 assurance: self.assurance.lock().unwrap().clone().unwrap_or(
                     rss_identity_core::assurance::Assurance::new(
                         Some(
@@ -150,6 +164,7 @@ impl UpstreamOidc for ScriptedOidc {
 }
 pub fn service(f: &Fixture, oidc: Arc<dyn UpstreamOidc>) -> Federation {
     Federation::new(
+        rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
         f.store.clone(),
         oidc,
         StateSigner::new([7; 32], "https://identity.example.test").unwrap(),

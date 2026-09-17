@@ -385,20 +385,21 @@ pub struct UpstreamClaims {
     pub subject: String,
     pub email: Option<String>,
     pub email_verified: bool,
-    pub groups: Vec<String>,
+    pub groups: crate::groups::UpstreamGroups,
+    pub issued_at: i64,
+    pub expires_at: i64,
     pub assurance: crate::assurance::Assurance,
 }
 
 impl UpstreamClaims {
     pub fn validate(&self) -> Result<(), FederationError> {
+        self.groups.validate()?;
+        if self.issued_at <= 0 || self.expires_at <= self.issued_at {
+            return Err(FederationError::Claims);
+        }
         if self.subject.is_empty()
             || self.subject.len() > 255
             || self.subject.chars().any(char::is_control)
-            || self.groups.len() > 100
-            || self
-                .groups
-                .iter()
-                .any(|s| s.is_empty() || s.len() > 256 || s.chars().any(char::is_control))
             || self
                 .email
                 .as_ref()

@@ -32,6 +32,7 @@ async fn real_identity_ui_management_seam() -> anyhow::Result<()> {
         keycloak_totp: true,
     }])?;
     let service = Federation::new(
+        rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
         f.store.clone(),
         Arc::new(upstream),
         StateSigner::new([7; 32], &origin)?,

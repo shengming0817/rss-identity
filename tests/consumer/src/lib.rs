@@ -237,6 +237,36 @@ mod tests {
             http.clone(),
         )
         .await?;
+        if let Ok(credential) = std::env::var("IDENTITY_TEST_GROUP_CREDENTIAL") {
+            let credential = Zeroizing::new(credential);
+            let proof = product.sdk.validate(&credential).await?;
+            assert!(!proof.subject().is_empty());
+            match std::env::var("IDENTITY_TEST_GROUP_STATUS")?.as_str() {
+                "available" => {
+                    let rss_identity_client::VerifiedGroups::Available(groups) = proof.groups()?
+                    else {
+                        anyhow::bail!("consumer groups unavailable");
+                    };
+                    assert_eq!(groups.values(), &["/staff"]);
+                    let source: &rss_identity_client::GroupSource = groups.source();
+                    assert!(!source.provider_id.is_nil());
+                    assert!(!groups.snapshot_id().is_nil());
+                    assert!(groups.provider_config_version() > 0);
+                }
+                "missing" => assert!(matches!(
+                    proof.groups()?,
+                    rss_identity_client::VerifiedGroups::Unavailable(
+                        rss_identity_client::UnavailableReason::ClaimMissing
+                    )
+                )),
+                "expired" => assert!(matches!(
+                    proof.groups()?,
+                    rss_identity_client::VerifiedGroups::Expired
+                )),
+                _ => anyhow::bail!("unknown consumer expectation"),
+            }
+            return Ok(());
+        }
         let (authorization, pending) = product.begin();
         let session = post(
             &http,
@@ -293,7 +323,12 @@ mod tests {
                 .await?,
         )?;
         let session = product.exchange(pending, &callback).await?;
-        product.verify(&session).await?;
+        assert!(matches!(
+            product.verify(&session).await?.groups()?,
+            rss_identity_client::VerifiedGroups::Unavailable(
+                rss_identity_client::UnavailableReason::LocalIdentity
+            )
+        ));
         product.verify(&session).await?;
         let logout = http
             .post(format!(

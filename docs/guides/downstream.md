@@ -40,3 +40,27 @@ Hydra 注册 authorization_code/code/openid/client_secret_basic 和精确 redire
 故障证明：canonical downstream_atomic 覆盖清理领取回滚、并发唯一远程调用、远程失败后退避、窗口内结算未知后以同一 consent/sid 重试、最终删除提交未知及 cleaned 事件唯一性。Hydra resolver 单测覆盖空/混合/越界解析和 hostname 错配，真实 TLS fixture 使用 localhost DNS SAN 与精确 loopback allowlist。
 
 MFA / 新鲜度使用在线 `VerifiedIdentity` 的 `acr/amr/auth_time`；Hydra 标准 ID Token 保持 `acr=unspecified`、不投影上游 AMR，其 Hydra 登录时间不能代表上游 MFA 时间。
+
+## 可信组消费（#2433）
+
+`groups` v1 是本版本必填字段；升级时一起固定 server 和 SDK，不接受旧缺字段响应。MDM #2363 固定消费本交付 revision，并自行证明接入 T2，不是 Identity 的反向依赖或发布门。标准 Hydra token 不携带这份组 authority。
+
+```rust,ignore
+let identity = client.validate(credential).await?;
+match identity.groups()? {
+    rss_identity_client::VerifiedGroups::Available(groups) => {
+        // 在本次请求内，将 tenant/subject、provider_id/issuer、精确组值与产品自己的映射匹配。
+        // snapshot_id 标识一次采集，provider_config_version 不是产品授权映射版本。
+        product_mapping.check(&identity, groups.source(), groups.values())?;
+    }
+    rss_identity_client::VerifiedGroups::Unavailable(_)
+    | rss_identity_client::VerifiedGroups::Expired => {
+        // 基础身份仍可使用；本次组依赖操作不予授权，需要时重新登录取得新事实。
+        return Err(ProductError::GroupsRequired);
+    }
+}
+```
+
+独立 `tests/consumer` 在真实 PG＋Keycloak＋Hydra 链路验证 available 和 expired（后者基础身份仍有效），不导入服务端 crate。生产固定 Git pin/lock、候选摘要与实际运行结果以 #2433 PR 交付记录为准，不以本段说明替代执行证据。
+
+SDK 根导出 `GroupSource` 和 `UnavailableReason`；仅依赖 client 即可精确匹配 `VerifiedGroups::Unavailable(UnavailableReason::ClaimMissing)`。`NotYetValid` 表示允许偏差内的未来观察：基础身份可用，到本地 `iat` 前不能访问可信组。使用时重新调用 `groups()`；不缓存成功证明。

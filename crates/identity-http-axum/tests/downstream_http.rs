@@ -1,5 +1,6 @@
 //! Real Hydra code flow through the production bridge and TLS gateway.
 #![allow(dead_code)]
+mod group_facts_support;
 mod keycloak_support;
 #[path = "../../identity-postgres/tests/support/mod.rs"]
 mod support;
@@ -78,6 +79,7 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
         keycloak_totp: true,
     }])?;
     let federation = Federation::new(
+        rss_identity_core::groups::GroupFactsMaxAge::new(30).unwrap(),
         f.store.clone(),
         Arc::new(oidc),
         StateSigner::new([7; 32], origin)?,
@@ -94,7 +96,7 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
                 scopes: vec!["openid".into()],
                 claims: ClaimMapping {
                     email: None,
-                    groups: None,
+                    groups: Some("groups".into()),
                 },
                 jit: true,
             }
@@ -127,14 +129,19 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
     let d = Downstream::new(
         f.store.clone(),
         hydra.clone(),
-        vec![Registration::new(RegistrationInput {
-            tenant: f.key.tenant,
-            client: "mdm".into(),
-            audience: "mdm-api".into(),
-            issuer: issuer.clone(),
-            redirect: "https://mdm.example.test/auth/callback".into(),
-            version: 1,
-        })?],
+        ["mdm", "other"]
+            .into_iter()
+            .map(|client| {
+                Registration::new(RegistrationInput {
+                    tenant: f.key.tenant,
+                    client: client.into(),
+                    audience: format!("{client}-api"),
+                    issuer: issuer.clone(),
+                    redirect: format!("https://{client}.example.test/auth/callback"),
+                    version: 1,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         Lifetimes::new(LifetimeLimits {
             request: 300,
             code: 60,
@@ -147,7 +154,13 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
     let app = federated_router(federation.clone(), config.clone())?.merge(downstream_router(
         d,
         config,
-        BTreeMap::from([("mdm".into(), Zeroizing::new(VALIDATION.into()))]),
+        BTreeMap::from([
+            ("mdm".into(), Zeroizing::new(VALIDATION.into())),
+            (
+                "other".into(),
+                Zeroizing::new("fixture-validation-other-secret-32bytes".into()),
+            ),
+        ]),
     )?);
     let listener = tokio::net::TcpListener::bind(format!(
         "127.0.0.1:{}",
@@ -223,6 +236,7 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
     .await?;
     let old_proof = sdk.validate(&old_token).await?;
     assert_eq!(old_proof.acr().as_str(), "unspecified");
+    let old_snapshot = group_facts_support::available(&old_proof, p.id, &["/staff"]);
     let step = post(
         &c,
         origin,
@@ -269,6 +283,10 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
     .await?;
     let proof = sdk.validate(&token).await?;
     assert_eq!(proof.acr().as_str(), "mfa");
+    assert_ne!(
+        group_facts_support::available(&proof, p.id, &["/staff"]),
+        old_snapshot
+    );
     assert_eq!(proof.subject(), old_proof.subject());
     assert_ne!(proof.session_id(), old_proof.session_id());
     let facts:Value = sqlx::query_scalar("SELECT auth_facts FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
@@ -290,16 +308,8 @@ async fn real_totp_assurance_reaches_hydra_and_validation_client() -> anyhow::Re
         .transpose()?
         .unwrap_or_default();
     assert!(methods.is_empty());
-    federation
-        .enable_provider(
-            session_actor(&f.store, f.candidate().await?).await?,
-            p.id,
-            p.version,
-            false,
-            deadline(),
-        )
+    group_facts_support::lifecycle(&f, &federation, &p, &sdk, &c, origin, &issuer, &token, csrf)
         .await?;
-    assert!(sdk.validate(&token).await.is_err());
     server.abort();
     let _ = server.await;
     f.close().await;

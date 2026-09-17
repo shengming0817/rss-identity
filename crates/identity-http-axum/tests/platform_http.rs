@@ -201,7 +201,8 @@ async fn platform_http_enforces_roles_and_activates_created_tenants() -> anyhow:
 async fn cli_sso_code_is_single_use_pkce_bound_and_revocable() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = federation_support::service(&f, federation_support::ScriptedOidc::new());
+    let upstream = federation_support::ScriptedOidc::new();
+    let s = federation_support::service(&f, upstream.clone());
     let mut settings = federation_support::settings().input();
     settings.jit = false;
     let p = s
@@ -280,6 +281,14 @@ async fn cli_sso_code_is_single_use_pkce_bound_and_revocable() -> anyhow::Result
             .await
             .is_err()
     );
+    let collected: serde_json::Value = sqlx::query_scalar(
+        "SELECT auth_facts FROM identity_authority.cli_grants WHERE code_hash=$1",
+    )
+    .bind(rss_identity_core::federation::digest(&code).as_slice())
+    .fetch_one(&f.owner)
+    .await?;
+    *upstream.groups.lock().unwrap() = vec!["must-not-be-collected-at-exchange".into()];
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let issued = f
         .store
         .exchange_cli_login(
@@ -290,6 +299,16 @@ async fn cli_sso_code_is_single_use_pkce_bound_and_revocable() -> anyhow::Result
             deadline(),
         )
         .await?;
+    let exchanged: serde_json::Value = sqlx::query_scalar(
+        "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1::uuid",
+    )
+    .bind(issued.view().id.to_string())
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(
+        collected, exchanged,
+        "delayed CLI exchange preserves snapshot ID and deadline"
+    );
     assert!(issued.identity().platform_administrator);
     assert!(!issued.identity().administrator);
     assert!(

@@ -64,6 +64,7 @@ fn config() -> anyhow::Result<ProviderSettings> {
 }
 fn service(f: &Fixture, upstream: Arc<dyn UpstreamOidc>) -> Federation {
     Federation::new(
+        rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
         f.store.clone(),
         upstream,
         StateSigner::new([7; 32], ORIGIN).unwrap(),
@@ -453,8 +454,8 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
     let facts:Value=sqlx::query_scalar("SELECT auth_facts FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid").bind(A).bind(a.view().id.to_string()).fetch_one(&f.owner).await?;
     assert_eq!(facts["email"], "same@example.test");
     assert_eq!(facts["email_verified"], true);
-    assert_eq!(facts["groups"], json!(["staff"]));
-    assert_eq!(facts["mapping_version"], p.version);
+    assert_eq!(facts["groups"]["values"], json!(["/staff"]));
+    assert_eq!(facts["provider_config_version"], p.version);
     let local = federation_support::session(&f).await?;
     let local_cookie = format!(
         "{BROWSER}; __Host-identity-session={}",

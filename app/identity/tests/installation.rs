@@ -325,6 +325,7 @@ async fn credential_rekey_is_bounded_and_fenced(
         .activate_registered_tenants(assembly::deadline())
         .await?;
     let federation = Federation::new(
+        rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
         authority.clone(),
         Arc::new(rss_identity_oidc::HttpOidc::new(vec![])?),
         StateSigner::new([7; 32], "https://identity.test")?,

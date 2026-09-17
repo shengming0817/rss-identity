@@ -65,6 +65,7 @@
     },
     "oidc": {
       "assurance_profiles": [],
+      "group_facts_max_age_seconds": 300,
       "state_key_file": "/srv/rss-identity/input/state-key-hex",
       "credential_keyring": {
         "active_key_id": "initial",

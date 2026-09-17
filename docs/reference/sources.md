@@ -106,3 +106,10 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - Hydra 固定 revision 的 consent/handler.go（见 I06 来源）：复核精确撤销和幂等204；补 PG 领取、远程失败、结算未知与最终事件恢复验证，不以204推断迟到窗口结束。
 
 前三项为本次读取的上游分支快照参考，只用于设计模式，不复制源码或新增依赖；构建身份仍由本仓 lock 持有。
+
+
+## #2433 组事实
+
+- [openidconnect-rs verifier，4.0.1 固定源码](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/verification/mod.rs)：实际读取 registry 发布源码，复用验签/issuer/audience/nonce/exp；默认 iat verifier 不额外检查时间，Identity 在 PG 采集时显式验证 signed iat/exp 与当前时间，并冻结有界期限。
+- [Keycloak 26.7.3 GroupMembershipMapper.java](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/GroupMembershipMapper.java)：实际读取 `useFullPath` 和 `setClaim`，启用 `full.path=true` 保持父子路径；不复制源码，不自动展开祖先。
+- [Keycloak 26.7.3 OIDCAttributeMapperHelper.java](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/OIDCAttributeMapperHelper.java)：真实撤组 T2 后实际读取 `mapAttributeValue`/`mapClaim`，空集合转 null 并省略 claim；consumer 必须保留 missing 与真实空数组区别。

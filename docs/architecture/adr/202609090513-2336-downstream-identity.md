@@ -4,7 +4,7 @@
 
 ## 唯一 owner
 
-Identity 持有账户、成员、中央 session 和 grant 关联；Hydra 只持有标准 OIDC 协议状态。`identity-contracts` 是 wire 数据，`identity-client` 是不含账户/KDF/PG/OIDC 的在线验证客户端，`identity-hydra` 是受控 admin transport。core 定义窄 port，Postgres coordinator 唯一持有结算并返回私有构造的 ValidatedIdentity，HTTP 唯一映射到 wire DTO；PG 不依赖 contracts。I02 的 SessionSnapshot 检查骨架和假 Hydra bridge 已被删除，不保留兼容别名或第二条认证入口。
+Identity 持有账户、成员、中央 session 和 grant 关联；Hydra 只持有标准 OIDC 协议状态。`identity-contracts` 持有 wire 数据与共享规范化词表，`identity-client` 是不含账户/KDF/PG/OIDC 的在线验证客户端，`identity-hydra` 是受控 admin transport。core 定义窄 port，Postgres coordinator 唯一持有结算并返回私有构造的 ValidatedIdentity，HTTP 组装最终响应。I09 已将 ACR/AMR 闭集收敛到 contracts；#2433 的 groups 投影沿用该共享类型模式，PG 持有独立私有快照及其 codec，不以 wire DTO 持久化认证来源或到期状态。此处校正 I06 初稿的“PG 不依赖 contracts”，不改变已有结算与信任 owner。I02 的 SessionSnapshot 检查骨架和假 Hydra bridge 已被删除，不保留兼容别名或第二条认证入口。
 
 新增 product_subjects 按 tenant/client/principal 稳定保存随机 subject，直接作为 Hydra login subject，不能用 force_subject_identifier 替代（它不改变 introspection sub）。downstream_grants 引用中央 session 和 subject，不复制 epoch 或认证事实。注册版本及完整配置指纹共同约束在途和已发授权，避免仅改 redirect 却复用版本导致旧授权存活。I06 历史初始版本为 schema v5，仅显式重建开发库；当前安装以 [#2427 ADR](202609130900-2427-platform-onboarding.md) 为准；所有新表 FORCE tenant RLS，runtime 精确权限，maintenance 无新表权限。新事件 identity.downstream.security V1 与状态同事务，不包含挑战、cookie、code、token 或 secret。
 
@@ -20,7 +20,7 @@ Hydra v26.2 consent 的 login_challenge 是内部 flow ID，与加密浏览器 c
 
 产品每个请求以独立 Basic 凭据调用单一 internal validate；不接受 cookie 代替服务凭据，验证 secret 与 Hydra client secret 分开。先 introspect，再校验 token_use、issuer/client/audience/sub/scope/expiry/ext，最后在租户 guard 下复用中央 session 的账户/member/session/source epoch 判定。validate 只读，不 touch idle、不缓存成功；cookie 旋转保持 session ID，因此不切断既有 grant。失效提交后开始的验证拒绝；已通过的在途业务不追溯取消。
 
-本地来源 amr 为 pwd；当前联合来源没有足够 AMR/ACR 证据，返回空 amr 和 unspecified acr，不推断 MFA。首版省略可选 groups。expires_at 取 token、grant 安全窗口、中央 idle/absolute 的最小值，过期严格拒绝；iat/nbf 的未来时间允许显式 clock_skew。client 不用本机时钟重新裁定服务端 auth_time，只检查正值及其早于 expires_at，通过必填 Clock 位置参数读取消费方墙钟，严格拒绝已过期及请求期间时钟回拨的结果；生产显式注入 SystemClock，无默认时钟或成功缓存。
+本地来源 amr 为 pwd；联合 assurance 按 [I09](202609091607-2339-assurance-recovery.md) 从已验签事实及显式 profile 解释，缺证据不推断 MFA。#2433 在线响应必填 groups v1，组缺失或过期保留基础身份；SDK 只通过借用当前身份的访问方法暴露未过期组，详见[在线协议](../identity-wire-v1.md)。expires_at 取 token、grant 安全窗口、中央 idle/absolute 的最小值，过期严格拒绝；iat/nbf 的未来时间允许显式 clock_skew。client 不用本机时钟重新裁定服务端 auth_time，只检查正值及其早于 expires_at，通过必填 Clock 位置参数读取消费方墙钟，严格拒绝已过期及请求期间时钟回拨的结果；生产显式注入 SystemClock，无默认时钟或成功缓存。
 
 cleanup_once 按显式 tenant、limit（1–128）和 deadline 运行，由 I08 调度。扫描、租约领取及结算各自有界，远程调用不占 PG 事务；Accepting 租约到期后视作未知，不恢复为可重发。先保持本地拒绝，再按 consent_request_id 清理 token，按 sid 清理协议登录会话。204 可能发生在迟到 verifier 尚未消费前，故重复清理到 request+code+token+skew+60秒执行余量的窗口末端；最后确认清理并同事务写事件后删除流程行，subject 映射保留。revoking 只在首次转换时发一次，后续重试只更新调度元数据，最终发一次 cleaned；仍复用同一事务结算 owner。没有独立持久队列、永久 cleaned 状态或全局租户 SQL 旁路。
 

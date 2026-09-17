@@ -115,9 +115,16 @@ impl CredentialKeyringConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OidcConfig {
+    pub group_facts_max_age_seconds: i64,
     pub assurance_profiles: Vec<AssuranceProfileConfig>,
     pub state_key_file: String,
     pub credential_keyring: CredentialKeyringConfig,
+}
+impl OidcConfig {
+    pub fn group_policy(&self) -> Result<rss_identity_core::groups::GroupFactsMaxAge, AppError> {
+        rss_identity_core::groups::GroupFactsMaxAge::new(self.group_facts_max_age_seconds)
+            .map_err(|_| AppError::Configuration)
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -203,6 +210,7 @@ impl RuntimeConfig {
             return Err(AppError::Configuration);
         }
         self.budgets.validate()?;
+        self.oidc.group_policy()?;
         self.storage.binding()?;
         if self.oidc.assurance_profiles.len() > 128 || self.hydra.clients.len() > 128 {
             return Err(AppError::Configuration);

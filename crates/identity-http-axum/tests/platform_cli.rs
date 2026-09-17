@@ -74,6 +74,7 @@ async fn real_cli_tls_login_provision_add_unknown_and_logout() -> anyhow::Result
     f.bootstrap().await?;
     let upstream = federation_support::ScriptedOidc::new();
     let federation = Federation::new(
+        rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
         f.store.clone(),
         upstream.clone(),
         StateSigner::new([7; 32], &origin)?,

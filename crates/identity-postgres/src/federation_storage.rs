@@ -71,7 +71,7 @@ pub(crate) async fn read_provider(
 pub(crate) struct Origin {
     pub identity: Uuid,
     pub epoch: i64,
-    pub facts: serde_json::Value,
+    pub facts: crate::auth_facts::AuthenticationFacts,
 }
 pub(crate) async fn origin(
     c: &mut PgConnection,
@@ -91,7 +91,7 @@ pub(crate) async fn origin(
         Some(identity) => Ok(Some(Origin {
             identity,
             epoch: r.try_get("provider_epoch")?,
-            facts: r.try_get("auth_facts")?,
+            facts: crate::auth_facts::AuthenticationFacts::decode(r.try_get("auth_facts")?)?,
         })),
         None => {
             if r.try_get::<Option<i64>, _>("provider_epoch")?.is_some()
@@ -106,23 +106,24 @@ pub(crate) async fn origin(
 }
 pub(crate) async fn check_origin(
     c: &mut PgConnection,
-    tenant: TenantId,
+    key: AccountKey,
     origin: &Origin,
-) -> Result<(), rss_transactional_messaging_postgres::PgError> {
-    let valid: bool = sqlx::query_scalar(concat!(
-        "SELECT EXISTS(SELECT FROM identity_authority.external_identities e JOIN identity",
+) -> Result<
+    rss_identity_contracts::groups::GroupSource,
+    rss_transactional_messaging_postgres::PgError,
+> {
+    let row = sqlx::query(concat!(
+        "SELECT e.provider_id,e.issuer FROM identity_authority.external_identities e JOIN identity",
         "_authority.providers p USING(tenant_id,provider_id) WHERE e.tenant_id=$1::uuid A",
-        "ND e.identity_id=$2 AND p.enabled AND p.revocation_epoch=$3)"
+        "ND e.identity_id=$2 AND p.enabled AND p.revocation_epoch=$3 AND p.config_version=$4 AND e.principal_id=$5"
     ))
-    .bind(tenant.to_string())
-    .bind(origin.identity)
-    .bind(origin.epoch)
-    .fetch_one(c)
-    .await?;
-    if !valid {
-        return Err(reject());
-    }
-    Ok(())
+    .bind(key.tenant.to_string()).bind(origin.identity).bind(origin.epoch)
+    .bind(origin.facts.provider_config_version).bind(key.principal.as_uuid())
+    .fetch_optional(c).await?.ok_or_else(reject)?;
+    Ok(rss_identity_contracts::groups::GroupSource {
+        provider_id: row.try_get("provider_id")?,
+        issuer: row.try_get("issuer")?,
+    })
 }
 pub(crate) async fn identity(
     c: &mut PgConnection,

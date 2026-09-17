@@ -27,7 +27,7 @@ IdP settings JSON：
 }
 ```
 
-只支持 confidential client Code + S256；openid 必需，offline_access 禁止。claim mapping 只选直接 claim 名，不执行表达式；subject/issuer/audience/nonce 等验证字段不能映射。groups mapper 由 Keycloak owner 配置；Identity 不把 groups 转为产品角色。
+只支持 confidential client Code + S256；openid 必需，offline_access 禁止。claim mapping 只选直接 claim 名，不执行表达式；subject/issuer/audience/nonce 等验证字段不能映射。groups mapper 由 Keycloak owner 配置为 `oidc-group-membership-mapper`、`full.path=true`、`id.token.claim=true`，使用 `/parent/child` 完整路径。Identity 精确保留这些标识，不展开父组或把组转为产品角色。
 
 管理 API 路径与输入见 [wire I07](../architecture/identity-wire-v1.md#日常管理-httpi07)。
 
@@ -35,7 +35,7 @@ IdP settings JSON：
 
 ## HTTP 消费
 
-用部署参数构造 `HttpOidc`、`StateSigner` 和 `Federation`，传给 `federated_router(federation, HttpConfig)`。该 router 包含原本地会话路由并使用同一个 Authority。传入真实 ConnectInfo；不信任客户端 forwarded headers。详见 [wire](../architecture/identity-wire-v1.md)。
+用部署参数构造 `HttpOidc`、`StateSigner` 和 `Federation`（首个参数为经过校验的 `GroupFactsMaxAge`），传给 `federated_router(federation, HttpConfig)`。该 router 包含原本地会话路由并使用同一个 Authority。传入真实 ConnectInfo；不信任客户端 forwarded headers。详见 [wire](../architecture/identity-wire-v1.md)。
 
 共享回调必须带 RFC 9207 `iss`，在领取 attempt 和发送 code 前与精确 issuer 比较；不支持该参数的 IdP 不可接入。开始返回 authorization_url；浏览器跳转至该 URL。回调成功 303 到注册 return_target，关联结果附加 `identity_result=linked|already_linked`，不含归属信息；部署回跳不得预占 `identity_result`。中央 session cookie 与原 I04 一致；GET session 可获取 session/CSRF。link 复用当前 cookie+CSRF，本地账户另提交密码；纯联合账户先跳原 IdP 重新认证，再跳目标 IdP。
 
@@ -53,3 +53,7 @@ make -k ci CI_BASE=origin/develop
 ```
 
 `test-federated` 需要 Docker 与 openssl，自动创建短期测试 CA/Keycloak TLS fixture 与独立 PG，严格核对 canonical 测试集合；所有测试私钥和数据库随 fixture 清理。具体运行结果、镜像 digest、SHA 与 lock 在实现 PR 记录。
+
+部署的 `oidc.group_facts_max_age_seconds` 必填，示例值 300，范围 1–300；不属于 provider 管理 API，也不需要前端配置。只有新的可信上游认证更新快照，普通会话续期不会延长组期限。已有快照不随配置变更重算，立即撤销使用 provider 或会话撤销。具体状态、时间与来源绑定见 [groups wire](../architecture/identity-wire-v1.md#可信组事实2433)。
+
+Keycloak 26.7.3 的 `OIDCAttributeMapperHelper.mapAttributeValue` 在集合为空时不写 claim；因此该 mapper 的零成员登录会得到 `unavailable/claim_missing`，不是 `available` 的空数组。Identity 不推断缺失含义；上游实际发送已签名 `[]` 时才表示已验证空组。
