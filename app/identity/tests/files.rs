@@ -51,70 +51,111 @@ fn binary_help_uses_identity_name() {
 }
 
 #[test]
-fn runtime_config_is_strict_and_contains_no_maintenance_secret_slot() {
+fn runtime_config_is_explicit_local_and_rejects_central_configuration() {
     use rss_identity_app::config::RuntimeConfig;
-    let v: serde_json::Value =
+    let example: serde_json::Value =
         serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
-    let mut runtime = v["runtime"].clone();
-    let parsed: RuntimeConfig = serde_json::from_value(runtime.clone()).unwrap();
+    let parsed: RuntimeConfig = serde_json::from_value(example.clone()).unwrap();
     parsed.validate().unwrap();
-    runtime["maintenance_password_file"] = serde_json::json!("/unavailable");
-    assert!(serde_json::from_value::<RuntimeConfig>(runtime).is_err());
-    for (key, bad) in [
-        ("format_version", serde_json::json!(0)),
-        ("public_gateway", v["runtime"]["private_gateway"].clone()),
+    assert!(parsed.oidc.is_none());
+    let mut missing_manager = example.clone();
+    missing_manager["storage"]["tenants"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("33333333-3333-4333-8333-333333333333"));
+    assert!(
+        serde_json::from_value::<RuntimeConfig>(missing_manager)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    let mut complete = example.clone();
+    complete["storage"]["tenants"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("33333333-3333-4333-8333-333333333333"));
+    complete["bootstrapAccounts"].as_array_mut().unwrap().push(serde_json::json!({"tenantId":"33333333-3333-4333-8333-333333333333", "principalId":"44444444-4444-4444-8444-444444444444"}));
+    assert!(
+        serde_json::from_value::<RuntimeConfig>(complete.clone())
+            .unwrap()
+            .validate()
+            .is_ok()
+    );
+    complete["bootstrapAccounts"][1] = complete["bootstrapAccounts"][0].clone();
+    assert!(
+        serde_json::from_value::<RuntimeConfig>(complete)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    for key in [
+        "format_version",
+        "bootstrap",
+        "public_origin",
+        "maintenance_password_file",
+        "private_gateway",
+        "hydra",
+        "system_tenant",
+        "runtime_source",
     ] {
-        let mut runtime = v["runtime"].clone();
-        runtime[key] = bad;
+        let mut value = example.clone();
+        value[key] = serde_json::json!("retired");
+        assert!(serde_json::from_value::<RuntimeConfig>(value).is_err());
+    }
+    for (key, value) in [
+        ("formatVersion", serde_json::json!(2)),
+        (
+            "instanceId",
+            serde_json::json!("00000000-0000-0000-0000-000000000000"),
+        ),
+        ("publicGateway", serde_json::json!("0.0.0.0")),
+    ] {
+        let mut bad = example.clone();
+        bad[key] = value;
         assert!(
-            serde_json::from_value::<RuntimeConfig>(runtime)
+            serde_json::from_value::<RuntimeConfig>(bad)
                 .unwrap()
                 .validate()
                 .is_err()
         );
     }
+    let mut wrong_tenant = example.clone();
+    wrong_tenant["bootstrapAccounts"][0]["tenantId"] =
+        serde_json::json!("22222222-2222-4222-8222-222222222222");
+    assert!(
+        serde_json::from_value::<RuntimeConfig>(wrong_tenant)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
 }
 
 #[test]
-fn group_facts_policy_is_required_and_deployment_scoped() {
+fn group_facts_policy_is_required_only_when_oidc_is_configured() {
     use rss_identity_app::config::RuntimeConfig;
-    let example: serde_json::Value =
-        serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
     use rss_identity_core::groups::GroupFactsMaxAge;
-    let values = [
+    let mut example: serde_json::Value =
+        serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
+    example["oidc"] = serde_json::json!({"groupFactsMaxAgeSeconds":300,"assuranceProfiles":[],"stateKeyFile":"/host/state.key","credentialKeyring":{"activeKeyId":"host","keys":[{"keyId":"host","path":"/host/credential.key"}]},"returnTargets":{"home":"https://identity.example.test/"}});
+    for value in [
         GroupFactsMaxAge::MIN_SECONDS - 1,
         GroupFactsMaxAge::MIN_SECONDS,
         GroupFactsMaxAge::MAX_SECONDS,
         GroupFactsMaxAge::MAX_SECONDS + 1,
-    ];
-    let expected: Vec<bool> = values
-        .iter()
-        .map(|v| GroupFactsMaxAge::new(*v).is_ok())
-        .collect();
-    // Exercise the deployment predicate with the Rust owner's boundaries, rather
-    // than letting the independent Python renderer drift to a different policy.
-    let output = std::process::Command::new("python3")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hack"))
-        .args(["-c", "import deploy,json,sys; print(json.dumps([deploy.valid_group_facts_max_age(v) for v in json.loads(sys.argv[1])]))", &serde_json::to_string(&values).unwrap()])
-        .output().unwrap();
-    assert!(output.status.success());
-    assert_eq!(
-        serde_json::from_slice::<Vec<bool>>(&output.stdout).unwrap(),
-        expected
-    );
-    for value in values {
-        let mut runtime = example["runtime"].clone();
-        runtime["oidc"]["group_facts_max_age_seconds"] = value.into();
-        let config: RuntimeConfig = serde_json::from_value(runtime).unwrap();
+    ] {
+        let mut runtime = example.clone();
+        runtime["oidc"]["groupFactsMaxAgeSeconds"] = value.into();
         assert_eq!(
-            config.validate().is_ok(),
+            serde_json::from_value::<RuntimeConfig>(runtime)
+                .unwrap()
+                .validate()
+                .is_ok(),
             GroupFactsMaxAge::new(value).is_ok()
         );
     }
-    let mut runtime = example["runtime"].clone();
-    runtime["oidc"]
+    example["oidc"]
         .as_object_mut()
         .unwrap()
-        .remove("group_facts_max_age_seconds");
-    assert!(serde_json::from_value::<RuntimeConfig>(runtime).is_err());
+        .remove("groupFactsMaxAgeSeconds");
+    assert!(serde_json::from_value::<RuntimeConfig>(example).is_err());
 }

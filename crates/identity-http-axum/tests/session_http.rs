@@ -1,5 +1,4 @@
 //! Real PG + in-process Router seam (T2), without claiming product binary/TLS T3.
-#[allow(dead_code)]
 #[path = "../../identity-postgres/tests/support/mod.rs"]
 mod support;
 use axum::{
@@ -32,7 +31,7 @@ fn request(
 ) -> Request<Body> {
     let mut req = Request::builder()
         .method(method)
-        .uri(format!("/api/v1/tenants/{A}/{path}"))
+        .uri(format!("/api/v2/tenants/{A}/{path}"))
         .header("origin", ORIGIN)
         .header("content-type", "application/json")
         .header("x-identity-request", "1");
@@ -73,7 +72,7 @@ async fn successful_login(app: &Router) -> anyhow::Result<(String, String, Value
     let value = body(response).await?;
     Ok((
         header.split(';').next().unwrap().into(),
-        value["csrf_token"].as_str().unwrap().into(),
+        value["csrfToken"].as_str().unwrap().into(),
         value,
     ))
 }
@@ -118,7 +117,7 @@ async fn session_http_login_cookie_csrf_and_replacement() -> anyhow::Result<()> 
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    let csrf = replacement["csrf_token"].as_str().unwrap();
+    let csrf = replacement["csrfToken"].as_str().unwrap();
     let a = app.clone().oneshot(request(
         "POST",
         "session/refresh",
@@ -152,10 +151,10 @@ async fn session_http_login_cookie_csrf_and_replacement() -> anyhow::Result<()> 
     let rotated = body(success).await?;
     assert_eq!(rotated["session"]["id"], replacement["session"]["id"]);
     assert_eq!(
-        rotated["session"]["absolute_expires_at"],
-        replacement["session"]["absolute_expires_at"]
+        rotated["session"]["absoluteExpiresAt"],
+        replacement["session"]["absoluteExpiresAt"]
     );
-    let csrf = rotated["csrf_token"].as_str().unwrap();
+    let csrf = rotated["csrfToken"].as_str().unwrap();
     let list = body(
         app.clone()
             .oneshot(request("GET", "sessions", Some(&cookie), None, json!(null)))
@@ -328,7 +327,7 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
         idle
     );
     let mut req = request("GET", "session", Some(&cookie), None, json!(null));
-    *req.uri_mut() = format!("/api/v1/tenants/{B}/session").parse()?;
+    *req.uri_mut() = format!("/api/v2/tenants/{B}/session").parse()?;
     assert_eq!(
         app.clone().oneshot(req).await?.status(),
         StatusCode::UNAUTHORIZED
@@ -340,7 +339,7 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response.headers().contains_key("set-cookie"));
     let after = body(response).await?;
-    assert_eq!(after["session"]["idle_expires_at"].as_i64().unwrap(), idle);
+    assert_eq!(after["session"]["idleExpiresAt"].as_i64().unwrap(), idle);
     // Lax cookies may accompany cross-site top-level navigation: safe methods cannot renew idle.
     for (method, path) in [
         ("GET", "session"),
@@ -380,7 +379,7 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
         .unwrap()
         .to_owned();
     let value = body(rotated).await?;
-    assert!(value["session"]["idle_expires_at"].as_i64().unwrap() > idle);
+    assert!(value["session"]["idleExpiresAt"].as_i64().unwrap() > idle);
     let response = app
         .clone()
         .oneshot(request(
@@ -529,7 +528,7 @@ async fn session_http_lookup_never_inserts_tenant_guard() -> anyhow::Result<()> 
     ] {
         for method in ["GET", "HEAD"] {
             let mut req = request(method, "session", Some(&fake), None, json!(null));
-            *req.uri_mut() = format!("/api/v1/tenants/{target}/session").parse()?;
+            *req.uri_mut() = format!("/api/v2/tenants/{target}/session").parse()?;
             assert!(!app.clone().oneshot(req).await?.status().is_success());
         }
     }
@@ -620,6 +619,102 @@ async fn session_http_pending_commit_preserves_settlement() -> anyhow::Result<()
             }
         );
     }
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn session_http_v2_reauthentication_is_bound_and_has_no_legacy_role_surface()
+-> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let app = app(&f);
+    let (cookie, csrf, first) = successful_login(&app).await?;
+    assert_eq!(first["identity"].as_object().unwrap().len(), 2);
+    assert!(first["identity"].get("administrator").is_none());
+    for path in [
+        format!("/api/v1/tenants/{A}/session"),
+        "/auth/callback".into(),
+        "/api/v2/oidc/callback".into(),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "session/reauthenticate",
+            Some(&cookie),
+            None,
+            json!({"password":PASSWORD}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    for value in [
+        json!({"password":PASSWORD,"login":"another"}),
+        json!({"password":PASSWORD,"administrator":true}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "session/reauthenticate",
+                Some(&cookie),
+                Some(&csrf),
+                value,
+            ))
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!response.headers().contains_key("set-cookie"));
+    }
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "session/reauthenticate",
+            Some(&cookie),
+            Some(&csrf),
+            json!({"password":PASSWORD}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let replacement = response.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let value = body(response).await?;
+    assert_ne!(replacement, cookie);
+    assert_eq!(
+        value["identity"]["principalId"],
+        first["identity"]["principalId"]
+    );
+    assert_ne!(value["session"]["id"], first["session"]["id"]);
+    assert_eq!(
+        app.clone()
+            .oneshot(request("GET", "session", Some(&cookie), None, json!(null)))
+            .await?
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.oneshot(request(
+            "GET",
+            "session",
+            Some(&replacement),
+            None,
+            json!(null)
+        ))
+        .await?
+        .status(),
+        StatusCode::OK
+    );
     f.close().await;
     Ok(())
 }

@@ -1,78 +1,119 @@
-//! Fresh-install transaction. Never upgrades, repairs, or destroys an existing installation.
-use crate::{AppError, assembly, config::MigrationConfig, read_secret};
-use sqlx::{Connection, Executor, PgConnection};
-use std::path::Path;
-const RELAY: &str = "DO $$ BEGIN IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='rss_tmsg_relay') THEN CREATE ROLE rss_tmsg_relay NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION; ELSIF EXISTS(SELECT FROM pg_roles WHERE rolname='rss_tmsg_relay' AND (rolcanlogin OR rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls OR rolreplication)) OR EXISTS(SELECT FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member OR r.oid=m.roleid WHERE r.rolname='rss_tmsg_relay') THEN RAISE EXCEPTION 'unsafe relay role'; END IF; END $$;";
-const GRANTS: &str = include_str!("grants.sql");
-fn literal(value: &str) -> Result<String, AppError> {
-    if value.is_empty() || value.len() > 4096 || value.contains(['\0', '\n', '\r']) {
-        return Err(AppError::Configuration);
-    }
-    Ok(format!("'{}'", value.replace('\'', "''")))
-}
-pub async fn install(c: MigrationConfig) -> Result<(), AppError> {
-    if c.format_version != 2
-        || c.database.user == "identity_runtime"
-        || c.database.user == "identity_maintenance"
+//! Fresh reference-host installation; existing schemas are rejected without mutation.
+use crate::{AppError, config::MigrationConfig};
+use rss_identity_core::InstanceId;
+use rss_identity_postgres::{AuthorityProfile, grant_profile};
+use sqlx::{Connection, PgConnection};
+pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
+    if config.format_version != 3
+        || config.runtime_role == config.maintenance_role
+        || config.runtime_role == config.database.user
+        || config.maintenance_role == config.database.user
     {
         return Err(AppError::Configuration);
     }
-    c.storage.binding()?;
-    let runtime_secret = read_secret(Path::new(&c.runtime_password_file))?;
-    let maintenance_secret = read_secret(Path::new(&c.maintenance_password_file))?;
-    if runtime_secret.len() < 32
-        || maintenance_secret.len() < 32
-        || *runtime_secret == *maintenance_secret
-    {
-        return Err(AppError::Configuration);
-    }
-    let mut connection = PgConnection::connect_with(&c.database.sqlx()?)
+    let instance = InstanceId::parse(&config.instance_id).map_err(|_| AppError::Configuration)?;
+    let tenants = config.storage.tenants()?;
+    config.storage.binding()?;
+    let mut c = PgConnection::connect_with(&config.database.sqlx()?)
         .await
         .map_err(|_| AppError::Connection)?;
-    // A session lock serializes commit verification as well as installation. Close always releases it.
-    let result=tokio::time::timeout(std::time::Duration::from_secs(60),async{
-        sqlx::query("SELECT pg_advisory_lock(2338,1)").execute(&mut connection).await.map_err(|_|AppError::Migration)?;
-        let mut tx=connection.begin().await.map_err(|_|AppError::Migration)?;
-        sqlx::raw_sql("SET LOCAL lock_timeout='10s'; SET LOCAL statement_timeout='30s'; SET LOCAL standard_conforming_strings=on").execute(&mut *tx).await.map_err(|_|AppError::Migration)?;
-        let exists:bool=sqlx::query_scalar("SELECT to_regnamespace('identity_authority') IS NOT NULL OR to_regnamespace('rss_transactional_messaging') IS NOT NULL").fetch_one(&mut *tx).await.map_err(|_|AppError::Migration)?;
-        if !exists {
-            tx.execute(RELAY).await.map_err(|_|AppError::Migration)?;
-            tx.execute(rss_transactional_messaging_postgres::MIGRATION_SQL).await.map_err(|_|AppError::Migration)?;
-            tx.execute(rss_identity_postgres::MIGRATION_SQL).await.map_err(|_|AppError::Migration)?;
-            for (role,password) in [("identity_runtime",&runtime_secret),("identity_maintenance",&maintenance_secret)] {
-                let sql=zeroize::Zeroizing::new(format!("CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION PASSWORD {}",literal(password)?));
-                sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str())).execute(&mut *tx).await.map_err(|_|AppError::Migration)?;
-            }
-            tx.execute(GRANTS).await.map_err(|_|AppError::Migration)?;
-            sqlx::query("UPDATE identity_authority.deployment SET environment_id=$1,identity_config_version=$2,identity_public_origin=$3,product_public_origin=$4")
-                .bind(c.identity_origin.environment()).bind(c.identity_origin.version()).bind(c.identity_origin.identity_origin()).bind(c.identity_origin.product_origin()).execute(&mut *tx).await.map_err(|_|AppError::Migration)?;
-            sqlx::query("INSERT INTO rss_transactional_messaging.storage_lineage VALUES(true,$1,$2)").bind(c.storage.target.as_slice()).bind(c.storage.lineage.as_slice()).execute(&mut *tx).await.map_err(|_|AppError::Migration)?;
-            sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,$2)").bind(c.storage.system_domain_id.as_str()).bind(c.storage.generation).execute(&mut *tx).await.map_err(|_|AppError::Migration)?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let mut tx = c.begin().await?;
+        sqlx::raw_sql("SET LOCAL lock_timeout='10s'; SET LOCAL statement_timeout='30s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(2435,9)")
+            .execute(&mut *tx)
+            .await?;
+        // RSS's migration owns its relay role contract. Roles/logins are provisioned by the host operator.
+        sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
+            .execute(&mut *tx)
+            .await?;
+        // RSS leaves host default table/sequence ACLs to its migrator. Reject ambient PUBLIC
+        // grants before committing a producer installation; Identity revokes its own PUBLIC ACLs.
+        let public_grants: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE n.nspname='rss_transactional_messaging' AND a.grantee=0)",
+        ).fetch_one(&mut *tx).await?;
+        if public_grants {
+            return Err(sqlx::Error::Protocol("unexpected public storage privileges".into()));
         }
-        let relay_safe:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_roles r WHERE r.rolname='rss_tmsg_relay' AND NOT r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolbypassrls AND NOT r.rolreplication AND NOT EXISTS(SELECT FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid))").fetch_one(&mut *tx).await.map_err(|_|AppError::Migration)?;
-        if !relay_safe {return Err(AppError::Migration);}
-        // Existing installations never take a mutation/repair branch.
-        let version:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *tx).await.map_err(|_|AppError::Migration)?;
-        if version!=[8]{return Err(AppError::Migration);}
-        let matches:bool=sqlx::query_scalar("SELECT count(*)=1 AND coalesce(bool_and(environment_id=$1 AND identity_config_version=$2 AND identity_public_origin=$3 AND product_public_origin=$4),false) FROM identity_authority.deployment")
-            .bind(c.identity_origin.environment()).bind(c.identity_origin.version()).bind(c.identity_origin.identity_origin()).bind(c.identity_origin.product_origin()).fetch_one(&mut *tx).await.map_err(|_|AppError::Migration)?;
-        if !matches{return Err(AppError::Migration);}
-        let signature:String=sqlx::query_scalar(rss_identity_postgres::SCHEMA_SIGNATURE_SQL).fetch_one(&mut *tx).await.map_err(|_|AppError::Migration)?;
-        if signature!=rss_identity_postgres::SCHEMA_SIGNATURE.trim(){return Err(AppError::Migration);}
-        tx.commit().await.map_err(|_|AppError::Migration)?;
-        // Verify real runtime/maintenance logins after commit, still holding the installation lock.
-        for (user,path,profile) in [("identity_runtime",&c.runtime_password_file,rss_identity_postgres::AuthorityProfile::Runtime),("identity_maintenance",&c.maintenance_password_file,rss_identity_postgres::AuthorityProfile::Maintenance)]{
-            let mut db=c.database.clone();db.user=user.into();db.password_file=path.clone();
-            let pool=std::sync::Arc::new(rss_transactional_messaging_postgres::PgRuntime::connect_producer(db.pg()?,assembly::Timer,c.storage.binding()?).await.map_err(|_|AppError::Migration)?);
-            let kdf=std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new());
-            let result=async{match profile { rss_identity_postgres::AuthorityProfile::Runtime => rss_identity_postgres::Authority::connect_runtime(pool.clone(),kdf.clone(),c.identity_origin.clone(),assembly::delivery_budget()?,c.storage.system()?,rss_identity_postgres::RuntimeConfiguration::new(rss_identity_postgres::RuntimeSource::new(db.pg()?,c.storage.identity()?,c.storage.epoch()?),c.credential_keyring.load()?),assembly::deadline()).await, rss_identity_postgres::AuthorityProfile::Maintenance => rss_identity_postgres::Authority::connect_maintenance(pool.clone(),kdf.clone(),c.identity_origin.clone(),assembly::delivery_budget()?,c.storage.system()?,assembly::deadline()).await }?;Ok::<_,AppError>(())}.await;
-            pool.close().await;
-            result?;
+        rss_identity_postgres::install(&mut tx, instance).await?;
+        grant_profile(&mut tx, &config.runtime_role, AuthorityProfile::Runtime).await?;
+        grant_profile(
+            &mut tx,
+            &config.maintenance_role,
+            AuthorityProfile::Maintenance,
+        )
+        .await?;
+        sqlx::query("INSERT INTO rss_transactional_messaging.storage_lineage VALUES(true,$1,$2)")
+            .bind(config.storage.target.as_slice())
+            .bind(config.storage.lineage.as_slice())
+            .execute(&mut *tx)
+            .await?;
+        for tenant in tenants {
+            sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,$2)")
+                .bind(tenant.to_string())
+                .bind(config.storage.generation)
+                .execute(&mut *tx)
+                .await?;
         }
-        Ok(())
-    }).await.map_err(|_|AppError::Migration).and_then(|r|r);
-    let closed = connection.close().await;
-    result?;
-    closed.map_err(|_| AppError::Migration)?;
-    Ok(())
+        for (role, profile) in [
+            (&config.runtime_role, AuthorityProfile::Runtime),
+            (&config.maintenance_role, AuthorityProfile::Maintenance),
+        ] {
+            // grant_profile already validated the name; quote it as an SQL identifier again.
+            let switch = format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\""));
+            sqlx::raw_sql(sqlx::AssertSqlSafe(switch)).execute(&mut *tx).await?;
+            rss_identity_postgres::verify_profile(&mut tx, profile, instance)
+                .await
+                .map_err(|_| sqlx::Error::Protocol("installation profile verification failed".into()))?;
+            sqlx::raw_sql("SET LOCAL ROLE NONE").execute(&mut *tx).await?;
+        }
+        tx.commit().await
+    })
+    .await;
+    let outcome = result
+        .map_err(|_| AppError::Migration)
+        .and_then(|r| r.map_err(|_| AppError::Migration));
+    finish_installation(outcome, c.close()).await
+}
+
+async fn finish_installation(
+    outcome: Result<(), AppError>,
+    close: impl std::future::Future<Output = Result<(), sqlx::Error>>,
+) -> Result<(), AppError> {
+    // Connection shutdown is independent of commit acknowledgement. Never rewrite settlement.
+    if !matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), close).await,
+        Ok(Ok(()))
+    ) {
+        eprintln!("component=migration cleanup=unconfirmed");
+    }
+    outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn cleanup_failure_preserves_confirmed_and_unknown_installation_outcomes() {
+        assert!(
+            finish_installation(Ok(()), async { Err(sqlx::Error::PoolClosed) })
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            finish_installation(Err(AppError::Migration), async { Ok(()) }).await,
+            Err(AppError::Migration)
+        ));
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                finish_installation(Ok(()), std::future::pending())
+            )
+            .await
+            .unwrap()
+            .is_ok()
+        );
+    }
 }

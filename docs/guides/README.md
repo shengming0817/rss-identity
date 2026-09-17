@@ -1,17 +1,6 @@
-# 开发与消费指南
+# 使用指南
 
-- [开发与验证](development.md)：工程、固定 Git 消费、单命令维护与真实 provider 接缝。
+- [嵌入认证组件](embedding.md)
+- [开发与验证](development.md)
 
-- [本机维护 runbook](local-maintenance.md)：开发库安装、身份配置与不确定提交的只读核实。
-
-[I08 部署入口](../deployment/README.md)持有产品启动、安装和候选。
-
-- [下游身份接入](downstream.md)：Hydra bridge、最小 client、在线撤销与独立 consumer。
-
-- [IdP 配置与联合登录](federation.md)：自助配置、加密凭据、管理 HTTP 和浏览器接缝。
-
-- [中央登录与日常管理](management.md)：独立前端挂载、会话管理与联合 T2。
-
-- [可信 MFA 与显式 step-up](assurance.md)：部署批准、会话轮换与下游事实。
-
-- [平台开通与 CLI](platform.md)：系统域、增加租户管理员、持久会话和未知提交核实。
+其余中央模式指南保留为历史记录，已在文件首部标记。

@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 [dependencies]
-rss-identity-contracts.workspace = true
 serde.workspace = true
 rss-request-context.workspace = true
 uuid.workspace = true

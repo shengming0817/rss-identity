@@ -1,3 +1,5 @@
+> 历史中央模式文档（基线 fa7019922162158704cc47c6ac7ad36a67c8ae5a），不适用于 #2435 的嵌入式组件。旧运行器已退役；保留验收/候选记录，不重标为本次成功。当前入口为 docs/guides/embedding.md，完整部署后续为 #2436。
+
 # 本机维护：开发库安装与不确定结果核实
 
 适用 #2358/#2334/#2335 的可丢弃专属开发库（当前初始安装为 schema version 8）；不用于已有生产数据升级。本工具不自动执行下列管理 SQL。维护密码恢复始终通过 `identity-admin CONFIG recover <tenant> <principal> <password-file>`，下列账户/事件查询只有只读用途。

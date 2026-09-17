@@ -2,7 +2,6 @@
 #[path = "../../identity-postgres/tests/federation_support/mod.rs"]
 mod federation_support;
 mod keycloak_support;
-#[allow(dead_code)]
 #[path = "../../identity-postgres/tests/support/mod.rs"]
 mod support;
 use axum::{
@@ -12,7 +11,7 @@ use axum::{
     response::Response,
 };
 use rss_identity_core::{federation::*, session::SessionSecret};
-use rss_identity_http_axum::{HttpConfig, federated_router};
+use rss_identity_http_axum::{HttpConfig, federated_router, router};
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
 use rss_identity_postgres::*;
 use rss_transactional_messaging_postgres::PgTransactionFault;
@@ -22,7 +21,7 @@ use support::*;
 use tower::ServiceExt;
 use zeroize::Zeroizing;
 const ORIGIN: &str = "https://identity.example.test";
-const CALLBACK: &str = "https://identity.example.test/api/v1/oidc/callback";
+const CALLBACK: &str = "https://identity.example.test/api/v2/oidc/callback";
 const BROWSER: &str = "__Host-identity-oidc-browser=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 fn production(keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
     Ok(HttpOidc::new(vec![TrustedAssuranceProfile {
@@ -68,7 +67,11 @@ fn service(f: &Fixture, upstream: Arc<dyn UpstreamOidc>) -> Federation {
         f.store.clone(),
         upstream,
         StateSigner::new([7; 32], ORIGIN).unwrap(),
-        BTreeMap::from([(("identity".into(), "home".into()), format!("{ORIGIN}/done"))]),
+        FederationConfig {
+            callback: CALLBACK.into(),
+            credential_keys: credential_keys(),
+            targets: BTreeMap::from([("home".into(), format!("{ORIGIN}/done"))]),
+        },
     )
     .unwrap()
 }
@@ -78,6 +81,13 @@ fn app(s: &Federation) -> Router {
         HttpConfig::new(ORIGIN, Duration::from_secs(30)).unwrap(),
     )
     .unwrap()
+    .merge(
+        router(
+            s.authority(),
+            HttpConfig::new(ORIGIN, Duration::from_secs(30)).unwrap(),
+        )
+        .unwrap(),
+    )
 }
 async fn provider(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
     let p = s
@@ -141,16 +151,16 @@ async fn begin(
     link: bool,
 ) -> anyhow::Result<String> {
     let payload = if link {
-        json!({"client_id":"identity","return_target":"home","password":password})
+        json!({"returnTarget":"home","password":password})
     } else {
-        json!({"client_id":"identity","return_target":"home"})
+        json!({"returnTarget":"home"})
     };
     let response = app
         .clone()
         .oneshot(request(
             "POST",
             &format!(
-                "/api/v1/tenants/{A}/oidc/{}/{}",
+                "/api/v2/tenants/{A}/oidc/{}/{}",
                 p.id,
                 if link { "link" } else { "login" }
             ),
@@ -160,7 +170,7 @@ async fn begin(
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
-    Ok(body(response).await?["authorization_url"]
+    Ok(body(response).await?["authorizationUrl"]
         .as_str()
         .unwrap()
         .into())
@@ -209,10 +219,10 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
     let p = provider(&f, &s).await?;
     let app = app(&s);
     let original = successful(&app, &p, "alice").await?;
-    let path = format!("/api/v1/tenants/{A}/oidc/{}/step-up", p.id);
+    let path = format!("/api/v2/tenants/{A}/oidc/{}/step-up", p.id);
     let browser = format!("{BROWSER}; {original}");
     let csrf = secret(&original).csrf();
-    let input = json!({"client_id":"identity","return_target":"home"});
+    let input = json!({"returnTarget":"home"});
     for (cookies, token) in [(BROWSER, None), (browser.as_str(), None)] {
         let r = app
             .clone()
@@ -226,7 +236,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         .oneshot(request("POST", &path, &browser, Some(&csrf), input.clone()))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
-    let url = body(r).await?["authorization_url"]
+    let url = body(r).await?["authorizationUrl"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -259,7 +269,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         .clone()
         .oneshot(request("POST", &path, &browser, Some(&csrf), input.clone()))
         .await?;
-    let url = body(r).await?["authorization_url"]
+    let url = body(r).await?["authorizationUrl"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -271,7 +281,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         .clone()
         .oneshot(request("POST", &path, &browser, Some(&csrf), input))
         .await?;
-    let url = body(r).await?["authorization_url"]
+    let url = body(r).await?["authorizationUrl"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -435,7 +445,6 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
             federation_support::actor(&f).await?,
             login("same@example.test"),
             password(),
-            rss_identity_postgres::LocalAccountRole::Member,
             deadline(),
         )
         .await?;
@@ -650,7 +659,7 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
     let response = callback(
         &mock_app,
         &format!(
-            "/api/v1/oidc/callback?state={state}&code=bob&iss={}",
+            "/api/v2/oidc/callback?state={state}&code=bob&iss={}",
             p.settings.issuer().as_str()
         ),
         BROWSER,
@@ -702,7 +711,7 @@ async fn real_provider_management_and_encrypted_credentials() -> anyhow::Result<
         .create_provider(f.actor().await?, config()?, credentials(true)?, deadline())
         .await?;
     assert!(!p.enabled);
-    assert!(!serde_json::to_string(&p)?.contains("fixture-secret"));
+    assert!(!format!("{p:?}").contains("fixture-secret"));
     let sealed:Value=sqlx::query_scalar("SELECT sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(A).bind(p.id.to_string()).fetch_one(&f.owner).await?;
     assert!(!sealed.to_string().contains("fixture-secret"));
     sqlx::query("UPDATE identity_authority.provider_credentials SET sealed=jsonb_set(sealed,'{key_id}','\"missing\"') WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(A).bind(p.id.to_string()).execute(&f.owner).await?;

@@ -1,5 +1,4 @@
 //! Password-file to maintenance authority seam; not a binary/configuration T3.
-#[allow(dead_code)]
 #[path = "../../../crates/identity-postgres/tests/support/mod.rs"]
 mod support;
 use rss_identity_app::read_secret;
@@ -33,7 +32,7 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
                     .await
             } else {
                 f.maintenance
-                    .recover_administrator(f.system_key, input()?, deadline())
+                    .recover_local_password(f.system_key, input()?, deadline())
                     .await
             };
             if fault.is_some() {
@@ -43,11 +42,10 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
             }
             assert!(!format!("{result:?}").contains("synthetic private marker"));
             assert_eq!(f.events().await?, if initialize { 0 } else { 1 });
-            let initialized: bool = sqlx::query_scalar(
-                "SELECT system_domain IS NOT NULL FROM identity_authority.deployment",
-            )
-            .fetch_one(&f.owner)
-            .await?;
+            let initialized: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.guard)")
+                    .fetch_one(&f.owner)
+                    .await?;
             assert_eq!(initialized, !initialize);
             let epochs: Vec<i64> =
                 sqlx::query_scalar("SELECT auth_epoch FROM identity_authority.accounts")
@@ -64,7 +62,7 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
                 .await
         } else {
             f.maintenance
-                .recover_administrator(f.system_key, input()?, deadline())
+                .recover_local_password(f.system_key, input()?, deadline())
                 .await
         };
         assert!(matches!(result, Err(AuthorityError::CommitUnknown(_))));
@@ -77,7 +75,19 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
         assert_eq!(std::fs::read_dir(&dir)?.count(), 1);
         assert!(std::fs::read_to_string(&file)? == PASSWORD);
     }
-    assert!(f.platform_actor().await.is_ok());
+    assert!(
+        f.store
+            .login_local(
+                f.system_key.tenant,
+                login("platform"),
+                password(),
+                source(),
+                None,
+                deadline()
+            )
+            .await
+            .is_ok()
+    );
     std::fs::remove_dir_all(dir)?;
     f.close().await;
     Ok(())

@@ -1,6 +1,6 @@
 //! Provider credential storage. ref: ring 0.17.14 src/aead/less_safe_key.rs.
 use crate::{
-    Authority, AuthorityError,
+    AuthorityError,
     storage::authority_id,
     transaction::{MutationError, corrupt},
 };
@@ -40,7 +40,7 @@ struct Context<'a> {
 impl CredentialKeys {
     pub fn new(active: String, keys: Vec<(String, [u8; 32])>) -> Result<Self, AuthorityError> {
         if keys.is_empty() || keys.len() > 8 {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::Configuration);
         }
         let mut values = BTreeMap::new();
         let mut digests = std::collections::BTreeSet::new();
@@ -57,16 +57,16 @@ impl CredentialKeys {
                     <[u8; 32]>::from(sha2::Sha256::digest(raw.as_ref()))
                 })
             {
-                return Err(AuthorityError::Invalid);
+                return Err(AuthorityError::Configuration);
             }
             let key = aead::UnboundKey::new(&aead::AES_256_GCM, raw.as_ref())
-                .map_err(|_| AuthorityError::Invalid)?;
+                .map_err(|_| AuthorityError::Configuration)?;
             if values.insert(id, aead::LessSafeKey::new(key)).is_some() {
-                return Err(AuthorityError::Invalid);
+                return Err(AuthorityError::Configuration);
             }
         }
         if !values.contains_key(&active) {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::Configuration);
         }
         Ok(Self {
             active,
@@ -107,7 +107,7 @@ impl CredentialKeys {
         version: i64,
     ) -> Result<Vec<u8>, AuthorityError> {
         if version < 1 {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::InvalidInput);
         }
         serde_json::to_vec(&Context {
             authority,
@@ -116,7 +116,7 @@ impl CredentialKeys {
             credential_version: version,
             purpose: "oidc-client-secret",
         })
-        .map_err(|_| AuthorityError::Invalid)
+        .map_err(|_| AuthorityError::Unavailable)
     }
     pub(crate) fn seal(
         &self,
@@ -192,18 +192,15 @@ impl CredentialKeys {
         ProviderCredentials::new(value.secret, value.ca).map_err(|_| AuthorityError::Unavailable)
     }
 }
-impl Authority {
-    pub(crate) fn credential_keys(&self) -> Result<std::sync::Arc<CredentialKeys>, AuthorityError> {
-        Ok(self.runtime_configuration()?.credential_keys.clone())
-    }
+impl crate::Federation {
     pub async fn check_credential_keys(
         &self,
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
-        let keys = self.credential_keys()?;
-        for tenant in self.active_tenants()? {
+        let keys = self.credential_keys.clone();
+        for tenant in self.authority.active_tenants()? {
             let keys = keys.clone();
-            self.read_sql(tenant,deadline,move|c|Box::pin(async move {
+            self.authority.read_sql(tenant,deadline,move|c|Box::pin(async move {
                 let authority=authority_id(c).await?;
                 let rows:Vec<(Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid LIMIT 101").bind(tenant.to_string()).fetch_all(c).await?;
                 if rows.len()>100 {return Err(corrupt().into());}
@@ -224,8 +221,8 @@ impl Authority {
         version: i64,
         deadline: OperationDeadline,
     ) -> Result<ProviderCredentials, AuthorityError> {
-        let keys = self.credential_keys()?;
-        self.read_sql(tenant,deadline,move|c|Box::pin(async move {
+        let keys = self.credential_keys.clone();
+        self.authority.read_sql(tenant,deadline,move|c|Box::pin(async move {
             let authority=authority_id(c).await?;
             let row:Option<(i64,serde_json::Value)>=sqlx::query_as("SELECT credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(tenant.to_string()).bind(provider.to_string()).fetch_optional(c).await?;
             let (current,sealed)=row.ok_or(FederationError::Rejected)?;

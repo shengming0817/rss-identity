@@ -10,7 +10,6 @@ use std::net::{IpAddr, SocketAddr};
 #[derive(Clone)]
 pub struct Ingress {
     pub public: IpAddr,
-    pub private: IpAddr,
 }
 impl Ingress {
     pub fn client(
@@ -19,10 +18,7 @@ impl Ingress {
         path: &str,
         headers: &axum::http::HeaderMap,
     ) -> Option<IpAddr> {
-        let internal = path.starts_with("/internal/");
-        if (internal && (peer != self.private || path != "/internal/v1/identity/validate"))
-            || (!internal && peer != self.public)
-        {
+        if peer != self.public || path.starts_with("/internal/") {
             return None;
         }
         let mut values = headers.get_all("x-forwarded-for").iter();
@@ -98,23 +94,17 @@ mod tests {
     fn only_exact_trusted_peer_can_supply_one_ip() {
         let i = Ingress {
             public: "10.0.0.2".parse().unwrap(),
-            private: "10.0.0.3".parse().unwrap(),
         };
         let mut h = axum::http::HeaderMap::new();
         h.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
         assert_eq!(
-            i.client(i.public, "/api/v1/login", &h),
+            i.client(i.public, "/api/v2/login", &h),
             Some("203.0.113.5".parse().unwrap())
         );
         assert!(i.client("10.0.0.4".parse().unwrap(), "/api", &h).is_none());
         assert!(
             i.client(i.public, "/internal/v1/identity/validate", &h)
                 .is_none()
-        );
-        assert!(i.client(i.private, "/api", &h).is_none());
-        assert!(
-            i.client(i.private, "/internal/v1/identity/validate", &h)
-                .is_some()
         );
         for bad in [
             "203.0.113.5, 127.0.0.1",

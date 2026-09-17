@@ -1,3 +1,5 @@
+> 已退役的中央 v1 协议；无兼容路由。当前协议见 [HTTP v2](identity-wire-v2.md)。
+
 # Identity v1 wire
 
 I01 协议 owner：#2331；internal validate 和下游 bridge 的实现 owner 为 #2336，见[接入指南](../guides/downstream.md)。I04 中央会话 Router 已实现，见末节；listener/TLS 属于后续装配。标准 OIDC discovery/authorize/token/JWKS/logout 由 Hydra 提供，不在 Identity 复制同名端点。

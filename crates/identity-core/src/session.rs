@@ -1,4 +1,4 @@
-//! Central session policy; one current credential, no refresh-token history.
+//! Instance-local session policy; one current credential, no refresh-token history.
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -64,62 +64,65 @@ fn hex(bytes: &[u8]) -> String {
     value
 }
 
-/// Policy identity is fixed when the lifetime is created or restored.
+/// Host-selected, positive and ordered session limits, measured in seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionClass {
-    Ordinary,
-    Administrator,
+pub struct SessionPolicy {
+    idle: i64,
+    absolute: i64,
 }
-impl SessionClass {
-    fn for_administrator(administrator: bool) -> Self {
-        if administrator {
-            Self::Administrator
-        } else {
-            Self::Ordinary
+impl SessionPolicy {
+    pub fn new(idle_seconds: i64, absolute_seconds: i64) -> Result<Self, SessionError> {
+        if idle_seconds <= 0 || absolute_seconds < idle_seconds {
+            return Err(SessionError);
         }
+        Ok(Self {
+            idle: idle_seconds,
+            absolute: absolute_seconds,
+        })
     }
-    fn limits(self) -> (i64, i64) {
-        match self {
-            Self::Administrator => (900, 14_400),
-            Self::Ordinary => (1_800, 28_800),
-        }
+    pub fn idle_seconds(self) -> i64 {
+        self.idle
+    }
+    pub fn absolute_seconds(self) -> i64 {
+        self.absolute
     }
 }
 
 /// Validated times from the authoritative clock. Not an authentication proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionLifetime {
-    class: SessionClass,
+    policy: SessionPolicy,
     auth_time: i64,
     idle_expires_at: i64,
     absolute_expires_at: i64,
 }
 impl SessionLifetime {
-    pub fn new(now: i64, administrator: bool) -> Result<Self, SessionError> {
-        let (idle, absolute) = SessionClass::for_administrator(administrator).limits();
+    pub fn new(now: i64, policy: SessionPolicy) -> Result<Self, SessionError> {
+        let (idle, absolute) = (policy.idle, policy.absolute);
         Self::restore(
             now,
             now.checked_add(idle).ok_or(SessionError)?,
             now.checked_add(absolute).ok_or(SessionError)?,
-            administrator,
+            policy,
         )
     }
     pub fn restore(
         auth_time: i64,
         idle_expires_at: i64,
         absolute_expires_at: i64,
-        administrator: bool,
+        policy: SessionPolicy,
     ) -> Result<Self, SessionError> {
-        let class = SessionClass::for_administrator(administrator);
         if auth_time <= 0
             || idle_expires_at <= auth_time
             || idle_expires_at > absolute_expires_at
-            || auth_time.checked_add(class.limits().1) != Some(absolute_expires_at)
+            || absolute_expires_at
+                .checked_sub(auth_time)
+                .is_none_or(|duration| duration != policy.absolute)
         {
             return Err(SessionError);
         }
         Ok(Self {
-            class,
+            policy,
             auth_time,
             idle_expires_at,
             absolute_expires_at,
@@ -128,17 +131,13 @@ impl SessionLifetime {
     pub fn valid_at(self, now: i64) -> bool {
         now >= self.auth_time && now < self.idle_expires_at && now < self.absolute_expires_at
     }
-    /// Renew within the policy bound at creation; callers cannot switch session class.
-    /// ```compile_fail
-    /// let mut admin = rss_identity_core::session::SessionLifetime::new(1000, true).unwrap();
-    /// admin.renew(1800, false);
-    /// ```
+    /// Renew only idle expiry within the original absolute deadline.
     pub fn renew(&mut self, now: i64) -> Result<(), SessionError> {
         if !self.valid_at(now) {
             return Err(SessionError);
         }
         self.idle_expires_at = self.idle_expires_at.max(
-            now.checked_add(self.class.limits().0)
+            now.checked_add(self.policy.idle)
                 .ok_or(SessionError)?
                 .min(self.absolute_expires_at),
         );

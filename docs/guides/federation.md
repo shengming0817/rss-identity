@@ -1,3 +1,5 @@
+> 历史中央模式文档（基线 fa7019922162158704cc47c6ac7ad36a67c8ae5a），不适用于 #2435 的嵌入式组件。旧运行器已退役；保留验收/候选记录，不重标为本次成功。当前入口为 docs/guides/embedding.md，完整部署后续为 #2436。
+
 # IdP 配置与联合登录接入
 
 I05/I07 提供 Federation 管理用例、管理 HTTP 和单一 callback；中央 UI 位于 rss-web apps/identity。生产 listener/反代由 I08 提供，本指南不构成生产 T3 证明。

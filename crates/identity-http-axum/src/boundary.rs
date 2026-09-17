@@ -86,7 +86,7 @@ impl IntoResponse for HttpError {
 impl From<AuthorityError> for HttpError {
     fn from(error: AuthorityError) -> Self {
         let mut response = match error {
-            AuthorityError::Invalid => BAD,
+            AuthorityError::InvalidInput => BAD,
             AuthorityError::Federation(error) => match error {
                 rss_identity_core::federation::FederationError::Configuration => BAD,
                 rss_identity_core::federation::FederationError::Conflict => {
@@ -209,7 +209,7 @@ pub(crate) async fn request_boundary(
     next: Next,
 ) -> Response {
     let callback = request.method() == axum::http::Method::GET
-        && request.uri().path() == "/api/v1/oidc/callback";
+        && request.uri().path() == "/api/v2/oidc/callback";
     let budget = RequestBudget(Instant::now() + state.config.timeout);
     request.extensions_mut().insert(budget);
     let origin = if request.uri().to_string().len() > 8192 {

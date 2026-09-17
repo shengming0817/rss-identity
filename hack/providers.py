@@ -3,7 +3,6 @@
 import contextlib
 from enum import Enum
 import json
-import math
 import os
 import re
 from pathlib import Path
@@ -22,7 +21,6 @@ ROOT = Path(__file__).resolve().parent.parent
 IMAGES = json.loads((Path(__file__).resolve().parents[1]/"deployment/providers.lock.json").read_text())
 PG = IMAGES["postgres"]
 KEYCLOAK = IMAGES["keycloak"]
-HYDRA = IMAGES["hydra"]
 
 class ContainerState(str, Enum):
     PRECREATE = 'precreate'
@@ -111,53 +109,32 @@ def report_tests(package, test, expected, result):
         if name in expected:
             print(f'{package}/{test}: {name}: {status}')
     print(f'{package}/{test}: cargo exit={result.returncode}; raw output withheld')
-    if test == 'ui_host':
-        stages = {'environment','login','create','disable','reset','enable','providers','signout','member-negative','platform','tenant-login','platform-negative','federated-login','step-up'}
-        for stage, failure in re.findall(r'Identity browser failure: ([a-z-]+)/([a-z]+)', result.stdout + result.stderr):
-            if stage in stages and failure in {'environment','timeout','assertion'}:
-                print(f'Identity browser failure: {stage}/{failure}')
-    if test == 'capacity_http':
-        matrix={(op,c) for op in ('local_login','session_inspect','online_validation') for c in (1,4,16)} | {('cleanup_8_grants',1)}
-        records={}
-        for match in re.finditer(r'CAPACITY (\{[^\n]+\})', result.stderr):
-            value=json.loads(match.group(1))
-            expected={'operation','concurrency','requests','succeeded','failed','seconds','successful_rps','p50_ms','p95_ms','p99_ms'}
-            if value.get('operation')=='cleanup_8_grants':expected-={'p50_ms','p95_ms','p99_ms'}
-            if set(value)!=expected or value['operation'] not in {'local_login','session_inspect','online_validation','cleanup_8_grants'} or any(not isinstance(v,(int,float)) for k,v in value.items() if k!='operation'):
-                raise RuntimeError('invalid capacity measurement')
-            identity=(value['operation'],value['concurrency'])
-            if identity not in matrix or identity in records or any(type(v) not in (int,float) or not math.isfinite(v) or v<0 for k,v in value.items() if k!='operation'):
-                raise RuntimeError('invalid capacity measurement')
-            if any(type(value[k]) is not int for k in ('concurrency','requests','succeeded','failed')) or value['requests'] != (8 if identity[0]=='cleanup_8_grants' else 64) or value['succeeded']+value['failed']!=value['requests'] or value['seconds']<=0:
-                raise RuntimeError('invalid capacity measurement counts')
-            if not math.isclose(value['successful_rps'],value['succeeded']/value['seconds'],rel_tol=.001,abs_tol=.001):
-                raise RuntimeError('invalid capacity measurement rate')
-            if identity[0]!='cleanup_8_grants' and not value['p50_ms']<=value['p95_ms']<=value['p99_ms']:
-                raise RuntimeError('invalid capacity measurement percentiles')
-            records[identity]=value
-        if set(records)!=matrix:raise RuntimeError('incomplete capacity measurement matrix')
-        for value in records.values():print('CAPACITY '+json.dumps(value,sort_keys=True))
+
+SUITES = {('rss-identity-http-axum', 'management_http'): {'management_rejects_password_for_federated_only_account', 'callback_cancellation_consumes_only_bound_attempts', 'management_rechecks_inflight_provider_authority', 'provider_capacity_is_atomic_and_keeps_management_available', 'management_accounts_sessions_and_boundaries', 'management_provider_operations_safe_and_scoped'}, ('rss-identity-http-axum', 'federated_http'): {'federated_http_rejects_mismatch_and_uncertain_commit', 'real_provider_management_and_encrypted_credentials', 'real_federated_login_and_linking', 'real_upstream_client_secret_rotation', 'real_step_up_rotates_only_the_bound_session', 'federated_tls_and_self_service_policy'}, ('rss-identity-postgres', 'federated_atomic'): {'session_security_is_subject_bound_and_revocable', 'federation_jit_isolated_subjects_and_membership', 'federation_atomic_events_and_unknown_commit', 'federation_link_conflict_logout_and_wrong_reauthentication', 'federation_assurance_change_revokes_attempts_and_sessions', 'federation_signed_time_skew_preserves_identity', 'federation_state_restart_expiry_and_replay', 'federation_config_races_and_provider_revocation', 'federation_group_snapshot_storage_bounds', 'federation_concurrent_linking_keeps_one_owner', 'federation_concurrent_jit_rls_and_schema_drift', 'federation_configuration_authorization_and_versions', 'federation_step_up_binding_and_settlement', 'federation_local_and_federated_linking', 'federation_step_up_unknown_commit_and_event_rollback'}, ('rss-identity-postgres', 'atomic'): {'maintenance_races_preserve_current_state', 'maintenance_permissions_and_schema_are_exact', 'attempts_are_shared_and_bounded', 'account_transition_matrix_and_events', 'maintenance_runbook_respects_forced_rls', 'storage_contract_is_checked', 'settlement_never_releases_uncertain_success', 'initialization_and_recovery', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_races_and_isolation', 'source_budgets_are_shared'}, ('rss-identity-postgres', 'session_atomic'): {'session_isolation_replacement_and_restart', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations', 'session_settlement_and_event_failure_are_atomic', 'session_rotation_and_revocation', 'session_account_changes_fence_racing_credentials'}, ('rss-identity-http-axum', 'session_http'): {'session_http_login_cookie_csrf_and_replacement', 'session_http_recovery_current_logout_and_deadline', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_pending_commit_preserves_settlement', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_v2_reauthentication_is_bound_and_has_no_legacy_role_surface'}, ('rss-identity-app', 'operator'): {'maintenance_file_and_settlement'}, ('rss-identity-oidc', 'provider'): {'real_provider_flows'}, ('rss-identity-postgres', 'embedded'): {'own_password_change_requires_current_host_policy', 'construction_verifies_every_declared_tenant_fence', 'trusted_groups_expire_without_extending_identity_or_snapshot', 'host_role_names_and_session_policy_survive_composition', 'local_facade_reauthenticates_and_host_policy_is_current', 'instances_tenants_and_borrowed_pool_are_separate'}, ('rss-identity-app', 'installation'): {'installation_and_reference_host_seams_are_verified'}}
 
 def cargo(package, test, env, features=()):
-    expected = {('rss-identity-http-axum','platform_cli'):{'real_cli_tls_login_provision_add_unknown_and_logout'},('rss-identity-http-axum','platform_http'):{'platform_http_enforces_roles_and_activates_created_tenants','cli_sso_code_is_single_use_pkce_bound_and_revocable'},('rss-identity-postgres','platform_atomic'):{'platform_last_administrator_changes_serialize','platform_initialization_roles_and_existing_accounts','platform_provisioning_concurrency_and_settlement','platform_dynamic_admission_and_restart'},('rss-identity-http-axum','capacity_http'): {'measure_single_consumer_identity_paths'},('rss-identity-http-axum','recovery_http'): {'physical_restore_preserves_the_selected_security_cut'},('rss-identity-app','clients'): {'clients_are_created_verified_and_drift_is_refused'},('rss-identity-app','installation'): {'installation_configuration_and_rollback_are_verified'},('rss-identity-http-axum','ui_host'): {'real_identity_ui_management_seam'},('rss-identity-http-axum','management_http'): {'management_accounts_sessions_and_boundaries','management_provider_operations_safe_and_scoped','callback_cancellation_consumes_only_bound_attempts','management_rechecks_inflight_provider_authority','provider_capacity_is_atomic_and_keeps_management_available'},('rss-identity-postgres','downstream_atomic'): {'downstream_prepare_admission_precedes_invalid_protocol_work','downstream_cleanup_failure_concurrency_and_unknown_settlement','downstream_cleanup_claim_rollback_and_final_unknown','downstream_readonly_rotation_and_revocation','downstream_unknown_commit_and_single_accept','downstream_remote_unknown_never_returns_authority','downstream_accept_rechecks_revocation_and_final_commit','downstream_claim_and_event_roll_back_together','downstream_federated_provider_revocation','downstream_prepare_budget_is_per_client_and_releases_expired'}, ('rss-identity-http-axum','downstream_http'): {'real_downstream_code_pkce_and_online_validation','downstream_body_deadline_and_caller_auth','real_totp_assurance_reaches_hydra_and_validation_client'}, ('rss-identity-http-axum','federated_http'): {'real_provider_management_and_encrypted_credentials','real_federated_login_and_linking','federated_http_rejects_mismatch_and_uncertain_commit','federated_tls_and_self_service_policy','real_step_up_rotates_only_the_bound_session','real_upstream_client_secret_rotation'}, ('rss-identity-postgres','federated_atomic'): {'session_security_is_subject_bound_and_revocable', 'federation_concurrent_linking_keeps_one_owner','federation_configuration_authorization_and_versions','federation_state_restart_expiry_and_replay','federation_jit_isolated_subjects_and_membership','federation_group_snapshot_storage_bounds','federation_signed_time_skew_preserves_identity','federation_config_races_and_provider_revocation','federation_atomic_events_and_unknown_commit','federation_local_and_federated_linking','federation_link_conflict_logout_and_wrong_reauthentication','federation_concurrent_jit_rls_and_schema_drift','federation_step_up_binding_and_settlement', 'federation_step_up_unknown_commit_and_event_rollback', 'federation_assurance_change_revokes_attempts_and_sessions'}, ('rss-identity-postgres', 'atomic'): {'initialization_and_recovery', 'account_races_and_isolation', 'attempts_are_shared_and_bounded', 'settlement_never_releases_uncertain_success', 'storage_contract_is_checked', 'source_budgets_are_shared', 'maintenance_races_preserve_current_state', 'maintenance_runbook_respects_forced_rls', 'maintenance_permissions_and_schema_are_exact', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_transition_matrix_and_events'},
-                ('rss-identity-postgres', 'session_atomic'): {'session_rotation_and_revocation', 'session_isolation_replacement_and_restart', 'session_account_changes_fence_racing_credentials', 'session_settlement_and_event_failure_are_atomic', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations'},
-                ('rss-identity-http-axum', 'session_http'): {'session_http_login_cookie_csrf_and_replacement', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_recovery_current_logout_and_deadline', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_pending_commit_preserves_settlement'},
-                ('rss-identity-app', 'operator'): {'maintenance_file_and_settlement'},
-                ('rss-identity-oidc', 'provider'): {'real_provider_flows'}}[(package, test)]
-    command = ['cargo', 'test', '--locked', '-p', package, '--test', test, *features, '--', '--ignored', '--test-threads=1']
+    expected = SUITES[(package,test)]
+    internal = package=="rss-identity-postgres" and test in {"atomic","session_atomic","federated_atomic"}
+    module = "account_atomic" if test == "atomic" else test
+    if internal: expected={f"{module}::{name}" for name in expected}
+    filtered = 0
+    command = ['cargo', 'test', '--locked', '-p', package, *(['--lib',module+'::'] if internal else ['--test',test]), *features, '--', '--ignored', '--test-threads=1']
     environment = {**os.environ, **env}
     listing = bounded_run([*command, '--list'], timeout=900, cwd=ROOT, env=environment, check=True, text=True, stdout=subprocess.PIPE).stdout
     names = re.findall(r'^(.+): test$', listing, re.M)
     if set(names) != expected or len(names) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test set missing or changed')
-    completed = bounded_run([*command, '--nocapture', '--format', 'pretty'], timeout=max(600 if test == 'recovery_http' else 300 if test == 'ui_host' else 180,len(expected)*180), cwd=ROOT, env=environment, text=True, capture_output=True)
+    if internal:
+        all_listing = bounded_run(['cargo','test','--locked','-p',package,'--lib','--','--list'],timeout=900,cwd=ROOT,env=environment,check=True,text=True,stdout=subprocess.PIPE).stdout
+        filtered=len(re.findall(r'^(.+): test$',all_listing,re.M))-len(expected)
+    completed = bounded_run([*command, '--nocapture', '--format', 'pretty'], timeout=max(180,len(expected)*180), cwd=ROOT, env=environment, text=True, capture_output=True)
     result = completed.stdout
     report_tests(package, test, expected, completed)
     if completed.returncode:
         raise RuntimeError(f'{package}/{test}: cargo exit={completed.returncode}')
     counts = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out', result, re.M)
     executed = re.findall(r'^test (.+) \.\.\. ok$', result, re.M)
-    if counts != [(str(len(expected)), '0', '0', '0', '0')] or set(executed) != expected or len(executed) != len(expected):
+    if counts != [(str(len(expected)), '0', '0', '0', str(filtered))] or set(executed) != expected or len(executed) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test execution incomplete')
 
 @contextlib.contextmanager
@@ -173,10 +150,9 @@ def postgres(on_container=None):
 def pg():
     with postgres() as (_, ports):
         env = {"IDENTITY_TEST_PG_PORT": str(ports[5432])}
-        cargo("rss-identity-postgres", "platform_atomic", env)
-        cargo("rss-identity-http-axum", "platform_http", env)
         cargo("rss-identity-postgres", "federated_atomic", env)
         cargo("rss-identity-postgres", "atomic", env)
+        cargo("rss-identity-postgres", "embedded", env)
         cargo("rss-identity-postgres", "session_atomic", env)
         cargo("rss-identity-http-axum", "session_http", env)
         cargo("rss-identity-http-axum", "management_http", env)
@@ -214,7 +190,7 @@ def configure_totp(realm):
         user['credentials'].append({'type':'otp','userLabel':'fixture-totp','secretData':json.dumps({'value':'fixture-totp-secret-2339'}),'credentialData':json.dumps({'digits':6,'counter':0,'period':30,'algorithm':'HmacSHA1','subType':'totp'})})
 
 @contextlib.contextmanager
-def keycloak(redirect_uri="https://identity.example.test/api/v1/oidc/callback", database_env=(), network=None, on_container=None):
+def keycloak(redirect_uri="https://identity.example.test/api/v2/oidc/callback", database_env=(), network=None, on_container=None):
     realm = {"realm":"identity", "enabled":True, "sslRequired":"all", "duplicateEmailsAllowed":True,
              "loginWithEmailAllowed":False,
              "groups":[{"name":"staff"}],
@@ -251,8 +227,26 @@ def federated():
     with keycloak() as env, postgres() as (_, ports):
         cargo("rss-identity-http-axum","federated_http",{**env,"IDENTITY_TEST_PG_PORT":str(ports[5432])})
 
+def assembly():
+    # TLS exercises the reference host's actual PG configuration, without a deployed stack.
+    with tempfile.TemporaryDirectory(prefix='identity-install-') as tmp, postgres() as (cid, ports):
+        root = Path(tmp)
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1','-addext','basicConstraints=critical,CA:FALSE','-keyout',str(root/'server.key'),'-out',str(root/'server.crt')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+        for name in ['server.key','server.crt']:
+            docker('cp',str(root/name),cid+':/tmp/'+name)
+        docker('exec','-u','root',cid,'sh','-c','chown postgres:postgres /tmp/server.key /tmp/server.crt && chmod 600 /tmp/server.key')
+        for setting in ["ssl='on'", "ssl_cert_file='/tmp/server.crt'", "ssl_key_file='/tmp/server.key'"]:
+            docker('exec',cid,'psql','-X','-U','postgres','-v','ON_ERROR_STOP=1','-c','ALTER SYSTEM SET '+setting)
+        docker('exec',cid,'psql','-X','-U','postgres','-v','ON_ERROR_STOP=1','-c','SELECT pg_reload_conf()')
+        for name, value in [('owner','fixture-only'),('runtime','fixture-runtime'),('maintenance','fixture-maintenance')]:
+            file = root/name
+            file.write_text(value)
+            file.chmod(0o600)
+        cargo('rss-identity-app','installation',{'IDENTITY_TEST_INSTALL_DIR':tmp,'IDENTITY_TEST_PG_PORT':str(ports[5432])})
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["pg"]: pg()
     elif sys.argv[1:] == ["oidc"]: oidc()
     elif sys.argv[1:] == ["federated"]: federated()
-    else: raise SystemExit("usage: providers.py pg|oidc|federated")
+    elif sys.argv[1:] == ["assembly"]: assembly()
+    else: raise SystemExit("usage: providers.py pg|oidc|federated|assembly")

@@ -196,14 +196,13 @@ impl ProviderSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct ProviderView {
     pub id: ProviderId,
     pub version: i64,
     pub enabled: bool,
     pub revocation_epoch: i64,
     pub settings: ProviderSettings,
-    #[serde(skip)]
     pub assurance_profile: [u8; 32],
     pub credential_version: i64,
 }
@@ -214,7 +213,6 @@ pub enum Purpose {
     Login,
     Reauthenticate,
     Link,
-    CliLogin,
 }
 
 impl Purpose {
@@ -223,7 +221,6 @@ impl Purpose {
             Self::Login => 0,
             Self::Reauthenticate => 1,
             Self::Link => 2,
-            Self::CliLogin => 3,
         }
     }
 
@@ -232,7 +229,6 @@ impl Purpose {
             0 => Ok(Self::Login),
             1 => Ok(Self::Reauthenticate),
             2 => Ok(Self::Link),
-            3 => Ok(Self::CliLogin),
             _ => Err(FederationError::Rejected),
         }
     }
@@ -485,7 +481,7 @@ pub struct ProviderFailure {
     pub stage: ProviderStage,
     pub reason: ProviderReason,
 }
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionReport {
     pub checks: Vec<ProviderStage>,
     pub tls_verified: bool,

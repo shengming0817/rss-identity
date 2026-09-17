@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 type Result<T> = std::result::Result<T, HttpError>;
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Login {
     login: String,
     password: String,
@@ -41,13 +41,11 @@ fn project_session(
     identity: &rss_identity_postgres::SessionIdentity,
     view: &rss_identity_postgres::SessionView,
     csrf_token: String,
-) -> rss_identity_contracts::session::Issued {
-    use rss_identity_contracts::session::{Identity, Issued, SessionInfo};
+) -> crate::dto::Issued {
+    use crate::dto::{Identity, Issued, SessionInfo};
     Issued {
         identity: Identity {
-            principal_id: identity.principal_id.to_string(),
-            administrator: identity.administrator,
-            platform_administrator: identity.platform_administrator,
+            principal_id: identity.principal_id.as_uuid().to_string(),
             has_local_password: identity.has_local_password,
         },
         session: SessionInfo {
@@ -103,14 +101,17 @@ pub(crate) async fn login(
     .map_err(|_| BAD)?;
     let password = Password::new(input.password).map_err(|_| UNAUTH)?;
     let login = LoginKey::parse(&input.login).map_err(|_| UNAUTH)?;
-    let candidate = state
-        .authority
-        .verify_password(tenant, login, password, source, budget.remaining())
-        .await?;
     issued(
         state
             .authority
-            .create_session(candidate, replacement, budget.remaining())
+            .login_local(
+                tenant,
+                login,
+                password,
+                source,
+                replacement,
+                budget.remaining(),
+            )
             .await?,
     )
 }
@@ -183,7 +184,7 @@ pub(crate) async fn logout_all(
     Ok(clear_cookie())
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Pagination {
     cursor: Option<SessionId>,
     limit: Option<u16>,
@@ -201,7 +202,7 @@ pub(crate) async fn list(
         .authority
         .inspect_session(tenant(&raw)?, secret, budget.remaining())
         .await?;
-    Ok(Json(
+    Ok(Json(crate::dto::SessionPage::from(
         state
             .authority
             .list_sessions(
@@ -211,6 +212,47 @@ pub(crate) async fn list(
                 budget.remaining(),
             )
             .await?,
-    )
+    ))
     .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Reauthentication {
+    password: String,
+}
+pub(crate) async fn reauthenticate(
+    State(state): State<AppState>,
+    Path(raw): Path<String>,
+    Extension(budget): Extension<RequestBudget>,
+    request: Request,
+) -> Result<Response> {
+    if unique(request.headers(), "x-identity-request")? != Some("1") {
+        return Err(FORBIDDEN);
+    }
+    let proof = actor(&state, &raw, request.headers(), budget).await?;
+    let peer = request
+        .extensions()
+        .get::<crate::ClientAddress>()
+        .ok_or(HttpError::from(AuthorityError::Unavailable))?
+        .0;
+    let source = AttemptSource::parse(&peer.to_string())?;
+    let Json(input) = tokio::time::timeout_at(
+        budget.cutoff(),
+        Json::<Reauthentication>::from_request(request, &state),
+    )
+    .await
+    .map_err(|_| HttpError::request_timeout())?
+    .map_err(|_| BAD)?;
+    issued(
+        state
+            .authority
+            .reauthenticate_local(
+                proof,
+                Password::new(input.password).map_err(|_| UNAUTH)?,
+                source,
+                budget.remaining(),
+            )
+            .await?,
+    )
 }

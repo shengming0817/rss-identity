@@ -3,11 +3,8 @@ use rss_transactional_messaging::policy::OperationDeadline;
 use std::time::Instant;
 use uuid::Uuid;
 
-/// This owned, short-lived candidate is neither a session nor a bearer credential.
-/// ```compile_fail
-/// fn copy(c: rss_identity_postgres::AuthenticationCandidate) { let _ = c.clone(); }
-/// ```
-pub struct AuthenticationCandidate {
+/// Internal password verification evidence.
+pub(crate) struct AuthenticationCandidate {
     pub(crate) state: AccountState,
     pub(crate) authority: Uuid,
     pub(crate) expires: Instant,
@@ -32,7 +29,7 @@ impl AttemptSource {
             || !value.is_ascii()
             || value.chars().any(char::is_control)
         {
-            return Err(AuthorityError::Invalid);
+            return Err(AuthorityError::InvalidInput);
         }
         Ok(Self(value.into()))
     }
@@ -43,12 +40,12 @@ impl AttemptSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorityError {
-    #[error(transparent)]
-    Platform(#[from] rss_identity_core::platform::PlatformError),
-    #[error("invalid account input")]
-    Invalid,
-    #[error(transparent)]
-    Downstream(#[from] rss_identity_core::downstream::DownstreamError),
+    #[error("invalid authority configuration")]
+    Configuration,
+    #[error("invalid operation input")]
+    InvalidInput,
+    #[error("operation deadline elapsed")]
+    DeadlineElapsed,
     #[error(transparent)]
     Federation(#[from] rss_identity_core::federation::FederationError),
     #[error("authentication or operation rejected")]
@@ -79,9 +76,9 @@ pub enum AuthorityError {
 /// Non-secret deployment diagnostics, independent of provider/SQL error text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum StorageMismatch {
-    #[error("deployment environment or origin identity mismatch")]
+    #[error("authentication instance mismatch")]
     DeploymentIdentity,
-    #[error("unsupported schema version; check the development database rebuild guide")]
+    #[error("unsupported authentication schema version")]
     SchemaVersion,
     #[error(
         "database role does not match the operation; use the matching runtime or maintenance configuration"
@@ -100,7 +97,7 @@ pub enum StorageMismatch {
 impl From<PasswordError> for AuthorityError {
     fn from(e: PasswordError) -> Self {
         match e {
-            PasswordError::Invalid => Self::Invalid,
+            PasswordError::Invalid => Self::InvalidInput,
             PasswordError::Busy => Self::Busy,
             PasswordError::Unavailable => Self::Unavailable,
         }
@@ -110,10 +107,13 @@ impl From<PasswordError> for AuthorityError {
 pub(crate) struct Budget(pub Instant);
 impl Budget {
     pub fn new(deadline: OperationDeadline) -> Result<Self, AuthorityError> {
+        if deadline.timeout().is_zero() {
+            return Err(AuthorityError::DeadlineElapsed);
+        }
         Instant::now()
             .checked_add(deadline.timeout())
             .map(Self)
-            .ok_or(AuthorityError::Invalid)
+            .ok_or(AuthorityError::InvalidInput)
     }
     pub fn remaining(&self) -> OperationDeadline {
         OperationDeadline::from_remaining(self.0.saturating_duration_since(Instant::now()))
@@ -124,7 +124,7 @@ impl Budget {
     ) -> Result<T, AuthorityError> {
         tokio::time::timeout_at(self.0.into(), future)
             .await
-            .map_err(|_| AuthorityError::Unavailable)?
+            .map_err(|_| AuthorityError::DeadlineElapsed)?
             .map_err(Into::into)
     }
 }
@@ -155,6 +155,29 @@ impl From<rss_transactional_messaging::error::MessagingErrorKind> for StorageFai
             K::Invariant => Self::Invariant,
             K::DeadlineElapsed => Self::DeadlineElapsed,
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn host_configuration_input_and_deadline_are_distinct() {
+        let keys = crate::CredentialKeys::new("absent".into(), vec![])
+            .err()
+            .unwrap();
+        assert_eq!(keys.to_string(), "invalid authority configuration");
+        assert_eq!(
+            AttemptSource::parse("").err().unwrap().to_string(),
+            "invalid operation input"
+        );
+        assert_eq!(
+            Budget::new(OperationDeadline::from_remaining(std::time::Duration::ZERO))
+                .err()
+                .unwrap()
+                .to_string(),
+            "operation deadline elapsed"
+        );
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

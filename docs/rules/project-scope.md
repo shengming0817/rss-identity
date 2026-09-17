@@ -1,15 +1,13 @@
 # 产品范围
 
-Identity 拥有本地身份认证、租户与成员身份、联合 IdP 登录事务、身份关联、中央登录会话、下游受控身份交接、自身管理授权与安全事件。拥有其 schema、生产迁移、配置、composition、assembly、binary 和产品 T3。
+rss-identity 拥有可嵌入的本地认证、租户成员身份、联合 IdP 登录/关联、实例内服务端会话和原子安全事件。core、postgres、oidc、http-axum 为公开能力包；app/identity 是参考宿主，不成为消费方的运行依赖。当前决定见 [#2435 ADR](../architecture/adr/202609170001-2435-embedded-authentication.md)。
 
-RSS 提供可复用 runtime、事务消息及必要基础库；只消费实际需要的公共 package，使用同一 Git URL 与完整 commit，独立 lock 和 feature 闭包；未发布不阻塞源码消费。禁止消费方跨仓 path、源码副本或 Git/registry 双来源。源码消费不证明 registry 发布。
+宿主持有管理角色、防锁死、资源授权、配置、实例标识、租户 admission、数据库角色与 fenced PgRuntime；组件强制实例/租户/主体/epoch/会话绑定并在事务内调用宿主策略。组和 assurance 仅提供可信认证事实，不生成资源权限。MDM/ZT 持有设备 authority、attestation、posture 和业务授权。
 
-MDM/ZT 拥有资源权限、业务角色与 ABAC、设备证书、attestation、posture、产品浏览器会话及其请求边界。Identity 仅规范化可信认证事实，不铸造产品授权结论。Identity 管理员不自动成为 MDM 管理员。
+仅支持 HTTP v2 和 fresh schema v9，无旧配置、旧库升级、v1 alias、legacy feature 或中央 downstream/client/Hydra 模式。旧候选与历史证据保留；重新部署及真实产品迁移须由其独立任务闭合。
 
-中央 Identity 登录会话与产品浏览器会话分开。产品后端通过受认证的服务端接缝消费身份；跨产品不共享宽域 cookie。完整 OAuth BFF 的代理路径须先决策，不能仅凭 cookie 宣称所有产品 token 均不进入浏览器。
+RSS 公共 runtime、事务消息及必要基础库使用同一 Git URL/完整 SHA，独立 Cargo.lock 与实际 feature 闭包。禁止消费方跨仓 path、源码副本、浮动 branch/tag 或 Git/registry 双来源。固定 Git checkout 内的包间 path 属于同一源码闭包。源码消费不等于 registry 发布。
 
-库统一放在 `crates/`，可执行入口放在 `app/`，与 RSS 主仓的库布局对齐。核心与 adapter 的边界由独立 package 和依赖方向表达；adapter 按能力和 provider 命名。初始不按每个模型拆 crate。产品注入共享连接池，业务写入与 Outbox 在同一数据库事务内组合；各 schema owner 导出自己的 migration，产品决定执行顺序。
+宿主注入既有连接池，业务变更与 Outbox 使用同一 PG 事务。组件不重建、替换或关闭宿主池；各 schema owner 导出 migration，宿主决定顺序、角色与 tenant fence。OIDC 配置可选，不引入统一 provider 总线。
 
-不建设通用 IAM、OAuth 授权服务器平台、通用 API proxy、中央业务 ABAC 或设备 authority。SAML/LDAP/SCIM、M2M、自助注册、passkey 等按 PRD 分级和真实消费者另行接纳。
-
-Hydra 作为独立标准 OIDC 协议引擎，拥有授权码、令牌和协议会话；Identity 唯一拥有账户、成员和认证有效性。产品通过 Identity 单一在线验证入口形成可信身份，不复制两套状态判定。远程协议操作不属于 Identity PG 原子事务。
+不建设通用 IAM、OAuth 授权服务器、API proxy、中央 ABAC 或设备 authority。新增 SAML/LDAP/SCIM、M2M、自助注册、passkey 按独立需求接纳。完整参考部署/运维/UI candidate/T3 属于 #2436，MDM 迁移属于 #2437，Web UI 属于 #2368。

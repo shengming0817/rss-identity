@@ -17,14 +17,15 @@ pub struct Federation {
     pub(crate) oidc: Arc<dyn UpstreamOidc>,
     pub(crate) signer: Arc<StateSigner>,
     pub(crate) group_policy: rss_identity_core::groups::GroupFactsMaxAge,
-    targets: Arc<BTreeMap<(String, String), String>>,
+    pub(crate) credential_keys: Arc<CredentialKeys>,
+    callback: String,
+    targets: Arc<BTreeMap<String, String>>,
 }
 /// Browser input plus transport attribution; the optional replacement is an authority-issued proof.
 pub struct LoginRequest {
     pub tenant: TenantId,
     pub provider: ProviderId,
     pub browser: String,
-    pub client: String,
     pub target: String,
     pub replacement: Option<AuthenticatedSession>,
     pub source: AttemptSource,
@@ -35,7 +36,6 @@ pub struct LinkRequest {
     pub target_provider: ProviderId,
     pub password: Option<rss_identity_core::account::Password>,
     pub browser: String,
-    pub client: String,
     pub target: String,
     pub source: AttemptSource,
 }
@@ -58,11 +58,6 @@ impl LinkResult {
     }
 }
 pub enum FederatedOutcome {
-    /// Bound native flow failed after its browser/state transaction was verified.
-    CliFailure {
-        return_url: String,
-        error: AuthorityError,
-    },
     Redirect(FederatedRedirect),
     Session {
         issued: IssuedSession,
@@ -85,7 +80,6 @@ pub(crate) enum Action {
     AlreadyLinked,
     Reauthenticated,
     SteppedUp,
-    CliAuthorized,
 }
 #[derive(Serialize)]
 pub(crate) struct FederationEvent {
@@ -118,17 +112,20 @@ impl Federation {
         authority: Authority,
         oidc: Arc<dyn UpstreamOidc>,
         signer: StateSigner,
-        targets: BTreeMap<(String, String), String>,
+        config: FederationConfig,
     ) -> Result<Self, AuthorityError> {
         authority.require_runtime()?;
+        let FederationConfig {
+            callback,
+            credential_keys,
+            targets,
+        } = config;
         if targets.len() > 128 {
             return Err(FederationError::Configuration.into());
         }
-        for ((client, id), target) in &targets {
+        for (id, target) in &targets {
             let url = url::Url::parse(target).map_err(|_| FederationError::Configuration)?;
-            if client.is_empty()
-                || client.len() > 128
-                || id.is_empty()
+            if id.is_empty()
                 || id.len() > 128
                 || target.len() > 2048
                 || url.scheme() != "https"
@@ -141,7 +138,21 @@ impl Federation {
                 return Err(FederationError::Configuration.into());
             }
         }
+        let callback_url =
+            url::Url::parse(&callback).map_err(|_| FederationError::Configuration)?;
+        if callback_url.scheme() != "https"
+            || callback_url.host_str().is_none()
+            || callback_url.path() != "/api/v2/oidc/callback"
+            || callback_url.query().is_some()
+            || callback_url.fragment().is_some()
+            || !callback_url.username().is_empty()
+            || callback_url.password().is_some()
+        {
+            return Err(FederationError::Configuration.into());
+        }
         Ok(Self {
+            callback,
+            credential_keys,
             group_policy,
             authority,
             oidc,
@@ -152,16 +163,14 @@ impl Federation {
     pub fn authority(&self) -> Authority {
         self.authority.clone()
     }
-    pub(crate) fn target(&self, client: &str, id: &str) -> Result<String, AuthorityError> {
+    pub(crate) fn target(&self, id: &str) -> Result<String, AuthorityError> {
         self.targets
-            .get(&(client.into(), id.into()))
+            .get(id)
             .cloned()
             .ok_or(FederationError::Configuration.into())
     }
-    pub(crate) fn allowed_return(&self, client: &str, url: &str) -> bool {
-        self.targets
-            .iter()
-            .any(|((c, _), u)| c == client && u == url)
+    pub(crate) fn allowed_return(&self, url: &str) -> bool {
+        self.targets.values().any(|u| u == url)
     }
     pub(crate) async fn upstream<T>(
         &self,
@@ -175,8 +184,8 @@ impl Federation {
     }
 }
 
-impl Authority {
-    pub(crate) async fn create_provider(
+impl Federation {
+    pub(crate) async fn persist_create_provider(
         &self,
         actor: AuthenticatedSession,
         settings: ProviderSettings,
@@ -184,12 +193,14 @@ impl Authority {
         profile: [u8; 32],
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
-        self.require_administrator(&actor)?;
-        let keys = self.credential_keys()?;
+        self.authority.require_runtime()?;
+        let keys = self.credential_keys.clone();
+        let operation = ManagementOperation::CreateProvider;
+        let policy = self.authority.policy.clone();
+        let instance = self.authority.instance;
         let tenant = actor.key.tenant;
-        self.write_sql(tenant,deadline,move|c|Box::pin(async move {
-            let loaded=crate::session_storage::recheck(c,&actor).await?;loaded.authorize_administration(tenant)?;
-            if loaded.system_domain && settings.jit(){return Err(FederationError::Configuration.into());}
+        self.authority.write_sql(tenant,deadline,move|c|Box::pin(async move {
+            let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None)?;
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
             if count>=100{return Err(FederationError::ProviderLimitReached.into());}
             let view=ProviderView{id:ProviderId::generate(),version:1,enabled:false,revocation_epoch:1,settings,assurance_profile:profile,credential_version:1};
@@ -199,7 +210,7 @@ impl Authority {
             Ok((view,vec![audit]))
         })).await
     }
-    pub(crate) async fn enable_provider(
+    pub(crate) async fn persist_enable_provider(
         &self,
         actor: AuthenticatedSession,
         id: ProviderId,
@@ -219,19 +230,24 @@ impl Authority {
         enabled: Option<bool>,
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
-        self.require_administrator(&actor)?;
+        self.authority.require_runtime()?;
+        let operation = enabled
+            .map(|value| ManagementOperation::SetProviderEnabled(id, value))
+            .unwrap_or(ManagementOperation::UpdateProvider(id));
         let keys = if settings.is_some() {
-            Some(self.credential_keys()?)
+            Some(self.credential_keys.clone())
         } else {
             None
         };
+        let policy = self.authority.policy.clone();
+        let instance = self.authority.instance;
         let tenant = actor.key.tenant;
-        self.write_sql(tenant,deadline,move|c|Box::pin(async move {
-            let loaded=crate::session_storage::recheck(c,&actor).await?;loaded.authorize_administration(tenant)?;
+        self.authority.write_sql(tenant,deadline,move|c|Box::pin(async move {
+            let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None)?;
             let mut view=db::provider(c,tenant,id).await?;
             if view.version!=expected{return Err(FederationError::StaleConfiguration.into());}
             let action=if let Some((settings,credentials,profile))=settings {
-                if settings.issuer()!=view.settings.issuer() || (loaded.system_domain && settings.jit()){return Err(FederationError::Configuration.into());}
+                if settings.issuer()!=view.settings.issuer(){return Err(FederationError::Configuration.into());}
                 view.settings=settings;view.assurance_profile=profile;
                 view.credential_version=view.credential_version.checked_add(1).ok_or(FederationError::Rejected)?;
                 view.revocation_epoch=view.revocation_epoch.checked_add(1).ok_or(FederationError::Rejected)?;
@@ -247,18 +263,21 @@ impl Authority {
             let audit=event(tenant,action,&view,Some(actor.key.principal));Ok((view,vec![audit]))
         })).await
     }
-    pub(crate) async fn list_providers(
+    pub(crate) async fn persist_list_providers(
         &self,
         actor: AuthenticatedSession,
         deadline: OperationDeadline,
     ) -> Result<Vec<ProviderView>, AuthorityError> {
-        self.require_runtime()?;
+        self.authority.require_runtime()?;
+        let policy = self.authority.policy.clone();
+        let instance = self.authority.instance;
         let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
-        self.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
+        self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
-                    crate::session_storage::recheck(c, &actor).await?.authorize_administration(tenant)?;
+                    let loaded = crate::session_storage::recheck(c, &actor).await?;
+                    crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListProviders,None)?;
                     let ids: Vec<Uuid> = sqlx::query_scalar(concat!(
                         "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid OR",
                         "DER BY provider_id LIMIT 101"
@@ -283,7 +302,7 @@ impl Authority {
                     Ok(result)
                 }) }).await
     }
-    pub(crate) async fn test_provider<F>(
+    pub(crate) async fn persist_test_provider<F>(
         &self,
         actor: AuthenticatedSession,
         id: ProviderId,
@@ -297,17 +316,26 @@ impl Authority {
             ProviderCredentials,
         ) -> UpstreamFuture<'static, ConnectionReport>,
     {
-        self.require_runtime()?;
+        self.authority.require_runtime()?;
+        let policy = self.authority.policy.clone();
+        let instance = self.authority.instance;
         let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(actor.expires);
+        let read_policy = policy.clone();
         let (actor, view) = self
+            .authority
             .read_sql(tenant, budget.remaining(), move |c| {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
-                    crate::session_storage::recheck(c, &actor)
-                        .await?
-                        .authorize_administration(tenant)?;
+                    let loaded = crate::session_storage::recheck(c, &actor).await?;
+                    crate::management::authorize(
+                        read_policy.as_ref(),
+                        instance,
+                        &loaded,
+                        ManagementOperation::TestProvider(id),
+                        None,
+                    )?;
                     Ok((actor, db::provider(c, tenant, id).await?))
                 })
             })
@@ -328,96 +356,39 @@ impl Authority {
         .unwrap_or(Err(FederationError::Unavailable));
         let diagnostic = result.as_ref().err().map(|e| e.diagnostic());
         let passed = result.is_ok();
-        self.write_sql(tenant, budget.remaining(), move |c| {
-            Box::pin(async move {
-                lock_guard(c, tenant).await?;
-                crate::session_storage::recheck(c, &actor)
-                    .await?
-                    .authorize_administration(tenant)?;
-                let current = db::provider(c, tenant, id).await?;
-                if current.version != view.version {
-                    return Err(FederationError::StaleConfiguration.into());
-                }
-                let audit = SecurityEvent::Federation(FederationEvent {
-                    tenant: tenant.to_string(),
-                    action: if passed {
-                        Action::ProviderTested
-                    } else {
-                        Action::ProviderTestFailed
-                    },
-                    provider_id: view.id,
-                    config_version: view.version,
-                    principal: Some(actor.key.principal.as_uuid()),
-                    diagnostic,
-                });
-                Ok(((), vec![audit]))
+        self.authority
+            .write_sql(tenant, budget.remaining(), move |c| {
+                Box::pin(async move {
+                    lock_guard(c, tenant).await?;
+                    let loaded = crate::session_storage::recheck(c, &actor).await?;
+                    crate::management::authorize(
+                        policy.as_ref(),
+                        instance,
+                        &loaded,
+                        ManagementOperation::TestProvider(id),
+                        None,
+                    )?;
+                    let current = db::provider(c, tenant, id).await?;
+                    if current.version != view.version {
+                        return Err(FederationError::StaleConfiguration.into());
+                    }
+                    let audit = SecurityEvent::Federation(FederationEvent {
+                        tenant: tenant.to_string(),
+                        action: if passed {
+                            Action::ProviderTested
+                        } else {
+                            Action::ProviderTestFailed
+                        },
+                        provider_id: view.id,
+                        config_version: view.version,
+                        principal: Some(actor.key.principal.as_uuid()),
+                        diagnostic,
+                    });
+                    Ok(((), vec![audit]))
+                })
             })
-        })
-        .await?;
+            .await?;
         result.map_err(Into::into)
-    }
-}
-
-#[cfg(test)]
-mod contract_tests {
-    use super::*;
-    #[test]
-    fn action_vocabulary_and_payload_match_schema() {
-        let schema: serde_json::Value =
-            serde_json::from_str(include_str!("federation-security-event-v1.json")).unwrap();
-        let actions = [
-            Action::ProviderCreated,
-            Action::ProviderUpdated,
-            Action::ProviderEnabled,
-            Action::ProviderDisabled,
-            Action::ProviderTested,
-            Action::ProviderTestFailed,
-            Action::JitCreated,
-            Action::LoggedIn,
-            Action::Linked,
-            Action::AlreadyLinked,
-            Action::Reauthenticated,
-            Action::SteppedUp,
-            Action::CliAuthorized,
-        ];
-        let values: Vec<_> = actions
-            .into_iter()
-            .map(|a| serde_json::to_value(a).unwrap())
-            .collect();
-        assert_eq!(
-            values,
-            *schema["properties"]["action"]["enum"].as_array().unwrap()
-        );
-        let event = FederationEvent {
-            tenant: Uuid::new_v4().to_string(),
-            action: Action::ProviderTestFailed,
-            provider_id: ProviderId::generate(),
-            config_version: 1,
-            principal: None,
-            diagnostic: Some(ProviderFailure {
-                stage: ProviderStage::Discovery,
-                reason: ProviderReason::Unavailable,
-            }),
-        };
-        let event = serde_json::to_value(event).unwrap();
-        for key in schema["required"].as_array().unwrap() {
-            assert!(event.get(key.as_str().unwrap()).is_some());
-        }
-        assert!(
-            event
-                .as_object()
-                .unwrap()
-                .keys()
-                .all(|k| schema["properties"].get(k).is_some())
-        );
-        for key in ["stage", "reason"] {
-            assert!(
-                schema["properties"]["diagnostic"]["properties"][key]["enum"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&event["diagnostic"][key])
-            );
-        }
     }
 }
 
@@ -429,10 +400,8 @@ impl Federation {
         credentials: ProviderCredentials,
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
-        self.authority.require_administrator(&actor)?;
-        if settings.redirect_uri()
-            != format!("{}/api/v1/oidc/callback", self.authority.identity_origin)
-        {
+        self.authority.require_runtime()?;
+        if settings.redirect_uri() != self.callback {
             return Err(FederationError::Configuration.into());
         }
         self.oidc
@@ -441,8 +410,7 @@ impl Federation {
             .oidc
             .assurance_profile(actor.key.tenant, &settings)
             .fingerprint;
-        self.authority
-            .create_provider(actor, settings, credentials, profile, deadline)
+        self.persist_create_provider(actor, settings, credentials, profile, deadline)
             .await
     }
     pub async fn update_provider(
@@ -454,10 +422,8 @@ impl Federation {
         credentials: ProviderCredentials,
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
-        self.authority.require_administrator(&actor)?;
-        if settings.redirect_uri()
-            != format!("{}/api/v1/oidc/callback", self.authority.identity_origin)
-        {
+        self.authority.require_runtime()?;
+        if settings.redirect_uri() != self.callback {
             return Err(FederationError::Configuration.into());
         }
         self.oidc
@@ -466,16 +432,15 @@ impl Federation {
             .oidc
             .assurance_profile(actor.key.tenant, &settings)
             .fingerprint;
-        self.authority
-            .edit_provider(
-                actor,
-                id,
-                expected_version,
-                Some((settings, credentials, profile)),
-                None,
-                deadline,
-            )
-            .await
+        self.edit_provider(
+            actor,
+            id,
+            expected_version,
+            Some((settings, credentials, profile)),
+            None,
+            deadline,
+        )
+        .await
     }
     pub async fn enable_provider(
         &self,
@@ -485,8 +450,7 @@ impl Federation {
         enabled: bool,
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
-        self.authority
-            .enable_provider(actor, id, expected_version, enabled, deadline)
+        self.persist_enable_provider(actor, id, expected_version, enabled, deadline)
             .await
     }
     pub async fn list_providers(
@@ -494,7 +458,7 @@ impl Federation {
         actor: AuthenticatedSession,
         deadline: OperationDeadline,
     ) -> Result<Vec<ProviderView>, AuthorityError> {
-        self.authority.list_providers(actor, deadline).await
+        self.persist_list_providers(actor, deadline).await
     }
     pub async fn test_provider(
         &self,
@@ -503,16 +467,15 @@ impl Federation {
         deadline: OperationDeadline,
     ) -> Result<ConnectionReport, AuthorityError> {
         let oidc = self.oidc.clone();
-        self.authority
-            .test_provider(
-                actor,
-                id,
-                move |tenant, settings, credentials| {
-                    Box::pin(async move { oidc.test(tenant, &settings, &credentials).await })
-                },
-                deadline,
-            )
-            .await
+        self.persist_test_provider(
+            actor,
+            id,
+            move |tenant, settings, credentials| {
+                Box::pin(async move { oidc.test(tenant, &settings, &credentials).await })
+            },
+            deadline,
+        )
+        .await
     }
     pub async fn login_options(
         &self,
@@ -530,7 +493,6 @@ impl Federation {
         })).await
     }
 }
-#[derive(Serialize)]
 pub struct LoginOption {
     pub provider_id: Uuid,
     pub label: String,
@@ -542,10 +504,9 @@ impl Federation {
         &self,
         actor: AuthenticatedSession,
         deadline: OperationDeadline,
-    ) -> Result<rss_identity_contracts::session::SessionSecurity, AuthorityError> {
+    ) -> Result<SessionSecurity, AuthorityError> {
         let oidc = self.oidc.clone();
         self.authority.read_sql(actor.key.tenant, deadline, move |c| Box::pin(async move {
-            use rss_identity_contracts::session::{AuthenticationFacts, SessionSecurity, StepUpProvider};
             lock_guard(c, actor.key.tenant).await?;
             let loaded = crate::session_storage::recheck(c, &actor).await?;
             // A persisted authentication fact must still match this process's approved interpretation.
@@ -564,7 +525,7 @@ impl Federation {
             for id in ids {
                 let view = db::provider(c, actor.key.tenant, ProviderId::parse(&id.to_string())?).await?;
                 match check_step_up(c, actor.key, &view, oidc.as_ref()).await {
-                    Ok(()) => providers.push(StepUpProvider {
+                    Ok(()) => providers.push(LoginOption {
                         provider_id: id,
                         label: format!("{} · {} · {}", view.settings.issuer().as_str(), view.settings.client_id().as_str(), id),
                     }),
@@ -575,12 +536,8 @@ impl Federation {
                 }
             }
             Ok(SessionSecurity {
-                session_id: loaded.view.id.to_string(),
-                authentication: AuthenticationFacts {
-                    auth_time: loaded.assurance.auth_time().unwrap_or(loaded.view.auth_time),
-                    acr: loaded.assurance.acr(),
-                    amr: loaded.assurance.amr().to_vec(),
-                },
+                session_id: loaded.view.id,
+                assurance: loaded.assurance,
                 eligible_step_up_providers: providers,
             })
         })).await
@@ -601,7 +558,7 @@ impl Federation {
         Ok(())
     }
     /// Revoke old authentication facts when the host changes ACR/AMR interpretation. This never admits or disables an IdP.
-    /// Existing provider versions fence attempts; epochs fence every session and downstream grant.
+    /// Existing provider versions fence attempts; epochs fence every federated session.
     /// ref: PostgreSQL 17 explicit-locking; reuse the same tenant/provider lock order as administration.
     pub async fn reconcile_assurance_profiles(
         &self,
@@ -615,7 +572,7 @@ impl Federation {
             let ids:Vec<Uuid> = sqlx::query_scalar("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT 101")
                 .bind(tenant.to_string()).fetch_all(&mut *c).await?;
             if ids.len()>100 { return Err(reject().into()); }
-            // Before first administrator initialization there is no guard or provider to synchronize.
+            // Before the tenant is initialized there is no guard or provider to synchronize.
             if ids.is_empty() { return Ok((false,Vec::new())); }
             lock_guard(c, tenant).await?;
             let mut events=Vec::new();
@@ -664,4 +621,78 @@ pub(super) async fn check_step_up(
         return Err(FederationError::Rejected.into());
     }
     Ok(())
+}
+
+/// Optional upstream configuration. Local authentication never needs these keys or URLs.
+pub struct FederationConfig {
+    pub callback: String,
+    pub credential_keys: Arc<CredentialKeys>,
+    pub targets: BTreeMap<String, String>,
+}
+pub struct SessionSecurity {
+    pub session_id: rss_identity_core::SessionId,
+    pub assurance: rss_identity_core::assurance::Assurance,
+    pub eligible_step_up_providers: Vec<LoginOption>,
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    #[test]
+    fn action_vocabulary_and_payload_match_schema() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("federation-security-event-v2.json")).unwrap();
+        let actions = [
+            Action::ProviderCreated,
+            Action::ProviderUpdated,
+            Action::ProviderEnabled,
+            Action::ProviderDisabled,
+            Action::ProviderTested,
+            Action::ProviderTestFailed,
+            Action::JitCreated,
+            Action::LoggedIn,
+            Action::Linked,
+            Action::AlreadyLinked,
+            Action::Reauthenticated,
+            Action::SteppedUp,
+        ];
+        let values: Vec<_> = actions
+            .into_iter()
+            .map(|a| serde_json::to_value(a).unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            *schema["properties"]["action"]["enum"].as_array().unwrap()
+        );
+        let event = FederationEvent {
+            tenant: Uuid::new_v4().to_string(),
+            action: Action::ProviderTestFailed,
+            provider_id: ProviderId::generate(),
+            config_version: 1,
+            principal: None,
+            diagnostic: Some(ProviderFailure {
+                stage: ProviderStage::Discovery,
+                reason: ProviderReason::Unavailable,
+            }),
+        };
+        let event = serde_json::to_value(event).unwrap();
+        for key in schema["required"].as_array().unwrap() {
+            assert!(event.get(key.as_str().unwrap()).is_some());
+        }
+        assert!(
+            event
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|k| schema["properties"].get(k).is_some())
+        );
+        for key in ["stage", "reason"] {
+            assert!(
+                schema["properties"]["diagnostic"]["properties"][key]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&event["diagnostic"][key])
+            );
+        }
+    }
 }

@@ -1,6 +1,6 @@
 # RSS Identity 协作说明
 
-rss-identity 是本地认证、租户联合身份接入与服务端会话产品仓。产品需求由 [PRD](docs/product/rss-identity-prd.md) 持有；当前具有 I01/I02 协议与工程接缝及 I03 本地账户/本机管理机制；I04 提供中央会话；I05 提供租户 IdP、持久 OIDC/JIT/关联及可挂载 HTTP Router；I06 提供 Hydra 下游 bridge、在线验证与最小 client；I07 的日常管理仅使用中央会话 API，UI 源码由 rss-web apps/identity 持有；I08 提供产品装配，I09 提供可信 assurance、显式 step-up、原生恢复/轮换 T2 与测量入口；生产目标及新增候选 T3 独立验收。
+rss-identity 提供可嵌入的本地认证、租户联合身份与实例内会话。四个能力包由宿主显式装配，管理授权策略由宿主提供；app/identity 是最小参考宿主。当前架构与计划见 [#2435 ADR](docs/architecture/adr/202609170001-2435-embedded-authentication.md)。历史中央模式及其验收记录不作为当前运行路径。
 
 ## 工作方式
 
@@ -13,9 +13,9 @@ rss-identity 是本地认证、租户联合身份接入与服务端会话产品�
 
 ## 产品边界
 
-遵循 [范围规则](docs/rules/project-scope.md)。Identity 拥有 AuthN、联合身份关联、登录会话和自身管理权限；产品资源 ABAC、设备证书、posture、attestation 属于 MDM/ZT。
+遵循 [范围规则](docs/rules/project-scope.md)。组件拥有 AuthN、联合身份关联和实例内会话；宿主持有管理角色与防锁死；产品资源 ABAC、设备证书、posture、attestation 属于 MDM/ZT。
 
-RSS 通过同一仓库 URL 与固定完整 Git commit 消费，提交独立 Cargo.lock；不使用浮动 branch/tag、消费方跨仓 path、submodule 或旧内部包。RSS 固定 checkout 内的包间 path 依赖属于同一源码闭包。编译期消费者仅依赖稳定 contracts/client 或采用标准 wire 协议。不得恢复全局 diport、vocab、generated 或 provider 汇总 adapter。
+RSS 通过同一仓库 URL 与固定完整 Git commit 消费，提交独立 Cargo.lock；不使用浮动 branch/tag、消费方跨仓 path、submodule 或旧内部包。RSS 固定 checkout 内的包间 path 依赖属于同一源码闭包。编译期消费者依赖四个公开能力包，HTTP DTO 保持在 adapter 内。不得恢复全局 diport、vocab、generated 或 provider 汇总 adapter。
 
 ## 历史与上游参考
 
@@ -32,6 +32,6 @@ RSS 通过同一仓库 URL 与固定完整 Git commit 消费，提交独立 Carg
 
 文档维护遵循 [文档规则](docs/rules/documentation.md)。
 
-## I07 管理边界
+## 管理与协议边界
 
-日常管理仅接受 AuthenticatedSession 并在事务内重检；AuthenticationCandidate 只用于登录发会话与密码再认证。identity-admin 仅持有 Maintenance initialize/recover。唯一协议 callback 为 /api/v1/oidc/callback，不新增兼容入口。当前决定见 docs/architecture/adr/202609090801-2337-central-management-ui.md。
+日常管理只接受组件签发的 AuthenticatedSession，事务内复核后调用必选宿主 ManagementPolicy。AuthenticationCandidate 与底层会话签发私有。identity-admin 仅使用 Maintenance initialize/recover_local_password。唯一 OIDC callback 是 `/api/v2/oidc/callback`，不新增兼容入口。

@@ -168,7 +168,11 @@ pub fn service(f: &Fixture, oidc: Arc<dyn UpstreamOidc>) -> Federation {
         f.store.clone(),
         oidc,
         StateSigner::new([7; 32], "https://identity.example.test").unwrap(),
-        BTreeMap::from([(("identity".into(), "home".into()), RETURN.into())]),
+        FederationConfig {
+            callback: "https://identity.example.test/api/v2/oidc/callback".into(),
+            credential_keys: credential_keys(),
+            targets: BTreeMap::from([("home".into(), RETURN.into())]),
+        },
     )
     .unwrap()
 }
@@ -177,7 +181,7 @@ pub fn settings() -> ProviderSettings {
         issuer: "https://idp.example.test".into(),
         client_id: "identity".into(),
 
-        redirect_uri: "https://identity.example.test/api/v1/oidc/callback".into(),
+        redirect_uri: "https://identity.example.test/api/v2/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
             email: Some("email".into()),
@@ -224,7 +228,6 @@ pub async fn begin(f: &Fixture, s: &Federation, p: &ProviderView) -> anyhow::Res
                 tenant: f.key.tenant,
                 provider: p.id,
                 browser: BROWSER.into(),
-                client: "identity".into(),
                 target: "home".into(),
                 replacement: None,
                 source: source(),
@@ -261,9 +264,7 @@ pub fn issued(outcome: FederatedOutcome) -> IssuedSession {
     }
 }
 pub async fn session(f: &Fixture) -> anyhow::Result<IssuedSession> {
-    Ok(f.store
-        .create_session(f.candidate().await?, None, deadline())
-        .await?)
+    f.login().await
 }
 pub fn secret(s: &IssuedSession) -> rss_identity_core::session::SessionSecret {
     rss_identity_core::session::SessionSecret::parse(s.secret().expose().into()).unwrap()

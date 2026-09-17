@@ -27,8 +27,6 @@ pub(crate) struct AccountEvent {
 #[derive(Serialize)]
 pub(crate) struct EventState {
     enabled: bool,
-    administrator: bool,
-    emergency: bool,
     member_active: bool,
     membership_epoch: i64,
 }
@@ -42,8 +40,6 @@ impl AccountEvent {
             epoch: state.epoch(),
             state: EventState {
                 enabled: state.enabled(),
-                administrator: state.administrator(),
-                emergency: state.emergency(),
                 member_active: state.member_active(),
                 membership_epoch: state.membership_epoch(),
             },
@@ -55,10 +51,8 @@ impl AccountEvent {
 #[serde(untagged)]
 pub(crate) enum SecurityEvent {
     Account(AccountEvent),
-    Platform(crate::platform::PlatformEvent),
     Session(crate::sessions::SessionEvent),
     Federation(crate::federation::FederationEvent),
-    Downstream(crate::downstream::DownstreamEvent),
 }
 impl SecurityEvent {
     pub fn account(action: SecurityAction, state: AccountState, actor: Option<AccountKey>) -> Self {
@@ -66,8 +60,6 @@ impl SecurityEvent {
     }
     fn tenant(&self) -> &str {
         match self {
-            Self::Platform(v) => &v.tenant,
-            Self::Downstream(v) => &v.tenant,
             Self::Account(v) => &v.tenant,
             Self::Session(v) => &v.tenant,
             Self::Federation(v) => &v.tenant,
@@ -75,29 +67,17 @@ impl SecurityEvent {
     }
     fn contract(&self) -> (&'static str, &'static str, u32, &'static str) {
         match self {
-            Self::Platform(_) => (
-                "platform.changed",
-                "identity.platform.security",
-                1,
-                include_str!("platform-security-event-v1.json"),
-            ),
-            Self::Downstream(_) => (
-                "downstream.changed",
-                "identity.downstream.security",
-                1,
-                include_str!("downstream-security-event-v1.json"),
-            ),
             Self::Account(_) => (
                 "account.changed",
                 "identity.account.security",
-                2,
+                3,
                 EVENT_SCHEMA,
             ),
             Self::Federation(_) => (
                 "federation.changed",
                 "identity.federation.security",
-                1,
-                include_str!("federation-security-event-v1.json"),
+                2,
+                include_str!("federation-security-event-v2.json"),
             ),
             Self::Session(_) => (
                 "session.changed",
@@ -111,15 +91,11 @@ impl SecurityEvent {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MutationError {
     #[error(transparent)]
-    Platform(#[from] rss_identity_core::platform::PlatformError),
-    #[error(transparent)]
     Storage(#[from] PgError),
     #[error(transparent)]
     Rule(#[from] AccountRuleError),
     #[error(transparent)]
     Federation(#[from] rss_identity_core::federation::FederationError),
-    #[error(transparent)]
-    Downstream(#[from] rss_identity_core::downstream::DownstreamError),
 }
 impl From<sqlx::Error> for MutationError {
     fn from(error: sqlx::Error) -> Self {
@@ -127,7 +103,7 @@ impl From<sqlx::Error> for MutationError {
     }
 }
 pub(crate) const MAX_MUTATION_EVENTS: usize = 8;
-const EVENT_SCHEMA: &str = include_str!("security-event-v2.json");
+const EVENT_SCHEMA: &str = include_str!("security-event-v3.json");
 pub(crate) fn reject() -> PgError {
     MessagingError::new(
         MessagingErrorKind::Conflict,
@@ -151,20 +127,29 @@ impl Authority {
         operation: F,
     ) -> Result<T, AuthorityError>
     where
-        F: for<'a> FnOnce(&'a mut PgTransaction<'_>) -> BoxFuture<'a, Result<T, PgError>> + Send,
+        F: for<'a> FnOnce(&'a mut PgTransaction<'_>) -> BoxFuture<'a, Result<T, PgError>>
+            + Send
+            + 'static,
     {
         let bundle = self.runtimes.snapshot()?;
-        Self::read_bundle(bundle, tenant, deadline, operation).await
+        Self::read_bundle(bundle, tenant, deadline, true, operation).await
     }
-    async fn read_bundle<T: Send, F>(
+    pub(crate) async fn read_bundle<T: Send, F>(
         bundle: std::sync::Arc<crate::runtime::RuntimeBundle>,
         tenant: TenantId,
         deadline: OperationDeadline,
+        verify_instance: bool,
         operation: F,
     ) -> Result<T, AuthorityError>
     where
-        F: for<'a> FnOnce(&'a mut PgTransaction<'_>) -> BoxFuture<'a, Result<T, PgError>> + Send,
+        F: for<'a> FnOnce(&'a mut PgTransaction<'_>) -> BoxFuture<'a, Result<T, PgError>>
+            + Send
+            + 'static,
     {
+        if !bundle.tenants.contains(&tenant) {
+            return Err(AuthorityError::Rejected);
+        }
+        let instance = bundle.instance;
         if deadline.timeout().is_zero() {
             return Err(AuthorityError::NotStarted(
                 crate::StorageFailure::DeadlineElapsed,
@@ -172,7 +157,19 @@ impl Authority {
         }
         bundle
             .runtime
-            .local_tx(tenant, deadline, operation)
+            .local_tx(tenant, deadline, move |tx| {
+                Box::pin(async move {
+                    if verify_instance {
+                        let actual =
+                            connection(tx, move |c| Box::pin(crate::storage::authority_id(c)))
+                                .await?;
+                        if actual != instance.as_uuid() {
+                            return Err(reject());
+                        }
+                    }
+                    operation(tx).await
+                })
+            })
             .await
             .fold(
                 Ok,
@@ -311,7 +308,7 @@ impl Authority {
         let outbox = bundle.outbox.clone();
         let reason = std::sync::Arc::new(std::sync::OnceLock::new());
         let reason_slot = reason.clone();
-        let result = Self::read_bundle(bundle, tenant, deadline, move |tx| {
+        let result = Self::read_bundle(bundle, tenant, deadline, true, move |tx| {
             Box::pin(async move {
                 let (result, events) = operation(tx)
                     .await
@@ -391,16 +388,8 @@ where
 fn sql_failure(error: MutationError, reason: &std::sync::OnceLock<AuthorityError>) -> PgError {
     match error {
         MutationError::Storage(e) => e,
-        MutationError::Platform(e) => {
-            let _ = reason.set(AuthorityError::Platform(e));
-            reject()
-        }
         MutationError::Rule(e) => {
             let _ = reason.set(AuthorityError::RuleRejected(e));
-            reject()
-        }
-        MutationError::Downstream(e) => {
-            let _ = reason.set(AuthorityError::Downstream(e));
             reject()
         }
         MutationError::Federation(e) => {
@@ -414,11 +403,31 @@ fn domain_result<T>(
     reason: Option<AuthorityError>,
 ) -> Result<T, AuthorityError> {
     match (result, reason) {
-        (
-            Err(AuthorityError::Rejected),
-            Some(AuthorityError::RuleRejected(AccountRuleError::Rejected)),
-        ) => Err(AuthorityError::Rejected),
         (Err(AuthorityError::Rejected), Some(reason)) => Err(reason),
         (result, _) => result,
+    }
+}
+
+#[cfg(test)]
+mod settlement_tests {
+    use super::*;
+
+    #[test]
+    fn domain_rejection_preserves_reason_only_after_confirmed_rollback() {
+        let reason = AuthorityError::RuleRejected(AccountRuleError::Rejected);
+        assert_eq!(
+            domain_result::<()>(Err(AuthorityError::Rejected), Some(reason)),
+            Err(reason)
+        );
+        for failure in [
+            AuthorityError::RollbackFailed(crate::StorageFailure::DeadlineElapsed),
+            AuthorityError::CommitUnknown(crate::StorageFailure::DeadlineElapsed),
+            AuthorityError::Fenced,
+        ] {
+            assert_eq!(
+                domain_result::<()>(Err(failure), Some(reason)),
+                Err(failure)
+            );
+        }
     }
 }

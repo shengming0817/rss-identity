@@ -1,4 +1,4 @@
-//! Central-session management. Domain authorization is rechecked in the mutation transaction.
+//! Instance-local management. Domain authorization is rechecked in the mutation transaction.
 use crate::{AppState, HttpConfig, boundary::*};
 use axum::{
     Extension, Json, Router,
@@ -6,23 +6,23 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use rss_identity_core::{
     PrincipalId,
     account::{AccountKey, AccountRuleError, LoginKey, Password},
-    federation::*,
+    federation::FederationError,
 };
 use rss_identity_postgres::{
-    AccountView, AttemptSource, AuthenticatedSession, AuthorityError, Federation, LocalAccountRole,
+    AccountView, AttemptSource, AuthenticatedSession, Authority, AuthorityError,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 
 #[derive(Clone)]
 struct Management {
-    federation: Federation,
+    authority: Authority,
 }
-struct Error(HttpError);
+pub(crate) struct Error(HttpError);
 impl From<HttpError> for Error {
     fn from(e: HttpError) -> Self {
         Self(e)
@@ -31,15 +31,6 @@ impl From<HttpError> for Error {
 impl From<AuthorityError> for Error {
     fn from(error: AuthorityError) -> Self {
         let (status, code) = match error {
-            AuthorityError::Platform(
-                rss_identity_core::platform::PlatformError::LastAdministrator,
-            ) => (StatusCode::CONFLICT, "last_platform_administrator"),
-            AuthorityError::Platform(rss_identity_core::platform::PlatformError::Forbidden) => {
-                (StatusCode::FORBIDDEN, "insufficient_privilege")
-            }
-            AuthorityError::Platform(rss_identity_core::platform::PlatformError::Invalid) => {
-                (StatusCode::BAD_REQUEST, "malformed_request")
-            }
             AuthorityError::Rejected => (StatusCode::UNAUTHORIZED, "invalid_credential"),
             AuthorityError::ReauthenticationFailed => {
                 (StatusCode::FORBIDDEN, "reauthentication_failed")
@@ -50,10 +41,11 @@ impl From<AuthorityError> for Error {
             AuthorityError::RuleRejected(AccountRuleError::AlreadyExists) => {
                 (StatusCode::CONFLICT, "account_already_exists")
             }
-            AuthorityError::RuleRejected(AccountRuleError::LastAdministrator) => {
-                (StatusCode::CONFLICT, "last_administrator")
+            AuthorityError::RuleRejected(AccountRuleError::ReauthenticationRequired) => {
+                (StatusCode::FORBIDDEN, "reauthentication_required")
             }
-            AuthorityError::Invalid
+            AuthorityError::RuleRejected(AccountRuleError::Rejected)
+            | AuthorityError::InvalidInput
             | AuthorityError::Federation(FederationError::Configuration) => {
                 (StatusCode::BAD_REQUEST, "malformed_request")
             }
@@ -82,59 +74,40 @@ impl IntoResponse for Error {
     }
 }
 type Result<T> = std::result::Result<T, Error>;
-/// Mount once alongside `federated_router` and `downstream_router` on the same HTTPS origin.
+/// Local account management, independent of upstream federation.
 pub fn management_router(
-    federation: Federation,
+    authority: Authority,
     config: HttpConfig,
 ) -> std::result::Result<Router, AuthorityError> {
-    let authority = federation.authority();
     authority.require_runtime()?;
-    let local = AppState { authority, config };
+    let local = AppState {
+        authority: authority.clone(),
+        config,
+    };
     Ok(Router::new()
-        .route("/api/v1/tenants/{tenant}/login-options", get(options))
         .route(
-            "/api/v1/tenants/{tenant}/accounts",
+            "/api/v2/tenants/{tenant}/accounts",
             get(accounts).post(create_account),
         )
         .route(
-            "/api/v1/tenants/{tenant}/accounts/{principal}/enabled",
+            "/api/v2/tenants/{tenant}/accounts/{principal}/enabled",
             post(enabled),
         )
         .route(
-            "/api/v1/tenants/{tenant}/accounts/{principal}/administrator",
-            post(administrator),
-        )
-        .route(
-            "/api/v1/tenants/{tenant}/accounts/{principal}/membership",
+            "/api/v2/tenants/{tenant}/accounts/{principal}/membership",
             post(membership),
         )
         .route(
-            "/api/v1/tenants/{tenant}/accounts/{principal}/password",
+            "/api/v2/tenants/{tenant}/accounts/{principal}/password",
             post(reset_password),
         )
         .route(
-            "/api/v1/tenants/{tenant}/account/password",
+            "/api/v2/tenants/{tenant}/account/password",
             post(own_password),
         )
-        .route(
-            "/api/v1/tenants/{tenant}/providers",
-            get(providers).post(create_provider),
-        )
-        .route(
-            "/api/v1/tenants/{tenant}/providers/{provider}",
-            put(update_provider),
-        )
-        .route(
-            "/api/v1/tenants/{tenant}/providers/{provider}/enabled",
-            post(provider_enabled),
-        )
-        .route(
-            "/api/v1/tenants/{tenant}/providers/{provider}/test",
-            post(test_provider),
-        )
         .layer(axum::extract::DefaultBodyLimit::max(32768))
-        .layer(middleware::from_fn_with_state(local, request_boundary))
-        .with_state(Management { federation }))
+        .route_layer(middleware::from_fn_with_state(local, request_boundary))
+        .with_state(Management { authority }))
 }
 async fn actor(
     s: &Management,
@@ -150,12 +123,11 @@ async fn actor(
         }
         csrf(h, &secret)?;
     }
-    Ok(s.federation
-        .authority()
+    Ok(s.authority
         .inspect_session(tenant(t)?, secret, b.remaining())
         .await?)
 }
-async fn body<T: DeserializeOwned>(request: Request, b: RequestBudget) -> Result<T> {
+pub(crate) async fn body<T: DeserializeOwned>(request: Request, b: RequestBudget) -> Result<T> {
     let bytes =
         tokio::time::timeout_at(b.cutoff(), axum::body::to_bytes(request.into_body(), 32768))
             .await
@@ -173,17 +145,10 @@ fn password(s: String) -> Result<Password> {
     Password::new(s).map_err(|_| BAD.into())
 }
 fn account(state: rss_identity_core::account::AccountState) -> Response {
-    Json(AccountView::new(state, None)).into_response()
-}
-async fn options(
-    State(s): State<Management>,
-    Path(t): Path<String>,
-    Extension(b): Extension<RequestBudget>,
-) -> Result<Response> {
-    Ok(Json(serde_json::json!({"providers":s.federation.login_options(tenant(&t)?,b.remaining()).await?})).into_response())
+    Json(crate::dto::Account::from(AccountView::new(state, None))).into_response()
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Page {
     cursor: Option<String>,
     limit: Option<u16>,
@@ -197,9 +162,8 @@ async fn accounts(
 ) -> Result<Response> {
     let Query(page) = q.map_err(|_| BAD)?;
     let actor = actor(&s, &t, &h, b, false).await?;
-    Ok(Json(
-        s.federation
-            .authority()
+    Ok(Json(crate::dto::AccountPage::from(
+        s.authority
             .list_accounts(
                 actor,
                 page.cursor
@@ -211,15 +175,14 @@ async fn accounts(
                 b.remaining(),
             )
             .await?,
-    )
+    ))
     .into_response())
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateAccount {
     login: String,
     password: String,
-    role: LocalAccountRole,
 }
 async fn create_account(
     State(s): State<Management>,
@@ -232,18 +195,20 @@ async fn create_account(
     let name = LoginKey::parse(&v.login).map_err(|_| BAD)?;
     let canonical_login = name.as_str().to_owned();
     let state = s
-        .federation
-        .authority()
-        .create_local_account(actor, name, password(v.password)?, v.role, b.remaining())
+        .authority
+        .create_local_account(actor, name, password(v.password)?, b.remaining())
         .await?;
     Ok((
         StatusCode::CREATED,
-        Json(AccountView::new(state, Some(canonical_login))),
+        Json(crate::dto::Account::from(AccountView::new(
+            state,
+            Some(canonical_login),
+        ))),
     )
         .into_response())
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Toggle {
     enabled: bool,
 }
@@ -256,24 +221,8 @@ async fn enabled(
     let actor = actor(&s, &t, r.headers(), b, true).await?;
     let v: Toggle = body(r, b).await?;
     Ok(account(
-        s.federation
-            .authority()
+        s.authority
             .set_account_enabled(actor, target(&t, &p)?, v.enabled, b.remaining())
-            .await?,
-    ))
-}
-async fn administrator(
-    State(s): State<Management>,
-    Path((t, p)): Path<(String, String)>,
-    Extension(b): Extension<RequestBudget>,
-    r: Request,
-) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
-    let v: Toggle = body(r, b).await?;
-    Ok(account(
-        s.federation
-            .authority()
-            .set_account_administrator(actor, target(&t, &p)?, v.enabled, b.remaining())
             .await?,
     ))
 }
@@ -286,14 +235,13 @@ async fn membership(
     let actor = actor(&s, &t, r.headers(), b, true).await?;
     let v: Toggle = body(r, b).await?;
     Ok(account(
-        s.federation
-            .authority()
+        s.authority
             .set_account_membership(actor, target(&t, &p)?, v.enabled, b.remaining())
             .await?,
     ))
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Reset {
     password: String,
 }
@@ -306,14 +254,13 @@ async fn reset_password(
     let actor = actor(&s, &t, r.headers(), b, true).await?;
     let v: Reset = body(r, b).await?;
     Ok(account(
-        s.federation
-            .authority()
+        s.authority
             .reset_local_password(actor, target(&t, &p)?, password(v.password)?, b.remaining())
             .await?,
     ))
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChangePassword {
     current_password: String,
     password: String,
@@ -333,8 +280,7 @@ async fn own_password(
     let source = AttemptSource::parse(&peer.to_string())?;
     let v: ChangePassword = body(r, b).await?;
     Ok(account(
-        s.federation
-            .authority()
+        s.authority
             .change_own_password(
                 actor,
                 password(v.current_password)?,
@@ -345,124 +291,47 @@ async fn own_password(
             .await?,
     ))
 }
-async fn providers(
-    State(s): State<Management>,
-    Path(t): Path<String>,
-    Extension(b): Extension<RequestBudget>,
-    h: HeaderMap,
-) -> Result<Response> {
-    let actor = actor(&s, &t, &h, b, false).await?;
-    Ok(Json(
-        serde_json::json!({"providers":s.federation.list_providers(actor,b.remaining()).await?}),
-    )
-    .into_response())
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateProvider {
-    settings: ProviderSettingsInput,
-    client_secret: String,
-    ca_pem: Option<String>,
-}
-async fn create_provider(
-    State(s): State<Management>,
-    Path(t): Path<String>,
-    Extension(b): Extension<RequestBudget>,
-    r: Request,
-) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
-    let v: CreateProvider = body(r, b).await?;
-    let credentials =
-        ProviderCredentials::new(v.client_secret, v.ca_pem).map_err(AuthorityError::from)?;
-    let settings = ProviderSettings::try_from(v.settings).map_err(AuthorityError::from)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            s.federation
-                .create_provider(actor, settings, credentials, b.remaining())
-                .await?,
-        ),
-    )
-        .into_response())
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UpdateProvider {
-    expected_version: i64,
-    settings: ProviderSettingsInput,
-    client_secret: String,
-    ca_pem: Option<String>,
-}
-async fn update_provider(
-    State(s): State<Management>,
-    Path((t, p)): Path<(String, ProviderId)>,
-    Extension(b): Extension<RequestBudget>,
-    r: Request,
-) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
-    let v: UpdateProvider = body(r, b).await?;
-    let credentials =
-        ProviderCredentials::new(v.client_secret, v.ca_pem).map_err(AuthorityError::from)?;
-    let settings = ProviderSettings::try_from(v.settings).map_err(AuthorityError::from)?;
-    Ok(Json(
-        s.federation
-            .update_provider(
-                actor,
-                p,
-                v.expected_version,
-                settings,
-                credentials,
-                b.remaining(),
-            )
-            .await?,
-    )
-    .into_response())
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProviderToggle {
-    expected_version: i64,
-    enabled: bool,
-}
-async fn provider_enabled(
-    State(s): State<Management>,
-    Path((t, p)): Path<(String, ProviderId)>,
-    Extension(b): Extension<RequestBudget>,
-    r: Request,
-) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
-    let v: ProviderToggle = body(r, b).await?;
-    Ok(Json(
-        s.federation
-            .enable_provider(actor, p, v.expected_version, v.enabled, b.remaining())
-            .await?,
-    )
-    .into_response())
-}
-async fn test_provider(
-    State(s): State<Management>,
-    Path((t, p)): Path<(String, ProviderId)>,
-    Extension(b): Extension<RequestBudget>,
-    h: HeaderMap,
-) -> Result<Response> {
-    let actor = actor(&s, &t, &h, b, true).await?;
-    match s.federation.test_provider(actor, p, b.remaining()).await {
-        Ok(report) => Ok(Json(serde_json::json!({"passed":true,"report":report})).into_response()),
-        Err(AuthorityError::Federation(
-            error @ (FederationError::Provider(_) | FederationError::Unavailable),
-        )) => Ok(
-            Json(serde_json::json!({"passed":false,"diagnostic":error.diagnostic()}))
-                .into_response(),
-        ),
-        Err(error) => Err(error.into()),
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
+    fn password_wire_rejects_retired_field_spelling() {
+        assert!(
+            serde_json::from_value::<ChangePassword>(
+                serde_json::json!({"currentPassword":"old", "password":"new"})
+            )
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<ChangePassword>(
+                serde_json::json!({"current_password":"old", "password":"new"})
+            )
+            .is_err()
+        );
+    }
+    #[test]
     fn management_rejections_are_not_login_failures() {
         for (error, status, code) in [
+            (
+                AuthorityError::Configuration,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_unavailable",
+            ),
+            (
+                AuthorityError::DeadlineElapsed,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_unavailable",
+            ),
+            (
+                AuthorityError::InvalidInput,
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+            ),
+            (
+                AuthorityError::RuleRejected(AccountRuleError::Rejected),
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+            ),
             (
                 AuthorityError::Rejected,
                 StatusCode::UNAUTHORIZED,
@@ -479,9 +348,9 @@ mod tests {
                 "reauthentication_failed",
             ),
             (
-                AuthorityError::RuleRejected(AccountRuleError::LastAdministrator),
-                StatusCode::CONFLICT,
-                "last_administrator",
+                AuthorityError::RuleRejected(AccountRuleError::ReauthenticationRequired),
+                StatusCode::FORBIDDEN,
+                "reauthentication_required",
             ),
         ] {
             let value = Error::from(error);

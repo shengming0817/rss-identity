@@ -1,4 +1,4 @@
-use crate::{AttemptSource, Authority, AuthorityError, storage::guard};
+use crate::{AttemptSource, Authority, AuthorityError, storage::lock_guard};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
 use sqlx::Row;
@@ -14,15 +14,6 @@ impl Authority {
         // Keep the shared database future out of composed authentication stack frames.
         Box::pin(self.reserve_attempt(tenant, Some(scope), source, deadline)).await
     }
-    /// Native codes are untrusted, high-cardinality input; only charge the transport source.
-    pub(crate) async fn reserve_source(
-        &self,
-        tenant: TenantId,
-        source: &AttemptSource,
-        deadline: OperationDeadline,
-    ) -> Result<(), AuthorityError> {
-        Box::pin(self.reserve_attempt(tenant, None, source, deadline)).await
-    }
     async fn reserve_attempt(
         &self,
         tenant: TenantId,
@@ -36,7 +27,7 @@ impl Authority {
         }
         let allowed=self.read(tenant,deadline,move|tx|Box::pin(async move {
             crate::transaction::connection(tx,move|c|Box::pin(async move {
-                guard(c,tenant).await?;
+                lock_guard(c,tenant).await?;
                 sqlx::query(concat!("DELETE FROM identity_authority.attempts WHERE (tenant_id,key) IN (SELECT tenant_","id,key FROM identity_authority.attempts WHERE tenant_id=$1::uuid AND expires_at<","=clock_timestamp() ORDER BY expires_at LIMIT 128)"))
                     .bind(tenant.to_string()).execute(&mut *c).await?;
                 let total:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.attempts WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
@@ -55,28 +46,6 @@ impl Authority {
                 }
                 Ok(true)
             })).await
-        })).await?;
-        if allowed {
-            Ok(())
-        } else {
-            Err(AuthorityError::RateLimited)
-        }
-    }
-}
-
-impl Authority {
-    /// Per registered client, independently committed. Invalid/replayed attempts do not refund it.
-    pub(crate) async fn reserve_downstream(
-        &self,
-        t: TenantId,
-        client: String,
-        d: OperationDeadline,
-    ) -> Result<(), AuthorityError> {
-        let allowed=self.read_sql(t,d,move|c|Box::pin(async move{
-            crate::storage::lock_guard(c,t).await?;
-            let count:i32=sqlx::query_scalar("INSERT INTO identity_authority.attempts VALUES($1::uuid,$2,1,clock_timestamp()+interval '60 seconds') ON CONFLICT(tenant_id,key) DO UPDATE SET count=CASE WHEN identity_authority.attempts.expires_at<=clock_timestamp() THEN 1 ELSE LEAST(identity_authority.attempts.count+1,61) END,expires_at=CASE WHEN identity_authority.attempts.expires_at<=clock_timestamp() THEN excluded.expires_at ELSE identity_authority.attempts.expires_at END RETURNING count")
-                .bind(t.to_string()).bind(format!("downstream:{client}")).fetch_one(c).await?;
-            Ok(count<=60)
         })).await?;
         if allowed {
             Ok(())

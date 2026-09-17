@@ -1,17 +1,12 @@
 # rss-identity
 
-面向 RSS 系产品的本地认证、租户联合身份接入与服务端会话服务。拥有独立数据库、装配、二进制、发布与产品 T3；资源级业务授权由 MDM/ZT 持有。
+可嵌入 Rust 产品的本地认证、租户 OIDC 联合身份与实例内会话组件。宿主提供数据库 runtime、实例与租户、管理授权策略和资源生命周期；Identity 提供认证事实，产品持有资源授权。
 
-当前提供身份协议 ADR、本地账户 Rust API、PG 原子安全事件、identity-admin 本机工具、OIDC 接缝、独立 CI 和真实 provider 测试。提供中央会话 Rust/PG API、租户 IdP 配置、持久 OIDC/JIT/身份关联及可挂载 HTTP Router；提供 Hydra 下游 bridge、在线验证和最小 client；中央 UI 由 rss-web apps/identity 持有，管理 API 已提供；生产部署由 I08 实现；本次不构成生产认证服务。集成分支为 `develop`。
+公开能力包为 `rss-identity-core`、`rss-identity-postgres`、可选 `rss-identity-oidc` 和可挂载的 `rss-identity-http-axum`。本地登录只需 Authority；OIDC 通过 Federation 单独装配。HTTP 仅提供 `/api/v2`，全新数据库使用 schema v9；没有旧中央模式、Hydra bridge、client/contracts 或旧 schema 兼容分支。
 
-- [产品 PRD](docs/product/rss-identity-prd.md)：需求、分级、消费者和验收目标。
-- [实施与 Issue 计划](docs/architecture/implementation-plan.md)：依赖顺序、真实工作项链接和验收责任。
-- [开发与验证](docs/guides/development.md)：固定 Git 消费、工具链、真实 provider 测试与证明边界。
-- [文档导航](docs/README.md)、[协作规则](AGENTS.md)。
-- [历史参考](reference/README.md)、[证据索引](docs/reference/sources.md)。
+- [嵌入指南](docs/guides/embedding.md)：公共 API、宿主责任与两种消费者。
+- [当前方案 ADR](docs/architecture/adr/202609170001-2435-embedded-authentication.md)、[实施计划](docs/architecture/implementation-plan.md)。
+- [产品需求](docs/product/rss-identity-prd.md)、[开发与验证](docs/guides/development.md)、[HTTP v2](docs/architecture/identity-wire-v2.md)。
+- [文档导航](docs/README.md)、[协作规则](AGENTS.md)、[历史参考](reference/README.md)。
 
-本地材料通过 `.git/info/exclude` 排除；克隆后按历史参考说明恢复。当前不包含业务数据库或密钥。
-
-## 产品装配
-
-`app/identity` 输出 identity-server / identity-migrate / identity-admin / identity-clients；配置与操作见 [部署入口](docs/deployment/README.md)。完整产品T3单独验收。
+`app/identity` 是最小参考宿主，输出 identity-server、identity-migrate、identity-admin。完整部署与 UI 候选、生产操作和 T3 属于 #2436；MDM 接入属于 #2437，前端消费调整属于 #2368。历史验收记录不证明本次重构的产品部署能力。

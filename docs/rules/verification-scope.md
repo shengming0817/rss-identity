@@ -9,8 +9,8 @@
 
 Make 入口通过 Git common directory 将所有本仓 worktree 的 Cargo 产物统一写入主 checkout 的
 `target/`；可选 sccache 位于主 checkout 的 `.cache/sccache/`，不与 RSS 或其它产品仓共享。
-显式 `CARGO_TARGET_DIR`、`SCCACHE_DIR` 仍可覆盖本地默认值；独立 consumer 使用共享 target 下的
-专属子目录，隔离构建与候选产物仍保持自己的临时目录。
+显式 `CARGO_TARGET_DIR`、`SCCACHE_DIR` 仍可覆盖本地默认值；独立 consumer 必须使用仓库祖先之外的 workspace、Cargo.lock 和独立 target，
+不得继承本仓 Cargo 配置或共享本仓 target。
 
 生产验收绑定版本、artifact、配置身份、provider 版本、实际行为、故障和未覆盖项。预发布冻结会话期限、撤销最大延迟、登录限流、容量、RPO/RTO、支持 IdP 矩阵，不凭经验数字宣称 SLO。
 

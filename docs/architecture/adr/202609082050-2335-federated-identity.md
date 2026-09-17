@@ -1,3 +1,5 @@
+> 历史决策记录；中央模式相关决策由 [#2435 ADR](202609170001-2435-embedded-authentication.md) 替换。仍适用的安全机制以当前源码与验证为准。
+
 # #2335 租户 IdP 与联合身份
 
 状态：I05 实现决定。按用户决定在一个 PR 内原子替换旧接缝，不保留旧 API/schema 兼容；实际 SHA、lock、provider digest 与 T1/T2 结果随 PR 记录。UI、Hydra bridge、生产 binary/TLS 装配与产品 T3 分别归 I07/I06/I08/T33。

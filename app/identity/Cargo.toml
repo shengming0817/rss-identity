@@ -15,17 +15,12 @@ path = "src/bin/server.rs"
 name = "identity-migrate"
 path = "src/bin/migrate.rs"
 
-[[bin]]
-name = "identity-clients"
-path = "src/bin/clients.rs"
-
 [dependencies]
 reqwest.workspace = true
 rss-runtime.workspace = true
 rss-axum = { workspace = true, features = ["http1"] }
 rss-identity-http-axum = { path = "../../crates/identity-http-axum" }
 rss-identity-oidc = { path = "../../crates/identity-oidc" }
-rss-identity-hydra = { path = "../../crates/identity-hydra" }
 axum = { version = "=0.8.9", default-features = false, features = ["tokio", "http1", "json"] }
 sha2.workspace = true
 uuid.workspace = true
