@@ -68,7 +68,7 @@ def manifest(profile, revision, rss_revision):
               'sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid"] }',
               'axum = "=0.8.9"', 'tower = { version = "0.5", features = ["util"] }']
     if profile == 'oidc':
-        lines += ['reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "cookies"] }', 'scraper = "=0.26.0"', 'zeroize = "1"']
+        lines += ['reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "cookies"] }', 'zeroize = "1"', '[dev-dependencies]', 'scraper = "=0.26.0"']
     return '\n'.join(lines) + '\n'
 
 def execute(command, directory, env, timeout=1800):
