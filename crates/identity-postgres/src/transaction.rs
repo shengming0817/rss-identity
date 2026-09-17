@@ -403,11 +403,31 @@ fn domain_result<T>(
     reason: Option<AuthorityError>,
 ) -> Result<T, AuthorityError> {
     match (result, reason) {
-        (
-            Err(AuthorityError::Rejected),
-            Some(AuthorityError::RuleRejected(AccountRuleError::Rejected)),
-        ) => Err(AuthorityError::Rejected),
         (Err(AuthorityError::Rejected), Some(reason)) => Err(reason),
         (result, _) => result,
+    }
+}
+
+#[cfg(test)]
+mod settlement_tests {
+    use super::*;
+
+    #[test]
+    fn domain_rejection_preserves_reason_only_after_confirmed_rollback() {
+        let reason = AuthorityError::RuleRejected(AccountRuleError::Rejected);
+        assert_eq!(
+            domain_result::<()>(Err(AuthorityError::Rejected), Some(reason)),
+            Err(reason)
+        );
+        for failure in [
+            AuthorityError::RollbackFailed(crate::StorageFailure::DeadlineElapsed),
+            AuthorityError::CommitUnknown(crate::StorageFailure::DeadlineElapsed),
+            AuthorityError::Fenced,
+        ] {
+            assert_eq!(
+                domain_result::<()>(Err(failure), Some(reason)),
+                Err(failure)
+            );
+        }
     }
 }
