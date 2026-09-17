@@ -23,7 +23,7 @@ zeroize.workspace = true
 [dev-dependencies]
 hmac = "0.13"
 sha1 = { version = "0.11", default-features = false }
-rss-identity-oidc = { path = "../identity-oidc" }
+rss-identity-oidc = { path = "../identity-oidc", features = ["test-support"] }
 reqwest = { workspace = true, features = ["cookies"] }
 scraper = "0.26"
 uuid.workspace = true

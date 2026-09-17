@@ -14,3 +14,12 @@ python3 /absolute/new-candidate/operate.py --candidate /absolute/new-candidate c
 用 `docker load --input /absolute/new-candidate/server.oci.tar` 分别加载三份归档。渲染配置仅引用 candidate.json 中的固定镜像摘要。部署前独立保存 candidate.json 摘要及可信来源；摘要校验不能替代候选来源认证。
 
 构建、网关和清理机制参考本仓 `fa7019922162158704cc47c6ac7ad36a67c8ae5a` 的 hack/release.py、hack/ui.py 和 deployment/Dockerfile，按当前三 binary 与组件边界重建。代理行为核对 [NGINX release-1.30.0 源码](https://github.com/nginx/nginx/blob/release-1.30.0/src/http/modules/ngx_http_proxy_module.c)；未引入其代码。
+
+参考候选接缝使用打包的 `reference_seams.py`（摘要在 candidate.tools 中），在隔离 Linux Docker 主机以 root 部署 owner 执行：
+
+```sh
+make test-reference CANDIDATE_OUTPUT=/absolute/candidate REFERENCE_RECORD=/private/reference-seams.json REFERENCE_WORK=/private/new-fixture
+python3 /absolute/candidate/reference_seams.py --candidate /absolute/candidate --record /private/reference-seams.json --verify-record
+```
+
+需要 Docker Compose v2、Python 3.11+、openssl，使用候选锁定的 Rust image 作为一次性 HTTP fixture。runner 只创建唯一前缀的测试 project，使用 172.29.241.0/24、172.29.242.0/24 和 443 端口；在空闲隔离主机运行。源码、候选、记录与工作目录须可由 Docker 使用相同绝对路径挂载。记录逐步原子保存，绑定候选 JSON 摘要、双方源码 SHA 和 runner 摘要，含真实凭据负向核验、rekey、新钥核验、重新开放、备份与隔离恢复，以及清理失败。成功必须经过记录契约和 subject 校验；旧静态 passed 清单不进入当前验证。保留失败 fixture 秘密的私有工作目录，使用后由 owner 清理；所有测试容器、卷、网络由 runner 清理并核实。该入口证明候选/operator 接缝，实际浏览器、生产恢复目标和容量仍归 #2366。

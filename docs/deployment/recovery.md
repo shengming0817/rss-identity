@@ -11,7 +11,7 @@ op verify
 op open
 ```
 
-backup 在关闭 Identity/网关并只读核验后执行 PG custom dump，使用排他新文件与0600权限；同名 `.dump.json` 记录摘要、schema、instance、storage、source project 和候选 SHA。校验同时检查摘要与固定 PG 的 pg_restore --list。失败不会生成成功记录；部分文件需由 owner 核对后另选输出路径。备份和收据共同置于加密私有存储，校验不代替完整恢复演练。
+backup 在关闭 Identity/网关并只读核验后执行 PG custom dump，使用排他新文件与0600权限；同名 `.dump.json` 记录摘要、schema、instance、storage、source project 和候选 SHA。check-backup 和 restore 复用严格的字段/类型校验，要求候选 revision、instance、storage、source project 和摘要完整有效且匹配；check-backup 还以固定 PG 的 pg_restore --list 离线核验。失败不会生成成功记录；部分文件需由 owner 核对后另选输出路径。备份和收据共同置于加密私有存储，校验不代替完整恢复演练。
 
 恢复时先再次关闭源 Identity/网关，保留原卷，禁止两份密码权威同时开放。用当前秘密和相同 instance/storage/tenants 生成另一个私有渲染目录，backendSubnet 和 publicGateway 改为不冲突的隔离网段；project 必须不同且不存在容器/卷。
 

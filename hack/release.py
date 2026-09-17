@@ -98,10 +98,10 @@ def build(out,ui_source,ui_dist):
   result['binaries']={p.name:sha(p) for p in (out/'binaries').glob('identity-*')}
   if set(result['binaries'])!={'identity-server','identity-admin','identity-migrate'}:raise ValueError('candidate binaries incomplete')
   (out/'binaries/metadata.json').unlink();(out/'binaries/artifacts.json').unlink()
-  shutil.copytree(ROOT/'deployment',out/'deployment');shutil.copy(ROOT/'hack/deploy.py',out/'deploy.py');shutil.copy(ROOT/'hack/operate.py',out/'operate.py')
+  shutil.copytree(ROOT/'deployment',out/'deployment');shutil.copy(ROOT/'hack/deploy.py',out/'deploy.py');shutil.copy(ROOT/'hack/operate.py',out/'operate.py');shutil.copy(ROOT/'hack/reference_seams.py',out/'reference_seams.py')
   if run(['/usr/bin/git','rev-parse','HEAD'],cwd=ROOT)!=revision or run(['/usr/bin/git','status','--porcelain'],cwd=ROOT):raise ValueError('source changed during candidate build')
   if validate_ui(ui_source,ui_dist)!=ui:raise ValueError('UI identity changed during candidate build')
-  result['tools']={name:sha(out/name) for name in ['deploy.py','operate.py']}
+  result['tools']={name:sha(out/name) for name in ['deploy.py','operate.py','reference_seams.py']}
   result['deployment_sha256']=tree(out/'deployment')
   (out/'candidate.json').write_text(json.dumps(result,indent=2)+'\n')
 def main():

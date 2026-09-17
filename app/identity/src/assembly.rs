@@ -96,10 +96,37 @@ pub async fn authority(
     )
     .await?)
 }
+struct FederationInputs {
+    oidc: HttpOidc,
+    signer: StateSigner,
+    options: FederationConfig,
+    group_policy: rss_identity_core::groups::GroupFactsMaxAge,
+}
+/// Offline validation through the same constructors used by runtime assembly.
+pub fn preflight(config: &RuntimeConfig) -> Result<(), AppError> {
+    config.validate()?;
+    config.database.pg()?;
+    authority_config(config)?;
+    federation_inputs(config)?;
+    Ok(())
+}
 pub fn federation(
     config: &RuntimeConfig,
     authority: Authority,
 ) -> Result<Option<Federation>, AppError> {
+    federation_inputs(config)?
+        .map(|inputs| {
+            Ok(Federation::new(
+                inputs.group_policy,
+                authority,
+                Arc::new(inputs.oidc),
+                inputs.signer,
+                inputs.options,
+            )?)
+        })
+        .transpose()
+}
+fn federation_inputs(config: &RuntimeConfig) -> Result<Option<FederationInputs>, AppError> {
     let Some(c) = &config.oidc else {
         return Ok(None);
     };
@@ -121,15 +148,16 @@ pub fn federation(
     hex::decode_to_slice(raw.as_str(), key.as_mut()).map_err(|_| AppError::Configuration)?;
     let signer = StateSigner::new(*key, &config.instance()?.to_string())
         .map_err(|_| AppError::Configuration)?;
-    Ok(Some(Federation::new(
-        c.group_policy()?,
-        authority,
-        Arc::new(oidc),
+    let options = FederationConfig {
+        callback: format!("{}/api/v2/oidc/callback", config.public_origin),
+        credential_keys: c.credential_keyring.load()?,
+        targets: c.return_targets.clone(),
+    };
+    options.validate()?;
+    Ok(Some(FederationInputs {
+        oidc,
         signer,
-        FederationConfig {
-            callback: format!("{}/api/v2/oidc/callback", config.public_origin),
-            credential_keys: c.credential_keyring.load()?,
-            targets: c.return_targets.clone(),
-        },
-    )?))
+        options,
+        group_policy: c.group_policy()?,
+    }))
 }

@@ -45,3 +45,8 @@ test-ui:
 	$(PYTHON) hack/ui.py
 candidate:
 	$(PYTHON) hack/release.py --output "$(CANDIDATE_OUTPUT)" --ui-source "$(IDENTITY_UI_SOURCE)" --ui-dist "$(IDENTITY_UI_DIST)"
+
+.PHONY: test-reference
+# Run on an isolated Linux Docker host as the deployment owner; record validates its subject.
+test-reference:
+	$(PYTHON) "$(CANDIDATE_OUTPUT)/reference_seams.py" --candidate "$(CANDIDATE_OUTPUT)" --record "$(REFERENCE_RECORD)" --work "$(REFERENCE_WORK)"

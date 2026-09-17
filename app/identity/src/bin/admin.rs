@@ -44,6 +44,12 @@ async fn run() -> Result<(), AppError> {
         println!("{}", usage());
         return Ok(());
     }
+    if args.len() == 2 && args[0] == "--check-config" {
+        let config: MaintenanceConfig = load(Path::new(&args[1]))?;
+        config.validate()?;
+        config.database.pg()?;
+        return Ok(());
+    }
     if args.len() < 2 {
         return Err(AppError::Arguments);
     }
@@ -126,7 +132,7 @@ enum Command<'a> {
     Recover(&'a str, &'a str, &'a str),
 }
 fn usage() -> &'static str {
-    "Usage: identity-admin CONFIG COMMAND\n  initialize <tenant> <login> <password-file>\n  recover <tenant> <principal> <password-file>"
+    "Usage: identity-admin --check-config FILE\nidentity-admin CONFIG COMMAND\n  initialize <tenant> <login> <password-file>\n  recover <tenant> <principal> <password-file>"
 }
 fn parse_command(args: &[String]) -> Result<Command<'_>, AppError> {
     match args {

@@ -16,11 +16,15 @@ async fn main() {
     }
     if args == ["--help"] {
         println!(
-            "identity-migrate --config FILE [--verify]\nidentity-migrate --config FILE --rekey KEYRING_FILE\nidentity-migrate --config FILE --verify-keys KEYRING_FILE"
+            "identity-migrate --config FILE [--verify]\nidentity-migrate --check-config FILE\nidentity-migrate --config FILE --rekey KEYRING_FILE\nidentity-migrate --config FILE --verify-keys KEYRING_FILE"
         );
         return;
     }
     let result = async {
+        if args.len() == 2 && args[0] == "--check-config" {
+            let config = rss_identity_app::config::load(std::path::Path::new(&args[1]))?;
+            return rss_identity_app::migration::preflight(&config);
+        }
         if args.len() < 2 || args[0] != "--config" {
             return Err(rss_identity_app::AppError::Arguments);
         }

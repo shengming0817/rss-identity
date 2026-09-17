@@ -2,7 +2,7 @@
 """Private reference deployment, derived from the pre-component deploy.py mechanism.
 One input generates runtime, maintenance, migration and static UI configuration.
 """
-import argparse, copy, ipaddress, json, os, re, stat
+import argparse, copy, ipaddress, json, os, re, stat, subprocess, tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 ROOT=Path(__file__).resolve().parents[1] if Path(__file__).resolve().parent.name=='hack' else Path(__file__).resolve().parent
@@ -27,12 +27,12 @@ def read(path,secret=False):
         require(not secret or not info.st_mode&0o077,'unsafe secret permissions')
         value=f.read(limit+1);require(0<len(value)<=limit,'invalid input length');return value
 
-def render(data,out,candidate):
+def stage(data,out,candidate,final):
     fields(data,{'runtime','ownerPasswordFile','maintenancePasswordFile','tlsCertificateFile','tlsKeyFile','postgresCertificateFile','postgresKeyFile','backendSubnet'},'deployment')
     require(os.geteuid()==0,'render as root for fixed service ownership')
     require(candidate['identity_schema']==9 and candidate['config_version']==3,'candidate schema/config mismatch')
     require(set(candidate['images'])=={'server','operator','gateway'},'incomplete candidate')
-    require(all(re.fullmatch(r'[A-Za-z0-9_./:-]+@sha256:[a-f0-9]{64}',v) for v in [*candidate['images'].values(),candidate['providers']['postgres']]),'unfixed image')
+    require(all(re.fullmatch(r'[A-Za-z0-9_./:-]+@sha256:[a-f0-9]{64}',v) for v in [*candidate['images'].values(),candidate['providers']['postgres'],candidate['providers']['runtime']]),'unfixed image')
     c=copy.deepcopy(data['runtime'])
     fields(c,{'formatVersion','instanceId','publicOrigin','bootstrapAccounts','database','storage','listen','publicGateway','budgets','oidc'},'runtime')
     require(c['formatVersion']==3,'unsupported runtime config')
@@ -44,14 +44,14 @@ def render(data,out,candidate):
     require(c['database']['host']=='postgres' and c['database']['database']=='identity' and c['database']['user']=='identity_runtime' and c['database']['port']==5432,'database identity mismatch')
     tenants=c['storage']['tenants'];accounts=c['bootstrapAccounts']
     require(len(tenants)==len(set(tenants)) and 1<=len(tenants)<=128 and len(accounts)==len(tenants) and all(sum(a['tenantId']==t for a in accounts)==1 for t in tenants),'one bootstrap account per tenant required')
-    require(not out.exists(),'output must be new');out.mkdir(mode=0o700,parents=True);os.chown(out,UID,UID)
+    os.chown(out,UID,UID)
     inputs=out/'input';inputs.mkdir(mode=0o700);os.chown(inputs,UID,UID)
     mounts={}
     def write(name,value):
         p=out/name;p.write_text(value);p.chmod(0o600);os.chown(p,UID,UID);return '/run/config/'+name
     def mount(path,name,secret=False):
         p=inputs/name;p.write_bytes(read(path,secret));p.chmod(0o600);os.chown(p,UID,UID)
-        mounts[name]={'type':'bind','source':str(p.resolve()),'target':'/run/input/'+name,'read_only':True}
+        mounts[name]={'type':'bind','source':str(final/'input'/name),'target':'/run/input/'+name,'read_only':True}
         return mounts[name]['target']
     c['database']['passwordFile']=mount(c['database']['passwordFile'],'runtime-password',True)
     c['database']['caFile']=mount(c['database']['caFile'],'database-ca')
@@ -109,7 +109,7 @@ http {{
 }}
 ''')
     def files(names):
-        return [mounts[n] if n in mounts else {'type':'bind','source':str((out/n).resolve()),'target':'/run/config/'+n,'read_only':True} for n in names]
+        return [mounts[n] if n in mounts else {'type':'bind','source':str(final/n),'target':'/run/config/'+n,'read_only':True} for n in names]
     def service(image,names,command=None):
         v={'image':image,'user':'10001:10001','read_only':True,'cap_drop':['ALL'],'security_opt':['no-new-privileges:true'],'tmpfs':['/tmp:rw,noexec,nosuid,size=64m'],'networks':['backend'],'volumes':files(names)}
         if command:v['command']=command
@@ -137,8 +137,24 @@ http {{
     if c['oidc'] is not None:networks['egress']={}
     write('compose.json',json.dumps(compose_literals({'services':services,'networks':networks,'volumes':{'pg':{}}}),indent=2))
 
+def preflight(out,candidate):
+    for binary,image,config in [('identity-server','server','runtime'),('identity-admin','operator','maintenance'),('identity-migrate','operator','migration')]:
+        result=subprocess.run(['docker','run','--rm','--network','none','--platform','linux/amd64','--user','10001:10001','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--volume',str(out)+':/run/config:ro','--volume',str(out/'input')+':/run/input:ro','--entrypoint',binary,candidate['images'][image],'--check-config','/run/config/'+config+'.json'],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=60)
+        require(result.returncode==0,'candidate configuration rejected')
+
+def render(data,out,candidate):
+    require(not out.exists() and not out.is_symlink(),'output must be new')
+    # Same parent/filesystem for atomic publication; final Compose binds already name out.
+    with tempfile.TemporaryDirectory(prefix='.'+out.name+'-',dir=out.parent) as temp:
+        staged=Path(temp)
+        stage(data,staged,candidate,out)
+        preflight(staged,candidate)
+        require(not out.exists() and not out.is_symlink(),'output must be new')
+        staged.rename(out)
+
+
 def main():
     p=argparse.ArgumentParser();p.add_argument('--input',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--candidate',type=Path,required=True);a=p.parse_args()
     try:render(json.loads(read(a.input)),a.output.resolve(),json.loads(read(a.candidate)))
-    except (ValueError,KeyError,TypeError,OSError):raise SystemExit('deployment configuration rejected; no services started')
+    except (ValueError,KeyError,TypeError,OSError,subprocess.SubprocessError):raise SystemExit('deployment configuration rejected; no services started')
 if __name__=='__main__':main()

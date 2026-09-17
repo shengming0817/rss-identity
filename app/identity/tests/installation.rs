@@ -395,6 +395,31 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         keys[1].principal.as_uuid().to_string()
     );
     assert_eq!(context["navigation"]["manageAccounts"], true);
+    assert_eq!(context["navigation"]["manageProviders"], true);
+    let member = client
+        .post(format!("{url}/api/v2/tenants/{}/login", keys[1].tenant))
+        .header("origin", value["publicOrigin"].as_str().unwrap())
+        .header("x-identity-request", "1")
+        .header("x-forwarded-for", "203.0.113.8")
+        .json(&json!({"login":"member","password":PASSWORD}))
+        .send()
+        .await?;
+    assert_eq!(member.status(), reqwest::StatusCode::OK);
+    let member_cookie = member.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap();
+    let member_context = client
+        .get(&resource)
+        .header("cookie", member_cookie)
+        .header("x-forwarded-for", "203.0.113.8")
+        .send()
+        .await?;
+    assert_eq!(member_context.status(), reqwest::StatusCode::OK);
+    let member_context = member_context.json::<serde_json::Value>().await?;
+    assert_eq!(member_context["navigation"]["manageAccounts"], false);
+    assert_eq!(member_context["navigation"]["manageProviders"], false);
     sqlx::query(
         "UPDATE identity_authority.accounts SET auth_epoch=auth_epoch+1 WHERE tenant_id=$1::uuid",
     )

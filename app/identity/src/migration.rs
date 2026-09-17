@@ -18,6 +18,13 @@ pub(crate) fn validate(config: &MigrationConfig) -> Result<InstanceId, AppError>
     InstanceId::parse(&config.instance_id).map_err(|_| AppError::Configuration)
 }
 
+/// Offline owner configuration validation; no pool, database or migration is opened.
+pub fn preflight(config: &MigrationConfig) -> Result<(), AppError> {
+    validate(config)?;
+    config.database.sqlx()?;
+    Ok(())
+}
+
 /// Read-only snapshot verification; never installs, initializes, repairs or increments a fence.
 pub async fn verify(config: MigrationConfig) -> Result<(), AppError> {
     let instance = validate(&config)?;
@@ -73,16 +80,8 @@ pub(crate) async fn verify_storage(
     Ok(())
 }
 pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
-    if config.format_version != 3
-        || config.runtime_role == config.maintenance_role
-        || config.runtime_role == config.database.user
-        || config.maintenance_role == config.database.user
-    {
-        return Err(AppError::Configuration);
-    }
-    let instance = InstanceId::parse(&config.instance_id).map_err(|_| AppError::Configuration)?;
+    let instance = validate(&config)?;
     let tenants = config.storage.tenants()?;
-    config.storage.binding()?;
     let mut c = PgConnection::connect_with(&config.database.sqlx()?)
         .await
         .map_err(|_| AppError::Connection)?;
@@ -164,6 +163,23 @@ async fn finish_installation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn install_rejects_invalid_roles_before_accessing_database_secrets() {
+        let runtime: serde_json::Value =
+            serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
+        for role in ["".to_owned(), "x".repeat(64), "bad\0role".to_owned()] {
+            let config = serde_json::from_value(serde_json::json!({
+                "formatVersion": 3, "instanceId": runtime["instanceId"],
+                "storage": runtime["storage"], "database": runtime["database"],
+                "runtimeRole": role, "maintenanceRole": "maintenance"
+            }))
+            .unwrap();
+            assert!(matches!(
+                install(config).await,
+                Err(AppError::Configuration)
+            ));
+        }
+    }
     #[tokio::test]
     async fn cleanup_failure_preserves_confirmed_and_unknown_installation_outcomes() {
         assert!(

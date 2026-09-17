@@ -243,6 +243,16 @@ impl CredentialKeys {
     }
 }
 impl crate::Federation {
+    /// Read-only authentication check of every stored provider credential in all active tenants.
+    ///
+    /// Uses this federation's configured keyring and authority/tenant/provider/version AAD.
+    /// No credential, key version, epoch or audit state is changed. Each tenant is read in
+    /// its own transaction; this is not a cross-tenant snapshot or proof against later writes.
+    /// At most 100 credentials per tenant are accepted (101 rows detect overflow).
+    /// Missing keys, malformed/authentication-failed ciphertext and overflow fail closed.
+    /// The caller's absolute deadline is shared by every tenant read; timeout or storage
+    /// failure returns an error without asserting that all tenants were checked.
+    /// Close concurrent credential writers before using success to retire an old key.
     pub async fn check_credential_keys(
         &self,
         deadline: OperationDeadline,
