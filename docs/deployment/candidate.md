@@ -22,4 +22,4 @@ make test-reference CANDIDATE_OUTPUT=/absolute/candidate REFERENCE_RECORD=/priva
 python3 /absolute/candidate/reference_seams.py --candidate /absolute/candidate --record /private/reference-seams.json --verify-record
 ```
 
-需要 Docker Compose v2、Python 3.11+、openssl，使用候选锁定的 Rust image 作为一次性 HTTP fixture。runner 只创建唯一前缀的测试 project，使用 172.29.241.0/24、172.29.242.0/24 和 443 端口；在空闲隔离主机运行。源码、候选、记录与工作目录须可由 Docker 使用相同绝对路径挂载。记录逐步原子保存，绑定候选 JSON 摘要、双方源码 SHA 和 runner 摘要，含真实凭据负向核验、rekey、新钥核验、重新开放、备份与隔离恢复，以及清理失败。成功必须经过记录契约和 subject 校验；旧静态 passed 清单不进入当前验证。保留失败 fixture 秘密的私有工作目录，使用后由 owner 清理；所有测试容器、卷、网络由 runner 清理并核实。该入口证明候选/operator 接缝，实际浏览器、生产恢复目标和容量仍归 #2366。
+需要 Docker Compose v2、Python 3.11+、openssl，使用候选锁定的 Rust image 作为一次性 HTTP fixture。runner 只创建唯一前缀的测试 project，从 10.243.0.0/16 中选择不与现存 Docker 网络重叠的两个 /24 网段，使用 443 端口；在空闲隔离主机运行。源码、候选、记录与工作目录须可由 Docker 使用相同绝对路径挂载。记录逐步原子保存，绑定候选 JSON 摘要、双方源码 SHA 和 runner 摘要，含真实凭据负向核验、rekey、新钥核验、重新开放、备份与隔离恢复，以及清理失败。成功必须经过记录契约和 subject 校验；旧静态 passed 清单不进入当前验证。保留失败 fixture 秘密的私有工作目录，使用后由 owner 清理；所有测试容器、卷、网络由 runner 清理并核实。该入口证明候选/operator 接缝，实际浏览器、生产恢复目标和容量仍归 #2366。

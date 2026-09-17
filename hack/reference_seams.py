@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Reproducible fixed-candidate/operator seams; does not assert product T3 acceptance."""
-import argparse, copy, hashlib, json, os, secrets, signal, subprocess, sys, tempfile, time
+import argparse, copy, ipaddress, json, os, secrets, signal, subprocess, sys, tempfile, time
 from pathlib import Path
 import deploy
 import operate
@@ -31,6 +31,17 @@ def process(argv,**kwargs):
     result=subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=180,**kwargs)
     if result.returncode:raise RuntimeError('fixture process failed')
     return result.stdout
+
+def free_subnets():
+    ids=process(['docker','network','ls','--quiet']).decode().split()
+    networks=json.loads(process(['docker','network','inspect',*ids])) if ids else []
+    occupied=[ipaddress.ip_network(entry['Subnet']) for network in networks for entry in (network.get('IPAM',{}).get('Config') or []) if entry.get('Subnet')]
+    selected=[]
+    for subnet in ipaddress.ip_network('10.243.0.0/16').subnets(new_prefix=24):
+        if not any(subnet.overlaps(existing) for existing in occupied):selected.append(str(subnet))
+        if len(selected)==2:return selected
+    raise ValueError('no isolated fixture subnets available')
+
 
 HTTP='''import http.client,json,ssl,sys
 v=json.load(sys.stdin)
@@ -90,8 +101,9 @@ def run(candidate,output,work):
         def render(name,ring,subnet):
             value=copy.deepcopy(data);value['backendSubnet']=subnet;value['runtime']['publicGateway']=subnet.rsplit('.',1)[0]+'.2';value['runtime']['oidc']['credentialKeyring']=ring
             deploy.render(value,work/name,c)
+        source_subnet,target_subnet=free_subnets()
         ring=runtime['oidc']['credentialKeyring']
-        step('render',lambda:render('old',ring,'172.29.241.0/24'))
+        step('render',lambda:render('old',ring,source_subnet))
         step('install',lambda:op(source,work/'old','install'))
         step('initialize',lambda:op(source,work/'old','initialize',tenant,'operator',password_file))
         step('open',lambda:op(source,work/'old','open'))
@@ -114,13 +126,13 @@ def run(candidate,output,work):
         new_ring={'activeKeyId':'new','keys':[{'keyId':'new','path':new}]}
         # A real encrypted provider makes the negative check non-vacuous.
         def reject_new():
-            render('negative',new_ring,'172.29.241.0/24')
+            render('negative',new_ring,source_subnet)
             op(source,work/'negative','verify-keys',expect_failure=True)
         step('reject-new-key-before-rekey',reject_new)
         mixed={'activeKeyId':'new','keys':[{'keyId':'old','path':old},{'keyId':'new','path':new}]}
-        step('render-rotation',lambda:render('rotation',mixed,'172.29.241.0/24'))
+        step('render-rotation',lambda:render('rotation',mixed,source_subnet))
         step('rekey',lambda:op(source,work/'rotation','rekey'))
-        step('render-new-key',lambda:render('new',new_ring,'172.29.241.0/24'))
+        step('render-new-key',lambda:render('new',new_ring,source_subnet))
         step('verify-keys',lambda:op(source,work/'new','verify-keys'))
         step('verify',lambda:op(source,work/'new','verify'))
         step('open-after-rekey',lambda:op(source,work/'new','open'))
@@ -129,7 +141,7 @@ def run(candidate,output,work):
         backup=work/'backup.dump'
         step('backup',lambda:op(source,work/'new','backup',backup))
         step('check-backup',lambda:op(source,work/'new','check-backup',backup))
-        step('render-restore',lambda:render('restored',new_ring,'172.29.242.0/24'))
+        step('render-restore',lambda:render('restored',new_ring,target_subnet))
         step('restore',lambda:op(target,work/'restored','restore',backup))
         step('verify-restored-keys',lambda:op(target,work/'restored','verify-keys'))
         step('open-restored',lambda:op(target,work/'restored','open'))

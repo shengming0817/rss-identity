@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import operate
 import reference_seams as seams
 
@@ -24,3 +25,8 @@ class RecordTests(unittest.TestCase):
                 with self.assertRaises(ValueError):seams.verify_record(record,root,runner)
             seams.save(record,good);runner.write_text('changed')
             with self.assertRaises(ValueError):seams.verify_record(record,root,runner)
+
+    def test_fixture_subnets_avoid_existing_broad_networks(self):
+        networks=[{'IPAM':{'Config':[{'Subnet':'172.29.0.0/16'},{'Subnet':'10.243.0.0/20'},{'Subnet':'fd00::/64'}]}}]
+        with patch.object(seams,'process',side_effect=[b'id',json.dumps(networks).encode()]):
+            self.assertEqual(seams.free_subnets(),['10.243.16.0/24','10.243.17.0/24'])
