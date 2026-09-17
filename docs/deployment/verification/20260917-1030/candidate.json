@@ -1,0 +1,133 @@
+{
+  "format_version": 1,
+  "config_version": 3,
+  "revision": "89b8769fd489d95faded6e411941d5003215a09e",
+  "version": "0.1.0",
+  "platform": "linux/amd64",
+  "cargo_lock_sha256": "d73f1736a9f8480f6d3dd858c852318506f791c9b3a577cbd65b9d2bbee71c1e",
+  "rust": "1.96.0",
+  "ui": {
+    "repository": "https://dev.azure.com/shengming0923/rss/_git/rss-web",
+    "revision": "4129f60de216c7803d3e6d6e23d30db30cdb6709",
+    "lock_sha256": "83740dc4c49b44d5298bece9ceb67536599facafa3f3c7837e227b7c008c06d3",
+    "dist_sha256": "7c62e867f963f76ca88beed88cf9146fc426bc698d3dc5d9da52eb1ba5c6f360"
+  },
+  "providers": {
+    "postgres": "postgres:17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929",
+    "keycloak": "quay.io/keycloak/keycloak:26.7.3@sha256:ff4257d0d64efbe99ed1ddfaf07765cc3c36dc7518bf8324d41961327f441c54",
+    "rust": "rust:1.96.0-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc",
+    "runtime": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
+    "nginx": "nginx:1.30.4@sha256:d5792f71a9496b833bc08ea834a758c46e2b6a6306c10f4be926f38a656cdc1c"
+  },
+  "migration_sha256": "60c3df5c0d48f5639025f2b20e08a6e4e3fc0725c2b966f8f8f1ffa164ac1270",
+  "images": {
+    "server": "rss-identity/server:89b8769fd489d95faded6e411941d5003215a09e@sha256:b83094236a0d6b263d5d5000ce7f56dfc6935a97cea24c602ce8a6f29f1cc25c",
+    "operator": "rss-identity/operator:89b8769fd489d95faded6e411941d5003215a09e@sha256:89ed1ea883044a7cd450aaeaa0e0e9d906c6c463c4fec5b9ec768739eddcfde6",
+    "gateway": "rss-identity/gateway:89b8769fd489d95faded6e411941d5003215a09e@sha256:3ad65d5ade40d65e8c9e3ac7f45e4103d600bbc8f47a02ac5eace3ff9e5daaee"
+  },
+  "archives": {
+    "server": {
+      "file": "server.oci.tar",
+      "sha256": "2cb879113f2ea0de4401bc25225e44d0b60e91264cbf6c93f58c29ebecaf6cbc",
+      "manifest_digest": "sha256:b83094236a0d6b263d5d5000ce7f56dfc6935a97cea24c602ce8a6f29f1cc25c"
+    },
+    "operator": {
+      "file": "operator.oci.tar",
+      "sha256": "17a355d5ff139f1c02fc17bfba89c50b5ea1ed85628c69a41bb90fb1d0dfa357",
+      "manifest_digest": "sha256:89ed1ea883044a7cd450aaeaa0e0e9d906c6c463c4fec5b9ec768739eddcfde6"
+    },
+    "gateway": {
+      "file": "gateway.oci.tar",
+      "sha256": "22495471321cf5b644fcf1a988f49d710979929fa0d077b2a17ef3aaca3e7b5d",
+      "manifest_digest": "sha256:3ad65d5ade40d65e8c9e3ac7f45e4103d600bbc8f47a02ac5eace3ff9e5daaee"
+    }
+  },
+  "rss": [
+    {
+      "package": "rss-axum",
+      "version": "0.1.0",
+      "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+    },
+    {
+      "package": "rss-contract",
+      "version": "0.1.0",
+      "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+    },
+    {
+      "package": "rss-diag-context",
+      "version": "0.1.0",
+      "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+    },
+    {
+      "package": "rss-redact",
+      "version": "0.1.0",
+      "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+    },
+    {
+      "package": "rss-request-context",
+      "version": "0.1.0",
+      "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+    },
+    {
+      "package": "rss-runtime",
+      "version": "0.1.0",
+      "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+    },
+    {
+      "package": "rss-transactional-messaging",
+      "version": "0.2.0",
+      "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+    },
+    {
+      "package": "rss-transactional-messaging-postgres",
+      "version": "0.1.0",
+      "source": "git+https://dev.azure.com/shengming0923/rss/_git/rss?rev=93ce6848b7c78753df9947bd08abfb37e5799838#93ce6848b7c78753df9947bd08abfb37e5799838"
+    }
+  ],
+  "migrations": {
+    "identity_sql_sha256": "60c3df5c0d48f5639025f2b20e08a6e4e3fc0725c2b966f8f8f1ffa164ac1270",
+    "rss_sql_sha256": "687273def9ec9b5e8cb6fa1586b992b1991fb24c0c1ab1985235ac444e14ba73",
+    "schema_contract": "ba71d44fc99b5b1fd362f0e041e39498c27f12e0d82b5ab2c0b16e15dee80607",
+    "schema_version": 9
+  },
+  "identity_schema": 9,
+  "toolchain": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: aarch64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 22.1.2\n12.2.0\nlibc6-amd64-cross\t2.36-8cross1\nlibc6-dev-amd64-cross\t2.36-8cross1\nlinux-libc-dev-amd64-cross\t6.1.4-1cross1\n",
+  "production_features": {
+    "rss-request-context": [
+      "default"
+    ],
+    "rss-contract": [
+      "default"
+    ],
+    "rss-redact": [
+      "default"
+    ],
+    "rss-diag-context": [
+      "default"
+    ],
+    "rss-transactional-messaging": [
+      "consumer",
+      "default",
+      "producer"
+    ],
+    "rss-axum": [
+      "http1",
+      "managed-server"
+    ],
+    "rss-runtime": [
+      "default"
+    ],
+    "rss-transactional-messaging-postgres": []
+  },
+  "binaries": {
+    "identity-admin": "e337e97e47d49c31d8e0d9641c005550f85c677507b7086e5bbc60d07eff90e8",
+    "identity-server": "772f4d6dde07e7942da72fbd6881ce6a1480df82694df16f8962237031368d37",
+    "identity-migrate": "6d6d4e0cb67a26f0a822ed26304750e0a232fecd76cb2ac90502be6b4353ced9"
+  },
+  "tools": {
+    "deploy.py": "f101571684ecf5721ce2d3021fad3998804932cde3ae273e98884032c7122cf2",
+    "operate.py": "93cb63d790a64b61f7ef258ff4bc769ace29d7d89c24758671a9452a20ad6a8d",
+    "reference_seams.py": "6671ceadf09e106377300ed76cd92988d3bbb150667e23c1a58fada38eacf2f6"
+  },
+  "deployment_sha256": "661b40180fc0a702f13439e1f303eea00417aa75e0f2a96fa1cdd4ffc816a540"
+}
