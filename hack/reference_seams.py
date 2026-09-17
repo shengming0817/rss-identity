@@ -89,7 +89,7 @@ def run(candidate,output,work):
     for sig in previous:signal.signal(sig,interrupted)
     try:
         step('candidate',lambda:op(source,work/'old','candidate'))
-        process(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(work/'cert-key'),'-out',str(work/'cert'),'-days','2','-subj','/CN=identity-reference-fixture','-addext','subjectAltName=DNS:identity.example.test,DNS:gateway,DNS:postgres'])
+        process(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(work/'cert-key'),'-out',str(work/'cert'),'-days','2','-subj','/CN=identity-reference-fixture','-addext','basicConstraints=critical,CA:FALSE','-addext','keyUsage=critical,digitalSignature,keyEncipherment','-addext','extendedKeyUsage=serverAuth','-addext','subjectAltName=DNS:identity.example.test,DNS:gateway,DNS:postgres'])
         (work/'cert-key').chmod(0o600)
         data=json.loads((candidate/'deployment/deploy.example.json').read_text())
         runtime=data['runtime'];tenant=runtime['storage']['tenants'][0]
