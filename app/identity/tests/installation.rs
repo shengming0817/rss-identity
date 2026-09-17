@@ -421,6 +421,43 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .await?,
         0
     );
+    // Native logical backup must preserve the exact structural attestation after PG re-parses DDL.
+    let container = std::env::var("IDENTITY_TEST_PG_CONTAINER")?;
+    let dump = std::process::Command::new("docker")
+        .args([
+            "exec", &container, "pg_dump", "-U", "postgres", "-d", "postgres", "-Fc",
+        ])
+        .output()?;
+    anyhow::ensure!(dump.status.success(), "fixture dump failed");
+    sqlx::query("CREATE DATABASE restored")
+        .execute(&mut owner)
+        .await?;
+    let mut restore = std::process::Command::new("docker")
+        .args([
+            "exec",
+            "-i",
+            &container,
+            "pg_restore",
+            "-U",
+            "postgres",
+            "-d",
+            "restored",
+            "--exit-on-error",
+            "--single-transaction",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    use std::io::Write;
+    restore.stdin.take().unwrap().write_all(&dump.stdout)?;
+    anyhow::ensure!(
+        restore.wait_with_output()?.status.success(),
+        "fixture restore failed"
+    );
+    let mut restored = install_config();
+    restored.database.database = "restored".into();
+    migration::verify(restored).await?;
     owner.close().await?;
     Ok(())
 }

@@ -19,10 +19,11 @@ CREATE TABLE identity_authority.accounts (
  auth_epoch bigint NOT NULL DEFAULT 1 CHECK(auth_epoch>0),
  PRIMARY KEY(tenant_id,principal_id)
 );
+-- Keep composite bounds flat: pg_dump/reparse must preserve structural attestation.
 CREATE TABLE identity_authority.local_credentials (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL,
- login_key text NOT NULL CHECK(octet_length(login_key) BETWEEN 1 AND 128 AND login_key=lower(login_key COLLATE "C") AND login_key !~ '[^\x20-\x7e]' AND login_key=btrim(login_key)),
- password_hash text NOT NULL CHECK(octet_length(password_hash) BETWEEN 80 AND 256 AND password_hash ~ '^\$argon2id\$v=19\$m=19456,t=2,p=1\$[A-Za-z0-9+/]{21}[AQgw]\$[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$'),
+ login_key text NOT NULL CHECK(octet_length(login_key)>=1 AND octet_length(login_key)<=128 AND login_key=lower(login_key COLLATE "C") AND login_key !~ '[^\x20-\x7e]' AND login_key=btrim(login_key)),
+ password_hash text NOT NULL CHECK(octet_length(password_hash)>=80 AND octet_length(password_hash)<=256 AND password_hash ~ '^\$argon2id\$v=19\$m=19456,t=2,p=1\$[A-Za-z0-9+/]{21}[AQgw]\$[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$'),
  PRIMARY KEY(tenant_id,principal_id), UNIQUE(tenant_id,login_key),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts
 );

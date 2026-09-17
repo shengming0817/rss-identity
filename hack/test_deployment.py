@@ -66,3 +66,18 @@ class OperationTests(unittest.TestCase):
         with patch.object(operate,'authority_states',return_value={'id':('identity',stopped)}):
             operate.require_closed('fixture',drained=True,expected={'id':None})
             with self.assertRaisesRegex(ValueError,'identity changed'):operate.require_closed('fixture',expected={})
+
+    def test_backup_listing_is_offline_and_uses_the_fixed_pg_tool(self):
+        import operate, argparse, subprocess
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);archive=root/'cut.dump';archive.write_bytes(b'fixture')
+            images={k:'fixed/'+k for k in ['server','operator','gateway']}
+            (root/'compose.json').write_text(json.dumps({'services':{s:{'image':images[i]} for s,i in [('identity','server'),('gateway','gateway'),('migrate','operator'),('maintenance','operator')]}}))
+            args=argparse.Namespace(candidate=root,command='check-backup',project='identity-source',deployment=root,backup=archive)
+            def execute(argv,**kwargs):
+                self.assertEqual(argv[argv.index('--network')+1],'none')
+                self.assertEqual(argv[-2:],[deploy.IMAGES['postgres'],'--list'])
+                self.assertEqual(kwargs['stdin'].read(),b'fixture')
+                return subprocess.CompletedProcess(argv,0)
+            with patch.object(operate,'candidate',return_value={'images':images,'providers':deploy.IMAGES}),patch.object(operate,'check_backup',return_value={}),patch.object(operate,'command',side_effect=execute) as run:
+                operate.operate(args);self.assertEqual(run.call_count,1)

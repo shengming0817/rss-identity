@@ -242,7 +242,7 @@ def assembly():
             file = root/name
             file.write_text(value)
             file.chmod(0o600)
-        cargo('rss-identity-app','installation',{'IDENTITY_TEST_INSTALL_DIR':tmp,'IDENTITY_TEST_PG_PORT':str(ports[5432])})
+        cargo('rss-identity-app','installation',{'IDENTITY_TEST_INSTALL_DIR':tmp,'IDENTITY_TEST_PG_PORT':str(ports[5432]),'IDENTITY_TEST_PG_CONTAINER':cid})
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["pg"]: pg()

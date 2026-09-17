@@ -107,7 +107,7 @@ def operate(args):
         receipt=path.with_suffix(path.suffix+'.json');receipt.write_text(json.dumps(record));receipt.chmod(0o600)
     elif args.command=='check-backup':
         check_backup(args.backup)
-        with args.backup.open('rb') as stream:run('run','--rm','-T','--no-deps','--entrypoint','pg_restore','postgres','--list',stdin=stream)
+        with args.backup.open('rb') as stream:command(['docker','run','--rm','--network','none','--user','10001:10001','--interactive','--entrypoint','pg_restore',c['providers']['postgres'],'--list'],stdin=stream,stdout=subprocess.DEVNULL)
     elif args.command=='restore':
         record=check_backup(args.backup)
         if record['project']==args.project:raise ValueError('restore requires a distinct isolated project')
