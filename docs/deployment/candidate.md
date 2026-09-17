@@ -1,15 +1,16 @@
-> 历史中央模式文档（基线 fa7019922162158704cc47c6ac7ad36a67c8ae5a），不适用于 #2435 的嵌入式组件。旧运行器已退役；保留验收/候选记录，不重标为本次成功。当前入口为 docs/guides/embedding.md，完整部署后续为 #2436。
-
 # 固定候选构建
 
-1. Identity 与 rss-web 都使用干净、固定完整 Git SHA。仅构建 rss-web/apps/identity：设置 RSS_IDENTITY_WEB_REVISION 为该仓 HEAD，运行 pnpm --filter @rss/identity-app build 和 pnpm check:identity-app:build。
-2. 在 Identity 运行 make ci CI_BASE=origin/develop。构建工具链Rust1.96.0；生产和测试RSS feature分别验证。
-3. `make candidate CANDIDATE_OUTPUT=/absolute/new-candidate IDENTITY_UI_SOURCE=/absolute/fixed-rss-web IDENTITY_UI_DIST=/absolute/fixed-rss-web/apps/identity/dist`。目标目录必须尚不存在。私有 RSS 获取使用 SYSTEM_ACCESSTOKEN，仅传递为BuildKit secret到fetch步骤；编译步骤无网络和Git认证。
-4. 交付candidate.json、server/operator/gateway OCI archive、binaries目录与部署模板。记录实际命令、结果及未覆盖项。镜像/二进制版本与schema/config身份是不同轴，不把artifact digest写入deployment表。
+双方使用干净且固定的完整 Git SHA。Web 执行 frozen install、typecheck、lint、format check、tests 和 build；Identity 执行 `make ci`，再由 Web 的 `pnpm test:identity:joint` 消费真实组件宿主。候选只装入 `apps/identity/dist`，不装入 apps/web。
 
-candidate.json绑定Identity版本/SHA/lock、RSS Git来源与版本、实际Linux编译feature、UI源码/lock/dist摘要、迁移摘要、provider镜像摘要及OCI manifest/归档/二进制摘要。它证明候选构建身份，不表示registry已发布，也不证明生产T3。
+```sh
+make candidate CANDIDATE_OUTPUT=/absolute/new-candidate IDENTITY_UI_SOURCE=/absolute/fixed-rss-web IDENTITY_UI_DIST=/absolute/fixed-rss-web/apps/identity/dist
+python3 /absolute/new-candidate/operate.py --candidate /absolute/new-candidate candidate
+```
 
-azure-candidate.yml提供手动流水线：需要部署管理员配置只读GitHub service connection（默认名称rss-web-read），并允许job token读取RSS Git。该配置不是已运行流水线的证据。实际输出通过Pipeline Artifact发布，不要求镜像registry。
+构建需要 Python 3.11+、Node、Docker Buildx 和 RSS 固定 Git 源码的读取凭据。`IDENTITY_GIT_AUTH_HEADER_FILE` 是私有 0600 文件，或 CI 提供 `SYSTEM_ACCESSTOKEN`；仅作为 BuildKit secret 传给 fetch，编译离线且没有凭据。禁止把秘密值写到 CLI。Web origin 必须是激活 Azure 仓库。
 
-候选构建在原生 build platform 上交叉编译 linux/amd64；Dockerfile 显式安装目标 libc 开发头文件，避免 ARM 主机把宿主头文件用于 x86_64。release 的 Python 子进程使用当前解释器，最低 Python 3.11，避免 Make 的 PATH 改写选择旧解释器。#2377 仅修复构建入口，不改变应用与 SDK 契约。
-非 root gateway 冒烟将全部 NGINX 临时目录指向可写 /tmp，包括 proxy_temp_path，保持与交付镜像 UID 10001 一致。
+候选目录包含 `candidate.json`、server/operator/gateway 的 OCI archives、identity-server / identity-admin / identity-migrate 三个 binary、deploy.py、operate.py 与部署材料。candidate.json 绑定双方 SHA、Cargo/pnpm locks、RSS Git revision 与实际生产 features、工具链、schema 9/config 3、迁移、UI、binary、操作工具、部署树和 OCI 摘要。构建会运行 binary `--version`、迁移 `--describe`，并读取非 root 网关内的 UI revision；工具校验归档及其 blob 摘要，不把本地候选宣称为已发布 registry 镜像。
+
+用 `docker load --input /absolute/new-candidate/server.oci.tar` 分别加载三份归档。渲染配置仅引用 candidate.json 中的固定镜像摘要。部署前独立保存 candidate.json 摘要及可信来源；摘要校验不能替代候选来源认证。
+
+构建、网关和清理机制参考本仓 `fa7019922162158704cc47c6ac7ad36a67c8ae5a` 的 hack/release.py、hack/ui.py 和 deployment/Dockerfile，按当前三 binary 与组件边界重建。代理行为核对 [NGINX release-1.30.0 源码](https://github.com/nginx/nginx/blob/release-1.30.0/src/http/modules/ngx_http_proxy_module.c)；未引入其代码。

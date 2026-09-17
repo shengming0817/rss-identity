@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 ARG RUST_IMAGE
 ARG RUNTIME_IMAGE
+ARG NGINX_IMAGE
 FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS build
 RUN apt-get update && apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu=4:12.2.0-3 libc6-dev-amd64-cross=2.36-8cross1 && rm -rf /var/lib/apt/lists/*
 RUN rustup target add x86_64-unknown-linux-gnu
@@ -39,3 +40,10 @@ COPY --from=build /build/metadata.json /metadata.json
 COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-server /identity-server
 COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-admin /identity-admin
 COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-migrate /identity-migrate
+FROM ${NGINX_IMAGE} AS gateway
+ARG IDENTITY_REVISION
+LABEL org.opencontainers.image.revision=${IDENTITY_REVISION}
+RUN rm -rf /usr/share/nginx/html/* /etc/nginx/conf.d/*
+COPY ui/ /usr/share/nginx/html/
+USER 10001:10001
+ENTRYPOINT ["nginx","-e","stderr","-g","daemon off;"]

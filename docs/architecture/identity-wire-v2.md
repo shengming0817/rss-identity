@@ -46,4 +46,4 @@ IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/provid
 
 ## 参考宿主资源
 
-`GET /api/identity-host/v1/tenants/{tenant}/context` 由 app/identity 持有，通过 HTTP adapter 的公开 `inspect_session` 读取同一 cookie，不续期。响应为 `{tenantId,principalId,sessionId,navigation:{manageAccounts,manageProviders}}`，no-store；导航由 BootstrapPolicy 派生，仅作展示。组件管理事务始终重新验证会话与宿主策略。UI 静态配置使用网关固定同源 `/identity-config.json`，严格 `{canonicalOrigin,oidcEnabled}`；并非动态能力发现。
+`GET /api/identity-host/v1/tenants/{tenant}/context` 由 app/identity 持有，通过 HTTP adapter 的公开 `inspect_session` 读取同一 cookie，不续期。响应为 `{tenantId,principalId,sessionId,navigation:{manageAccounts,manageProviders}}`，no-store；导航由 BootstrapPolicy 派生，仅作展示。组件管理事务始终重新验证会话与宿主策略。UI 静态配置使用网关固定同源 `/api/identity-host/v1/config.json`，严格 `{canonicalOrigin,oidcEnabled}`；并非动态能力发现。

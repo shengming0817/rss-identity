@@ -1,7 +1,10 @@
-# 参考宿主与历史部署证据
+# 可部署参考应用
 
-当前 app/identity 是最小参考宿主，配置格式为 3，所有配置 JSON 字段使用 camelCase（例如 `formatVersion`、`instanceId`、`passwordFile`），拒绝旧字段别名；样例见 [example.json](../../deployment/example.json)。支持 identity-server、identity-migrate、identity-admin；数据库角色由宿主预建，Identity schema 仅全新 v9 安装。公共 Rust 装配见 [嵌入指南](../guides/embedding.md)。
+参考宿主默认本地认证，可选上游企业 OIDC。持久拓扑为 Identity、专属 TLS PostgreSQL 和固定 UI 的同源 TLS 网关；Keycloak 仅用于测试，不是本地部署依赖。配置版本 3、HTTP v2、全新 schema v9；不升级旧中央数据库，也不提供兼容路由。
 
-此目录其余文档与 t3 中已保存的证据属于旧中央模式。旧可执行装配/验收入口已退役，源码可从 fa7019922162158704cc47c6ac7ad36a67c8ae5a 恢复。完整部署、UI 候选、运维和 T3 由 #2436 更新验收，本次不声明这些旧记录覆盖新组件。
+- [候选构建](candidate.md)：双方 SHA、locks、RSS features、三个 binary 与三种镜像。
+- [安装和操作](operations.md)：同一输入生成 runtime/maintenance/migration/UI，初始化与只读核验。
+- [备份、隔离恢复和轮换](recovery.md)：显式关闭与重新开放，无未知写入重试。
+- [旧环境退役](retirement.md)：owner、保留条件和消费者迁移前置。
 
-`bootstrapAccounts` 为每个 `storage.tenants` 租户提供唯一 `{tenantId, principalId}`。迁移输入包含 `formatVersion`、`instanceId`、`database`、`storage`、`runtimeRole`、`maintenanceRole`；维护命令输入包含 `instanceId`、`database`、`storage`。安装提交前验证目标角色属性、继承权限和有效授权；异常会回滚 RSS 与 Identity schema。`make test-assembly` 用真实 TLS PostgreSQL 验证安装及参考进程启停，不构成部署 T3。
+日期命名的旧验收及 `t3/` 记录保留历史来源。当前代码和 T2 不使这些记录自动成为新候选的验收；#2366 持有实际浏览器、部署恢复和容量 T3。

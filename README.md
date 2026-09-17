@@ -9,4 +9,4 @@
 - [产品需求](docs/product/rss-identity-prd.md)、[开发与验证](docs/guides/development.md)、[HTTP v2](docs/architecture/identity-wire-v2.md)。
 - [文档导航](docs/README.md)、[协作规则](AGENTS.md)、[历史参考](reference/README.md)。
 
-`app/identity` 是最小参考宿主，输出 identity-server、identity-migrate、identity-admin。完整部署与 UI 候选、生产操作和 T3 属于 #2436；MDM 接入属于 #2437，前端消费调整属于 #2368。历史验收记录不证明本次重构的产品部署能力。
+`app/identity` 是最小参考宿主，输出 identity-server、identity-migrate、identity-admin。[参考部署与固定 UI 候选](docs/deployment/README.md) 由 #2436 与 Web #2368 交付；实际候选的浏览器、恢复和容量 T3 属于 #2366，MDM 接入属于 #2437。历史验收记录不证明本次重构的产品部署能力。

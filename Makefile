@@ -39,3 +39,9 @@ test-consumers:
 .PHONY: test-assembly
 test-assembly:
 	$(PYTHON) hack/providers.py assembly
+
+.PHONY: test-ui candidate
+test-ui:
+	$(PYTHON) hack/ui.py
+candidate:
+	$(PYTHON) hack/release.py --output "$(CANDIDATE_OUTPUT)" --ui-source "$(IDENTITY_UI_SOURCE)" --ui-dist "$(IDENTITY_UI_DIST)"

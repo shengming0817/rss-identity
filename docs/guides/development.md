@@ -22,4 +22,4 @@ make test-consumers IDENTITY_CONSUMER_REVISION=<完整已提交并推送的SHA> 
 
 Azure CI 的 job token 只供 fetch，随后移除凭据并离线运行相同门禁。配置文件不等于托管流水线已执行。唯一公告例外 [#2357](https://dev.azure.com/shengming0923/rss/_workitems/edit/2357) 仅为 identity-oidc → openidconnect 4.0.1 → rsa 0.9.10 公钥验证路径，版本或调用路径变化即撤销例外；不用于 RSA 私钥操作。
 
-参考宿主配置见 [deployment/example.json](../../deployment/example.json)。完整 binary/image/UI/provider 装配、运维候选与生产 T3 属于 #2436；真实 MDM 接入属于 #2437。本次 T1/T2 和独立宿主证明不替代这些验收。
+参考宿主配置见 [deployment/example.json](../../deployment/example.json)。完整 binary/image/UI 装配与操作入口见 [参考部署](../deployment/README.md)。联合 T2 从固定 Web checkout 运行 `IDENTITY_BACKEND_FIXTURE=/absolute/fixed-identity IDENTITY_JOINT_RECORD=/absolute/new-record.json pnpm test:identity:joint`；使用 Vitest/jsdom 的生产 transport，经 TLS 消费真实组件宿主。实际候选浏览器、恢复和容量 T3 属于 #2366；MDM 接入属于 #2437。
