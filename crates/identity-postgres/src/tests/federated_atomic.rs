@@ -10,6 +10,88 @@ use zeroize::Zeroizing;
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
+async fn tenant_reencryption_is_atomic_scoped_and_authenticates_every_value() -> anyhow::Result<()>
+{
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let s = service(&f, ScriptedOidc::new());
+    let p = enabled(&f, &s).await?;
+    let old = credential_keys();
+    // Preserve the fixture key and select a fresh write key.
+    let rotated = CredentialKeys::new(
+        "next".into(),
+        vec![("fixture".into(), [8; 32]), ("next".into(), [2; 32])],
+    )?;
+    let next = CredentialKeys::new("next".into(), vec![("next".into(), [2; 32])])?;
+    let instance = rss_identity_core::InstanceId::parse(
+        &sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT authority_id FROM identity_authority.deployment",
+        )
+        .fetch_one(&f.owner)
+        .await?
+        .to_string(),
+    )?;
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT sealed FROM identity_authority.provider_credentials")
+            .fetch_one(&f.owner)
+            .await?;
+    let mut tx = f.owner.begin().await?;
+    assert!(
+        next.reencrypt_tenant(&mut tx, instance, f.key.tenant)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    let mut tx = f.owner.begin().await?;
+    assert_eq!(
+        rotated
+            .reencrypt_tenant(&mut tx, instance, f.key.tenant)
+            .await?,
+        1
+    );
+    tx.rollback().await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT sealed FROM identity_authority.provider_credentials"
+        )
+        .fetch_one(&f.owner)
+        .await?,
+        before
+    );
+    let mut tx = f.owner.begin().await?;
+    assert_eq!(
+        rotated
+            .reencrypt_tenant(&mut tx, instance, f.key.tenant)
+            .await?,
+        1
+    );
+    tx.commit().await?;
+    let mut tx = f.owner.begin().await?;
+    assert_eq!(
+        next.reencrypt_tenant(&mut tx, instance, f.key.tenant)
+            .await?,
+        1
+    );
+    assert!(
+        old.reencrypt_tenant(&mut tx, instance, f.key.tenant)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    sqlx::query("UPDATE identity_authority.provider_credentials SET credential_version=credential_version+1 WHERE provider_id=$1::uuid").bind(p.id.to_string()).execute(&f.owner).await?;
+    let mut tx = f.owner.begin().await?;
+    assert!(
+        next.reencrypt_tenant(&mut tx, instance, f.key.tenant)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
 async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()> {
     use rss_identity_core::assurance::{Acr, Amr};
     let f = Fixture::new().await?;

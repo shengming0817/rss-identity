@@ -75,6 +75,32 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         sqlx::raw_sql(restore).execute(&mut owner).await?;
     }
     migration::install(install_config()).await?;
+    migration::verify(install_config()).await?;
+    for (corrupt, restore) in [
+        (
+            "DELETE FROM identity_authority.schema_version",
+            "INSERT INTO identity_authority.schema_version VALUES(9)",
+        ),
+        (
+            "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2",
+            "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=1",
+        ),
+        (
+            "ALTER ROLE host_runtime BYPASSRLS",
+            "ALTER ROLE host_runtime NOBYPASSRLS",
+        ),
+    ] {
+        sqlx::raw_sql(corrupt).execute(&mut owner).await?;
+        assert!(migration::verify(install_config()).await.is_err());
+        sqlx::raw_sql(restore).execute(&mut owner).await?;
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_authority.guard")
+            .fetch_one(&mut owner)
+            .await?,
+        0,
+        "verification must not initialize tenants"
+    );
     assert!(
         migration::install(install_config()).await.is_err(),
         "fresh-only installer must reject existing storage"
@@ -269,9 +295,49 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert!(response.headers().contains_key("set-cookie"));
+    let cookie = response.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
     assert_eq!(
         response.json::<serde_json::Value>().await?["identity"]["principalId"],
         keys[1].principal.as_uuid().to_string()
+    );
+    let resource = format!(
+        "{url}/api/identity-host/v1/tenants/{}/context",
+        keys[1].tenant
+    );
+    let reply = client
+        .get(&resource)
+        .header("cookie", &cookie)
+        .header("x-forwarded-for", "203.0.113.7")
+        .send()
+        .await?;
+    assert_eq!(reply.status(), reqwest::StatusCode::OK);
+    assert_eq!(reply.headers()["cache-control"], "no-store");
+    let context = reply.json::<serde_json::Value>().await?;
+    assert_eq!(
+        context["principalId"],
+        keys[1].principal.as_uuid().to_string()
+    );
+    assert_eq!(context["navigation"]["manageAccounts"], true);
+    sqlx::query(
+        "UPDATE identity_authority.accounts SET auth_epoch=auth_epoch+1 WHERE tenant_id=$1::uuid",
+    )
+    .bind(keys[1].tenant.to_string())
+    .execute(&mut owner)
+    .await?;
+    assert_eq!(
+        client
+            .get(&resource)
+            .header("cookie", &cookie)
+            .header("x-forwarded-for", "203.0.113.7")
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
     );
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(10), server).await???;

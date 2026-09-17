@@ -3,6 +3,75 @@ use crate::{AppError, config::MigrationConfig};
 use rss_identity_core::InstanceId;
 use rss_identity_postgres::{AuthorityProfile, grant_profile};
 use sqlx::{Connection, PgConnection};
+pub(crate) fn validate(config: &MigrationConfig) -> Result<InstanceId, AppError> {
+    if config.format_version != 3
+        || config.runtime_role == config.maintenance_role
+        || config.runtime_role == config.database.user
+        || config.maintenance_role == config.database.user
+        || [&config.runtime_role, &config.maintenance_role]
+            .iter()
+            .any(|r| r.is_empty() || r.len() > 63 || r.contains('\0'))
+    {
+        return Err(AppError::Configuration);
+    }
+    config.storage.binding()?;
+    InstanceId::parse(&config.instance_id).map_err(|_| AppError::Configuration)
+}
+
+/// Read-only snapshot verification; never installs, initializes, repairs or increments a fence.
+pub async fn verify(config: MigrationConfig) -> Result<(), AppError> {
+    let instance = validate(&config)?;
+    let mut c = PgConnection::connect_with(&config.database.sqlx()?)
+        .await
+        .map_err(|_| AppError::Connection)?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let mut tx = c.begin().await?;
+        sqlx::raw_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY; SET LOCAL statement_timeout='30s'; SET LOCAL lock_timeout='10s'").execute(&mut *tx).await?;
+        verify_storage(&mut tx, &config.storage).await?;
+        for (role, profile) in [(&config.runtime_role, AuthorityProfile::Runtime), (&config.maintenance_role, AuthorityProfile::Maintenance)] {
+            let switch = format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\""));
+            sqlx::raw_sql(sqlx::AssertSqlSafe(switch)).execute(&mut *tx).await?;
+            rss_identity_postgres::verify_profile(&mut tx, profile, instance).await.map_err(|_| sqlx::Error::Protocol("installation verification failed".into()))?;
+            sqlx::raw_sql("SET LOCAL ROLE NONE").execute(&mut *tx).await?;
+        }
+        tx.rollback().await
+    }).await;
+    let outcome = result
+        .map_err(|_| AppError::Migration)
+        .and_then(|r| r.map_err(|_| AppError::Migration));
+    finish_installation(outcome, c.close()).await
+}
+pub(crate) async fn verify_storage(
+    c: &mut PgConnection,
+    storage: &crate::config::StorageConfig,
+) -> Result<(), sqlx::Error> {
+    let identity: Vec<(Vec<u8>, Vec<u8>)> =
+        sqlx::query_as("SELECT target,lineage FROM rss_transactional_messaging.storage_lineage")
+            .fetch_all(&mut *c)
+            .await?;
+    let tenants: Vec<(uuid::Uuid, i64)> = sqlx::query_as(
+        "SELECT tenant_id,epoch FROM rss_transactional_messaging.tenant_epoch ORDER BY tenant_id",
+    )
+    .fetch_all(c)
+    .await?;
+    let mut expected = storage
+        .tenants()
+        .map_err(|_| sqlx::Error::Protocol("invalid tenant binding".into()))?
+        .into_iter()
+        .map(|t| (t.to_string(), storage.generation))
+        .collect::<Vec<_>>();
+    expected.sort();
+    if identity != [(storage.target.to_vec(), storage.lineage.to_vec())]
+        || tenants
+            .into_iter()
+            .map(|(t, e)| (t.to_string(), e))
+            .collect::<Vec<_>>()
+            != expected
+    {
+        return Err(sqlx::Error::Protocol("storage binding mismatch".into()));
+    }
+    Ok(())
+}
 pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
     if config.format_version != 3
         || config.runtime_role == config.maintenance_role

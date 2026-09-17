@@ -40,6 +40,11 @@ pub fn deadline() -> OperationDeadline {
 
 /// Product policy, deliberately outside the authentication component.
 pub struct BootstrapPolicy(pub Vec<AccountKey>);
+impl BootstrapPolicy {
+    pub fn is_manager(&self, account: AccountKey) -> bool {
+        self.0.contains(&account)
+    }
+}
 impl ManagementPolicy for BootstrapPolicy {
     fn authorize(
         &self,
@@ -52,7 +57,7 @@ impl ManagementPolicy for BootstrapPolicy {
                 300,
             )));
         }
-        if !self.0.contains(&context.actor())
+        if !self.is_manager(context.actor())
             || (context
                 .target()
                 .is_some_and(|target| self.0.contains(&target))

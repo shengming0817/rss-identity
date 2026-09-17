@@ -184,7 +184,8 @@ pub async fn serve(
                     let http = HttpConfig::new(&config.public_origin, config.budgets.request())
                         .map_err(|_| AppError::Configuration)?;
                     let gate = Arc::new(OnceLock::new());
-                    let mut app = router(authority, http.clone())?;
+                    let context = crate::context::router(authority.clone(), &config)?;
+                    let mut app = router(authority, http.clone())?.merge(context);
                     if let Some(federation) = federation {
                         app = app.merge(federated_router(federation, http)?);
                     }

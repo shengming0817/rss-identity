@@ -15,6 +15,52 @@ use support::*;
 use tower::ServiceExt;
 
 const ORIGIN: &str = "https://identity.example.test";
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn public_session_reader_is_passive_and_rejects_revoked_credentials() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let app = app(&f);
+    let (cookie, csrf, initial) = successful_login(&app).await?;
+    let headers = request("GET", "session", Some(&cookie), None, json!(null))
+        .headers()
+        .clone();
+    let proof =
+        rss_identity_http_axum::inspect_session(&f.store, f.key.tenant, &headers, deadline())
+            .await
+            .unwrap();
+    assert_eq!(proof.view().id.to_string(), initial["session"]["id"]);
+    assert_eq!(
+        proof.view().idle_expires_at,
+        initial["session"]["idleExpiresAt"]
+    );
+    let mut ambiguous = headers.clone();
+    ambiguous.append("cookie", cookie.parse()?);
+    let error =
+        rss_identity_http_axum::inspect_session(&f.store, f.key.tenant, &ambiguous, deadline())
+            .await
+            .err()
+            .unwrap();
+    assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(error.headers()["cache-control"], "no-store");
+    app.oneshot(request(
+        "POST",
+        "session/logout",
+        Some(&cookie),
+        Some(&csrf),
+        json!(null),
+    ))
+    .await?;
+    let error =
+        rss_identity_http_axum::inspect_session(&f.store, f.key.tenant, &headers, deadline())
+            .await
+            .err()
+            .unwrap();
+    assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+    f.close().await;
+    Ok(())
+}
 fn app(f: &Fixture) -> Router {
     router(
         f.store.clone(),

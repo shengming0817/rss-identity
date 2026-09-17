@@ -144,3 +144,37 @@ mod tests {
 /// headers are never interpreted by this adapter. The raw peer remains in `ConnectInfo`.
 #[derive(Clone, Copy, Debug)]
 pub struct ClientAddress(pub std::net::IpAddr);
+
+/// Read a host resource's cookie using the adapter's strict parser and authoritative session check.
+/// This does not extend idle expiry or expose credentials. The host owns its request budget,
+/// resource authorization and successful response cache policy; failures are safe and no-store.
+/// Use only for passive reads. This is not a CSRF check for host mutations.
+pub async fn inspect_session(
+    authority: &Authority,
+    tenant: rss_request_context::TenantId,
+    headers: &axum::http::HeaderMap,
+    deadline: rss_transactional_messaging::policy::OperationDeadline,
+) -> Result<rss_identity_postgres::AuthenticatedSession, axum::response::Response> {
+    use axum::response::IntoResponse;
+    let result = async {
+        authority.require_runtime()?;
+        let secret = boundary::cookie(headers)?.ok_or(boundary::UNAUTH)?;
+        authority
+            .inspect_session(tenant, secret, deadline)
+            .await
+            .map_err(boundary::HttpError::from)
+    }
+    .await;
+    result.map_err(|error: boundary::HttpError| {
+        let mut response = error.into_response();
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+        response.headers_mut().insert(
+            axum::http::header::REFERRER_POLICY,
+            axum::http::HeaderValue::from_static("no-referrer"),
+        );
+        response
+    })
+}
