@@ -30,7 +30,20 @@ let groups = actor.groups()?;
 
 Identity 不存储 administrator、emergency 或平台角色。宿主维护管理角色、防锁死和授权映射，并负责其并发一致性。参考宿主的 `bootstrapAccounts` 必须恰好覆盖配置中的每个租户，各有一个 AccountKey，禁止重复、遗漏和跨租户配置。每个管理员只能管理本租户，禁止其自我禁用/移除成员，并要求 300 秒内重新认证。普通账户可调用 `ChangeOwnPassword`，也必须经过同一管理策略并满足其重新认证要求；当前密码证明不替代宿主授权。
 
-`actor.groups()?` 返回 `VerifiedGroups::Available`、`Unavailable` 或 `Expired`。Available 包装器只能借自本次认证结果；每次访问重新检查剩余有效期，不能由请求 JSON 构造。空组、缺失组、过期组语义不同。组是有来源和期限的认证事实，资源授权由宿主决定。观察时间取已验签 ID token 的 iat，期限为 min(iat + 1–300 秒策略, exp)；普通刷新不延长。provider/账户/session 撤销使整次验证失败，组独立过期只移除组事实。
+`actor.groups()?` 和 `ManagementContext::groups()?` 共用检查路径，返回 `VerifiedGroups::Available`、`Unavailable` 或 `Expired`。Available 包装器只能借自本次认证结果；`groups.values()?` 每次读取重新检查请求证明与快照期限，不能由请求 JSON 构造。空组、缺失组、过期组语义不同。组是有来源和期限的认证事实，资源授权由宿主决定。观察时间取已验签 ID token 的 iat，期限为 min(iat + 1–300 秒策略, exp)；普通刷新不延长。provider/账户/session 撤销使整次验证失败，组独立过期只移除组事实。
+
+`GroupAccessError::ProofExpired` 表示请求证明到期；已借出的组对象也不能继续读取值。快照独立到期时，新的 `groups()` 返回 `Expired`，保留对象的 `values()` 返回 `GroupAccessError::SnapshotExpired`；两者同时到期优先返回 `ProofExpired`。元数据仅描述来源，不能替代本次 `values()` 检查。宿主已复制的值、引用和已作出的授权决定不会被自动撤回；不要跨请求缓存。
+
+```rust,ignore
+match actor.groups()? {
+    VerifiedGroups::Available(groups) => {
+        product_mapping.check(actor.account(), groups.source(), groups.values()?)?;
+    }
+    VerifiedGroups::Unavailable(_) | VerifiedGroups::Expired => return Err(GroupsRequired),
+}
+```
+
+期限从锁与 provider 复核后的数据库微秒采样推导，单调时钟锚点在查询发送前；查询、续期和事务返回耗时均消耗预算。管理策略还受传入证明的原期限约束。`NotYetValid` 在本次证明内保持不可用，需要下次权威读取重新投影。公开 API 直接替换旧 unchecked getter，无兼容别名，schema v9/HTTP v2 不变。
 
 ## 可选 OIDC
 
@@ -70,3 +83,6 @@ let routes = routes.layer(axum::middleware::from_fn(client_address));
 HTTP 宿主资源可调用 `rss_identity_http_axum::inspect_session(&authority, tenant, headers, deadline)`，返回 `AuthenticatedSession` 或已安全投影的 HTTP response，不暴露 bearer/CSRF、不延长 idle。宿主仍持有资源授权、成功响应 no-store 与预算；该只读入口不代替写请求 CSRF。
 
 部署 owner 轮换凭据时调用 `CredentialKeys::reencrypt_tenant(&mut tx, instance, tenant)`；组件持有 guard、AAD、密文和 SQL，宿主先绑定 storage fence 与 SQL 预算，最后提交或回滚。逐值重加密不是公开接口，runtime/maintenance 角色不会因轮换扩权。
+
+
+固定 Git 消费验证：`make test-consumers IDENTITY_CONSUMER_REVISION=<完整 SHA> IDENTITY_CONSUMER_OUTPUT=<仓库祖先之外的新目录>`。OIDC 独立 workspace 默认构建不启用 `test-support`，执行生产 `HttpOidc::new` 拒绝 loopback 的用例；显式 `loopback-fixture` 仅映射依赖的 `rss-identity-oidc/test-support`，通过 `for_loopback_test` 跑真实 PG＋Keycloak。报告分别保存两种模式的解析闭包与实际 compiler features。fixture 成功不表示生产出口已连通，生产出口限制保持不变。

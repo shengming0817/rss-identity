@@ -119,3 +119,10 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - [ASP.NET Core v10.0.0 UserManager](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Extensions.Core/src/UserManager.cs)、[SignInManager](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Core/src/SignInManager.cs)：读取账户管理/登录/宿主策略职责；不采用 stamp 成功缓存。
 - [Axum State 固定源码](https://github.com/tokio-rs/axum/blob/c59208c86fded335cd85e388030ad59347b0e5ae/axum/src/extract/state.rs)：显式状态注入与 Router 组合。
 - openidconnect 验证沿用 #2433 固定来源；中央下游/Hydra 来源仅保留为历史决策证据。没有复制上游实现，也不声明与 ASP.NET Identity 能力等价。
+
+## #2438 截止点与嵌入式验证
+
+- [PostgreSQL 17 日期时间函数](https://www.postgresql.org/docs/17/functions-datetime.html)：`clock_timestamp()` 取实际时刻，区别于事务起点；用于锁后权威采样。
+- [Rust std/time.rs](https://doc.rust-lang.org/src/std/time.rs.html)：实际读取 Instant 的单调语义与 `checked_add`；只复用标准库，不复制源码或增加公开时钟注入。
+- 本仓 `fa7019922162158704cc47c6ac7ad36a67c8ae5a` 的 `crates/identity-http-axum/tests/group_facts_support/mod.rs`：历史真实 Keycloak 撤组与断网语义；按嵌入式 API 重建 producer T2，删除旧中央 client/Hydra 假设。
+- ASP.NET Core v10.0.0 [UserClaimsPrincipalFactory](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Extensions.Core/src/UserClaimsPrincipalFactory.cs) 与 [SecurityStampValidatorOptions](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Core/src/SecurityStampValidatorOptions.cs)：实际读取 Manager 生成 claims/roles 与默认 30 分钟 stamp 间隔；不将其等同 RSS 的 IdP 组时效。

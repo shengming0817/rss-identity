@@ -1,6 +1,6 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "loopback-fixture"))]
 mod host;
-#[cfg(test)]
+#[cfg(all(test, feature = "loopback-fixture"))]
 mod tests {
     use super::host::*;
     use rss_identity_core::{federation::*, groups::GroupFactsMaxAge};
@@ -12,16 +12,17 @@ mod tests {
         let local = host.login().await?;
         let issuer = std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?;
         let pem = std::fs::read_to_string(std::env::var("IDENTITY_TEST_FEDERATED_CA")?)?;
-        let oidc =
-            rss_identity_oidc::HttpOidc::new(vec![rss_identity_oidc::TrustedAssuranceProfile {
+        let oidc = rss_identity_oidc::HttpOidc::for_loopback_test(vec![
+            rss_identity_oidc::TrustedAssuranceProfile {
                 tenant: host.key.tenant,
                 issuer: issuer.clone(),
                 client_id: "identity-test".into(),
                 keycloak_totp: true,
-            }])?;
+            },
+        ])?;
         let callback = "https://embedded.example.test/api/v2/oidc/callback";
         let federation = Federation::new(
-            GroupFactsMaxAge::new(300)?,
+            GroupFactsMaxAge::new(5)?,
             host.authority.clone(),
             Arc::new(oidc),
             StateSigner::new([7; 32], &host.authority.instance().to_string())?,
@@ -155,8 +156,12 @@ mod tests {
         let VerifiedGroups::Available(groups) = actor.groups()? else {
             anyhow::bail!("groups unavailable")
         };
-        assert_eq!(groups.values(), ["/staff"]);
+        assert_eq!(groups.values()?, ["/staff"]);
         assert_eq!(groups.source().issuer, issuer);
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert_eq!(groups.values(), Err(GroupAccessError::SnapshotExpired));
+        assert!(matches!(actor.groups()?, VerifiedGroups::Expired));
+        assert!(actor.assurance().is_ok());
         federation
             .enable_provider(
                 host.actor(&local).await?,
@@ -178,6 +183,21 @@ mod tests {
             .await?;
         assert!(host.actor(&local).await.is_err());
         host.close().await;
+        Ok(())
+    }
+}
+
+#[cfg(all(test, not(feature = "loopback-fixture")))]
+mod production {
+    #[test]
+    fn production_transport_rejects_loopback() -> anyhow::Result<()> {
+        let profile = rss_identity_oidc::TrustedAssuranceProfile {
+            tenant: rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111")?,
+            issuer: "https://127.0.0.1:443/realms/identity".into(),
+            client_id: "identity-test".into(),
+            keycloak_totp: true,
+        };
+        assert!(rss_identity_oidc::HttpOidc::new(vec![profile]).is_err());
         Ok(())
     }
 }

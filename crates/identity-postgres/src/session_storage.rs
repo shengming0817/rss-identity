@@ -1,6 +1,7 @@
 //! All session paths share guard → account/membership → session and a post-lock clock.
 use crate::{
-    AccountKey, AccountState, session_storage,
+    AccountKey, AccountState,
+    groups::GroupFacts,
     sessions::*,
     storage::*,
     transaction::{corrupt, reject},
@@ -11,6 +12,47 @@ use rss_identity_core::session::{SessionLifetime, SessionPolicy};
 use rss_request_context::TenantId;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row};
+use std::time::{Duration, Instant};
+
+/// Anchor before the query: all database and post-sample latency consumes the deadline.
+pub(crate) struct TimeSample {
+    started: Instant,
+    micros: i64,
+}
+impl TimeSample {
+    async fn read(c: &mut PgConnection) -> Result<Self, PgError> {
+        let started = Instant::now();
+        let micros = sqlx::query_scalar(
+            "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000000)::bigint",
+        )
+        .fetch_one(c)
+        .await?;
+        if micros <= 0 {
+            return Err(corrupt());
+        }
+        Ok(Self { started, micros })
+    }
+    pub(crate) fn seconds(&self) -> i64 {
+        self.micros / 1_000_000
+    }
+    pub(crate) fn started(&self) -> Instant {
+        self.started
+    }
+    pub(crate) fn deadline(&self, seconds: i64) -> Result<Instant, PgError> {
+        if seconds <= 0 {
+            return Err(corrupt());
+        }
+        // PostgreSQL floors to microseconds; discard the remaining fractional microsecond.
+        let remaining = i128::from(seconds) * 1_000_000 - i128::from(self.micros) - 1;
+        if remaining <= 0 {
+            return Ok(self.started);
+        }
+        let micros = u64::try_from(remaining).map_err(|_| corrupt())?;
+        self.started
+            .checked_add(Duration::from_micros(micros))
+            .ok_or_else(corrupt)
+    }
+}
 
 pub(crate) async fn now(c: &mut PgConnection) -> Result<i64, PgError> {
     Ok(
@@ -25,7 +67,9 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 
 pub(crate) struct Loaded {
     pub assurance: Assurance,
-    pub groups: rss_identity_core::groups::Groups,
+    pub groups: GroupFacts,
+    sample: TimeSample,
+    pub expires: Instant,
     pub state: AccountState,
     pub view: SessionView,
     pub lifetime: SessionLifetime,
@@ -98,7 +142,8 @@ pub(crate) async fn by_id(
         lifetime_policy(&row)?,
     )
     .map_err(|_| corrupt())?;
-    let now = session_storage::now(c).await?;
+    let sample = TimeSample::read(c).await?;
+    let now = sample.seconds();
     if !lifetime.valid_at(now) {
         return Err(reject());
     }
@@ -120,7 +165,9 @@ pub(crate) async fn by_id(
         .map_err(|_| reject())?;
     Ok(Loaded {
         assurance,
-        groups,
+        groups: GroupFacts::new(groups, &sample)?,
+        expires: sample.deadline(lifetime.idle_expires_at())?,
+        sample,
         state,
         view: SessionView::new(session_id(&id)?, lifetime),
         lifetime,
@@ -134,10 +181,11 @@ pub(crate) async fn recheck(
     if std::time::Instant::now() >= proof.expires || authority_id(c).await? != proof.authority {
         return Err(reject());
     }
-    let loaded = lookup(c, proof.key.tenant, &proof.digest).await?;
+    let mut loaded = lookup(c, proof.key.tenant, &proof.digest).await?;
+    loaded.expires = loaded.expires.min(proof.expires);
     if loaded.state.key() != proof.key
         || loaded.view.id != proof.view.id
-        || std::time::Instant::now() >= proof.expires
+        || Instant::now() >= loaded.expires
     {
         return Err(reject());
     }
@@ -146,6 +194,7 @@ pub(crate) async fn recheck(
 pub(crate) async fn touch(c: &mut PgConnection, loaded: &mut Loaded) -> Result<(), PgError> {
     loaded.lifetime.renew(loaded.now).map_err(|_| reject())?;
     loaded.view = SessionView::new(loaded.view.id, loaded.lifetime);
+    loaded.expires = loaded.sample.deadline(loaded.lifetime.idle_expires_at())?;
     sqlx::query(concat!(
         "UPDATE identity_authority.sessions SET idle_expires_at=$3 WHERE tenant_id=$1::uu",
         "id AND session_id=$2::uuid"
@@ -181,4 +230,35 @@ pub(crate) fn lifetime_policy(row: &sqlx::postgres::PgRow) -> Result<SessionPoli
         row.try_get("absolute_timeout")?,
     )
     .map_err(|_| corrupt())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn database_fraction_and_all_later_latency_consume_deadline() {
+        let start = Instant::now();
+        let sample = TimeSample {
+            started: start,
+            micros: 100_750_000,
+        };
+        assert_eq!(sample.seconds(), 100);
+        assert_eq!(
+            sample.deadline(101).unwrap(),
+            start + Duration::from_micros(249_999)
+        );
+        assert_eq!(sample.deadline(100).unwrap(), start);
+        assert!(sample.deadline(0).is_err());
+        assert!(sample.deadline(i64::MAX).is_err());
+        let exact = TimeSample {
+            started: start,
+            micros: 101_000_000,
+        };
+        assert_eq!(exact.deadline(101).unwrap(), start);
+        let edge = TimeSample {
+            started: start,
+            micros: 100_999_999,
+        };
+        assert_eq!(edge.deadline(101).unwrap(), start);
+    }
 }

@@ -69,3 +69,73 @@ fn form(html: &str, selector: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("expected Keycloak form absent: {selector}"))?
         .to_owned())
 }
+
+/// Disposable realm administration through Keycloak's real public TLS Admin API.
+pub async fn staff_membership(member: bool) -> anyhow::Result<()> {
+    let issuer = std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?;
+    let origin = issuer.trim_end_matches("/realms/identity");
+    let c = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .add_root_certificate(reqwest::Certificate::from_pem(&std::fs::read(
+            std::env::var("IDENTITY_TEST_FEDERATED_CA")?,
+        )?)?)
+        .build()?;
+    let token: serde_json::Value = c
+        .post(format!(
+            "{origin}/realms/master/protocol/openid-connect/token"
+        ))
+        .form(&[
+            ("client_id", "admin-cli"),
+            ("grant_type", "password"),
+            ("username", "fixture-operator"),
+            ("password", "fixture-operator-password"),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let token = token["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("fixture admin credential absent"))?;
+    let users: serde_json::Value = c
+        .get(format!(
+            "{origin}/admin/realms/identity/users?username=alice&exact=true"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let groups: serde_json::Value = c
+        .get(format!(
+            "{origin}/admin/realms/identity/groups?search=staff&exact=true"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let user = users[0]["id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("fixture user absent"))?;
+    let group = groups[0]["id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("fixture group absent"))?;
+    c.request(
+        if member {
+            reqwest::Method::PUT
+        } else {
+            reqwest::Method::DELETE
+        },
+        format!("{origin}/admin/realms/identity/users/{user}/groups/{group}"),
+    )
+    .bearer_auth(token)
+    .send()
+    .await?
+    .error_for_status()?;
+    Ok(())
+}

@@ -1,13 +1,12 @@
 //! Host authorization is the only management authority. No product roles are stored here.
-use crate::session_storage::Loaded;
+use crate::{GroupAccessError, VerifiedGroups, groups::GroupFacts, session_storage::Loaded};
 use rss_identity_core::{
     InstanceId,
     account::{AccountKey, AccountRuleError},
     assurance::{Acr, Assurance},
     federation::ProviderId,
-    groups::Groups,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagementOperation {
     ListAccounts,
@@ -38,7 +37,8 @@ pub struct ManagementContext<'a> {
     target: Option<AccountKey>,
     operation: ManagementOperation,
     assurance: &'a Assurance,
-    groups: &'a Groups,
+    groups: &'a GroupFacts,
+    expires: Instant,
 }
 impl ManagementContext<'_> {
     pub fn instance(&self) -> InstanceId {
@@ -56,8 +56,8 @@ impl ManagementContext<'_> {
     pub fn assurance(&self) -> &Assurance {
         self.assurance
     }
-    pub fn groups(&self) -> &Groups {
-        self.groups
+    pub fn groups(&self) -> Result<VerifiedGroups<'_>, GroupAccessError> {
+        self.groups.view(self.expires)
     }
 }
 /// Bounded in-process policy, invoked for every management operation. Do not perform blocking I/O.
@@ -83,6 +83,9 @@ pub(crate) fn authorize(
     operation: ManagementOperation,
     target: Option<AccountKey>,
 ) -> Result<(), AccountRuleError> {
+    if Instant::now() >= loaded.expires {
+        return Err(AccountRuleError::InsufficientPrivilege);
+    }
     if target.is_some_and(|t| t.tenant != loaded.state.key().tenant) {
         return Err(AccountRuleError::InsufficientPrivilege);
     }
@@ -94,8 +97,12 @@ pub(crate) fn authorize(
             operation,
             assurance: &loaded.assurance,
             groups: &loaded.groups,
+            expires: loaded.expires,
         })
         .map_err(|_| AccountRuleError::InsufficientPrivilege)?;
+    if Instant::now() >= loaded.expires {
+        return Err(AccountRuleError::InsufficientPrivilege);
+    }
     let (max_age, mfa) = match requirement {
         ReauthenticationRequirement::None => return Ok(()),
         ReauthenticationRequirement::Recent(age) => (age, false),

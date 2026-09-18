@@ -1,6 +1,8 @@
 //! Real PG + HTTPS Keycloak adapter with explicit loopback fixture transport + in-process Axum. No product binary/T3 claim.
 #[path = "../../identity-postgres/tests/federation_support/mod.rs"]
 mod federation_support;
+#[path = "group_lifecycle/mod.rs"]
+mod group_lifecycle;
 mod keycloak_support;
 #[path = "../../identity-postgres/tests/support/mod.rs"]
 mod support;
