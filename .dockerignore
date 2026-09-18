@@ -1,0 +1,13 @@
+**
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!deny.toml
+!crates/
+!crates/**
+!app/
+!app/**
+!hack/
+!hack/check_dependencies.py
+!deployment/
+!deployment/Dockerfile

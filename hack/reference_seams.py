@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Reproducible fixed-candidate/operator seams; does not assert product T3 acceptance."""
+"""Reproducible image/config operation seams; does not assert product T3 acceptance."""
 import argparse, copy, ipaddress, json, os, secrets, signal, subprocess, sys, tempfile, time
 from pathlib import Path
 import deploy
 import operate
 
-STEPS=['candidate','render','install','initialize','open','tls-ui-context','seed-credential','close','reject-new-key-before-rekey','render-rotation','rekey','render-new-key','verify-keys','verify','open-after-rekey','login-after-rekey','close-after-rekey','backup','check-backup','render-restore','restore','verify-restored-keys','open-restored','restored-login','close-restored']
+STEPS=['render','install','initialize','open','tls-ui-context','recover','login-after-recover','seed-credential','close','reject-new-key-before-rekey','render-rotation','rekey','render-new-key','verify-keys','verify','open-after-rekey','login-after-rekey','close-after-rekey','backup','check-backup','render-web-update','check-backup-after-web-update','open-web-update','web-version','close-web-update','render-restore','restore','verify-restored-keys','open-restored','restored-login','close-restored']
 
 def save(path,record):
     fd,name=tempfile.mkstemp(prefix='.'+path.name,dir=path.parent)
@@ -16,11 +16,10 @@ def save(path,record):
     finally:
         if os.path.exists(name):os.unlink(name)
 
-def verify_record(path,candidate,runner):
-    record=json.loads(path.read_text());subject=json.loads((candidate/'candidate.json').read_text())
-    expected={'candidateSha256':operate.sha(candidate/'candidate.json'),'identityRevision':subject['revision'],'webRevision':subject['ui']['revision'],'runnerSha256':operate.sha(runner)}
-    if set(record)!={'formatVersion','scope','subject','steps','result','failure','cleanup'} or type(record['formatVersion']) is not int or record['formatVersion']!=1:raise ValueError('record schema')
-    if record['scope']!='candidate-operator-seams' or record['subject']!=expected:raise ValueError('record subject')
+def verify_record(path,subject):
+    record=json.loads(path.read_text())
+    if set(record)!={'formatVersion','scope','subject','steps','result','failure','cleanup'} or type(record['formatVersion']) is not int or record['formatVersion']!=2:raise ValueError('record schema')
+    if record['scope']!='image-operation-seams' or record['subject']!=subject:raise ValueError('record subject')
     if record['result']!='passed' or record['failure'] is not None or record['cleanup']!={'status':'passed','remaining':[]}:raise ValueError('record not successful')
     if not isinstance(record['steps'],list) or len(record['steps'])!=len(STEPS):raise ValueError('record steps')
     for entry,name in zip(record['steps'],STEPS):
@@ -53,12 +52,16 @@ print(json.dumps({'status':r.status,'headers':{k.lower():v for k,v in r.getheade
 c.close()
 '''
 
-def run(candidate,output,work):
+def run(identity_image,web_image,previous_web_image,output,work):
     if os.geteuid()!=0:raise ValueError('reference runner requires Linux deployment owner root')
     if output.exists() or work.exists():raise ValueError('fresh record and work directory required')
-    c=operate.candidate(candidate)
-    if operate.sha(Path(__file__))!=c['tools']['reference_seams.py']:raise ValueError('runner candidate mismatch')
-    record={'formatVersion':1,'scope':'candidate-operator-seams','subject':{'candidateSha256':operate.sha(candidate/'candidate.json'),'identityRevision':c['revision'],'webRevision':c['ui']['revision'],'runnerSha256':operate.sha(Path(__file__))},'steps':[],'result':'running','failure':None,'cleanup':{'status':'pending','remaining':[]}}
+    images=deploy.resolve_images(identity_image,web_image)
+    def version(name):return deploy.inspect_image(images[name],True)['Config']['Labels']['org.opencontainers.image.revision']
+    previous=deploy.inspect_image(previous_web_image,True)['Id']
+    if previous==images['web']:raise ValueError('web update requires different image IDs')
+    subject={'previousWebImage':previous,'identityImage':images['identity'],'webImage':images['web'],'identityRevision':version('identity'),'webRevision':version('web')}
+    updated_web=images['web'];images['web']=previous
+    record={'formatVersion':2,'scope':'image-operation-seams','subject':subject,'steps':[],'result':'running','failure':None,'cleanup':{'status':'pending','remaining':[]}}
     save(output,record)
     work.mkdir(mode=0o700)
     prefix='identity-seam-'+secrets.token_hex(5);source=prefix+'-source';target=prefix+'-restored'
@@ -72,7 +75,7 @@ def run(candidate,output,work):
         else:entry['status']='passed';return result
         finally:entry['elapsedMs']=int((time.monotonic()-start)*1000);save(output,record)
     def op(project,directory,command,*args,expect_failure=False):
-        result=subprocess.run([sys.executable,str(candidate/'operate.py'),'--candidate',str(candidate),'--deployment',str(directory),'--project',project,command,*map(str,args)],capture_output=True,timeout=240)
+        result=subprocess.run([sys.executable,str(Path(__file__).with_name('operate.py')),'--deployment',str(directory),'--project',project,command,*map(str,args)],capture_output=True,timeout=240)
         if expect_failure:
             if result.returncode==0:raise AssertionError('new key unexpectedly decrypted old credentials')
             status=json.loads(result.stdout)
@@ -82,16 +85,15 @@ def run(candidate,output,work):
         path=work/name;path.write_text(value);path.chmod(0o600);os.chown(path,10001,10001);return str(path)
     def http(project,path,body=None,headers=None):
         request={'method':'POST' if body is not None else 'GET','path':path,'body':body,'headers':{'Host':'identity.example.test','Origin':'https://identity.example.test','X-Identity-Request':'1','Content-Type':'application/json',**(headers or {})}}
-        raw=process(['docker','run','--rm','--interactive','--network',project+'_public','--volume',str(work/'cert')+':/fixture-ca:ro','--entrypoint','python3',c['providers']['rust'],'-c',HTTP],input=json.dumps(request).encode())
+        raw=process(['docker','run','--pull=never','--rm','--interactive','--network',project+'_public','--volume',str(work/'cert')+':/fixture-ca:ro','--entrypoint','python3',deploy.IMAGES['rust'],'-c',HTTP],input=json.dumps(request).encode())
         return json.loads(raw)
     previous={sig:signal.getsignal(sig) for sig in [signal.SIGINT,signal.SIGTERM]}
     def interrupted(signum,frame):raise SystemExit(128+signum)
     for sig in previous:signal.signal(sig,interrupted)
     try:
-        step('candidate',lambda:op(source,work/'old','candidate'))
         process(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(work/'cert-key'),'-out',str(work/'cert'),'-days','2','-subj','/CN=identity-reference-fixture','-addext','basicConstraints=critical,CA:FALSE','-addext','keyUsage=critical,digitalSignature,keyEncipherment','-addext','extendedKeyUsage=serverAuth','-addext','subjectAltName=DNS:identity.example.test,DNS:gateway,DNS:postgres'])
         (work/'cert-key').chmod(0o600)
-        data=json.loads((candidate/'deployment/deploy.example.json').read_text())
+        data=json.loads((deploy.ROOT/'deployment/deploy.example.json').read_text())
         runtime=data['runtime'];tenant=runtime['storage']['tenants'][0]
         password=secrets.token_hex(24);password_file=write('user-password',password)
         runtime['database'].update(passwordFile=write('runtime-password',secrets.token_hex(24)),caFile=str(work/'cert'))
@@ -100,7 +102,7 @@ def run(candidate,output,work):
         runtime['oidc']={'groupFactsMaxAgeSeconds':300,'assuranceProfiles':[],'stateKeyFile':write('state-key',secrets.token_hex(32)),'credentialKeyring':{'activeKeyId':'old','keys':[{'keyId':'old','path':old}]},'returnTargets':{'resume':'https://identity.example.test/auth/resume'}}
         def render(name,ring,subnet):
             value=copy.deepcopy(data);value['backendSubnet']=subnet;value['runtime']['publicGateway']=subnet.rsplit('.',1)[0]+'.2';value['runtime']['oidc']['credentialKeyring']=ring
-            deploy.render(value,work/name,c)
+            deploy.render(value,work/name,images)
         source_subnet,target_subnet=free_subnets()
         ring=runtime['oidc']['credentialKeyring']
         step('render',lambda:render('old',ring,source_subnet))
@@ -118,6 +120,14 @@ def run(candidate,output,work):
                 if response['status']!=200:raise AssertionError('reference surface failed')
             if http(source,'/api/v1/health')['status']!=404:raise AssertionError('legacy path accepted')
         step('tls-ui-context',surfaces)
+        old_password=password
+        password=secrets.token_hex(24);recovery_password=write('recovery-password',password)
+        step('recover',lambda:op(source,work/'old','recover',tenant,runtime['bootstrapAccounts'][0]['principalId'],recovery_password))
+        def recovered_login():
+            nonlocal session
+            if http(source,'/api/v2/tenants/'+tenant+'/login',{'login':'operator','password':old_password})['status']!=401:raise AssertionError('old password accepted after recovery')
+            session=login(source)
+        step('login-after-recover',recovered_login)
         def seed():
             result=http(source,'/api/v2/tenants/'+tenant+'/providers',{'settings':{'issuer':'https://idp.example.test','clientId':'fixture','redirectUri':'https://identity.example.test/api/v2/oidc/callback','scopes':['openid'],'claims':{'email':None,'groups':None},'jit':False},'clientSecret':secrets.token_hex(24),'caPem':None},session)
             if result['status']!=201:raise AssertionError('credential not created')
@@ -141,6 +151,19 @@ def run(candidate,output,work):
         backup=work/'backup.dump'
         step('backup',lambda:op(source,work/'new','backup',backup))
         step('check-backup',lambda:op(source,work/'new','check-backup',backup))
+        images['web']=updated_web
+        step('render-web-update',lambda:render('web-updated',new_ring,source_subnet))
+        step('check-backup-after-web-update',lambda:op(source,work/'web-updated','check-backup',backup))
+        step('open-web-update',lambda:op(source,work/'web-updated','open'))
+        def web_version():
+            login(source)
+            response=http(source,'/identity-build.json')
+            if response['status']!=200 or json.loads(response['body'])!={'revision':subject['webRevision']}:raise AssertionError('web update not served')
+            ids=process(['docker','ps','--filter','label=com.docker.compose.project='+source,'--filter','label=com.docker.compose.service=identity','--quiet']).decode().split()
+            actual=json.loads(process(['docker','inspect',*ids]))
+            if len(actual)!=1 or actual[0]['Image']!=images['identity']:raise AssertionError('backend image changed')
+        step('web-version',web_version)
+        step('close-web-update',lambda:op(source,work/'web-updated','close'))
         step('render-restore',lambda:render('restored',new_ring,target_subnet))
         step('restore',lambda:op(target,work/'restored','restore',backup))
         step('verify-restored-keys',lambda:op(target,work/'restored','verify-keys'))
@@ -164,12 +187,9 @@ def run(candidate,output,work):
         if remaining:record['result']='failed';record['failure']=record['failure'] or {'stage':'cleanup','reason':'unconfirmed'}
         save(output,record)
         for sig,handler in previous.items():signal.signal(sig,handler)
-    verify_record(output,candidate,Path(__file__))
+    verify_record(output,subject)
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--candidate',type=Path,required=True);parser.add_argument('--record',type=Path,required=True);parser.add_argument('--work',type=Path);parser.add_argument('--verify-record',action='store_true');args=parser.parse_args()
-    if args.verify_record:verify_record(args.record,args.candidate,Path(__file__))
-    else:
-        if args.work is None:parser.error('--work required for execution')
-        run(args.candidate.resolve(),args.record.resolve(),args.work.resolve())
+    parser=argparse.ArgumentParser();parser.add_argument('--identity-image',required=True);parser.add_argument('--web-image',required=True);parser.add_argument('--previous-web-image',required=True);parser.add_argument('--record',type=Path,required=True);parser.add_argument('--work',type=Path,required=True);args=parser.parse_args()
+    run(args.identity_image,args.web_image,args.previous_web_image,args.record.resolve(),args.work.resolve())
 if __name__=='__main__':main()

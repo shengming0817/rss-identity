@@ -20,7 +20,7 @@ T31 验证 binary/config/secret/TLS、PG、Hydra、Keycloak、RSS producer 与 l
 | RSS source | `93ce6848b7c78753df9947bd08abfb37e5799838`，单一固定 Git 消费 |
 | 编译 | Rust 1.96.0；原生构建器交叉编译 Linux amd64 |
 
-[Identity 固定源码](https://dev.azure.com/shengming0923/rss/_git/rss-identity?version=GC06d4e85498281a874eff9898a3b77fc19705e8b1)、[UI 固定源码](https://github.com/shengming0817/rss-web/tree/37b7fb356aa7e436cc708caa1593427e6d553d30) 及各自 lock 是重建来源。按[候选构建](candidate.md)在两个干净固定 checkout 生成 UI，然后执行：
+[Identity 固定源码](https://dev.azure.com/shengming0923/rss/_git/rss-identity?version=GC06d4e85498281a874eff9898a3b77fc19705e8b1)、[UI 固定源码](https://github.com/shengming0817/rss-web/tree/37b7fb356aa7e436cc708caa1593427e6d553d30) 及各自 lock 是重建来源。按[候选构建](images.md)在两个干净固定 checkout 生成 UI，然后执行：
 
 ```sh
 make candidate CANDIDATE_OUTPUT=/absolute/new-candidate IDENTITY_UI_SOURCE=/absolute/fixed-rss-web IDENTITY_UI_DIST=/absolute/fixed-rss-web/apps/identity/dist

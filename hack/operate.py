@@ -1,38 +1,14 @@
 #!/usr/bin/env python3
 """Bounded reference operations. No retries, implicit initialization, or restore into a live volume."""
-import argparse, contextlib, fcntl, hashlib, json, os, re, stat, subprocess, tarfile, uuid
+import argparse, contextlib, fcntl, hashlib, json, os, re, stat, subprocess, uuid
 from pathlib import Path
+import deploy
 
 def sha(path):
     h=hashlib.sha256()
     with path.open('rb') as f:
         for block in iter(lambda:f.read(1024*1024),b''):h.update(block)
     return h.hexdigest()
-def tree(path):
-    h=hashlib.sha256()
-    for p in sorted(path.rglob('*')):
-        if p.is_symlink():raise Rejection('artifact-symlink')
-        if p.is_file():h.update(p.relative_to(path).as_posix().encode()+b'\0'+p.read_bytes()+b'\0')
-    return h.hexdigest()
-def candidate(root):
-    c=json.loads((root/'candidate.json').read_text())
-    if c['identity_schema']!=9 or c['config_version']!=3:raise Rejection('candidate-contract')
-    for name,entry in c['archives'].items():
-        if name not in ['server','operator','gateway'] or entry['file']!=name+'.oci.tar':raise Rejection('archive-identity')
-        path=root/entry['file']
-        if sha(path)!=entry['sha256']:raise Rejection('archive-digest')
-        with tarfile.open(path) as t:
-            for m in t.getmembers():
-                if m.name.startswith('blobs/sha256/') and m.isfile():
-                    if hashlib.sha256(t.extractfile(m).read()).hexdigest()!=m.name.split('/')[-1]:raise Rejection('oci-blob-digest')
-    if set(c['archives'])!={'server','operator','gateway'} or set(c['binaries'])!={'identity-server','identity-admin','identity-migrate'}:raise Rejection('incomplete-artifacts')
-    for name,digest in c['binaries'].items():
-        if sha(root/'binaries'/name)!=digest:raise Rejection('binary-digest')
-    for name in ['deploy.py','operate.py','reference_seams.py']:
-        if sha(root/name)!=c['tools'][name]:raise Rejection('operator-digest')
-    if tree(root/'deployment')!=c['deployment_sha256']:raise Rejection('deployment-digest')
-    return c
-
 class OperationError(RuntimeError):
     def __init__(self,stage,reason,outcome_known):
         self.stage=stage;self.reason=reason;self.outcome_known=outcome_known
@@ -52,12 +28,12 @@ def command(args,stage='inspect',mutating=False,**kwargs):
 def project_name(value):
     return isinstance(value,str) and re.fullmatch('[a-z][a-z0-9_-]{2,47}',value)
 
-def check_backup(path,c=None,config=None):
+def check_backup(path,backend_version=None,config=None):
     record=json.loads(path.with_suffix(path.suffix+'.json').read_text())
-    if not isinstance(record,dict) or set(record)!={'schema','instanceId','storage','candidate','project','sha256'}:raise Rejection('backup-receipt-fields')
+    if not isinstance(record,dict) or set(record)!={'schema','instanceId','storage','backendVersion','project','sha256'}:raise Rejection('backup-receipt-fields')
     if type(record['schema']) is not int or record['schema']!=9:raise Rejection('backup-schema')
     if not project_name(record['project']):raise Rejection('backup-project')
-    for key,size in [('candidate',40),('sha256',64)]:
+    for key,size in [('backendVersion',40),('sha256',64)]:
         if not isinstance(record[key],str) or not re.fullmatch('[a-f0-9]{'+str(size)+'}',record[key]):raise Rejection('backup-digest-identity')
     def identity(value):
         if not isinstance(value,str) or str(uuid.UUID(value))!=value or uuid.UUID(value).int==0:raise Rejection('backup-uuid')
@@ -73,7 +49,7 @@ def check_backup(path,c=None,config=None):
     for tenant in tenants:identity(tenant)
     if len(set(tenants))!=len(tenants):raise Rejection('backup-tenants')
     if record['sha256']!=sha(path):raise Rejection('backup-digest')
-    if c is not None and record['candidate']!=c['revision']:raise Rejection('backup-candidate-mismatch')
+    if backend_version is not None and record['backendVersion']!=backend_version:raise Rejection('backup-backend-version-mismatch')
     if config is not None and (record['instanceId'],storage)!=(config['instanceId'],config['storage']):raise Rejection('restore-binding-mismatch')
     return record
 
@@ -116,22 +92,28 @@ def require_closed(project,drained=False,expected=None):
         if drained and service=='identity' and state['Status']=='exited' and (state['ExitCode']!=0 or state['OOMKilled']):raise Rejection('identity-drain-not-confirmed')
     return states
 
+def deployment_images(spec):
+    services=spec['services']
+    if set(services)!={'identity','gateway','migrate','maintenance','postgres','volume-init'}:raise Rejection('deployment-services')
+    for service in services.values():
+        if not re.fullmatch(r'sha256:[a-f0-9]{64}',service['image']) or service.get('pull_policy')!='never' or service.get('platform')!='linux/amd64':raise Rejection('deployment-image-not-fixed')
+    identity=services['identity']['image']
+    if any(services[name]['image']!=identity for name in ['migrate','maintenance']):raise Rejection('backend-image-mismatch')
+    inspected={image:deploy.inspect_image(image,image in [identity,services['gateway']['image']]) for image in {s['image'] for s in services.values()}}
+    if any(key!=value['Id'] for key,value in inspected.items()):raise Rejection('image-ID-mismatch')
+    return inspected[identity]['Config']['Labels']['org.opencontainers.image.revision']
+
 def operate(args):
-    c=candidate(args.candidate.resolve())
-    if args.command=='candidate':return
     if not re.fullmatch('[a-z][a-z0-9_-]{2,47}',args.project or ''):raise Rejection('project-identity')
-    if args.deployment is None:raise Rejection('deployment-required')
     directory=args.deployment.resolve()
     compose=['docker','compose','--project-name',args.project,'--project-directory',str(directory),'--file',str(directory/'compose.json')]
     spec=json.loads((directory/'compose.json').read_text())
-    expected={s:c['images'][i] for s,i in [('identity','server'),('gateway','gateway'),('migrate','operator'),('maintenance','operator')]}
-    expected.update(postgres=c['providers']['postgres'],**{'volume-init':c['providers']['runtime']})
-    if set(spec['services'])!=set(expected) or any(spec['services'][n]['image']!=image for n,image in expected.items()):raise Rejection('deployment-candidate-mismatch')
+    backend_version=deployment_images(spec)
     record=None
     if args.command in ['check-backup','restore']:
-        record=check_backup(args.backup,c,json.loads((directory/'migration.json').read_text()))
+        record=check_backup(args.backup,backend_version,json.loads((directory/'migration.json').read_text()))
     if args.command=='check-backup':
-        with args.backup.open('rb') as stream:command(['docker','run','--rm','--network','none','--user','10001:10001','--interactive','--entrypoint','pg_restore',c['providers']['postgres'],'--list'],stage='check-backup',stdin=stream,stdout=subprocess.DEVNULL)
+        with args.backup.open('rb') as stream:command(['docker','run','--pull=never','--platform','linux/amd64','--rm','--network','none','--user','10001:10001','--interactive','--entrypoint','pg_restore',spec['services']['postgres']['image'],'--list'],stage='check-backup',stdin=stream,stdout=subprocess.DEVNULL)
         return
     projects=[args.project]
     if args.command=='restore':
@@ -141,9 +123,9 @@ def operate(args):
     endpoint=command(['docker','info','--format','{{.ID}}'],stdout=subprocess.PIPE).stdout.decode().strip()
     if not endpoint:raise Rejection('unknown-docker-endpoint')
     with project_locks(endpoint,projects):
-        execute(args,c,compose,directory,record)
+        execute(args,backend_version,compose,directory,record)
 
-def execute(args,c,compose,directory,record):
+def execute(args,backend_version,compose,directory,record):
     def run(*words,**kwargs):return command(compose+list(words),stage=kwargs.pop('stage',args.command),mutating=kwargs.pop('mutating',True),stdout=kwargs.pop('stdout',subprocess.DEVNULL),**kwargs)
     def migration(*words):run('run','--rm','migrate','--config','/run/config/migration.json',*words,stage=words[0].lstrip('-') if words else 'install',mutating=not words or words[0] not in ['--verify','--verify-keys'])
     def closed():return require_closed(args.project)
@@ -174,7 +156,7 @@ def execute(args,c,compose,directory,record):
             os.chmod(path,0o600)
             run('exec','-T','postgres','pg_dump','-U','postgres','-d','identity','-Fc',stdout=stream)
         config=json.loads((directory/'migration.json').read_text())
-        record={'schema':9,'instanceId':config['instanceId'],'storage':config['storage'],'candidate':c['revision'],'project':args.project,'sha256':sha(path)}
+        record={'schema':9,'instanceId':config['instanceId'],'storage':config['storage'],'backendVersion':backend_version,'project':args.project,'sha256':sha(path)}
         receipt=path.with_suffix(path.suffix+'.json');receipt.write_text(json.dumps(record));receipt.chmod(0o600)
     elif args.command=='restore':
         require_closed(record['project'])
@@ -188,9 +170,9 @@ def execute(args,c,compose,directory,record):
     else:raise Rejection('unknown-operation')
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--candidate',type=Path,required=True);p.add_argument('--deployment',type=Path);p.add_argument('--project')
+    p=argparse.ArgumentParser();p.add_argument('--deployment',type=Path,required=True);p.add_argument('--project',required=True)
     sub=p.add_subparsers(dest='command',required=True)
-    for name in ['candidate','install','verify','open','close','rekey','verify-keys']:sub.add_parser(name)
+    for name in ['install','verify','open','close','rekey','verify-keys']:sub.add_parser(name)
     for name in ['backup','check-backup','restore']:sub.add_parser(name).add_argument('backup',type=Path)
     for name in ['initialize','recover']:
         command=sub.add_parser(name);command.add_argument('tenant');command.add_argument('account',help='login for initialize; principal UUID for recover');command.add_argument('password',type=Path)
