@@ -63,11 +63,31 @@ class DeploymentTests(unittest.TestCase):
     def test_images_preflight_is_offline_and_covers_each_owner(self):
         with fixture() as (root,data,images),patch('subprocess.run',return_value=subprocess.CompletedProcess([],0)) as run:
             deploy.preflight(root/'output',images)
-            self.assertEqual(run.call_count,3)
-            for call in run.call_args_list:
+            self.assertEqual(run.call_count,4)
+            for call in run.call_args_list[:3]:
                 argv=call.args[0]
                 self.assertEqual(argv[argv.index('--network')+1],'none')
                 self.assertIn('--check-config',argv)
+            argv=run.call_args_list[3].args[0]
+            self.assertEqual(argv[argv.index('--network')+1],'none')
+            self.assertEqual(argv[argv.index('--entrypoint')+1],'sh')
+            self.assertIn(images['web'],argv)
+            self.assertIn('nginx -t',argv[-1])
+            self.assertIn('/usr/share/nginx/html/index.html',argv[-1])
+            self.assertIn('/usr/share/nginx/html/identity-build.json',argv[-1])
+            for forbidden in ['owner-password','maintenance-password','runtime-password']:
+                self.assertNotIn(forbidden,' '.join(argv))
+
+    def test_gateway_rejection_prevents_publication_and_cleans_private_staging(self):
+        with fixture() as (root,data,images):
+            out=root/'wrong-web'
+            images['web']=images['identity']
+            def execute(argv,**kwargs):
+                return subprocess.CompletedProcess(argv,127 if argv[argv.index('--entrypoint')+1]=='sh' else 0)
+            with patch('os.geteuid',return_value=0),patch('os.chown'),patch('subprocess.run',side_effect=execute):
+                with self.assertRaisesRegex(ValueError,'gateway image configuration rejected'):
+                    deploy.render(data,out,images)
+            self.assertFalse(out.exists());self.assertEqual(list(root.glob('.wrong-web-*')),[])
 
 class OperationTests(unittest.TestCase):
     def test_failed_reads_and_unknown_writes_have_distinct_redacted_outcomes(self):

@@ -14,7 +14,7 @@ python3 hack/operate.py --deployment /private/rendered --project identity-main i
 python3 hack/operate.py --deployment /private/rendered --project identity-main open
 ```
 
-输出目录必须不存在；root 渲染为服务 UID/GID 10001:10001，目录0700、文件0600。操作命令由有权读取此目录和使用 Docker 的部署 owner 执行；新口令文件也须归10001且0600。同一输入生成 runtime、maintenance、owner migration 和严格静态 UI JSON。渲染在同父目录的私有临时目录完成，使用同一后端镜像的三个程序 `--check-config FILE` 在无网络容器内复用 Rust 的配置、秘密与契约校验；全部通过才原子发布，失败清理临时输出并允许原路径重试。不要手改生成配置或二次 envsubst；Compose 字面量已转义。首次 install 只安装数据库结构与角色授权；不会创建账户或开放入口。
+输出目录必须不存在；root 渲染为服务 UID/GID 10001:10001，目录0700、文件0600。操作命令由有权读取此目录和使用 Docker 的部署 owner 执行；新口令文件也须归10001且0600。同一输入生成 runtime、maintenance、owner migration 和严格静态 UI JSON。渲染在同父目录的私有临时目录完成，使用同一后端镜像的三个程序 `--check-config FILE` 在无网络容器内复用 Rust 的配置、秘密与契约校验；同时以实际 Web 镜像、仅网关配置与 TLS 挂载离线运行 nginx -t，并核对静态 index.html 与 identity-build.json 存在。全部通过才原子发布，错误镜像角色或网关配置在开放前拒绝；失败清理临时输出并允许原路径重试。不要手改生成配置或二次 envsubst；Compose 字面量已转义。首次 install 只安装数据库结构与角色授权；不会创建账户或开放入口。
 
 `initialize <tenant> <login> <password-file>` 的 principal 取自该租户唯一 bootstrapAccounts。组件一次性 guard 拒绝重复、并发输家及重启后重做；旧 principal 参数形式拒绝。新 tenant 必须显式交由宿主配置，不提供平台租户 API。维护恢复命令为 `recover <tenant> <principal> <password-file>`，仅更新既有本地密码和 epoch，保持 enabled/member 与管理策略不变。
 

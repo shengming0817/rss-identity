@@ -5,7 +5,7 @@ from pathlib import Path
 import deploy
 import operate
 
-STEPS=['render','install','initialize','open','tls-ui-context','recover','login-after-recover','seed-credential','close','reject-new-key-before-rekey','render-rotation','rekey','render-new-key','verify-keys','verify','open-after-rekey','login-after-rekey','close-after-rekey','backup','check-backup','render-web-update','check-backup-after-web-update','open-web-update','web-version','close-web-update','render-restore','restore','verify-restored-keys','open-restored','restored-login','close-restored']
+STEPS=['reject-backend-as-web','render','install','initialize','open','tls-ui-context','recover','login-after-recover','seed-credential','close','reject-new-key-before-rekey','render-rotation','rekey','render-new-key','verify-keys','verify','open-after-rekey','login-after-rekey','close-after-rekey','backup','check-backup','render-web-update','check-backup-after-web-update','open-web-update','web-version','close-web-update','render-restore','restore','verify-restored-keys','open-restored','restored-login','close-restored']
 
 def save(path,record):
     fd,name=tempfile.mkstemp(prefix='.'+path.name,dir=path.parent)
@@ -107,6 +107,16 @@ def run(identity_image,web_image,previous_web_image,output,work):
             deploy.render(value,work/name,images)
         source_subnet,target_subnet=free_subnets()
         ring=runtime['oidc']['credentialKeyring']
+        def reject_backend_as_web():
+            web=images['web'];images['web']=images['identity']
+            try:
+                render('wrong-web',ring,source_subnet)
+            except ValueError as error:
+                if str(error)!='gateway image configuration rejected':raise
+            else:raise AssertionError('backend accepted as web image')
+            finally:images['web']=web
+            if (work/'wrong-web').exists() or list(work.glob('.wrong-web-*')):raise AssertionError('rejected render left private output')
+        step('reject-backend-as-web',reject_backend_as_web)
         step('render',lambda:render('old',ring,source_subnet))
         step('install',lambda:op(source,work/'old','install'))
         step('initialize',lambda:op(source,work/'old','initialize',tenant,'operator',password_file))

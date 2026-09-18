@@ -164,14 +164,16 @@ http {{
 
 def preflight(out,images):
     services=json.loads((out/'compose.json').read_text())['services']
-    for binary,service,config in [('identity-server','identity','runtime'),('identity-admin','maintenance','maintenance'),('identity-migrate','migrate','migration')]:
+    checks=[(binary,service,images['identity'],['--check-config','/run/config/'+config+'.json']) for binary,service,config in [('identity-server','identity','runtime'),('identity-admin','maintenance','maintenance'),('identity-migrate','migrate','migration')]]
+    checks.append(('sh','gateway',images['web'],['-ec','nginx -t -e stderr -c /run/config/gateway.conf && test -s /usr/share/nginx/html/index.html && test -s /usr/share/nginx/html/identity-build.json']))
+    for binary,service,image,arguments in checks:
         volumes=[]
         for mount in services[service]['volumes']:
             target=mount['target']
             source=out/('input/' if target.startswith('/run/input/') else '')/Path(target).name
             volumes+=['--volume',str(source)+':'+target+':ro']
-        result=subprocess.run(['docker','run','--pull=never','--rm','--network','none','--platform','linux/amd64','--user','10001:10001','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true',*volumes,'--entrypoint',binary,images['identity'],'--check-config','/run/config/'+config+'.json'],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=60)
-        require(result.returncode==0,'image configuration rejected')
+        result=subprocess.run(['docker','run','--pull=never','--rm','--network','none','--platform','linux/amd64','--user','10001:10001','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=64m','--cap-drop','ALL','--security-opt','no-new-privileges:true',*volumes,'--entrypoint',binary,image,*arguments],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=60)
+        require(result.returncode==0,service+' image configuration rejected')
 
 
 def render(data,out,images):
