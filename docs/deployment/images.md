@@ -8,7 +8,7 @@ make image IDENTITY_IMAGE=rss-identity:my-version
 # 或 SYSTEM_ACCESSTOKEN；不要将秘密放进 build-arg。
 ```
 
-前端在 rss-web 通过 `pnpm image:identity --tag rss-identity-web:my-version --build-arg RSS_IDENTITY_WEB_REVISION=<完整 Web SHA> .` 独立构建。它拥有 Node 构建、静态检查、Web revision 和 Nginx 镜像；后端和前端版本独立。交付镜像的 revision 必须对应构建源码，正式联合验证使用各仓最终提交。
+前端在 rss-web 通过 `pnpm image:identity --tag rss-identity-web:my-version` 独立构建。该薄入口也使用干净 HEAD 的源码归档并派生 Web revision。它拥有 Node 构建、静态检查、Web revision 和 Nginx 镜像；后端和前端版本独立。交付镜像的 revision 必须对应构建源码，正式联合验证使用各仓最终提交。
 
 在目标 Docker daemon 上准备镜像，跨主机可显式从选定来源 `docker pull --platform linux/amd64 <image>`。PostgreSQL 与 volume-init 的 Debian 镜像使用 deployment/providers.lock.json 中固定来源，也须预先显式拉取对应平台。本轮不提供 registry 或发布流水线。
 
