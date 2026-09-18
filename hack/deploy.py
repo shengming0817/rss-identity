@@ -29,10 +29,16 @@ def read(path,secret=False):
 
 def inspect_image(reference, product=False):
     require(isinstance(reference,str) and reference and not reference.startswith('-'),'image required')
-    result=subprocess.run(['docker','image','inspect','--platform','linux/amd64',reference],check=True,capture_output=True,timeout=30)
-    values=json.loads(result.stdout);require(len(values)==1,'ambiguous image')
-    image=values[0]
-    require(re.fullmatch(r'sha256:[a-f0-9]{64}',image['Id']),'invalid image ID')
+    def inspect(*args):
+        result=subprocess.run(['docker','image','inspect',*args],check=True,capture_output=True,timeout=30)
+        values=json.loads(result.stdout);require(len(values)==1,'ambiguous image')
+        return values[0]
+    # Containerd may return an unaddressable child manifest ID with --platform.
+    # Keep the daemon's addressable image/index ID and validate its selected platform.
+    identity=inspect(reference)['Id']
+    require(re.fullmatch(r'sha256:[a-f0-9]{64}',identity),'invalid image ID')
+    image=inspect('--platform','linux/amd64',identity)
+    image['Id']=identity
     require(image['Os']=='linux' and image['Architecture']=='amd64','image platform must be linux/amd64')
     if product:
         require(image['Config']['User']=='10001:10001','image user must be 10001:10001')

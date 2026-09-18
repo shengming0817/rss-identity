@@ -148,7 +148,7 @@ class ImageContractTests(unittest.TestCase):
         good={'Id':'sha256:'+'1'*64,'Os':'linux','Architecture':'amd64','Config':{'User':'10001:10001','Labels':{'org.opencontainers.image.revision':'a'*40}}}
         with patch('subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout=json.dumps([good]))) as run:
             self.assertEqual(deploy.inspect_image('backend:ready',True),good)
-            self.assertEqual(run.call_args.args[0],['docker','image','inspect','--platform','linux/amd64','backend:ready'])
+            self.assertEqual(run.call_args.args[0],['docker','image','inspect','--platform','linux/amd64',good['Id']])
         for image in [[],[{**good,'Architecture':'arm64'}],[{**good,'Id':'mutable:tag'}],[{**good,'Config':{'User':'0'}}],[{**good,'Config':{'User':'10001:10001','Labels':{}}}]]:
             with patch('subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout=json.dumps(image))):
                 with self.assertRaises(ValueError):deploy.inspect_image('fixture',True)
@@ -199,3 +199,10 @@ class ImageContractTests(unittest.TestCase):
             (root/'called').unlink();(root/'Makefile').write_text((root/'Makefile').read_text()+'\n# dirty\n')
             result=subprocess.run(['make','image'],cwd=root,env=env,capture_output=True,timeout=10)
             self.assertNotEqual(result.returncode,0);self.assertFalse((root/'called').exists())
+
+    def test_platform_validation_keeps_daemon_addressable_index_identity(self):
+        index='sha256:'+'1'*64;child='sha256:'+'2'*64
+        selected={'Id':child,'Os':'linux','Architecture':'amd64','Config':{'User':'10001:10001','Labels':{'org.opencontainers.image.revision':'a'*40}}}
+        replies=[subprocess.CompletedProcess([],0,stdout=json.dumps([{'Id':index}])),subprocess.CompletedProcess([],0,stdout=json.dumps([selected]))]
+        with patch('subprocess.run',side_effect=replies):
+            self.assertEqual(deploy.inspect_image('registry/image:ready',True)['Id'],index)
