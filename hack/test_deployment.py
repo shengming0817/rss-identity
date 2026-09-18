@@ -41,6 +41,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(json.loads((out/'ui.json').read_text()),{'canonicalOrigin':data['runtime']['publicOrigin'],'oidcEnabled':False})
             compose=json.loads((out/'compose.json').read_text())
             self.assertEqual(set(compose['services']),{'postgres','identity','gateway','migrate','maintenance','volume-init'})
+            self.assertEqual(compose['services']['postgres']['healthcheck']['test'],['CMD','pg_isready','-h','127.0.0.1','-U','postgres'])
             self.assertNotIn('keycloak',json.dumps(compose));self.assertNotIn('hydra',json.dumps(compose))
             for service in compose['services'].values():
                 for volume in service.get('volumes',[]):

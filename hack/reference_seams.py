@@ -80,7 +80,9 @@ def run(identity_image,web_image,previous_web_image,output,work):
             if result.returncode==0:raise AssertionError('new key unexpectedly decrypted old credentials')
             status=json.loads(result.stdout)
             if status['stage']!='verify-keys' or status['reason']!='process-failed' or not status['outcomeKnown']:raise AssertionError('wrong rejection')
-        elif result.returncode:raise RuntimeError('operator '+command+' failed')
+        elif result.returncode:
+            status=json.loads(result.stdout)
+            raise operate.OperationError(status['stage'],status['reason'],status['outcomeKnown'])
     def write(name,value):
         path=work/name;path.write_text(value);path.chmod(0o600);os.chown(path,10001,10001);return str(path)
     def http(project,path,body=None,headers=None):
@@ -173,6 +175,7 @@ def run(identity_image,web_image,previous_web_image,output,work):
         record['result']='passed'
     except BaseException as error:
         record['result']='failed';record['failure']={'stage':record['steps'][-1]['name'] if record['steps'] else 'environment','reason':'interrupted' if isinstance(error,(KeyboardInterrupt,SystemExit)) else 'execution-or-assertion'}
+        if isinstance(error,operate.OperationError):record['failure'].update(operationStage=error.stage,operationReason=error.reason,outcomeKnown=error.outcome_known)
     finally:
         for sig in previous:signal.signal(sig,signal.SIG_IGN)
         remaining=[]

@@ -142,7 +142,9 @@ http {{
     pg=services['postgres'];pg['read_only']=False;pg['environment']={'POSTGRES_USER':'postgres','POSTGRES_DB':'identity','POSTGRES_PASSWORD_FILE':'/run/input/owner-password','PGDATA':'/var/lib/postgresql/data/pgdata'}
     pg['volumes'][-2]['target']='/docker-entrypoint-initdb.d/00-roles.sql'
     pg['volumes'].append({'type':'volume','source':'pg','target':'/var/lib/postgresql/data','volume':{'nocopy':True}})
-    pg['networks']={'backend':{'ipv4_address':postgres}};pg['healthcheck']={'test':['CMD','pg_isready','-U','postgres'],'interval':'5s','timeout':'3s','retries':12}
+    # The entrypoint's temporary initialization server accepts Unix sockets only.
+    # Require final TCP readiness before installation or pg_restore can start.
+    pg['networks']={'backend':{'ipv4_address':postgres}};pg['healthcheck']={'test':['CMD','pg_isready','-h','127.0.0.1','-U','postgres'],'interval':'5s','timeout':'3s','retries':12}
     services['migrate']=service(images['identity'],['migration.json','owner-password','database-ca']+key_files+(['keyring.json'] if key_files else []),['--config','/run/config/migration.json'])
     services['migrate']['entrypoint']=['identity-migrate'];services['migrate']['profiles']=['operator'];services['migrate']['depends_on']={'postgres':{'condition':'service_healthy'}}
     services['maintenance']=service(images['identity'],['maintenance.json','maintenance-password','database-ca'])
