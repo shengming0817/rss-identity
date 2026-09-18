@@ -11,7 +11,7 @@ op verify
 op open
 ```
 
-backup 在关闭 Identity/网关并只读核验后执行 PG custom dump，使用排他新文件与0600权限；同名 `.dump.json` 记录摘要、schema、instance、storage、source project 和后端版本 backendVersion（后端镜像的完整源码 revision）。check-backup 和 restore 复用严格的字段/类型校验，要求后端版本、instance、storage、source project 和摘要完整有效且匹配；check-backup 还以固定 PG 的 pg_restore --list 离线核验。失败不会生成成功记录；部分文件需由 owner 核对后另选输出路径。备份和收据共同置于加密私有存储，校验不代替完整恢复演练。
+backup 在关闭 Identity/网关并只读核验后执行 PG custom dump，使用排他新文件与0600权限；同名 `.dump.json` 记录摘要、schema、instance、storage、source project 和后端版本 backendVersion（实际不可变后端 image ID，sha256:…）。check-backup 和 restore 复用严格的字段/类型校验，要求后端版本、instance、storage、source project 和摘要完整有效且匹配；check-backup 还以固定 PG 的 pg_restore --list 离线核验。失败不会生成成功记录；部分文件需由 owner 核对后另选输出路径。备份和收据共同置于加密私有存储，校验不代替完整恢复演练。
 
 恢复时先再次关闭源 Identity/网关，保留原卷，禁止两份密码权威同时开放。用当前秘密和相同 instance/storage/tenants 生成另一个私有渲染目录，backendSubnet 和 publicGateway 改为不冲突的隔离网段；project 必须不同且不存在容器/卷。
 
@@ -28,3 +28,5 @@ restore 拒绝仍运行的源 Identity/网关，目标 PG 空卷只建立容器�
 stateKeyFile 更换后重启，旧 OIDC state 拒绝，用户重新开始。上游 client secret 通过 IdP owner 轮换和当前 provider 管理提交，同步核对旧凭据拒绝；不自动重放未知管理提交。数据库密码由 owner 在受控事务修改对应角色，再生成新私有配置并以新连接核验；TLS证书更新同样重新渲染和启动。维护 recover 不自动启用禁用账户或成员，不授予权限。
 
 旧 candidate 字段回执明确拒绝，无兼容读取或转换。新格式不记录前端镜像，前端独立升级不影响已有备份；schema、instance、storage lineage、source project 及 dump 摘要仍严格校验。数据库 dump 格式保持不变。
+
+backendVersion 与 Compose 的 identity image ID 精确相等；镜像的源码 revision 标签仅用于追溯展示，不作为恢复兼容凭据。同源码重建得到不同 image ID 时也须保留备份所属后端镜像，不能凭标签宣称兼容。

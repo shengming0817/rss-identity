@@ -28,7 +28,7 @@ def fixture():
 
 def receipt(path,data,images):
     path.write_bytes(b'fixture')
-    value={'schema':9,'instanceId':data['runtime']['instanceId'],'storage':data['runtime']['storage'],'backendVersion':'a'*40,'project':'identity-source','sha256':operate.sha(path)}
+    value={'schema':9,'instanceId':data['runtime']['instanceId'],'storage':data['runtime']['storage'],'backendVersion':images['identity'],'project':'identity-source','sha256':operate.sha(path)}
     path.with_suffix('.dump.json').write_text(json.dumps(value))
     return value
 
@@ -78,11 +78,11 @@ class OperationTests(unittest.TestCase):
     def test_receipt_is_closed_typed_and_images_bound(self):
         with fixture() as (root,data,images):
             path=root/'cut.dump';valid=receipt(path,data,images)
-            self.assertEqual(operate.check_backup(path,'a'*40,data['runtime']),valid)
+            self.assertEqual(operate.check_backup(path,images['identity'],data['runtime']),valid)
             invalid=[{'schema':9,'sha256':valid['sha256']},{**valid,'backendVersion':'b'*40}, {**{k:v for k,v in valid.items() if k!='backendVersion'},'candidate':'a'*40},{**valid,'project':'../bad'},{**valid,'instanceId':'bad'},{**valid,'unknown':True},{**valid,'storage':{**valid['storage'],'generation':True}},{**valid,'storage':{**valid['storage'],'target':[True]*16}}]
             for value in invalid:
                 path.with_suffix('.dump.json').write_text(json.dumps(value))
-                with self.assertRaises(ValueError):operate.check_backup(path,'a'*40,data['runtime'])
+                with self.assertRaises(ValueError):operate.check_backup(path,images['identity'],data['runtime'])
             path.with_suffix('.dump.json').write_text(json.dumps(valid));path.write_bytes(b'corrupt')
             with self.assertRaises(ValueError):operate.check_backup(path)
     def test_all_executed_services_are_bound_before_any_docker_action(self):
@@ -98,7 +98,7 @@ class OperationTests(unittest.TestCase):
         with fixture() as (root,data,images):
             archive=root/'cut.dump';receipt(archive,data,images)
             args=argparse.Namespace(command='restore',project='identity-target',deployment=root/'output',backup=archive)
-            with patch.object(operate,'deployment_images',return_value='a'*40),patch.object(operate,'project_locks') as locks,patch.object(operate,'require_closed',side_effect=ValueError('source authority')) as closed,patch.object(operate,'command',return_value=subprocess.CompletedProcess([],0,stdout=b'daemon')) as run:
+            with patch.object(operate,'deployment_images',return_value=images['identity']),patch.object(operate,'project_locks') as locks,patch.object(operate,'require_closed',side_effect=ValueError('source authority')) as closed,patch.object(operate,'command',return_value=subprocess.CompletedProcess([],0,stdout=b'daemon')) as run:
                 with self.assertRaisesRegex(ValueError,'source authority'):operate.operate(args)
                 closed.assert_called_once_with('identity-source');self.assertEqual(run.call_count,1)
                 locks.assert_called_once_with('daemon',['identity-target','identity-source'])
@@ -128,7 +128,7 @@ class OperationTests(unittest.TestCase):
             def execute(argv,**kwargs):
                 self.assertEqual(argv[argv.index('--network')+1],'none');self.assertEqual(argv[-2:],[images['postgres'],'--list']);self.assertEqual(kwargs['stdin'].read(),b'fixture')
                 return subprocess.CompletedProcess(argv,0)
-            with patch.object(operate,'deployment_images',return_value='a'*40),patch.object(operate,'command',side_effect=execute) as run:
+            with patch.object(operate,'deployment_images',return_value=images['identity']),patch.object(operate,'command',side_effect=execute) as run:
                 operate.operate(args);self.assertEqual(run.call_count,1)
 
 class ImageContractTests(unittest.TestCase):
@@ -167,8 +167,35 @@ class ImageContractTests(unittest.TestCase):
             self.assertEqual(operate.check_backup(path,backend,data['runtime']),value)
 
     def test_old_cli_parameters_are_rejected(self):
-        for script in ['deploy.py','operate.py','reference_seams.py']:
-            result=subprocess.run([sys.executable,str(deploy.ROOT/'hack'/script),'--candidate','old'],capture_output=True,timeout=10)
+        arguments={
+            'deploy.py':['--input','input','--output','output','--identity-image','backend','--web-image','web'],
+            'operate.py':['--deployment','deployment','--project','identity-fixture','verify'],
+            'reference_seams.py':['--identity-image','backend','--web-image','web','--previous-web-image','previous','--record','record','--work','work'],
+        }
+        for script,args in arguments.items():
+            result=subprocess.run([sys.executable,str(deploy.ROOT/'hack'/script),*args,'--candidate','old'],capture_output=True,timeout=10)
             self.assertNotEqual(result.returncode,0)
+            self.assertIn(b'unrecognized arguments: --candidate',result.stderr)
         result=subprocess.run(['make','candidate'],cwd=deploy.ROOT,capture_output=True,timeout=10)
         self.assertNotEqual(result.returncode,0)
+
+    def test_image_entry_uses_clean_archive_and_derives_build_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);(root/'deployment').mkdir();(root/'bin').mkdir()
+            (root/'Makefile').write_bytes((deploy.ROOT/'Makefile').read_bytes())
+            (root/'deployment/providers.lock.json').write_bytes((deploy.ROOT/'deployment/providers.lock.json').read_bytes())
+            docker=root/'bin/docker';docker.write_text('#!/bin/sh\ncat >/dev/null\nprintf "%s\\n" "$@" > "$IMAGE_CALL_LOG"\n');docker.chmod(0o755)
+            env={**os.environ,'PATH':str(root/'bin')+':'+os.environ['PATH'],'IMAGE_CALL_LOG':str(root/'called')}
+            subprocess.run(['/usr/bin/git','init','-q',str(root)],check=True)
+            subprocess.run(['/usr/bin/git','-C',str(root),'add','Makefile','deployment'],check=True)
+            subprocess.run(['/usr/bin/git','-C',str(root),'-c','user.name=fixture','-c','user.email=fixture@example.test','commit','-qm','fixture'],check=True)
+            # Ignore the fake Docker and its result, just as local build products are ignored.
+            (root/'.git/info/exclude').write_text('bin/\ncalled\n')
+            head=subprocess.check_output(['/usr/bin/git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
+            result=subprocess.run(['make','image','IDENTITY_REVISION='+'f'*40,'RUST_IMAGE=untrusted:latest','RUNTIME_IMAGE=untrusted:latest'],cwd=root,env=env,capture_output=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr.decode())
+            arguments=(root/'called').read_text()
+            self.assertIn('IDENTITY_REVISION='+head,arguments);self.assertNotIn('untrusted',arguments);self.assertTrue(arguments.endswith('-\n'))
+            (root/'called').unlink();(root/'Makefile').write_text((root/'Makefile').read_text()+'\n# dirty\n')
+            result=subprocess.run(['make','image'],cwd=root,env=env,capture_output=True,timeout=10)
+            self.assertNotEqual(result.returncode,0);self.assertFalse((root/'called').exists())

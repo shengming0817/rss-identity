@@ -33,8 +33,9 @@ def check_backup(path,backend_version=None,config=None):
     if not isinstance(record,dict) or set(record)!={'schema','instanceId','storage','backendVersion','project','sha256'}:raise Rejection('backup-receipt-fields')
     if type(record['schema']) is not int or record['schema']!=9:raise Rejection('backup-schema')
     if not project_name(record['project']):raise Rejection('backup-project')
-    for key,size in [('backendVersion',40),('sha256',64)]:
+    for key,size in [('sha256',64)]:
         if not isinstance(record[key],str) or not re.fullmatch('[a-f0-9]{'+str(size)+'}',record[key]):raise Rejection('backup-digest-identity')
+    if not isinstance(record['backendVersion'],str) or not re.fullmatch(r'sha256:[a-f0-9]{64}',record['backendVersion']):raise Rejection('backup-backend-version')
     def identity(value):
         if not isinstance(value,str) or str(uuid.UUID(value))!=value or uuid.UUID(value).int==0:raise Rejection('backup-uuid')
     identity(record['instanceId'])
@@ -101,7 +102,7 @@ def deployment_images(spec):
     if any(services[name]['image']!=identity for name in ['migrate','maintenance']):raise Rejection('backend-image-mismatch')
     inspected={image:deploy.inspect_image(image,image in [identity,services['gateway']['image']]) for image in {s['image'] for s in services.values()}}
     if any(key!=value['Id'] for key,value in inspected.items()):raise Rejection('image-ID-mismatch')
-    return inspected[identity]['Config']['Labels']['org.opencontainers.image.revision']
+    return identity
 
 def operate(args):
     if not re.fullmatch('[a-z][a-z0-9_-]{2,47}',args.project or ''):raise Rejection('project-identity')

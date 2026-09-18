@@ -45,16 +45,18 @@ test-ui:
 	$(PYTHON) hack/ui.py
 
 IDENTITY_IMAGE ?= rss-identity:local
-IDENTITY_REVISION ?= $(shell /usr/bin/git rev-parse HEAD)
-RUST_IMAGE := $(shell $(PYTHON) -c 'import json; print(json.load(open("deployment/providers.lock.json"))["rust"])')
-RUNTIME_IMAGE := $(shell $(PYTHON) -c 'import json; print(json.load(open("deployment/providers.lock.json"))["runtime"])')
+override IDENTITY_REVISION := $(shell /usr/bin/git rev-parse HEAD)
+override RUST_IMAGE := $(shell $(PYTHON) -c 'import json; print(json.load(open("deployment/providers.lock.json"))["rust"])')
+override RUNTIME_IMAGE := $(shell $(PYTHON) -c 'import json; print(json.load(open("deployment/providers.lock.json"))["runtime"])')
 ifdef IDENTITY_GIT_AUTH_HEADER_FILE
 IMAGE_SECRET := --secret "id=azure_header,src=$(IDENTITY_GIT_AUTH_HEADER_FILE)"
 else ifdef SYSTEM_ACCESSTOKEN
 IMAGE_SECRET := --secret id=azure_token,env=SYSTEM_ACCESSTOKEN
 endif
 image:
-	docker buildx build --platform linux/amd64 --load --provenance=false -f deployment/Dockerfile --tag "$(IDENTITY_IMAGE)" --build-arg "IDENTITY_REVISION=$(IDENTITY_REVISION)" --build-arg "RUST_IMAGE=$(RUST_IMAGE)" --build-arg "RUNTIME_IMAGE=$(RUNTIME_IMAGE)" $(IMAGE_SECRET) .
+	@test -z "$$(/usr/bin/git status --porcelain)" || { echo "image requires clean HEAD" >&2; exit 1; }
+	set -o pipefail; /usr/bin/git archive "$(IDENTITY_REVISION)" | docker buildx build --platform linux/amd64 --load --provenance=false -f deployment/Dockerfile --tag "$(IDENTITY_IMAGE)" --build-arg "IDENTITY_REVISION=$(IDENTITY_REVISION)" --build-arg "RUST_IMAGE=$(RUST_IMAGE)" --build-arg "RUNTIME_IMAGE=$(RUNTIME_IMAGE)" $(IMAGE_SECRET) -
+	@test "$$(/usr/bin/git rev-parse HEAD)" = "$(IDENTITY_REVISION)" && test -z "$$(/usr/bin/git status --porcelain)"
 
 # Explicit image/config seams on an isolated Linux Docker host; not part of CI.
 test-reference:

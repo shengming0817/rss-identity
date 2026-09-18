@@ -1,6 +1,6 @@
 # 独立镜像构建
 
-后端只产出一个 linux/amd64 镜像，包含 identity-server、identity-migrate、identity-admin，默认入口为服务。构建仅使用本仓源码和固定 Cargo.lock；不读取 rss-web 或静态目录，不需要 Node。生产 release compiler artifacts 由现有 check_dependencies.check_artifacts/check_features 验证，私有 Git 凭据仅提供给 cargo fetch 的 BuildKit secret。
+后端只产出一个 linux/amd64 镜像，包含 identity-server、identity-migrate、identity-admin，默认入口为服务。正式入口要求干净 HEAD，以 git archive 固定构建上下文；revision 和基础镜像从该提交与 providers.lock 派生，不接受外部覆盖。构建仅使用本仓源码和固定 Cargo.lock；不读取 rss-web 或静态目录，不需要 Node。生产 release compiler artifacts 由现有 check_dependencies.check_artifacts/check_features 验证，私有 Git 凭据仅提供给 cargo fetch 的 BuildKit secret。
 
 ```sh
 make image IDENTITY_IMAGE=rss-identity:my-version
