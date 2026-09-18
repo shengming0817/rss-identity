@@ -43,3 +43,7 @@ IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/provid
 宿主活动业务请求在应用请求/CSRF 策略后通过 `authenticate_session` 生成可信认证结果，组事实通过 `VerifiedGroups` 借用；详细来源、过期和授权边界见 [嵌入指南](../guides/embedding.md)。HTTP JSON 只是前端交互投影。
 
 `authenticate_session` 验证并延长 idle，不改变原 absolute deadline；宿主须先实施请求/CSRF 与用户活动策略，不能让后台心跳无限续期。`inspect_session` 只读验证，用于登录替换前检查、浏览器 GET session 和不应续期的被动查询。HTTP POST refresh 显式续期并旋转凭据；两种验证入口都重新检查权威状态。
+
+## 参考宿主资源
+
+`GET /api/identity-host/v1/tenants/{tenant}/context` 由 app/identity 持有，通过 HTTP adapter 的公开 `inspect_session` 读取同一 cookie，不续期。响应为 `{tenantId,principalId,sessionId,navigation:{manageAccounts,manageProviders}}`，no-store；导航由 BootstrapPolicy 派生，仅作展示。组件管理事务始终重新验证会话与宿主策略。UI 静态配置使用网关固定同源 `/api/identity-host/v1/config.json`，严格 `{canonicalOrigin,oidcEnabled}`；并非动态能力发现。

@@ -79,8 +79,7 @@ impl CredentialKeys {
     pub fn has_key(&self, id: &str) -> bool {
         self.keys.contains_key(id)
     }
-    /// Owner-side bounded re-encryption; the caller owns the database transaction and restore binding.
-    pub fn reencrypt_value(
+    fn reencrypt_value(
         &self,
         authority: Uuid,
         tenant: TenantId,
@@ -99,6 +98,57 @@ impl CredentialKeys {
         }
         serde_json::to_value(self.seal(authority, tenant, provider, version, &plain)?)
             .map_err(|_| AuthorityError::Unavailable)
+    }
+    /// Re-encrypt all provider credentials in one tenant, authenticating even active-key values.
+    /// Requires the schema owner's transaction. The host must establish its execution fence and
+    /// statement/lock budgets before calling, and owns commit/rollback and unknown settlement.
+    /// The component holds the same tenant guard as provider writers and enforces their capacity.
+    /// An uninitialized tenant has no credentials and is a successful empty operation.
+    pub async fn reencrypt_tenant(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        instance: rss_identity_core::InstanceId,
+        tenant: TenantId,
+    ) -> Result<usize, AuthorityError> {
+        let owner: bool = sqlx::query_scalar("SELECT nspowner=(SELECT oid FROM pg_roles WHERE rolname=current_user) FROM pg_namespace WHERE nspname='identity_authority'")
+            .fetch_one(&mut **tx).await.map_err(|_| AuthorityError::Unavailable)?;
+        if !owner {
+            return Err(AuthorityError::Configuration);
+        }
+        if authority_id(tx)
+            .await
+            .map_err(|_| AuthorityError::Unavailable)?
+            != instance.as_uuid()
+        {
+            return Err(AuthorityError::Configuration);
+        }
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(tenant.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(|_| AuthorityError::Unavailable)?;
+        sqlx::query(
+            "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+        )
+        .bind(tenant.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| AuthorityError::Unavailable)?;
+        let rows: Vec<(Uuid, i64, serde_json::Value)> = sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT 101 FOR UPDATE")
+            .bind(tenant.to_string()).fetch_all(&mut **tx).await.map_err(|_| AuthorityError::Unavailable)?;
+        if rows.len() > 100 {
+            return Err(AuthorityError::Configuration);
+        }
+        let count = rows.len();
+        for (id, version, value) in rows {
+            let provider =
+                ProviderId::parse(&id.to_string()).map_err(|_| AuthorityError::Unavailable)?;
+            let sealed =
+                self.reencrypt_value(instance.as_uuid(), tenant, provider, version, value)?;
+            sqlx::query("UPDATE identity_authority.provider_credentials SET sealed=$3 WHERE tenant_id=$1::uuid AND provider_id=$2")
+                .bind(tenant.to_string()).bind(id).bind(sealed).execute(&mut **tx).await.map_err(|_| AuthorityError::Unavailable)?;
+        }
+        Ok(count)
     }
     fn aad(
         authority: Uuid,
@@ -193,6 +243,16 @@ impl CredentialKeys {
     }
 }
 impl crate::Federation {
+    /// Read-only authentication check of every stored provider credential in all active tenants.
+    ///
+    /// Uses this federation's configured keyring and authority/tenant/provider/version AAD.
+    /// No credential, key version, epoch or audit state is changed. Each tenant is read in
+    /// its own transaction; this is not a cross-tenant snapshot or proof against later writes.
+    /// At most 100 credentials per tenant are accepted (101 rows detect overflow).
+    /// Missing keys, malformed/authentication-failed ciphertext and overflow fail closed.
+    /// The caller's absolute deadline is shared by every tenant read; timeout or storage
+    /// failure returns an error without asserting that all tenants were checked.
+    /// Close concurrent credential writers before using success to retire an old key.
     pub async fn check_credential_keys(
         &self,
         deadline: OperationDeadline,

@@ -315,3 +315,39 @@ fn signed_group_claim_presence_and_exact_values_are_distinct() {
         assert!(mapped_groups(Some("groups"), &json!({"groups":value})).is_err());
     }
 }
+
+#[tokio::test]
+async fn production_dns_denial_prevents_connecting_to_loopback() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let settings: ProviderSettings = ProviderSettingsInput {
+        issuer: format!(
+            "https://localhost:{}",
+            listener.local_addr().unwrap().port()
+        ),
+        client_id: "fixture".into(),
+        redirect_uri: "https://identity.example.test/api/v2/oidc/callback".into(),
+        scopes: vec!["openid".into()],
+        claims: ClaimMapping {
+            email: None,
+            groups: None,
+        },
+        jit: false,
+    }
+    .try_into()
+    .unwrap();
+    let tenant = TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap();
+    let credentials = ProviderCredentials::new("private-fixture".into(), None).unwrap();
+    assert_eq!(
+        HttpOidc::new(vec![])
+            .unwrap()
+            .test(tenant, &settings, &credentials)
+            .await
+            .unwrap_err(),
+        failure(ProviderStage::Discovery, ProviderReason::EgressDenied)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), listener.accept())
+            .await
+            .is_err()
+    );
+}

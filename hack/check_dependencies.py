@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check effective source identities, not just manifest strings."""
+import argparse
 import json
 from pathlib import Path
 import subprocess
@@ -75,13 +76,8 @@ def check(metadata, manifest):
     check_advisory_path(metadata)
     return {"git":url,"revision":rev,"packages":found}
 
-if __name__ == "__main__":
-    data = json.loads(subprocess.check_output(["cargo","metadata","--locked","--format-version","1"],cwd=ROOT))
-    manifest = tomllib.loads((ROOT/"Cargo.toml").read_text())
-    check_advisory_policy(tomllib.loads((ROOT / "deny.toml").read_text()))
-    result = check(data, manifest)
-    # Read actual normal library build artifacts, not a display approximation of resolution.
-    output = subprocess.check_output(['cargo', 'check', '--locked', '--workspace', '--lib', '--bins', '--message-format=json'], cwd=ROOT, text=True)
+def check_artifacts(data, output):
+    # Use the actual release/check compiler artifacts, including cached artifacts.
     packages = {p['id']: p for p in data['packages']}
     actual = {}
     for line in output.splitlines():
@@ -95,4 +91,18 @@ if __name__ == "__main__":
             require(name not in actual or actual[name] == values, 'conflicting production feature sets')
             actual[name] = values
     check_features(actual, 'production')
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--metadata', type=Path)
+    parser.add_argument('--artifacts', type=Path)
+    args = parser.parse_args()
+    if bool(args.metadata) != bool(args.artifacts):
+        parser.error('--metadata and --artifacts must be provided together')
+    data = json.loads(args.metadata.read_text() if args.metadata else subprocess.check_output(["cargo","metadata","--locked","--format-version","1"],cwd=ROOT))
+    manifest = tomllib.loads((ROOT/"Cargo.toml").read_text())
+    check_advisory_policy(tomllib.loads((ROOT / "deny.toml").read_text()))
+    result = check(data, manifest)
+    output = args.artifacts.read_text() if args.artifacts else subprocess.check_output(['cargo', 'check', '--locked', '--workspace', '--lib', '--bins', '--message-format=json'], cwd=ROOT, text=True)
+    check_artifacts(data, output)
     print(json.dumps(result, sort_keys=True))

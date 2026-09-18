@@ -219,20 +219,7 @@ impl RuntimeConfig {
         InstanceId::parse(&self.instance_id).map_err(|_| AppError::Configuration)
     }
     pub fn bootstrap_keys(&self) -> Result<Vec<AccountKey>, AppError> {
-        let tenants = self.storage.tenants()?;
-        let keys = self
-            .bootstrap_accounts
-            .iter()
-            .map(Bootstrap::key)
-            .collect::<Result<Vec<_>, _>>()?;
-        if keys.len() != tenants.len()
-            || tenants
-                .iter()
-                .any(|t| keys.iter().filter(|k| k.tenant == *t).count() != 1)
-        {
-            return Err(AppError::Tenant);
-        }
-        Ok(keys)
+        bootstrap_keys(&self.bootstrap_accounts, &self.storage)
     }
 }
 #[derive(Deserialize)]
@@ -248,6 +235,52 @@ impl Bootstrap {
             principal: PrincipalId::parse(&self.principal_id).map_err(|_| AppError::Principal)?,
         })
     }
+}
+/// Generated from the same deployment input as RuntimeConfig; no independent bootstrap identity.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MaintenanceConfig {
+    pub format_version: u32,
+    pub instance_id: String,
+    pub bootstrap_accounts: Vec<Bootstrap>,
+    pub database: DatabaseConfig,
+    pub storage: StorageConfig,
+}
+impl MaintenanceConfig {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.format_version != 3 {
+            return Err(AppError::Configuration);
+        }
+        InstanceId::parse(&self.instance_id).map_err(|_| AppError::Configuration)?;
+        self.storage.binding()?;
+        bootstrap_keys(&self.bootstrap_accounts, &self.storage)?;
+        Ok(())
+    }
+    pub fn bootstrap_key(&self, tenant: TenantId) -> Result<AccountKey, AppError> {
+        self.validate()?;
+        bootstrap_keys(&self.bootstrap_accounts, &self.storage)?
+            .into_iter()
+            .find(|k| k.tenant == tenant)
+            .ok_or(AppError::Tenant)
+    }
+}
+fn bootstrap_keys(
+    accounts: &[Bootstrap],
+    storage: &StorageConfig,
+) -> Result<Vec<AccountKey>, AppError> {
+    let tenants = storage.tenants()?;
+    let keys = accounts
+        .iter()
+        .map(Bootstrap::key)
+        .collect::<Result<Vec<_>, _>>()?;
+    if keys.len() != tenants.len()
+        || tenants
+            .iter()
+            .any(|t| keys.iter().filter(|k| k.tenant == *t).count() != 1)
+    {
+        return Err(AppError::Tenant);
+    }
+    Ok(keys)
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

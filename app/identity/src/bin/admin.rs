@@ -1,7 +1,7 @@
-use rss_identity_app::{AppError, read_public_file, read_secret};
+use rss_identity_app::{AppError, read_secret};
 use rss_identity_app::{
     assembly,
-    config::{DatabaseConfig, StorageConfig},
+    config::{MaintenanceConfig, load},
 };
 use rss_identity_core::account::AccountKey;
 use rss_identity_core::{
@@ -10,15 +10,7 @@ use rss_identity_core::{
 };
 use rss_identity_postgres::*;
 use rss_request_context::TenantId;
-use serde::Deserialize;
 use std::{path::Path, sync::Arc, time::Duration};
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Config {
-    instance_id: String,
-    database: DatabaseConfig,
-    storage: StorageConfig,
-}
 fn password(path: &str) -> Result<Password, AppError> {
     Password::new(read_secret(Path::new(path))?.to_string()).map_err(|_| AppError::Password)
 }
@@ -43,17 +35,27 @@ async fn main() {
     }
 }
 async fn run() -> Result<(), AppError> {
+    if std::env::args().skip(1).collect::<Vec<_>>() == ["--version"] {
+        println!("identity-admin {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args == ["--help"] || args == ["-h"] {
         println!("{}", usage());
+        return Ok(());
+    }
+    if args.len() == 2 && args[0] == "--check-config" {
+        let config: MaintenanceConfig = load(Path::new(&args[1]))?;
+        config.validate()?;
+        config.database.pg()?;
         return Ok(());
     }
     if args.len() < 2 {
         return Err(AppError::Arguments);
     }
     let command = parse_command(&args[1..])?;
-    let raw = read_public_file(Path::new(&args[0]), 16384).map_err(|_| AppError::Configuration)?;
-    let config: Config = serde_json::from_slice(&raw).map_err(|_| AppError::Json)?;
+    let config: MaintenanceConfig = load(Path::new(&args[0]))?;
+    config.validate()?;
     let authority_config = AuthorityConfig::new(
         rss_identity_core::InstanceId::parse(&config.instance_id)
             .map_err(|_| AppError::Configuration)?,
@@ -77,7 +79,7 @@ async fn run() -> Result<(), AppError> {
         Authority::connect_maintenance(runtime.clone(), kdf.clone(), authority_config, budget())
             .await;
     let result = match authority {
-        Ok(authority) => execute(&authority, command).await,
+        Ok(authority) => execute(&authority, &config, command).await,
         Err(error) => Err(error.into()),
     };
     kdf.close();
@@ -96,11 +98,15 @@ async fn run() -> Result<(), AppError> {
     }
     result
 }
-async fn execute(a: &Authority, command: Command<'_>) -> Result<(), AppError> {
+async fn execute(
+    a: &Authority,
+    config: &MaintenanceConfig,
+    command: Command<'_>,
+) -> Result<(), AppError> {
     let result = match command {
-        Command::Initialize(tenant, principal, name, pw) => {
+        Command::Initialize(tenant, name, pw) => {
             a.initialize(
-                key(tenant, principal)?,
+                config.bootstrap_key(TenantId::parse(tenant).map_err(|_| AppError::Tenant)?)?,
                 login(name)?,
                 password(pw)?,
                 budget(),
@@ -122,16 +128,16 @@ async fn execute(a: &Authority, command: Command<'_>) -> Result<(), AppError> {
 
 #[derive(Debug)]
 enum Command<'a> {
-    Initialize(&'a str, &'a str, &'a str, &'a str),
+    Initialize(&'a str, &'a str, &'a str),
     Recover(&'a str, &'a str, &'a str),
 }
 fn usage() -> &'static str {
-    "Usage: identity-admin CONFIG COMMAND\n  initialize <tenant> <principal> <login> <password-file>\n  recover <tenant> <principal> <password-file>"
+    "Usage: identity-admin --check-config FILE\nidentity-admin CONFIG COMMAND\n  initialize <tenant> <login> <password-file>\n  recover <tenant> <principal> <password-file>"
 }
 fn parse_command(args: &[String]) -> Result<Command<'_>, AppError> {
     match args {
-        [name, tenant, principal, login, password] if name == "initialize" => {
-            Ok(Command::Initialize(tenant, principal, login, password))
+        [name, tenant, login, password] if name == "initialize" => {
+            Ok(Command::Initialize(tenant, login, password))
         }
         [name, tenant, principal, password] if name == "recover" => {
             Ok(Command::Recover(tenant, principal, password))
@@ -146,8 +152,11 @@ mod tests {
     #[test]
     fn maintenance_commands_are_single_step() {
         assert!(
+            parse_command(&["initialize", "tenant", "login", "file"].map(String::from)).is_ok()
+        );
+        assert!(
             parse_command(&["initialize", "tenant", "id", "login", "file"].map(String::from))
-                .is_ok()
+                .is_err()
         );
         assert!(parse_command(&["recover", "tenant", "id", "file"].map(String::from)).is_ok());
         for command in [

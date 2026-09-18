@@ -1,4 +1,8 @@
-//! Real TLS PostgreSQL installation, host policy and startup seams; no deployed artifact/T3 claim.
+#[path = "../../../crates/identity-postgres/tests/federation_support/mod.rs"]
+mod federation_support;
+#[path = "../../../crates/identity-postgres/tests/support/mod.rs"]
+mod support;
+// Real TLS PostgreSQL installation, host policy and startup seams; no deployed artifact/T3 claim.
 use rss_identity_app::{
     AppError, assembly,
     config::{MigrationConfig, RuntimeConfig},
@@ -75,6 +79,32 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         sqlx::raw_sql(restore).execute(&mut owner).await?;
     }
     migration::install(install_config()).await?;
+    migration::verify(install_config()).await?;
+    for (corrupt, restore) in [
+        (
+            "DELETE FROM identity_authority.schema_version",
+            "INSERT INTO identity_authority.schema_version VALUES(9)",
+        ),
+        (
+            "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2",
+            "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=1",
+        ),
+        (
+            "ALTER ROLE host_runtime BYPASSRLS",
+            "ALTER ROLE host_runtime NOBYPASSRLS",
+        ),
+    ] {
+        sqlx::raw_sql(corrupt).execute(&mut owner).await?;
+        assert!(migration::verify(install_config()).await.is_err());
+        sqlx::raw_sql(restore).execute(&mut owner).await?;
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_authority.guard")
+            .fetch_one(&mut owner)
+            .await?,
+        0,
+        "verification must not initialize tenants"
+    );
     assert!(
         migration::install(install_config()).await.is_err(),
         "fresh-only installer must reject existing storage"
@@ -128,6 +158,20 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .await?,
     );
     let authority = assembly::authority(&config, runtime.clone(), kdf.clone()).await?;
+    let federation = Federation::new(
+        rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
+        authority.clone(),
+        federation_support::ScriptedOidc::new(),
+        rss_identity_core::federation::StateSigner::new([7; 32], &config.public_origin)?,
+        FederationConfig {
+            callback: format!("{}/api/v2/oidc/callback", config.public_origin),
+            credential_keys: support::credential_keys(),
+            targets: std::collections::BTreeMap::from([(
+                "resume".into(),
+                format!("{}/auth/resume", config.public_origin),
+            )]),
+        },
+    )?;
     for key in &keys {
         let issued = authority
             .login_local(
@@ -143,6 +187,20 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())
                 .unwrap()
         };
+        let manager = authority
+            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .await?;
+        federation
+            .create_provider(
+                manager,
+                federation_support::settings(),
+                rss_identity_core::federation::ProviderCredentials::new(
+                    "private-rotation-test".into(),
+                    None,
+                )?,
+                assembly::deadline(),
+            )
+            .await?;
         let manager = authority
             .inspect_session(key.tenant, actor(), assembly::deadline())
             .await?;
@@ -208,6 +266,46 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             )
             .await?;
     }
+    // Real host transaction: first tenant changes, second tenant fails AAD authentication.
+    use std::os::unix::fs::PermissionsExt;
+    for (name, raw) in [("old-key", [8_u8; 32]), ("new-key", [2_u8; 32])] {
+        let p = root.join(name);
+        std::fs::write(&p, hex::encode(raw))?;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let ring = |only_new: bool| -> rss_identity_app::config::CredentialKeyringConfig {
+        let mut entries = vec![json!({"keyId":"next","path":root.join("new-key")})];
+        if !only_new {
+            entries.push(json!({"keyId":"fixture","path":root.join("old-key")}));
+        }
+        serde_json::from_value(json!({"activeKeyId":"next","keys":entries})).unwrap()
+    };
+    let before: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT sealed FROM identity_authority.provider_credentials ORDER BY tenant_id",
+    )
+    .fetch_all(&mut owner)
+    .await?;
+    assert_eq!(before.len(), 2);
+    sqlx::query("UPDATE identity_authority.provider_credentials SET credential_version=credential_version+1 WHERE tenant_id=$1::uuid").bind(keys[1].tenant.to_string()).execute(&mut owner).await?;
+    assert!(
+        rss_identity_app::rekey::run(install_config(), ring(false), false)
+            .await
+            .is_err()
+    );
+    let after: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT sealed FROM identity_authority.provider_credentials ORDER BY tenant_id",
+    )
+    .fetch_all(&mut owner)
+    .await?;
+    assert_eq!(before, after, "partial tenant updates must roll back");
+    sqlx::query("UPDATE identity_authority.provider_credentials SET credential_version=credential_version-1 WHERE tenant_id=$1::uuid").bind(keys[1].tenant.to_string()).execute(&mut owner).await?;
+    assert!(
+        rss_identity_app::rekey::run(install_config(), ring(true), true)
+            .await
+            .is_err()
+    );
+    rss_identity_app::rekey::run(install_config(), ring(false), false).await?;
+    rss_identity_app::rekey::run(install_config(), ring(true), true).await?;
     runtime.close().await;
     maintenance_runtime.close().await;
     kdf.close();
@@ -269,9 +367,74 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert!(response.headers().contains_key("set-cookie"));
+    let cookie = response.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
     assert_eq!(
         response.json::<serde_json::Value>().await?["identity"]["principalId"],
         keys[1].principal.as_uuid().to_string()
+    );
+    let resource = format!(
+        "{url}/api/identity-host/v1/tenants/{}/context",
+        keys[1].tenant
+    );
+    let reply = client
+        .get(&resource)
+        .header("cookie", &cookie)
+        .header("x-forwarded-for", "203.0.113.7")
+        .send()
+        .await?;
+    assert_eq!(reply.status(), reqwest::StatusCode::OK);
+    assert_eq!(reply.headers()["cache-control"], "no-store");
+    let context = reply.json::<serde_json::Value>().await?;
+    assert_eq!(
+        context["principalId"],
+        keys[1].principal.as_uuid().to_string()
+    );
+    assert_eq!(context["navigation"]["manageAccounts"], true);
+    assert_eq!(context["navigation"]["manageProviders"], true);
+    let member = client
+        .post(format!("{url}/api/v2/tenants/{}/login", keys[1].tenant))
+        .header("origin", value["publicOrigin"].as_str().unwrap())
+        .header("x-identity-request", "1")
+        .header("x-forwarded-for", "203.0.113.8")
+        .json(&json!({"login":"member","password":PASSWORD}))
+        .send()
+        .await?;
+    assert_eq!(member.status(), reqwest::StatusCode::OK);
+    let member_cookie = member.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap();
+    let member_context = client
+        .get(&resource)
+        .header("cookie", member_cookie)
+        .header("x-forwarded-for", "203.0.113.8")
+        .send()
+        .await?;
+    assert_eq!(member_context.status(), reqwest::StatusCode::OK);
+    let member_context = member_context.json::<serde_json::Value>().await?;
+    assert_eq!(member_context["navigation"]["manageAccounts"], false);
+    assert_eq!(member_context["navigation"]["manageProviders"], false);
+    sqlx::query(
+        "UPDATE identity_authority.accounts SET auth_epoch=auth_epoch+1 WHERE tenant_id=$1::uuid",
+    )
+    .bind(keys[1].tenant.to_string())
+    .execute(&mut owner)
+    .await?;
+    assert_eq!(
+        client
+            .get(&resource)
+            .header("cookie", &cookie)
+            .header("x-forwarded-for", "203.0.113.7")
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
     );
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(10), server).await???;
@@ -283,6 +446,43 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .await?,
         0
     );
+    // Native logical backup must preserve the exact structural attestation after PG re-parses DDL.
+    let container = std::env::var("IDENTITY_TEST_PG_CONTAINER")?;
+    let dump = std::process::Command::new("docker")
+        .args([
+            "exec", &container, "pg_dump", "-U", "postgres", "-d", "postgres", "-Fc",
+        ])
+        .output()?;
+    anyhow::ensure!(dump.status.success(), "fixture dump failed");
+    sqlx::query("CREATE DATABASE restored")
+        .execute(&mut owner)
+        .await?;
+    let mut restore = std::process::Command::new("docker")
+        .args([
+            "exec",
+            "-i",
+            &container,
+            "pg_restore",
+            "-U",
+            "postgres",
+            "-d",
+            "restored",
+            "--exit-on-error",
+            "--single-transaction",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    use std::io::Write;
+    restore.stdin.take().unwrap().write_all(&dump.stdout)?;
+    anyhow::ensure!(
+        restore.wait_with_output()?.status.success(),
+        "fixture restore failed"
+    );
+    let mut restored = install_config();
+    restored.database.database = "restored".into();
+    migration::verify(restored).await?;
     owner.close().await?;
     Ok(())
 }

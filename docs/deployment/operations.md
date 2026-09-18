@@ -1,75 +1,33 @@
-> 历史中央模式文档（基线 fa7019922162158704cc47c6ac7ad36a67c8ae5a），不适用于 #2435 的嵌入式组件。旧运行器已退役；保留验收/候选记录，不重标为本次成功。当前入口为 docs/guides/embedding.md，完整部署后续为 #2436。
+# 安装与操作
 
-# 首次安装与运维
+在 Linux Docker 部署主机使用本仓 hack/deploy.py / hack/operate.py（部署只需脚本、deployment 配置及已准备的镜像）。复制 `deployment/deploy.example.json` 为私有输入，填写随机 instanceId、storage target/lineage、租户与唯一 bootstrap principal、固定 HTTPS origin 和秘密路径。`runtime.publicGateway` 必须等于 backendSubnet 的 .2；Identity .3、PostgreSQL .4，网段为不冲突的私有 /24。公开入口仅 HTTPS 443，租户登录入口 `/tenants/{tenant-uuid}/login`（例如 `https://identity.example.test/tenants/11111111-1111-4111-8111-111111111111/login`），API `/api/v2`，唯一 callback `/api/v2/oidc/callback`。
 
-## 准备
+每个 `storage.tenants` 中的租户使用自己的登录 URL；将 origin 与该租户 UUID 组合后交给用户。根路径 `/` 不负责选择租户。
 
-使用候选中的三份 OCI archives 和 candidate.json，通过 `docker load -i <archive>` 装入本地镜像存储，核对配置使用 candidate.json 的 digest 引用。参考拓扑只支持标准 HTTPS 443、专用 PostgreSQL、一个 Keycloak hostname（可有多个 realm/client）、单 Identity 副本。部署前评估实际 provider 版本，版本/摘要统一来自 deployment/providers.lock.json。
+准备公共 TLS 证书及私钥，证书 SAN 覆盖 origin；PG 证书 SAN 含 postgres，database.caFile 信任其 CA。每个数据库角色用不同的私有 0600 密码文件，无尾部换行；口令长度和内容须满足宿主配置校验。OIDC 为空即本地模式。开启时配置 stateKeyFile、credentialKeyring、assuranceProfiles、groupFactsMaxAgeSeconds 及 `returnTargets: {"resume":"https://固定域名/auth/resume"}`，字段以 RuntimeConfig 为准。state/keyring 钥文件为非零 32 字节随机钥的 64 位十六进制，不能复用。
 
-复制 deployment/example.json 为私有部署输入，替换 environment_id、origin、system_domain_id、随机 storage target/lineage、generation 和全部路径；runtime format_version 固定为 2。两个产品 origin 不同；IdP hostname 也独立。域名均由 owner 配置 DNS；不得从请求 Host/Forwarded 推导。
+```sh
+sudo python3 hack/deploy.py --input /private/deployment.json --output /private/rendered --identity-image rss-identity:my-version --web-image rss-identity-web:my-version
+python3 hack/operate.py --deployment /private/rendered --project identity-main install
+python3 hack/operate.py --deployment /private/rendered --project identity-main verify
+python3 hack/operate.py --deployment /private/rendered --project identity-main initialize <tenant-uuid> <login> /private/new-password
+python3 hack/operate.py --deployment /private/rendered --project identity-main open
+```
 
-准备 CA 及独立服务端证书：public 证书 SAN 覆盖 Identity 与 Keycloak 外部 hostname；postgres 证书 SAN 含 postgres；Hydra admin 证书 SAN 含 hydra-admin；Keycloak 服务端证书 SAN 含 keycloak。数据库与 Hydra 的 ca_file、Keycloak 网关的 keycloak.ca_file、各 IdP 提交的 ca_pem 必须信任对应证书；不关闭 VerifyFull。
+输出目录必须不存在；root 渲染为服务 UID/GID 10001:10001，目录0700、文件0600。操作命令由有权读取此目录和使用 Docker 的部署 owner 执行；新口令文件也须归10001且0600。同一输入生成 runtime、maintenance、owner migration 和严格静态 UI JSON。渲染在同父目录的私有临时目录完成，使用同一后端镜像的三个程序 `--check-config FILE` 在无网络容器内复用 Rust 的配置、秘密与契约校验；同时以实际 Web 镜像、仅网关配置与 TLS 挂载离线运行 nginx -t，并核对静态 index.html 与 identity-build.json 存在。全部通过才原子发布，错误镜像角色或网关配置在开放前拒绝；失败清理临时输出并允许原路径重试。不要手改生成配置或二次 envsubst；Compose 字面量已转义。首次 install 只安装数据库结构与角色授权；不会创建账户或开放入口。
 
-所有秘密为普通 0600 文件，无尾部换行：runtime/maintenance PG 密码彼此独立且至少32字节；每个产品的 validation secret、OIDC secret独立且至少32字节；OIDC state_key_file 是64位十六进制（32字节、非零）；Hydra gateway service secret和Keycloak DB密码使用32–256字符 base64url；Hydra system/cookie keyring 分别通过 hydra_system_secret_files/hydra_cookie_secret_files 提供，每个 key 至少32字节且两域不重用。秘密不得传命令行值或提交到Git。
+`initialize <tenant> <login> <password-file>` 的 principal 取自该租户唯一 bootstrapAccounts。组件一次性 guard 拒绝重复、并发输家及重启后重做；旧 principal 参数形式拒绝。新 tenant 必须显式交由宿主配置，不提供平台租户 API。维护恢复命令为 `recover <tenant> <principal> <password-file>`，仅更新既有本地密码和 epoch，保持 enabled/member 与管理策略不变。
 
-Identity、NGINX、Hydra、PG容器以10001:10001运行；Keycloak保留锁定上游镜像的1000:0，以支持其启动时augmentation。渲染器由root执行，按唯一服务owner交付配置并核验权限；其它调用者明确拒绝。私钥和秘密按消费服务UID/GID准备（Keycloak私钥1000:0，其它容器秘密10001:10001），均0600；公共CA/证书须对消费用户可读；仅给各服务挂载其所需文件。安装前执行下文volume-init任务，为空卷固定目录设置10001所有权；有内容且属主不匹配的旧卷明确拒绝，不递归修改。维护秘密只在维护任务中挂载，日常服务无 owner/maintenance mount。
+`verify` 是只读安装核验，检查 schema、instance、目标角色及有效权限、storage identity 和完整 tenant fence；不补建、不修授权、不初始化。`close` 先停网关再排空 Identity，并核对容器身份、终态、退出码与 OOM 状态；重启中/暂停/未知状态不视为关闭。`open` 先核验、再等待 Identity 内部健康检查、最后开放网关。非零退出或中断均不确认成功，先检查实际状态；不自动重发写命令。
 
-准备独立 consumer Docker network，与 MDM 所在网络连接。private-gateway 在此网络以 Identity hostname 提供 TLS 443；容器专属网络命名空间允许非root绑定该端口，消费方保持同一个 Identity origin，不能改 issuer。公网只发布 public-gateway 的443；该网关独占 public 网络，保证主机端口实际发布，数据库与协议服务仍只接内部网络。后端网段和协议网段必须是不冲突的独立 /24，网关地址与输入精确一致。每个网段的后半段 /25 用于动态分配，避免先启动的 provider 占用固定服务地址。public-gateway 在主机和容器内均监听 443；协议侧 Hydra 固定为 .5、Keycloak 固定为 .6。网关按这些部署内地址连接 provider，TLS 仍校验 Keycloak 名称和 CA；provider 离线不会因启动时 DNS 解析而阻止本地登录网关启动。
+网关固定提供 `/api/identity-host/v1/config.json`（canonicalOrigin/oidcEnabled）；UI 缺失或畸形时拒绝启动。唯一动态宿主资源 `/api/identity-host/v1/tenants/{tenant}/context` 读取权威会话，展示与宿主策略一致的管理提示；管理请求仍由组件事务内授权。网关覆盖来源头、保留原 API 路径且关闭代理重试，PG 不向宿主发布端口。日常容器不挂载 owner/maintenance 秘密。
 
-旧拓扑升级须在维护窗口停止使用旧网络的服务、重建网络，再以新渲染配置启动；保留 PostgreSQL 和 Keycloak 数据卷，不使用 `down --volumes`。已有网络不会自动应用新的 IPAM 地址池。
+回退只允许已验证、同 schema 和同 instance/storage 配置的后端镜像。切换前 close，在新私有渲染目录绑定镜像，verify 后 open；不得回滚数据库撤销状态。未知提交不等于失败回滚。实际切换和故障恢复证据由 #2366 保存。
 
-## 渲染和安装
+全部服务（含 postgres、volume-init）由 compose.json 固定 image ID、平台和 pull_policy=never，操作前核对本地镜像存在。所有操作按 Docker daemon ID 与 project 获取跨进程排他锁；restore 按排序同时锁源、目标，锁竞争立即拒绝。每个 Docker 主机使用唯一部署 owner 和共享的 `/var/tmp/rss-identity-operations`；直接 Docker 操作或另一个未共享锁目录的控制主机不受该锁约束，维护期间必须禁止这些旁路。锁文件保留，文件描述符关闭释放锁；不要手删活跃锁文件。
 
-在仓库使用 `python3 hack/deploy.py --input /private/deployment.json --output /private/rendered --candidate /artifacts/candidate.json`；候选目录可直接使用其中 deploy.py。输出目录必须尚不存在，包含秘密的生成配置，权限700；运行时宜位于受控私有磁盘或tmpfs，不进入日志/备份通用收集器。
+操作输出是脱敏 JSON：`operation`、`stage`、`reason`、`outcomeKnown`、`status`。前置拒绝与只读核验失败标识已知结果；写入进程超时/失败或排空未确认标识未知，先运行 `verify`、`verify-keys` 或只读 `docker inspect`，不可自动重试写入。原始 stderr、配置和秘密值不进入诊断。
 
-渲染的 Compose 文件已对所有字面量值转义 `$`，包括安装 shell 和挂载路径；由 Compose 解析后恢复原值。不要对输出再运行 envsubst 或手工取消转义。部署回归使用真实 `docker compose config` 验证该消费边界。
+OIDC 默认只连接公网单播目标。拒绝私网、loopback、link-local、metadata、保留地址、IPv4 映射及过渡 IPv6；DNS 的全部 A/AAAA 必须通过校验，reqwest 直接消费这组地址，禁止代理和重定向。私网 IdP 不在当前参考部署支持范围，测试 loopback 仅由 test-support 显式构造，不由生产配置开启。
 
-0. `docker compose -f /private/rendered/compose.json run --rm volume-init`。仅初始化空卷固定目录权限：PG为10001:10001、Keycloak为1000:0；nocopy防止镜像copy-up覆盖属主。
-1. `docker compose -f /private/rendered/compose.json up -d postgres`。首次 PG 初始化建立独立 hydra/keycloak数据库；已有卷不会重放初始化 SQL。
-2. `docker compose -f /private/rendered/compose.json run --rm migrate`。该命令内嵌 RSS/Identity SQL，执行单库安装并核验实际 runtime/maintenance 权限；旧版本、身份错配、角色碰撞和权限漂移拒绝。
-3. `docker compose -f /private/rendered/compose.json run --rm hydra-migrate`。Hydra 独立执行官方迁移，不受 Identity 事务回滚保护。
-4. 启动 Hydra、hydra-admin和Keycloak：`docker compose -f /private/rendered/compose.json up -d hydra hydra-admin keycloak`。然后运行 `docker compose -f /private/rendered/compose.json run --rm hydra-clients`。Compose 先等待 Hydra 的有界 healthcheck 通过；operator 校验本地配置后，在任何注册写入之前额外等待 admin/public readiness（总预算 60 秒），超时则非零退出。只有无副作用的 readiness GET 会重试。该 operator 任务共享 Hydra 网络命名空间，通过固定 loopback admin/public 端口注册并验证 runtime.json 中的静态 client；仅挂载配置及 OIDC client 秘密，不挂载数据库/维护凭据。缺失时创建，一致时核验通过，配置或凭据漂移时拒绝覆盖；超时/未知创建结果只回读核验，不盲目重发 POST。核验包含 client 认证，成功输出不含秘密。Hydra 全局配置保持 S256，client 固定 authorization_code/code/openid/client_secret_basic、精确 redirect、opaque token 及声明期限。初次 Keycloak 导入 IdP owner 提供的 realm/client，既有realm变化须经其管理员显式更新，不通过重复导入修复漂移。
-5. 通过独立维护任务初始化系统域首个平台管理员：`docker compose ... run --rm -v /private/new-password:/run/input/new-password:ro maintenance initialize <principal-uuid> <login> /run/input/new-password`。system_domain_id 来自维护配置；初始化只能成功一次，重启不能再次夺取authority。
-6. 启动 Identity；使用 `docker compose ... exec identity identity-server --probe 127.0.0.1:8080` 执行固定内部探针，Compose healthcheck使用同一命令。公私网网关依赖Identity healthy后才启动并开放端口；不存在启动即自动DDL或自动初始化管理员。
-
-维护配置固定系统域及外部 deployment generation；recover 命令显式传入目标 tenant 与 principal，连接绑定包含系统域和该目标。Keycloak 本身管理员建立/用户生命周期由其部署 owner 负责，本参考不提供默认管理员或密码。
-
-## 故障、停止与回退
-
-| 故障 | 允许操作 |
-| --- | --- |
-| PG/schema/环境身份不匹配 | 拒绝启动或业务；不返回可信身份 |
-| Hydra不可用 | /readyz失败；本地登录、中央会话与管理可继续；产品交接和在线验证拒绝 |
-| Keycloak不可用 | 本地登录与管理继续；相关SSO/test失败，必须重新开始登录 |
-| worker/listener意外退出 | 同一scope排空，非零退出，Compose重启 |
-| 排空超时 | 非零退出；不得解释为数据库已回滚或远端效果不存在 |
-
-SIGTERM关闭admission并有界等待请求/响应、worker、实际KDF和PG。Compose stop_grace_period大于内部总预算。协议清理持久记录保存在PG，重启继续cleanup_once；应用不盲重试未知提交或远程接受。
-
-回退仅限支持同一schema和同一身份配置的应用artifact；不得回退DB撤销状态。所有旧开发库（含 v7）只能由owner确认可丢弃后重建；不自动down migration。首版禁止同库改变environment/origin/config代际，修改配置会明确拒绝；需要保留数据的origin迁移属于后续专门交付。
-
-维护恢复继续使用 identity-admin recover，详见[维护指南](../guides/local-maintenance.md)。MFA 见[assurance 指南](../guides/assurance.md)；备份恢复、凭据轮换与测量见[I09 运维步骤](recovery.md)。
-
-Hydra admin实际仅监听其网络命名空间的127.0.0.1:4445，认证TLS侧车共享该命名空间；其它protocol网络成员不能直连4445。provider版本始终从candidate.json的providers读取，不随执行脚本旁的新checkout改变。
-
-Identity runtime/maintenance 只使用 RSS producer 连接入口：业务变更与 Outbox 同事务提交，
-保留 check_execution fencing；不给 Inbox 访问或 claim/lease/settle 执行权限。重复安装与启动
-会拒绝这些额外权限。实际消息投递由独立 relay owner 承担，不由 Identity 进程代行。
-
-
-## 平台与自助 IdP 配置
-
-`runtime.storage` 仅包含 target、lineage、system_domain_id、generation。业务租户经平台 API 创建，不再配置静态 tenants。`runtime.oidc` 包含 state_key_file、credential_keyring 和 assurance_profiles；后者仅持有可信 ACR/AMR 的解释，不批准 IdP 接入。没有 IdP 时 profiles 可为空。下游 clients 可为空，此时 readiness 不依赖 Hydra 在线。
-
-credential_keyring 为 `{active_key_id, keys:[{key_id,path}]}`，各 path 文件为 0600、32 字节随机钥的 64 位十六进制表示，owner 与服务一致。renderer 只向需要解密的 runtime/owner 任务挂载这些文件。`identity-migrate --rekey --config /run/config/migration.json` 是有界 owner 重加密命令，步骤见[平台指南](../guides/platform.md)。
-
-参考拓扑的 `keycloak` 是独立 IdP 的运维输入，包含 public_origin、ca_file、realm_files。realm_files 是 IdP owner 准备的私有 JSON 文件，渲染后归 Keycloak UID；不由 Identity 租户或审批清单派生。其它 OIDC IdP 可直接由各租户配置。Identity 新增不发布端口的 egress 网络以访问自助 IdP；数据库和内部协议服务继续位于内部网络。
-
-系统域初始化完成后使用 identity-platform login、tenant create 或 tenant admin add。固定候选包含独立 identity-platform 二进制；网页必须消费新协议，旧 UI 不能作为新后端已验收的组合。
-
-
-## 组事实有效期
-
-`runtime.oidc.group_facts_max_age_seconds` 必填，部署样例为 300 秒，允许 1–300。重启应用采用新策略后只影响新上游认证快照；不会重新计算已有会话期限。需要立即撤销时停用 provider 或撤销会话，不能仅缩短 TTL。未部署产品的本次替换不读取旧 `auth_facts` 格式；测试/候选使用新建数据库及当前固定源码，不提供历史数据转换。组到期仅使组事实不可用，组依赖操作需重新认证；账户/成员/provider 撤销仍拒绝整个身份。
-
-Identity、PG、IdP 和 SDK 宿主应同步时钟。组事实允许最多 30 秒未来签发偏差；在消费方本地时间到 `iat` 前仅组不可用，身份保留，超过偏差则拒绝验证。该固定容差不是部署配置，不能延长签名 `iat` 所确定的 TTL。
+仅更新前端时，保持 --identity-image 和宿主配置不变，以新 --web-image 渲染新目录。通过原部署 close 后在新目录 verify/open；后端不需重建，备份只绑定后端版本。前端管理导航请求的网络、超时或合法 503 暂不可用保留已接受会话，隐藏提示依赖的入口并提供手动重试；401、协议错误与身份不匹配继续拒绝。

@@ -115,41 +115,12 @@ impl Federation {
         config: FederationConfig,
     ) -> Result<Self, AuthorityError> {
         authority.require_runtime()?;
+        config.validate()?;
         let FederationConfig {
             callback,
             credential_keys,
             targets,
         } = config;
-        if targets.len() > 128 {
-            return Err(FederationError::Configuration.into());
-        }
-        for (id, target) in &targets {
-            let url = url::Url::parse(target).map_err(|_| FederationError::Configuration)?;
-            if id.is_empty()
-                || id.len() > 128
-                || target.len() > 2048
-                || url.scheme() != "https"
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.fragment().is_some()
-                || url.query_pairs().any(|(k, _)| k == "identity_result")
-            {
-                return Err(FederationError::Configuration.into());
-            }
-        }
-        let callback_url =
-            url::Url::parse(&callback).map_err(|_| FederationError::Configuration)?;
-        if callback_url.scheme() != "https"
-            || callback_url.host_str().is_none()
-            || callback_url.path() != "/api/v2/oidc/callback"
-            || callback_url.query().is_some()
-            || callback_url.fragment().is_some()
-            || !callback_url.username().is_empty()
-            || callback_url.password().is_some()
-        {
-            return Err(FederationError::Configuration.into());
-        }
         Ok(Self {
             callback,
             credential_keys,
@@ -633,6 +604,43 @@ pub struct SessionSecurity {
     pub session_id: rss_identity_core::SessionId,
     pub assurance: rss_identity_core::assurance::Assurance,
     pub eligible_step_up_providers: Vec<LoginOption>,
+}
+
+impl FederationConfig {
+    /// Validate callback and return-target contracts without connecting to storage or a provider.
+    pub fn validate(&self) -> Result<(), AuthorityError> {
+        if self.targets.len() > 128 {
+            return Err(FederationError::Configuration.into());
+        }
+        for (id, target) in &self.targets {
+            let url = url::Url::parse(target).map_err(|_| FederationError::Configuration)?;
+            if id.is_empty()
+                || id.len() > 128
+                || target.len() > 2048
+                || url.scheme() != "https"
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.fragment().is_some()
+                || url.query_pairs().any(|(k, _)| k == "identity_result")
+            {
+                return Err(FederationError::Configuration.into());
+            }
+        }
+        let callback_url =
+            url::Url::parse(&self.callback).map_err(|_| FederationError::Configuration)?;
+        if callback_url.scheme() != "https"
+            || callback_url.host_str().is_none()
+            || callback_url.path() != "/api/v2/oidc/callback"
+            || callback_url.query().is_some()
+            || callback_url.fragment().is_some()
+            || !callback_url.username().is_empty()
+            || callback_url.password().is_some()
+        {
+            return Err(FederationError::Configuration.into());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! Real PG + production HTTPS Keycloak adapter + in-process Axum. No product binary/T3 claim.
+//! Real PG + HTTPS Keycloak adapter with explicit loopback fixture transport + in-process Axum. No product binary/T3 claim.
 #[path = "../../identity-postgres/tests/federation_support/mod.rs"]
 mod federation_support;
 mod keycloak_support;
@@ -23,13 +23,15 @@ use zeroize::Zeroizing;
 const ORIGIN: &str = "https://identity.example.test";
 const CALLBACK: &str = "https://identity.example.test/api/v2/oidc/callback";
 const BROWSER: &str = "__Host-identity-oidc-browser=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-fn production(keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
-    Ok(HttpOidc::new(vec![TrustedAssuranceProfile {
-        keycloak_totp,
-        tenant: tenant(),
-        issuer: std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?,
-        client_id: "identity-test".into(),
-    }])?)
+fn fixture_transport(keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
+    Ok(HttpOidc::for_loopback_test(vec![
+        TrustedAssuranceProfile {
+            keycloak_totp,
+            tenant: tenant(),
+            issuer: std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?,
+            client_id: "identity-test".into(),
+        },
+    ])?)
 }
 fn credentials(ca: bool) -> anyhow::Result<ProviderCredentials> {
     ProviderCredentials::new(
@@ -215,7 +217,7 @@ async fn successful(app: &Router, p: &ProviderView, user: &str) -> anyhow::Resul
 async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(production(true)?));
+    let s = service(&f, Arc::new(fixture_transport(true)?));
     let p = provider(&f, &s).await?;
     let app = app(&s);
     let original = successful(&app, &p, "alice").await?;
@@ -318,7 +320,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         1
     );
     // A real adapter profile withdrawal is applied before startup opens HTTP admission.
-    let withdrawn = service(&f, Arc::new(production(false)?));
+    let withdrawn = service(&f, Arc::new(fixture_transport(false)?));
     withdrawn
         .reconcile_assurance_profiles(f.key.tenant, deadline())
         .await?;
@@ -350,7 +352,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
 async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let old = service(&f, Arc::new(production(true)?));
+    let old = service(&f, Arc::new(fixture_transport(true)?));
     let p = provider(&f, &old).await?;
     let old_app = app(&old);
     let url = begin(&old_app, &p, BROWSER, None, None, false).await?;
@@ -405,7 +407,7 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
     let rejected = callback(&old_app, &cb, BROWSER).await?;
     assert_eq!(rejected.headers()["location"], "/auth/error?reason=failed");
     assert!(!rejected.headers().contains_key("set-cookie"));
-    let next = HttpOidc::new(vec![TrustedAssuranceProfile {
+    let next = HttpOidc::for_loopback_test(vec![TrustedAssuranceProfile {
         tenant: f.key.tenant,
         issuer,
         client_id: "identity-test".into(),
@@ -437,7 +439,7 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
 async fn real_federated_login_and_linking() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(production(true)?));
+    let s = service(&f, Arc::new(fixture_transport(true)?));
     let p = provider(&f, &s).await?;
     let app = app(&s);
     f.store
@@ -547,7 +549,7 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
 async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(production(true)?));
+    let s = service(&f, Arc::new(fixture_transport(true)?));
     let p = provider(&f, &s).await?;
     let app = app(&s);
     let url = begin(&app, &p, BROWSER, None, None, false).await?;
@@ -677,11 +679,11 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
-    production(true)?
+    fixture_transport(true)?
         .test(tenant(), &config()?, &credentials(true)?)
         .await?;
     assert_eq!(
-        production(true)?
+        fixture_transport(true)?
             .test(tenant(), &config()?, &credentials(false)?)
             .await
             .unwrap_err(),
@@ -690,9 +692,9 @@ async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
     let mut private = config()?.input();
     private.issuer = "https://127.0.0.1".into();
     assert!(
-        production(false)?
+        HttpOidc::new(vec![])?
             .validate(tenant(), &private.try_into()?, &credentials(false)?)
-            .is_ok()
+            .is_err()
     );
     Ok(())
 }
@@ -706,7 +708,7 @@ fn tenant() -> rss_request_context::TenantId {
 async fn real_provider_management_and_encrypted_credentials() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(production(true)?));
+    let s = service(&f, Arc::new(fixture_transport(true)?));
     let p = s
         .create_provider(f.actor().await?, config()?, credentials(true)?, deadline())
         .await?;

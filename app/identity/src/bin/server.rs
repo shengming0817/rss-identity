@@ -14,15 +14,19 @@ fn main() {
     }
     if args == ["--help"] {
         println!(
-            "identity-server --config FILE\nidentity-server --version\nidentity-server --probe LOOPBACK:PORT"
+            "identity-server --config FILE\nidentity-server --check-config FILE\nidentity-server --version\nidentity-server --probe LOOPBACK:PORT"
         );
         return;
     }
     let result = (|| {
-        if args.len() != 2 || args[0] != "--config" {
+        if args.len() != 2 || !["--config", "--check-config"].contains(&args[0].as_str()) {
             return Err(AppError::Arguments);
         }
         let config = RuntimeConfig::load(std::path::Path::new(&args[1]))?;
+        rss_identity_app::assembly::preflight(&config)?;
+        if args[0] == "--check-config" {
+            return Ok(());
+        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

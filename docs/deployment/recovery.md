@@ -1,130 +1,32 @@
-> 历史中央模式文档（基线 fa7019922162158704cc47c6ac7ad36a67c8ae5a），不适用于 #2435 的嵌入式组件。旧运行器已退役；保留验收/候选记录，不重标为本次成功。当前入口为 docs/guides/embedding.md，完整部署后续为 #2436。
+# 备份、隔离恢复与轮换
 
-# 停机备份、恢复与密钥轮换
-
-适用于新部署的同版本、同环境/origin 恢复到选定切点。部署 owner 负责恢复点、秘密保管与最后开放；工具不判断任意旧快照是否包含故障前全部撤销。缺少完整安全状态、当前配置或必需密钥时保持隔离，不通过改 epoch、初始化或直接改账户表重新开放。
-
-## 备份
-
-以下命令中的绝对路径由部署 owner 选定。使用已交付候选的 compose.json 和 providers.lock；备份目录应处于加密存储、权限 0700，禁止公开渲染目录、数据库备份或密钥。
-
-1. 记录 candidate.json 摘要、Identity/RSS/UI SHA/lock、schema、配置身份及 provider digest。停止公私网入口，再排空 Identity 并停止 Hydra、Keycloak及其它写入者：
-
-   ```sh
-   docker compose -f /private/rendered/compose.json stop public-gateway private-gateway
-   docker compose -f /private/rendered/compose.json stop identity hydra-admin hydra keycloak
-   ```
-
-2. PostgreSQL 保持运行，使用其原生工具备份整集群，包含 Identity、Hydra、Keycloak 数据库及角色。`/tmp/identity-backup` 必须不存在；不要覆盖已有备份：
-
-   ```sh
-   docker compose -f /private/rendered/compose.json exec -T postgres pg_basebackup -U postgres -D /tmp/identity-backup -Fp -X stream -c fast
-   docker compose -f /private/rendered/compose.json exec -T postgres pg_verifybackup /tmp/identity-backup
-   docker compose -f /private/rendered/compose.json cp postgres:/tmp/identity-backup /private/backups/cut-001
-   ```
-
-   此命令使用受控容器内数据库本机身份；不同 PG 部署按其认证配置使用专用备份身份，密码从受控文件读取。禁止降低数据库访问控制来运行备份。
-
-3. 外部副本复制完成后，在同版本 PG 工具中再次校验，记录 manifest 摘要后才清理容器内这个临时目录。外部 cut-001 备份继续保留：
-
-   ```sh
-   PG_IMAGE=$(python3 -c 'import json; print(json.load(open("/artifacts/candidate.json"))["providers"]["postgres"])')
-   docker run --rm --user 0:0 --entrypoint pg_verifybackup -v /private/backups/cut-001:/backup:ro "$PG_IMAGE" /backup
-   shasum -a 256 /private/backups/cut-001/backup_manifest > /private/backups/cut-001.manifest.sha256
-   # 仅在上述两步成功后执行；不删除外部副本。
-   docker compose -f /private/rendered/compose.json exec -T postgres rm -rf -- /tmp/identity-backup
-   ```
-
-4. 记录并独立保管 backup_manifest 摘要、PG system identifier/WAL 范围和切点时间；配置、证书、所需 system/cookie key 集合和当前服务秘密另行保管。Keycloak realm export 不能代替数据库备份。源端恢复写入后，该备份不再证明之后的安全状态。
-
-### 备份后恢复原服务
-
-备份不是停机流程的终点。确认上述外部副本校验/摘要已成功后，在同一维护窗口按以下顺序恢复原服务。任何失败均保持入口关闭；不要运行初始化、migrate 或重建卷来“修好”恢复原服务。下面 helper 使用固定候选 NGINX 中的 curl，只共享 Hydra 网络、不发布端口。
+部署 owner 决定恢复点及可接受数据损失，独立保管配置、证书、密码和所需钥集合。工具保持实例与 tenant fence，不判断历史快照是否包含最新撤销；未核对完整安全状态前保持关闭。每条命令都传私有部署目录和明确 project，以下以 `op` 表示这个固定前缀。
 
 ```sh
-set -eu
-compose() { docker compose -f /private/rendered/compose.json "$@"; }
-isolate() { compose stop public-gateway private-gateway; printf '%s\n' 'backup-resume failed; gateways kept closed' >&2; }
-trap isolate EXIT
-compose up -d --wait --wait-timeout 90 postgres hydra hydra-admin keycloak
-NGINX_IMAGE=$(python3 -c 'import json; print(json.load(open("/artifacts/candidate.json"))["providers"]["nginx"])')
-OIDC_CA=$(python3 -c 'import json; print(json.load(open("/private/deployment.json"))["runtime"]["oidc"]["ca_file"])')
-docker run --rm --network "container:$(compose ps -q hydra)" \
-  -v "$OIDC_CA:/run/oidc-ca:ro" --entrypoint curl "$NGINX_IMAGE" \
-  --fail --silent --show-error --max-time 3 --retry 20 --retry-delay 1 \
-  --retry-all-errors --retry-max-time 60 --cacert /run/oidc-ca \
-  -o /dev/null https://keycloak:8443/realms/master/.well-known/openid-configuration
-compose run --rm hydra-clients
-compose up -d --wait --wait-timeout 60 identity
-compose exec -T identity identity-server --probe 127.0.0.1:8080
-compose up -d --wait --wait-timeout 30 public-gateway private-gateway
-trap - EXIT
+op() { python3 hack/operate.py --deployment /private/rendered --project identity-main "$@"; }
+op close
+op backup /private/backups/cut-001.dump
+op check-backup /private/backups/cut-001.dump
+op verify
+op open
 ```
 
-成功后恢复日常监控并记录备份切点与重新开放时间。失败时记录上述最后失败步骤和退出码，保留已校验备份及原卷，排障后从服务核验重新开始；不要把未开放误记为成功完成备份维护。
+backup 在关闭 Identity/网关并只读核验后执行 PG custom dump，使用排他新文件与0600权限；同名 `.dump.json` 记录摘要、schema、instance、storage、source project 和后端版本 backendVersion（实际不可变后端 image ID，sha256:…）。check-backup 和 restore 复用严格的字段/类型校验，要求后端版本、instance、storage、source project 和摘要完整有效且匹配；check-backup 还以固定 PG 的 pg_restore --list 离线核验。失败不会生成成功记录；部分文件需由 owner 核对后另选输出路径。备份和收据共同置于加密私有存储，校验不代替完整恢复演练。
 
-## 恢复与开放
+恢复时先再次关闭源 Identity/网关，保留原卷，禁止两份密码权威同时开放。用当前秘密和相同 instance/storage/tenants 生成另一个私有渲染目录，backendSubnet 和 publicGateway 改为不冲突的隔离网段；project 必须不同且不存在容器/卷。
 
-1. 保持入口、Identity、Hydra、Keycloak 停止，停止源 PG，保留原卷。恢复到新的空目标卷，不覆盖唯一现存数据。
-2. 使用与备份一致的 PG17 工具校验并复制到新卷；参考部署 PG UID/GID 为 10001:10001。下面 `PG_IMAGE` 从实际候选读取，不使用浮动镜像：
+```sh
+python3 hack/operate.py --deployment /private/restored --project identity-restored restore /private/backups/cut-001.dump
+python3 hack/operate.py --deployment /private/restored --project identity-restored verify
+# owner 完成恢复点、撤销、账户/member/provider 状态和秘密核对后，才显式 open。
+```
 
-   ```sh
-   PG_IMAGE=$(python3 -c 'import json; print(json.load(open("/artifacts/candidate.json"))["providers"]["postgres"])')
-   docker volume create identity-restore-cut-001
-   docker run --rm --user 0:0 --entrypoint sh \
-     -v /private/backups/cut-001:/backup:ro \
-     -v identity-restore-cut-001:/restore \
-     "$PG_IMAGE" -ec 'pg_verifybackup /backup; test -z "$(ls -A /restore)"; cp -a /backup/. /restore/; chown -R 10001:10001 /restore; chmod 700 /restore'
-   ```
+restore 拒绝仍运行的源 Identity/网关，目标 PG 空卷只建立容器所需角色；pg_restore 在单事务恢复后仅运行 `--verify`，不执行 Identity 安装或初始化。失败目标留在隔离状态供检查，不覆盖源卷、不自动擦除失败卷重试。校验后部署 owner 才决定 open，保持源端关闭；actual browser/recovery/capacity T3 归 #2366。
 
-   不能仅凭校验成功跳过启动后的实际核验。
-3. 保留源卷，释放原参考拓扑的容器/网络，使用显式目标卷启动。`down` 不附加 `--volumes`；此处不会删除源数据。将以下内容保存为私有 `/private/restore-volume.json`：
+凭据加密钥轮换：关闭源服务，用新私有渲染目录保留所有旧钥并将新钥设为 activeKeyId；运行 `rekey`。owner 一个有界事务遍历全部配置租户，先验证 storage/fence；组件按现有 provider 上限持锁、认证每个密文/AAD 并重写。未知提交不报成功、不重试。随后再生成只含新钥的配置，运行 `verify-keys`，完整解密所有租户后 verify/open。未完成单新钥核验前禁止销毁旧钥；备份保留期内仍需受控保管其解密钥。日常角色无额外授权。
 
-   ```json
-   {"volumes":{"pg":{"external":true,"name":"identity-restore-cut-001"}}}
-   ```
+stateKeyFile 更换后重启，旧 OIDC state 拒绝，用户重新开始。上游 client secret 通过 IdP owner 轮换和当前 provider 管理提交，同步核对旧凭据拒绝；不自动重放未知管理提交。数据库密码由 owner 在受控事务修改对应角色，再生成新私有配置并以新连接核验；TLS证书更新同样重新渲染和启动。维护 recover 不自动启用禁用账户或成员，不授予权限。
 
-   ```sh
-   docker compose -f /private/rendered/compose.json down
-   docker compose -p identity-restored -f /private/rendered/compose.json -f /private/restore-volume.json run --rm volume-init
-   docker compose -p identity-restored -f /private/rendered/compose.json -f /private/restore-volume.json up -d postgres
-   docker compose -p identity-restored -f /private/rendered/compose.json -f /private/restore-volume.json run --rm migrate
-   docker compose -p identity-restored -f /private/rendered/compose.json -f /private/restore-volume.json up -d hydra hydra-admin keycloak
-   docker compose -p identity-restored -f /private/rendered/compose.json -f /private/restore-volume.json run --rm hydra-clients
-   ```
+旧 candidate 字段回执明确拒绝，无兼容读取或转换。新格式不记录前端镜像，前端独立升级不影响已有备份；schema、instance、storage lineage、source project 及 dump 摘要仍严格校验。数据库 dump 格式保持不变。
 
-   固定 schema、环境/origin、storage identity、provider 版本和当前秘密。不得运行账户初始化、重新创建用户或自动 down migration。原站点与恢复站点不能同时接入同一产品流量。
-4. 运行候选中的 `identity-migrate` 作同版本结构/身份/权限核验（已有安装分支不会修复或重新授权），再启动 Hydra/Keycloak，验证实际 client 凭据。保持网关未开放，核对账户禁用、member/provider 状态、维护改密结果、撤销会话、Outbox 及旧 Hydra 凭据的 Identity 拒绝结果。
-5. 只有选定恢复点确实包含所需安全状态、provider/秘密核验和独立 T3 均通过，才由部署 owner 启动 Identity 并最后开放网关。任意步骤失败保留隔离；不自动回滚数据库或重发未知远程操作。
-
-本次 T2 使用临时卷演练以上原生机制，覆盖备份损坏和两种真实恢复点。历史切点会恢复历史账户事实；本项目没有额外库外状态源，不能宣称自动阻止这种回退。生产 RPO/RTO 需在真实资源及可接受数据损失范围下另行冻结。
-
-## 轮换矩阵
-
-所有轮换先关闭入口并停止相关调用方，保留必要恢复材料，使用新私有渲染目录；应用重新启动读取文件，不假定热更新。原秘密文件不可覆盖仍在使用的候选配置身份。
-
-| 材料 | 操作与验证 |
-| --- | --- |
-| 应急管理员口令 | 每次使用结束立即 `identity-admin recover`，确认 emergency/enabled/member 状态未被扩大；验证旧口令、中央 cookie 与下游凭据失效。受控保管和人工使用归属由部署入口记录。 |
-| PG runtime/maintenance/owner、Hydra/Keycloak DB 密码 | 数据库 owner 用 PostgreSQL `ALTER ROLE` 在受控交互任务中更新，再同步私有文件；重启所有持有旧连接池的服务。必须以新连接证明旧密码拒绝、新密码成功，不能用缓存连接证明轮换。 |
-| OIDC client secret | Keycloak 原生 client-secret 轮换；通过租户或系统域管理 API 提交新的只写 client_secret，配置、密文、凭据版本与事件同事务更新。旧登录事务和相关旧会话立即失效；验证旧 secret 兑换失败、新配置重新登录成功。数据库加密 keyring 轮换按平台操作指南执行。 |
-| Identity state key | 生成独立新 32 字节 key 并更换 state_key_file，重启服务；全部旧 state 拒绝，用户重新开始登录。没有双钥窗口。 |
-| 下游 OIDC client secret | 通过 Hydra 原生 admin API 在维护窗口替换，同步产品后端文件；`identity-clients` 仅核验最终配置，不自动覆盖漂移。旧 client secret 必须认证失败。 |
-| Identity validation / Hydra gateway service secret | 同步调用双方文件和渲染配置，重启双方；旧 secret 拒绝、新 secret 成功。凭据轮换本身不替代账户/会话撤销。 |
-| Hydra system / cookie keys | 使用必填有序 `hydra_system_secret_files`、`hydra_cookie_secret_files`，分别 1–8 个不重复密钥，两域不重用。新钥置首，旧钥仅在数据仍需解密时保留。实测旧签名 key 在新旧 keyring 中可读，提前移除旧 system key 后不可读；独立浏览器 flow 验证旧 cookie 在保留旧 cookie key 时可继续、退出旧 cookie key 后被拒绝，此时 system keys 仍可读；过期 token 不代表所有持久加密数据都已退出。 |
-| TLS 证书/私钥/CA | 使用同一既定 hostname/SAN，先准备双方信任配置，再在窗口内更换并重启。逐接缝验证 VerifyFull/TLS 成功及错误/退出 CA 拒绝。变更 origin 是独立身份迁移，不作为证书轮换处理。 |
-
-Hydra 旧数据不会自动重新加密。没有可靠旧钥退出证据时保留所需 key；不自写上游 SQL、不使用已退出的 migrate-secret 命令，也不以重建 Hydra 数据库冒充无损轮换。
-
-## 可重复验证与测量
-
-- `make test-recovery`：临时 PG 物理备份/恢复、真实持久 Hydra/Keycloak、选定切点拒绝旧凭据、旧快照反例、数据库新连接密码轮换。
-- `make test-federated`：真实 TOTP 与 Keycloak client-secret 轮换。
-- `make test-clients`：真实持久 Hydra client 凭据、重启及原生 keyring 保留/错误移除旧钥。
-- `make measure-capacity`：单进程 consumer，1 tenant、16 accounts、8 grants；并发 1/4/16，每组 64 次请求。统计包含失败，登录限流/KDF 拒绝也如实计入；独立组前重置 fixture 尝试预算，组内不重置。清理只测 8 个 grant 的一次失效处理，不代表最终删除。
-
-测量输出绑定当前源码/dirty 状态、lock、provider/架构；它没有性能门禁或生产 SLO。正式接受前在固定候选、实际资源配额和负载上重测，记录失败类型及未覆盖场景。
-
-独立候选与生产验收：[MFA #2366](https://dev.azure.com/shengming0923/rss/_workitems/edit/2366)、[恢复/轮换与生产目标 #2367](https://dev.azure.com/shengming0923/rss/_workitems/edit/2367)。
-
-恢复 T2 失败仅输出闭合 action/stage/error 分类及子进程退出码，不打印命令、秘密或 provider 原文。渲染器对缺失 keyring/profile 字段及已退出的单钥字段提供明确诊断，仍拒绝接受旧配置。
+backendVersion 与 Compose 的 identity image ID 精确相等；镜像的源码 revision 标签仅用于追溯展示，不作为恢复兼容凭据。同源码重建得到不同 image ID 时也须保留备份所属后端镜像，不能凭标签宣称兼容。

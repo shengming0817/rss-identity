@@ -21,14 +21,9 @@ fn credentials() -> ProviderCredentials {
     ProviderCredentials::new("fixture-secret".into(), None).unwrap()
 }
 #[test]
-fn self_service_accepts_network_locations_without_deployment_approval() {
+fn self_service_rejects_special_network_destinations() {
     let adapter = HttpOidc::new(vec![]).unwrap();
-    for issuer in [
-        "https://idp.example.test",
-        "https://127.0.0.1",
-        "https://169.254.169.254",
-        "https://10.0.0.1",
-    ] {
+    for issuer in ["https://idp.example.test", "https://8.8.8.8"] {
         let mut c = input();
         c.issuer = issuer.into();
         assert!(
@@ -38,6 +33,12 @@ fn self_service_accepts_network_locations_without_deployment_approval() {
         );
     }
     for issuer in [
+        "https://127.0.0.1",
+        "https://169.254.169.254",
+        "https://10.0.0.1",
+        "https://[::1]",
+        "https://[::ffff:127.0.0.1]",
+        "https://2130706433",
         "http://idp.example.test",
         "not a url",
         "https://user:secret@idp.example.test",

@@ -1,0 +1,143 @@
+{
+  "formatVersion": 1,
+  "scope": "candidate-operator-seams",
+  "subject": {
+    "candidateSha256": "20ad2786a4894a3c102cb8d70ed431d4ce2f90047f843e0b359392865656e2c4",
+    "identityRevision": "89b8769fd489d95faded6e411941d5003215a09e",
+    "webRevision": "4129f60de216c7803d3e6d6e23d30db30cdb6709",
+    "runnerSha256": "6671ceadf09e106377300ed76cd92988d3bbb150667e23c1a58fada38eacf2f6"
+  },
+  "steps": [
+    {
+      "name": "candidate",
+      "status": "passed",
+      "elapsedMs": 183
+    },
+    {
+      "name": "render",
+      "status": "passed",
+      "elapsedMs": 430
+    },
+    {
+      "name": "install",
+      "status": "passed",
+      "elapsedMs": 7082
+    },
+    {
+      "name": "initialize",
+      "status": "passed",
+      "elapsedMs": 773
+    },
+    {
+      "name": "open",
+      "status": "passed",
+      "elapsedMs": 9170
+    },
+    {
+      "name": "tls-ui-context",
+      "status": "passed",
+      "elapsedMs": 777
+    },
+    {
+      "name": "seed-credential",
+      "status": "passed",
+      "elapsedMs": 209
+    },
+    {
+      "name": "close",
+      "status": "passed",
+      "elapsedMs": 599
+    },
+    {
+      "name": "reject-new-key-before-rekey",
+      "status": "passed",
+      "elapsedMs": 6355
+    },
+    {
+      "name": "render-rotation",
+      "status": "passed",
+      "elapsedMs": 445
+    },
+    {
+      "name": "rekey",
+      "status": "passed",
+      "elapsedMs": 5923
+    },
+    {
+      "name": "render-new-key",
+      "status": "passed",
+      "elapsedMs": 446
+    },
+    {
+      "name": "verify-keys",
+      "status": "passed",
+      "elapsedMs": 5912
+    },
+    {
+      "name": "verify",
+      "status": "passed",
+      "elapsedMs": 1209
+    },
+    {
+      "name": "open-after-rekey",
+      "status": "passed",
+      "elapsedMs": 9272
+    },
+    {
+      "name": "login-after-rekey",
+      "status": "passed",
+      "elapsedMs": 430
+    },
+    {
+      "name": "close-after-rekey",
+      "status": "passed",
+      "elapsedMs": 579
+    },
+    {
+      "name": "backup",
+      "status": "passed",
+      "elapsedMs": 1324
+    },
+    {
+      "name": "check-backup",
+      "status": "passed",
+      "elapsedMs": 325
+    },
+    {
+      "name": "render-restore",
+      "status": "passed",
+      "elapsedMs": 459
+    },
+    {
+      "name": "restore",
+      "status": "passed",
+      "elapsedMs": 7215
+    },
+    {
+      "name": "verify-restored-keys",
+      "status": "passed",
+      "elapsedMs": 1220
+    },
+    {
+      "name": "open-restored",
+      "status": "passed",
+      "elapsedMs": 9190
+    },
+    {
+      "name": "restored-login",
+      "status": "passed",
+      "elapsedMs": 547
+    },
+    {
+      "name": "close-restored",
+      "status": "passed",
+      "elapsedMs": 598
+    }
+  ],
+  "result": "passed",
+  "failure": null,
+  "cleanup": {
+    "status": "passed",
+    "remaining": []
+  }
+}

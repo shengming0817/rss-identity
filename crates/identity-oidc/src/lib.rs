@@ -2,6 +2,7 @@
 //! ref: openidconnect-rs src/verification/mod.rs @ b639b5d39eac6903238867aeb2b29326502e6b26.
 #![deny(missing_docs)]
 mod assurance;
+mod egress;
 pub use ipnet::IpNet;
 use openidconnect::{
     AsyncHttpClient, AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
@@ -41,11 +42,13 @@ pub struct HttpOidc {
     loopback: bool,
 }
 impl HttpOidc {
-    /// Production uses HTTPS and normal certificate verification. Empty profile sets are valid.
+    /// Production uses HTTPS, certificate verification and only vetted public unicast addresses.
+    /// Every DNS answer must be public; special/private IP literals are rejected at binding.
+    /// Empty assurance profile sets are valid and do not relax the destination policy.
     pub fn new(profiles: Vec<TrustedAssuranceProfile>) -> Result<Self, FederationError> {
         Self::build(profiles, false)
     }
-    /// Explicit cleartext loopback fixture. Never enabled by production configuration.
+    /// Explicit loopback fixture (HTTP or HTTPS). Never enabled by production configuration.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_loopback_test(
         profiles: Vec<TrustedAssuranceProfile>,
@@ -91,6 +94,9 @@ impl HttpOidc {
             .ascii_serialization();
         let mut builder = reqwest::Client::builder()
             .no_proxy()
+            .dns_resolver(std::sync::Arc::new(egress::VettedResolver::new(
+                self.loopback,
+            )))
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_secs(3));
@@ -175,6 +181,17 @@ fn parse_url(value: &str, loopback: bool) -> Result<Url, FederationError> {
         || u.query().is_some()
     {
         return Err(FederationError::Configuration);
+    }
+    let host = u.host_str().unwrap();
+    if host
+        .trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| !egress::allowed(ip, loopback))
+    {
+        return Err(failure(
+            ProviderStage::Binding,
+            ProviderReason::EgressDenied,
+        ));
     }
     Ok(u)
 }
