@@ -10,4 +10,4 @@ RSS 公共 runtime、事务消息及必要基础库使用同一 Git URL/完整 S
 
 宿主注入既有连接池，业务变更与 Outbox 使用同一 PG 事务。组件不重建、替换或关闭宿主池；各 schema owner 导出 migration，宿主决定顺序、角色与 tenant fence。OIDC 配置可选，不引入统一 provider 总线。
 
-不建设通用 IAM、OAuth 授权服务器、API proxy、中央 ABAC 或设备 authority。新增 SAML/LDAP/SCIM、M2M、自助注册、passkey 按独立需求接纳。完整参考部署/运维/UI candidate/T3 属于 #2436，MDM 迁移属于 #2437，Web UI 属于 #2368。
+不建设通用 IAM、OAuth 授权服务器、API proxy、中央 ABAC 或设备 authority。新增 SAML/LDAP/SCIM、M2M、自助注册、passkey 按独立需求接纳。参考部署/运维与独立前后端镜像属于 #2436，产品 T3 属于独立 #2366，MDM 迁移属于 #2437，Web UI 属于 #2368。
