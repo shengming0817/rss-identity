@@ -847,7 +847,6 @@ async function recoveryState() {
 async function capacity() {
   const a = await admin();
   const times = [],
-    sessionTimes = [],
     eventTimes = [],
     loginContexts = [];
   let unexpected = 0,
@@ -881,11 +880,27 @@ async function capacity() {
     success === 5 && limited === 0 && unexpected === 0,
     "login-baseline-samples",
   );
-  const started = performance.now();
+  const lifetime = (value) =>
+    value.status === 200
+      ? {
+          status: value.status,
+          sessionIdSha256: crypto
+            .createHash("sha256")
+            .update(value.body.session.id)
+            .digest("hex"),
+          idleRemainingSeconds:
+            value.body.session.idleExpiresAt - Math.floor(Date.now() / 1000),
+          absoluteRemainingSeconds:
+            value.body.session.absoluteExpiresAt -
+            Math.floor(Date.now() / 1000),
+        }
+      : { status: value.status };
+  const sessionBefore = lifetime(await current(a));
   const profiles = [];
   for (const concurrency of [1, 4, 16]) {
     const samples = [],
-      statuses = {};
+      statuses = {},
+      codes = {};
     const profileStart = performance.now();
     const until = performance.now() + 30000;
     while (performance.now() < until)
@@ -897,23 +912,44 @@ async function capacity() {
             `/api/identity-host/v1/tenants/${tenant}/context`,
           );
           statuses[r.status] = (statuses[r.status] ?? 0) + 1;
-          if (r.status !== 200) unexpected++;
+          if (r.status !== 200) {
+            unexpected++;
+            const allowed = [
+              "invalid_credential",
+              "identity_unavailable",
+              "rate_limited",
+              "malformed_request",
+              "insufficient_privilege",
+              "csrf_rejected",
+            ];
+            const code = allowed.includes(r.body?.code)
+              ? r.body.code
+              : r.body === null
+                ? "non-json"
+                : "unrecognized";
+            codes[code] = (codes[code] ?? 0) + 1;
+          }
           const elapsed = performance.now() - start;
           samples.push(elapsed);
-          sessionTimes.push(elapsed);
         }),
       );
     profiles.push({
       concurrency,
       statuses,
+      codes,
       samples: samples.length,
       p95Ms: percentile95(samples),
       requestsPerSecond:
         samples.length / ((performance.now() - profileStart) / 1000),
     });
   }
-  const elapsed = (performance.now() - started) / 1000;
-  diagnostics = { capacityProfiles: profiles, unexpectedErrors: unexpected };
+  const sessionAfter = lifetime(await current(a));
+  diagnostics = {
+    capacityProfiles: profiles,
+    sessionBefore,
+    sessionAfter,
+    unexpectedErrors: unexpected,
+  };
   check(unexpected === 0, "capacity-unexpected-errors");
   await store(a);
   return {
@@ -923,14 +959,20 @@ async function capacity() {
       accountEventCommitP95Ms: percentile95(eventTimes),
       accountEventCommitsPerSecond:
         5000 / eventTimes.reduce((a, b) => a + b, 0),
-      sessionP95Ms: percentile95(sessionTimes),
-      sessionRequestsPerSecond: sessionTimes.length / elapsed,
+      ...Object.fromEntries(
+        profiles.flatMap((p) => [
+          [`session${p.concurrency}P95Ms`, p.p95Ms],
+          [`session${p.concurrency}RequestsPerSecond`, p.requestsPerSecond],
+        ]),
+      ),
       unexpectedErrors: unexpected,
     },
     counts: {
       loginSamples: success,
       limitedLogins: limited,
-      sessionSamples: sessionTimes.length,
+      sessionSamples: profiles.reduce((sum, p) => sum + p.samples, 0),
+      sessionBefore,
+      sessionAfter,
       profiles,
     },
   };

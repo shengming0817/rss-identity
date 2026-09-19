@@ -276,3 +276,14 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(sanitized["result"], "failed")
             self.assertEqual(sanitized["failure"]["reason"], "secret-in-evidence")
             self.assertEqual(sanitized["steps"], [])
+
+    def test_high_concurrency_regression_cannot_be_averaged_away(self):
+        import json
+
+        targets, subject, raw = self.approved()
+        record = json.loads(raw)
+        record.update(targets=targets, result="passed")
+        t3.verify_record(record, subject, raw)
+        record["measurements"]["session16P95Ms"] = 2
+        with self.assertRaisesRegex(ValueError, "target-not-met"):
+            t3.verify_record(record, subject, raw)
