@@ -271,6 +271,21 @@ def save(path, value):
             os.unlink(tmp)
 
 
+def save_evidence(path, record, secrets_):
+    try:
+        assert_redacted(record, secrets_)
+    except ValueError:
+        safe = new_record({}, None)
+        safe.update(
+            result="failed",
+            failure={"stage": "redaction", "reason": "secret-in-evidence"},
+            cleanup={"status": "unconfirmed", "remaining": []},
+        )
+        save(path, safe)
+        raise
+    save(path, record)
+
+
 def image_identity(image):
     return {
         "id": image["Id"],
@@ -462,7 +477,7 @@ class Run:
     def step(self, name, action):
         item = {"name": name, "status": "running", "elapsedMs": 0, "observations": {}}
         self.record["steps"].append(item)
-        save(self.output, self.record)
+        save_evidence(self.output, self.record, self.secrets)
         start = time.monotonic()
         try:
             item["observations"] = action() or {}
@@ -475,7 +490,7 @@ class Run:
             raise
         finally:
             item["elapsedMs"] = int((time.monotonic() - start) * 1000)
-            save(self.output, self.record)
+            save_evidence(self.output, self.record, self.secrets)
         print("T3 " + name + ": passed", flush=True)
 
     def compose(self, *args, project=None, directory=None, **kwargs):
@@ -1330,13 +1345,35 @@ class Run:
             timeout=30,
             capture_output=True,
         )
-        require(
+        passed = (
             result.returncode == 0 and result.stdout.decode().strip() == role
             if accepted
             else result.returncode != 0
-            and b"password authentication failed" in result.stderr,
-            "database-credential-probe",
+            and b"password authentication failed" in result.stderr
         )
+        if not passed:
+            error = result.stderr.lower()
+            kind = (
+                "unexpected-acceptance"
+                if result.returncode == 0
+                else "certificate"
+                if b"certificate" in error
+                else "resolve"
+                if b"resolve" in error or b"translate host" in error
+                else "authentication"
+                if b"authentication failed" in error
+                else "container"
+                if result.returncode == 125
+                else "connection"
+                if b"connect" in error
+                else "unknown"
+            )
+            raise ValueError(
+                "database-"
+                + role.replace("_", "-")
+                + ("-current-" if accepted else "-rejected-")
+                + kind
+            )
 
     def database_rotation(self):
         self.op("close")
@@ -1657,8 +1694,7 @@ class Run:
                         "reason": "incomplete-or-target-not-met",
                     }
                     self.record["result"] = "failed"
-            assert_redacted(self.record, self.secrets)
-            save(self.output, self.record)
+            save_evidence(self.output, self.record, self.secrets)
         return self.record["result"] != "failed"
 
 
@@ -1806,6 +1842,11 @@ def outside(args):
         )
         raw = docker("exec", operator, "cat", mount + "/result.json")
         returned = json.loads(raw)
+        require(
+            returned.get("failure", {})
+            != {"stage": "redaction", "reason": "secret-in-evidence"},
+            "secret-in-evidence",
+        )
         require(returned["subject"] == subject, "returned-subject-mismatch")
         report = returned
         if status.returncode and not report["failure"]:

@@ -29,6 +29,10 @@ function remember(value) {
   if (value) state.secrets.push(value);
   return value;
 }
+function rememberProtocol(url) {
+  for (const key of ["state", "code", "nonce", "code_challenge"])
+    for (const value of new URL(url).searchParams.getAll(key)) remember(value);
+}
 function save() {
   fs.writeFileSync(input.privateFile, JSON.stringify(state), { mode: 0o600 });
   fs.chmodSync(input.privateFile, 0o600);
@@ -558,7 +562,7 @@ async function oidc() {
       new URL(location).pathname === "/api/v2/oidc/callback"
     ) {
       callback = location;
-      for (const [, v] of new URL(callback).searchParams) remember(v);
+      rememberProtocol(callback);
       await route.abort();
     } else await route.fulfill({ response });
   });
@@ -811,7 +815,7 @@ async function beginState() {
   );
   check(r.status === 200, "begin-state");
   data.pendingState = r.body.authorizationUrl;
-  for (const [, v] of new URL(data.pendingState).searchParams) remember(v);
+  rememberProtocol(data.pendingState);
   await store(c);
   return { started: true };
 }

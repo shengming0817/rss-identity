@@ -259,3 +259,20 @@ class EvidenceTests(unittest.TestCase):
             patch.object(t3, "bounded_run", side_effect=operation),
         ):
             run.op("open")
+
+    def test_secret_in_checkpoint_writes_only_a_failed_redacted_record(self):
+        import json, tempfile
+        from pathlib import Path
+
+        record, subject = self.complete()
+        record["steps"][0]["observations"]["leak"] = "private-test-secret"
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "result.json"
+            with self.assertRaisesRegex(ValueError, "secret-in-evidence"):
+                t3.save_evidence(path, record, ["private-test-secret"])
+            raw = path.read_text()
+            self.assertNotIn("private-test-secret", raw)
+            sanitized = json.loads(raw)
+            self.assertEqual(sanitized["result"], "failed")
+            self.assertEqual(sanitized["failure"]["reason"], "secret-in-evidence")
+            self.assertEqual(sanitized["steps"], [])
