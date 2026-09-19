@@ -1346,7 +1346,10 @@ def outside(args):
             "--name",
             operator,
             "--add-host",
-            "identity.example.test:host-gateway",
+            "identity.example.test:"
+            + json.loads(docker("network", "inspect", "bridge"))[0]["IPAM"]["Config"][
+                0
+            ]["Gateway"],
             "--mount",
             f"type=volume,source={volume},target={mount}",
             "--mount",
