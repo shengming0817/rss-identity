@@ -5,7 +5,7 @@ import argparse, copy, hashlib, io, ipaddress, json, math, os, re, secrets, sign
 import subprocess, sys, tarfile, tempfile, time, tomllib
 from urllib.parse import urlsplit
 from pathlib import Path
-import deploy, operate
+import deploy, operate, providers
 from bounded_process import run as bounded_run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -380,6 +380,7 @@ def candidate(args):
         "tools": image_identity(tool),
         "resources": {
             "daemonId": info["ID"],
+            "providerBindAddress": providers.private_host(),
             "serverVersion": info["ServerVersion"],
             "os": info["OSType"],
             "architecture": info["Architecture"],
@@ -732,7 +733,8 @@ class Run:
             "public", ["DNS:identity.example.test"]
         )
         pg_ca, pg_cert, pg_key = self.cert("postgres", ["DNS:postgres"])
-        kc_ca, kc_cert, kc_key = self.cert("keycloak", ["IP:" + gateway])
+        provider_address = self.config["subject"]["resources"]["providerBindAddress"]
+        kc_ca, kc_cert, kc_key = self.cert("keycloak", ["IP:" + provider_address])
         self.admin_password, admin_file = self.secret("admin-password")
         self.user_password, _ = self.secret("user-password")
         self.next_password, _ = self.secret("next-user-password")
@@ -741,7 +743,7 @@ class Run:
         self.otp_secret, _ = self.secret("otp-secret", 20)
         self.kc_admin, self.kc_admin_file = self.secret("keycloak-admin-password")
         port = secrets.randbelow(20000) + 24000
-        self.issuer = f"https://{gateway}:{port}/realms/identity"
+        self.issuer = f"https://{provider_address}:{port}/realms/identity"
         realm = {
             "realm": "identity",
             "enabled": True,
@@ -816,7 +818,7 @@ class Run:
             "--env-file",
             kc_env,
             "-p",
-            f"{gateway}:{port}:8443",
+            f"{provider_address}:{port}:8443",
             "--mount",
             f"type=bind,source={realm_file},target=/opt/keycloak/data/import/realm.json,readonly",
             "--mount",
@@ -894,7 +896,7 @@ class Run:
                     "tenantId": t,
                     "issuer": self.issuer,
                     "clientId": "reference",
-                    "cidrs": [gateway + "/32"],
+                    "cidrs": [provider_address + "/32"],
                 }
                 for t in TENANTS
             ],

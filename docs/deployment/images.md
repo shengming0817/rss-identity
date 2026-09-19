@@ -28,6 +28,6 @@ make test-reference IDENTITY_IMAGE=rss-identity:revision WEB_IMAGE=rss-identity-
 
 结果只保存本次实际观测、材料摘要、测量和通过/失败/未覆盖；任何必要步骤、目标或清理不满足都不能通过。源码树不保存逐次结果，完整脱敏结果归档为 T3 PR 附件并回读校验摘要。实际密码、cookie、CSRF、TOTP seed、code、verifier、client secret 与浏览器存储仅存在私有 fixture，退出后删除，不进入报告。恢复直接消费 operate 的备份回执，不新增候选协议、恢复 seal 或激活系统。
 
-工具只支持内层 socket 与当前 context 可核验为相同 daemon ID 的环境；不一致在启动产品之前失败。Keycloak 只发布到 daemon 私有网桥地址。工具只清理本次精确随机 project/label 的容器、网络和卷。外层先保存 running，再停止 operator、清理并验证产品及私有卷，最后原子发布最终结果；失败和中断也保存失败结果并确认清理；未知写入只读核对，不自动重放。普通 `make ci` 保持组件 T1/T2；浏览器 T3 不进入普通 CI。
+工具只支持内层 socket 与当前 context 可核验为相同 daemon ID 的环境；不一致在启动产品之前失败。Keycloak 只发布到本机实际拥有的 RFC1918 地址（复用 provider fixture 的接口发现，可用 `IDENTITY_TEST_PRIVATE_HOST` 指定，仍须通过地址范围与归属校验），不绑定所有接口；该地址与 daemon 身份一并冻结。工具只清理本次精确随机 project/label 的容器、网络和卷。外层先保存 running，再停止 operator、清理并验证产品及私有卷，最后原子发布最终结果；失败和中断也保存失败结果并确认清理；未知写入只读核对，不自动重放。普通 `make ci` 保持组件 T1/T2；浏览器 T3 不进入普通 CI。
 
 对标源码：[Moby ImageInspect](https://github.com/moby/moby/blob/v28.3.3/daemon/images/image_inspect.go)、[Playwright browser context](https://github.com/microsoft/playwright/blob/v1.60.0/packages/playwright-core/src/server/browserContext.ts)。
