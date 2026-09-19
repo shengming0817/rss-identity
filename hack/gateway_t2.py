@@ -8,6 +8,7 @@ import json
 import os
 import ssl
 import subprocess
+import sys
 import time
 import uuid
 from unittest.mock import patch
@@ -15,6 +16,32 @@ from unittest.mock import patch
 import deploy
 from providers import IMAGES, container, docker, wait
 from test_deployment import fixture
+
+
+def verify_rows(rows, source):
+    deploy.require(len(rows) == 64, "gateway sample count")
+    for i, row in enumerate(rows):
+        deploy.require(
+            row["source"] == source and row["host"] == "identity.example.test",
+            "gateway source/host",
+        )
+        deploy.require(row["cookie"] == f"probe={i}", "gateway cookie isolation")
+        ipaddress.ip_address(row["xff"])
+        deploy.require(
+            all(
+                row[k] == ""
+                for k in ["forwarded", "real", "xfh", "xfp", "connectionHeader"]
+            ),
+            "gateway header isolation",
+        )
+    count = len({r["connection"] for r in rows})
+    deploy.require(
+        count == 1, f"gateway opened {count} upstream connections for 64 requests"
+    )
+    deploy.require(
+        [int(r["requests"]) for r in rows] == list(range(1, 65)),
+        "gateway connection request sequence",
+    )
 
 
 def gateway():
@@ -33,8 +60,8 @@ def gateway():
         if not any(n.overlaps(u) for u in used)
     )
     name = "identity-gateway-t2-" + uuid.uuid4().hex
-    docker("network", "create", "--subnet", str(subnet), name)
     try:
+        docker("network", "create", "--subnet", str(subnet), name)
         with fixture() as (root, data, images), contextlib.ExitStack() as stack:
             source, backend = str(subnet[2]), str(subnet[3])
             data["backendSubnet"] = str(subnet)
@@ -156,30 +183,34 @@ http {
                 )
                 response = client.getresponse()
                 body = response.read()
-                assert response.status == 200, (
-                    f"gateway returned HTTP {response.status}"
+                deploy.require(
+                    response.status == 200, f"gateway returned HTTP {response.status}"
                 )
-                row = json.loads(body)
-                assert (
-                    row["source"] == source and row["host"] == "identity.example.test"
-                )
-                assert row["cookie"] == f"probe={i}"
-                ipaddress.ip_address(row["xff"])
-                assert all(
-                    row[k] == ""
-                    for k in ["forwarded", "real", "xfh", "xfp", "connectionHeader"]
-                )
-                rows.append(row)
-            count = len({r["connection"] for r in rows})
-            assert count == 1, (
-                f"gateway opened {count} upstream connections for 64 requests"
-            )
-            assert [int(r["requests"]) for r in rows] == list(range(1, 65))
+                rows.append(json.loads(body))
+            verify_rows(rows, source)
             print(
                 "gateway T2: 64 requests across both routes reuse one upstream connection; headers isolated"
             )
     finally:
-        docker("network", "rm", name)
+        failed = sys.exception() is not None
+        try:
+            removed = subprocess.run(
+                ["docker", "network", "rm", name], capture_output=True, timeout=30
+            )
+            if removed.returncode:
+                remaining = docker(
+                    "network",
+                    "ls",
+                    "--filter",
+                    f"name=^{name}$",
+                    "--format",
+                    "{{.Name}}",
+                )
+                deploy.require(not remaining, "gateway network cleanup failed")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            if not failed:
+                raise
+            print("gateway network cleanup also failed", file=sys.stderr)
 
 
 if __name__ == "__main__":
