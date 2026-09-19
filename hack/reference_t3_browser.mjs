@@ -455,11 +455,17 @@ async function oidc() {
   // Capture a real callback and deliver it without the originating browser cookie first.
   const bound = await open("bound", tenant, true);
   let callback;
-  const callbackRoute = (url) => url.origin === origin && url.pathname === "/api/v2/oidc/callback";
+  // Routing sees the initial request in a redirect chain. Capture the actual
+  // Keycloak form response before its 302 can consume the host callback.
+  const callbackRoute = (url) => url.pathname.endsWith("/login-actions/authenticate");
   await bound.page.route(callbackRoute, async (route) => {
-    callback = route.request().url();
-    for (const [, v] of new URL(callback).searchParams) remember(v);
-    await route.abort();
+    const response = await route.fetch({ maxRedirects: 0 });
+    const location = response.headers().location;
+    if (location && new URL(location).origin === origin && new URL(location).pathname === "/api/v2/oidc/callback") {
+      callback = location;
+      for (const [, v] of new URL(callback).searchParams) remember(v);
+      await route.abort();
+    } else await route.fulfill({ response });
   });
   await bound.page
     .getByRole("button", { name: /Organization SSO|组织 SSO/ })
