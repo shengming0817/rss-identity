@@ -11,6 +11,10 @@ const origin = input.origin,
   tenant = input.tenants[0],
   other = input.tenants[1];
 const data = state.data;
+const percentile95 = (values) =>
+  [...values].sort((a, b) => a - b)[
+    Math.min(values.length - 1, Math.ceil(values.length * 0.95) - 1)
+  ];
 let browser,
   assertions = 0,
   diagnostic = "start";
@@ -167,7 +171,10 @@ async function createAccount(c, name, password, expected = 201) {
     const value = await r.json();
     data.accounts ??= {};
     data.accounts[name] = value.principalId;
-    await c.page.locator("tbody tr").filter({ hasText: value.principalId }).waitFor();
+    await c.page
+      .locator("tbody tr")
+      .filter({ hasText: value.principalId })
+      .waitFor();
     return value;
   }
   await c.page.getByRole("alert").waitFor();
@@ -235,6 +242,7 @@ async function keycloak(
   user,
   { otp = false, badPassword = false, badOtp = false, success = true } = {},
 ) {
+  diagnostic = "idp-password-form";
   await c.page.locator("#username").waitFor();
   await c.page.locator("#username").fill(user);
   await c.page
@@ -253,6 +261,7 @@ async function keycloak(
     await c.page.locator("#kc-login").click();
   }
   if (otp) {
+    diagnostic = "idp-otp-form";
     await c.page.locator("#otp").waitFor();
     if (badOtp) {
       const wrong = String((Number(totp()) + 123456) % 1000000).padStart(
@@ -266,6 +275,7 @@ async function keycloak(
     await c.page.locator("#otp").fill(totp());
     await c.page.locator("#kc-login").click();
   }
+  diagnostic = "idp-callback";
   await c.page.waitForURL((u) => u.origin === origin);
   if (success) {
     await c.page.waitForURL(`**/tenants/${c.t}/sessions`);
@@ -288,6 +298,7 @@ async function sso(role, user, t = tenant, options = {}) {
 }
 async function stepUp(c, user = "bob", options = {}) {
   await sessions(c);
+  diagnostic = "step-up-button";
   await c.page
     .getByRole("button", { name: /Step up authentication|增强认证/ })
     .click();
@@ -312,6 +323,64 @@ async function local() {
       401,
     "tenant-isolation",
   );
+  for (const [actor, target] of [
+    [a, b],
+    [b, a],
+  ]) {
+    const before = {};
+    for (const route of ["accounts", "providers", "sessions"]) {
+      const path = `/api/v2/tenants/${target.t}/${route}`;
+      const actual = await read(target, path);
+      check(actual.status === 200, "cross-tenant-reference-read");
+      before[route] = actual.body;
+      check(
+        (await read(actor, path)).status === 401,
+        "cross-tenant-management-read",
+      );
+    }
+    const csrf = (await current(actor)).body.csrfToken;
+    remember(csrf);
+    for (const [route, body] of [
+      ["accounts", { login: "cross-tenant", password: input.userPassword }],
+      [
+        "providers",
+        {
+          settings: {
+            issuer: input.issuer,
+            clientId: "reference",
+            redirectUri: origin + "/api/v2/oidc/callback",
+            scopes: ["openid"],
+            claims: { email: null, groups: null },
+            jit: true,
+          },
+          clientSecret: input.clientSecret,
+          caPem: input.idpCa,
+        },
+      ],
+      ["sessions/logout-all", {}],
+    ]) {
+      const denied = await request(
+        actor,
+        "POST",
+        `/api/v2/tenants/${target.t}/${route}`,
+        body,
+        { "x-csrf-token": csrf },
+      );
+      check(denied.status === 401, "cross-tenant-management-write");
+    }
+    for (const route of ["accounts", "providers", "sessions"]) {
+      const after = await read(target, `/api/v2/tenants/${target.t}/${route}`);
+      // Passive list operations may advance idle timestamps. Compare durable identities and authority.
+      const stable = (v) =>
+        JSON.stringify(v, (k, x) =>
+          ["idleExpiresAt", "lastSeenAt"].includes(k) ? undefined : x,
+        );
+      check(
+        after.status === 200 && stable(after.body) === stable(before[route]),
+        "cross-tenant-no-effects",
+      );
+    }
+  }
   const anon = await open("anonymous", tenant, true);
   check(
     (await read(anon, `/api/identity-host/v1/tenants/${tenant}/context`))
@@ -389,13 +458,16 @@ async function local() {
   await expectOldCookie(c, allCookie);
   const limited = await open("limited", tenant, true);
   let failures = 0;
+  const failedTimes = [];
   for (let i = 0; i < 6; i++) {
+    const started = performance.now();
     const r = await request(
       limited,
       "POST",
       `/api/v2/tenants/${tenant}/login`,
       { login: "limited", password: "wrong-private-password" },
     );
+    failedTimes.push(performance.now() - started);
     check(r.status === (i < 5 ? 401 : 429), "failed-attempt-budget");
     failures++;
   }
@@ -412,6 +484,11 @@ async function local() {
     cookieAttributes: true,
     tenantAndPrivilegeDenied: true,
     failedAttempts: failures,
+    measurements: {
+      failedAttemptP95Ms: percentile95(failedTimes),
+      failedAttemptRequestsPerSecond:
+        6000 / failedTimes.reduce((a, b) => a + b, 0),
+    },
     sessionRotationAndRevocation: true,
   };
 }
@@ -457,11 +534,16 @@ async function oidc() {
   let callback;
   // Routing sees the initial request in a redirect chain. Capture the actual
   // Keycloak form response before its 302 can consume the host callback.
-  const callbackRoute = (url) => url.pathname.endsWith("/login-actions/authenticate");
+  const callbackRoute = (url) =>
+    url.pathname.endsWith("/login-actions/authenticate");
   await bound.page.route(callbackRoute, async (route) => {
     const response = await route.fetch({ maxRedirects: 0 });
     const location = response.headers().location;
-    if (location && new URL(location).origin === origin && new URL(location).pathname === "/api/v2/oidc/callback") {
+    if (
+      location &&
+      new URL(location).origin === origin &&
+      new URL(location).pathname === "/api/v2/oidc/callback"
+    ) {
       callback = location;
       for (const [, v] of new URL(callback).searchParams) remember(v);
       await route.abort();
@@ -478,15 +560,28 @@ async function oidc() {
   check(Boolean(callback), "captured-callback");
   const foreign = await browser.newContext();
   const rejected = await foreign.request.get(callback, { maxRedirects: 0 });
-  check(rejected.status() === 303 && rejected.headers().location.startsWith("/auth/error?"), "callback-browser-binding");
-  check((await foreign.request.get(`${origin}/api/v2/tenants/${tenant}/session`)).status() === 401, "foreign-callback-no-session");
+  check(
+    rejected.status() === 303 &&
+      rejected.headers().location.startsWith("/auth/error?"),
+    "callback-browser-binding",
+  );
+  check(
+    (
+      await foreign.request.get(`${origin}/api/v2/tenants/${tenant}/session`)
+    ).status() === 401,
+    "foreign-callback-no-session",
+  );
   await foreign.close();
   await bound.page.unroute(callbackRoute);
   await bound.page.goto(callback);
   await bound.page.waitForURL(`**/tenants/${tenant}/sessions`);
   check((await current(bound)).status === 200, "bound-callback-completes");
   const replay = await bound.context.request.get(callback, { maxRedirects: 0 });
-  check(replay.status() === 303 && replay.headers().location.startsWith("/auth/error?"), "callback-replay-rejected");
+  check(
+    replay.status() === 303 &&
+      replay.headers().location.startsWith("/auth/error?"),
+    "callback-replay-rejected",
+  );
   await store(bound);
   return {
     jitAndExplicitLink: true,
@@ -670,15 +765,18 @@ async function recoveryState() {
 async function capacity() {
   const a = await admin();
   const times = [],
-    sessionTimes = [];
+    sessionTimes = [],
+    eventTimes = [];
   let unexpected = 0,
     limited = 0,
     success = 0;
   for (let i = 0; i < 5; i++) {
+    const eventStart = performance.now();
     const created = await write(a, "POST", "accounts", {
       login: "capacity-" + i,
       password: input.userPassword,
     });
+    eventTimes.push(performance.now() - eventStart);
     check(created.status === 201, "capacity-account");
     const c = await open("capacity-" + i, tenant, true);
     const begin = performance.now();
@@ -692,7 +790,10 @@ async function capacity() {
     } else if (result.status === 429) limited++;
     else unexpected++;
   }
-  check(times.length > 0, "login-baseline-samples");
+  check(
+    success === 5 && limited === 0 && unexpected === 0,
+    "login-baseline-samples",
+  );
   const started = performance.now();
   for (const concurrency of [1, 4, 16]) {
     const until = performance.now() + 30000;
@@ -710,16 +811,15 @@ async function capacity() {
       );
   }
   const elapsed = (performance.now() - started) / 1000;
-  const p95 = (values) =>
-    [...values].sort((a, b) => a - b)[
-      Math.min(values.length - 1, Math.ceil(values.length * 0.95) - 1)
-    ];
   check(unexpected === 0, "capacity-unexpected-errors");
   await store(a);
   return {
     measurements: {
-      loginP95Ms: p95(times),
-      sessionP95Ms: p95(sessionTimes),
+      loginP95Ms: percentile95(times),
+      accountEventCommitP95Ms: percentile95(eventTimes),
+      accountEventCommitsPerSecond:
+        5000 / eventTimes.reduce((a, b) => a + b, 0),
+      sessionP95Ms: percentile95(sessionTimes),
       sessionRequestsPerSecond: sessionTimes.length / elapsed,
       unexpectedErrors: unexpected,
     },
@@ -764,7 +864,28 @@ try {
         result.status === 200 && result.body.passed === false,
         "idp-unavailable",
       );
-      observations = { localLogin: true, upstreamFailure: true };
+      const failed = await open("idp-unavailable", tenant, true);
+      const start = failed.page.waitForResponse(
+        (r) =>
+          r.request().method() === "POST" &&
+          /\/oidc\/[^/]+\/login$/.test(new URL(r.url()).pathname),
+      );
+      await failed.page
+        .getByRole("button", { name: /Organization SSO|组织 SSO/ })
+        .click();
+      check((await start).status() === 503, "idp-login-start-rejected");
+      check(
+        (await current(failed)).status === 401 &&
+          !(await failed.context.cookies(origin)).some(
+            (c) => c.name === "__Host-identity-session",
+          ),
+        "idp-failure-no-session",
+      );
+      observations = {
+        localLogin: true,
+        upstreamFailure: true,
+        browserLoginDenied: true,
+      };
       break;
     }
     case "provider-ready":

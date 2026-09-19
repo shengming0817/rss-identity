@@ -40,7 +40,7 @@ test-consumers:
 test-assembly:
 	$(PYTHON) hack/providers.py assembly
 
-.PHONY: test-ui image test-reference reference-tools
+.PHONY: test-ui image test-reference
 test-ui:
 	$(PYTHON) hack/ui.py
 
@@ -59,10 +59,10 @@ image:
 	@test "$$(/usr/bin/git rev-parse HEAD)" = "$(IDENTITY_REVISION)" && test -z "$$(/usr/bin/git status --porcelain)"
 
 # Explicit fixed-candidate product T3; stays outside normal component CI.
-REFERENCE_TOOLS_IMAGE ?= rss-identity-reference-tools:local
-reference-tools:
-	@test -z "$$('/usr/bin/git' status --porcelain)" || { echo "tools image requires clean HEAD" >&2; exit 1; }
-	set -o pipefail; /usr/bin/git archive HEAD | docker buildx build --load --provenance=false -f deployment/reference-tools.Dockerfile --tag "$(REFERENCE_TOOLS_IMAGE)" --build-arg "REFERENCE_REVISION=$(IDENTITY_REVISION)" -
-
+REFERENCE_TOOLS_IMAGE ?= rss-identity-test-reference:local
 test-reference:
-	$(PYTHON) hack/reference_t3.py --identity-image "$(IDENTITY_IMAGE)" --web-image "$(WEB_IMAGE)" --tools-image "$(REFERENCE_TOOLS_IMAGE)" --web-repo "$(REFERENCE_WEB_REPO)" --record "$(REFERENCE_RECORD)" $(if $(REFERENCE_TARGETS),--targets "$(REFERENCE_TARGETS)")
+	@test -z "$$('/usr/bin/git' status --porcelain)" || { echo "tools image requires clean HEAD" >&2; exit 1; }
+	set -o pipefail; /usr/bin/git archive "$(IDENTITY_REVISION)" | docker buildx build --load --provenance=false -f deployment/reference-tools.Dockerfile --tag "$(REFERENCE_TOOLS_IMAGE)" --build-arg "REFERENCE_REVISION=$(IDENTITY_REVISION)" -
+
+	@test "$$(/usr/bin/git rev-parse HEAD)" = "$(IDENTITY_REVISION)" && test -z "$$(/usr/bin/git status --porcelain)"
+	$(PYTHON) hack/reference_t3.py --identity-image "$(IDENTITY_IMAGE)" --web-image "$(WEB_IMAGE)" --tools-image "$(REFERENCE_TOOLS_IMAGE)" --web-repo "$(REFERENCE_WEB_REPO)" --record "$(REFERENCE_RECORD)" $(if $(REFERENCE_TARGETS),--targets "$(REFERENCE_TARGETS)") $(if $(REFERENCE_BASELINE),--baseline "$(REFERENCE_BASELINE)")

@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libnss3-tools \
 # Same package and integrity as the frozen Web lock; no second npm project.
 RUN curl --fail --silent --show-error https://registry.npmjs.org/playwright-core/-/playwright-core-1.60.0.tgz -o /tmp/playwright.tgz \
     && python3 -c "import base64,hashlib; assert base64.b64encode(hashlib.sha512(open('/tmp/playwright.tgz','rb').read()).digest()).decode() == '9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA=='" \
+    && python3 -c "import base64,hashlib,pathlib;pathlib.Path('/opt/playwright-integrity').write_text('sha512-'+base64.b64encode(hashlib.sha512(open('/tmp/playwright.tgz','rb').read()).digest()).decode())" \
     && mkdir /opt/playwright-core && tar xzf /tmp/playwright.tgz -C /opt/playwright-core --strip-components=1 \
     && rm /tmp/playwright.tgz
 ARG REFERENCE_REVISION

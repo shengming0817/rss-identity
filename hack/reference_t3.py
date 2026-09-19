@@ -3,6 +3,7 @@
 
 import argparse, copy, hashlib, io, ipaddress, json, math, os, re, secrets, signal
 import subprocess, sys, tarfile, tempfile, time, tomllib
+from urllib.parse import urlsplit
 from pathlib import Path
 import deploy, operate
 from bounded_process import run as bounded_run
@@ -27,6 +28,10 @@ STEPS = (
 )
 MEASUREMENTS = (
     "loginP95Ms",
+    "failedAttemptP95Ms",
+    "failedAttemptRequestsPerSecond",
+    "accountEventCommitP95Ms",
+    "accountEventCommitsPerSecond",
     "sessionP95Ms",
     "sessionRequestsPerSecond",
     "unexpectedErrors",
@@ -37,6 +42,10 @@ MEASUREMENTS = (
 )
 LIMITS = {
     "loginP95Ms": "max",
+    "failedAttemptP95Ms": "max",
+    "failedAttemptRequestsPerSecond": "min",
+    "accountEventCommitP95Ms": "max",
+    "accountEventCommitsPerSecond": "min",
     "sessionP95Ms": "max",
     "sessionRequestsPerSecond": "min",
     "unexpectedErrors": "max",
@@ -68,12 +77,60 @@ def file_digest(path):
     return digest(Path(path).read_bytes())
 
 
+class ProcessFailure(RuntimeError):
+    def __init__(self, action, exit_code):
+        self.action, self.exit_code = action, exit_code
+        super().__init__("process-failed")
+
+
+def failure_fact(error, stage):
+    value = {
+        "stage": stage,
+        "reason": "interrupted"
+        if isinstance(error, (KeyboardInterrupt, SystemExit))
+        else str(error)
+        if isinstance(error, ValueError) and re.fullmatch("[a-z-]{1,80}", str(error))
+        else "execution-or-assertion",
+    }
+    if isinstance(error, ProcessFailure):
+        value.update(
+            reason="process-failed", action=error.action, exitCode=error.exit_code
+        )
+    return value
+
+
 def process(args, **kwargs):
-    result = bounded_run(
-        args, timeout=kwargs.pop("timeout", 240), capture_output=True, **kwargs
+    program = Path(args[0]).name
+    action = (
+        program if program in {"docker", "git", "openssl", "certutil"} else "process"
     )
+    if (
+        program == "docker"
+        and len(args) > 1
+        and args[1]
+        in {
+            "info",
+            "inspect",
+            "network",
+            "volume",
+            "run",
+            "exec",
+            "compose",
+            "ps",
+            "rm",
+            "start",
+            "stop",
+        }
+    ):
+        action += "-" + args[1]
+    try:
+        result = bounded_run(
+            args, timeout=kwargs.pop("timeout", 240), capture_output=True, **kwargs
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise ProcessFailure(action, None) from None
     if result.returncode:
-        raise RuntimeError("process-failed")
+        raise ProcessFailure(action, result.returncode)
     return result.stdout
 
 
@@ -106,21 +163,34 @@ def new_record(subject, targets):
     }
 
 
-def validate_targets(value, subject):
+def validate_targets(value, subject, baseline=None):
     require(
         isinstance(value, dict)
-        and set(value) == {"subject", "approvalReference", "limits"},
+        and set(value) == {"subject", "approvalReference", "baselineSha256", "limits"},
         "target-fields",
     )
     require(value["subject"] == subject, "target-candidate-mismatch")
+    reference = value["approvalReference"]
+    require(isinstance(reference, str), "owner-approval-required")
+    url = urlsplit(reference)
     require(
-        isinstance(value["approvalReference"], str)
-        and re.fullmatch(
-            r"https://dev\.azure\.com/[^\s?#]+(?:\?[^\s#]+)?",
-            value["approvalReference"],
-        ),
+        url.scheme == "https"
+        and url.netloc == "dev.azure.com"
+        and url.path == "/shengming0923/rss/_git/rss-identity/pullrequest/1057"
+        and not url.fragment
+        and re.fullmatch(r"discussionId=[1-9][0-9]*", url.query),
         "owner-approval-required",
     )
+    require(
+        isinstance(baseline, bytes) and digest(baseline) == value["baselineSha256"],
+        "baseline-digest",
+    )
+    measured = json.loads(baseline)
+    require(
+        measured.get("targets") is None and measured.get("result") == "measured",
+        "complete-baseline-required",
+    )
+    verify_record(measured, subject)
     limits = value["limits"]
     require(isinstance(limits, dict) and set(limits) == set(LIMITS), "target-limits")
     require(
@@ -133,7 +203,7 @@ def validate_targets(value, subject):
     return value
 
 
-def verify_record(record, subject):
+def verify_record(record, subject, baseline=None):
     require(
         set(record) == set(new_record(subject, None))
         and record["formatVersion"] == 1
@@ -171,7 +241,7 @@ def verify_record(record, subject):
     if record["targets"] is None:
         require(record["result"] == "measured", "baseline-is-not-acceptance")
     else:
-        target = validate_targets(record["targets"], subject)
+        target = validate_targets(record["targets"], subject, baseline)
         for name, direction in LIMITS.items():
             require(
                 measurements[name] <= target["limits"][name]
@@ -209,6 +279,24 @@ def image_identity(image):
         "architecture": image["Architecture"],
         "variant": image.get("Variant") or None,
     }
+
+
+def verify_browser_lock(lock, browser):
+    text = lock.decode()
+    sections = re.findall(r"^packages:\n(.*?)(?=^[^ \n]|\Z)", text, re.M | re.S)
+    require(len(sections) == 1, "browser-lock-mismatch")
+    entries = re.findall(
+        r"^  playwright-core@1\.60\.0:\n((?:    .*\n|\n)*)", sections[0], re.M
+    )
+    require(len(entries) == 1, "browser-lock-mismatch")
+    integrities = re.findall(
+        r"^    resolution: \{integrity: (sha512-[A-Za-z0-9+/=]+)\}$", entries[0], re.M
+    )
+    require(
+        browser.get("version") == "1.60.0"
+        and integrities == [browser.get("integrity")],
+        "browser-lock-mismatch",
+    )
 
 
 def candidate(args):
@@ -260,6 +348,7 @@ def candidate(args):
         "crates/identity-postgres/src/schema-signature.sha256",
         "deployment/providers.lock.json",
         "deployment/deploy.example.json",
+        "crates/identity-postgres/src/security-event-v3.json",
     ]:
         require(
             process(
@@ -310,24 +399,34 @@ def candidate(args):
             "node",
             tool["Id"],
             "-e",
-            "const p=require('/opt/playwright-core/package.json');console.log(JSON.stringify({version:p.version}))",
+            "const p=require('/opt/playwright-core/package.json');console.log(JSON.stringify({version:p.version,integrity:require('fs').readFileSync('/opt/playwright-integrity','utf8')}))",
         )
     )
-    require(
-        browser["version"] == "1.60.0" and b"playwright-core@1.60.0" in web_lock,
-        "browser-lock-mismatch",
-    )
+    verify_browser_lock(web_lock, browser)
     subject["browser"] = browser
+    subject["workload"] = {
+        "successfulLogins": 5,
+        "sessionConcurrency": [1, 4, 16],
+        "secondsPerConcurrency": 30,
+        "expiredAttempts": 256,
+    }
+    require(bool(args.targets) == bool(args.baseline), "targets-require-baseline")
+    baseline = args.baseline.read_bytes() if args.baseline else None
     targets = (
-        validate_targets(json.loads(args.targets.read_text()), subject)
+        validate_targets(json.loads(args.targets.read_text()), subject, baseline)
         if args.targets
         else None
     )
-    return details, tool, subject, targets
+    return details, tool, subject, targets, baseline
 
 
 class Run:
     def __init__(self, config):
+        require(
+            docker("info", "--format", "{{.ID}}").decode().strip()
+            == config["subject"]["resources"]["daemonId"],
+            "docker-daemon-mismatch",
+        )
         self.config = config
         self.work = Path(config["work"])
         self.work.mkdir(mode=0o700)
@@ -364,6 +463,9 @@ class Run:
         start = time.monotonic()
         try:
             item["observations"] = action() or {}
+            self.record["measurements"].update(
+                item["observations"].pop("measurements", {})
+            )
             item["status"] = "passed"
         except BaseException:
             item["status"] = "failed"
@@ -570,14 +672,29 @@ class Run:
         return path
 
     def snapshot(self, project=None):
+        # Full rows remain inside the private fixture; reports contain only IDs and digests.
         queries = {
-            "accounts": "SELECT tenant_id,principal_id,enabled,auth_epoch FROM identity_authority.accounts ORDER BY tenant_id,principal_id",
-            "memberships": "SELECT tenant_id,principal_id,active,epoch FROM identity_authority.memberships ORDER BY tenant_id,principal_id",
-            "providers": "SELECT tenant_id,provider_id,enabled,config_version,revocation_epoch,credential_version FROM identity_authority.providers ORDER BY tenant_id,provider_id",
-            "sessions": "SELECT tenant_id,principal_id,session_id,auth_epoch,membership_epoch,revoked_at FROM identity_authority.sessions ORDER BY tenant_id,session_id",
-            "attempts": "SELECT tenant_id,key,count,expires_at FROM identity_authority.attempts ORDER BY tenant_id,key",
-            "outbox": "SELECT tenant_id,message_id,seq FROM rss_transactional_messaging.outbox ORDER BY seq",
+            name: "SELECT * FROM identity_authority." + table + " ORDER BY " + order
+            for name, table, order in [
+                ("accounts", "accounts", "tenant_id,principal_id"),
+                ("memberships", "memberships", "tenant_id,principal_id"),
+                ("credentials", "local_credentials", "tenant_id,principal_id"),
+                ("providers", "providers", "tenant_id,provider_id"),
+                (
+                    "providerCredentials",
+                    "provider_credentials",
+                    "tenant_id,provider_id",
+                ),
+                ("externalIdentities", "external_identities", "tenant_id,identity_id"),
+                ("sessions", "sessions", "tenant_id,session_id"),
+                ("attempts", "attempts", "tenant_id,key"),
+                ("linkIntents", "link_intents", "tenant_id,intent_id"),
+                ("oidcTransactions", "oidc_transactions", "tenant_id,attempt_id"),
+            ]
         }
+        queries["outbox"] = (
+            "SELECT * FROM rss_transactional_messaging.outbox ORDER BY seq"
+        )
         return {
             name: json.loads(
                 self.sql(
@@ -699,7 +816,7 @@ class Run:
             "--env-file",
             kc_env,
             "-p",
-            f"{port}:8443",
+            f"{gateway}:{port}:8443",
             "--mount",
             f"type=bind,source={realm_file},target=/opt/keycloak/data/import/realm.json,readonly",
             "--mount",
@@ -909,10 +1026,55 @@ class Run:
         )
         final = self.snapshot()
         require(len(final["outbox"]) == len(after["outbox"]) + 1, "unknown-event-once")
+        row = final["outbox"][-1]
+        principal = self.sql(
+            "SELECT principal_id FROM identity_authority.local_credentials WHERE login_key='uncertain';"
+        )
+        account = next(a for a in final["accounts"] if a["principal_id"] == principal)
+        member = next(a for a in final["memberships"] if a["principal_id"] == principal)
+        envelope = row["envelope"]
+        payload = json.loads(bytes(envelope["payload"]))
+        require(
+            row["tenant_id"] == TENANTS[0]
+            and row["message_id"] == envelope["id"]
+            and row["domain"] == "identity.security"
+            and row["status"] == "pending",
+            "unknown-event-envelope",
+        )
+        require(
+            envelope["tenant"] == TENANTS[0]
+            and envelope["domain"] == "identity.security"
+            and envelope["route"] == "account.changed"
+            and envelope["contract"] == "identity.account.security"
+            and envelope["version"] == "v3"
+            and envelope["schema"]
+            == "sha256:"
+            + file_digest(ROOT / "crates/identity-postgres/src/security-event-v3.json"),
+            "unknown-event-contract",
+        )
+        require(
+            payload
+            == {
+                "action": "account_created",
+                "tenant": TENANTS[0],
+                "principal": principal,
+                "actor": PRINCIPALS[0],
+                "epoch": account["auth_epoch"],
+                "state": {
+                    "enabled": account["enabled"],
+                    "member_active": member["active"],
+                    "membership_epoch": member["epoch"],
+                },
+            },
+            "unknown-event-state-correlation",
+        )
         return {
             "rollbackPreserved": True,
             "responseLossObservedCommitted": True,
             "durableEvents": len(final["outbox"]),
+            "outboxSha256": digest(
+                json.dumps(final["outbox"], sort_keys=True).encode()
+            ),
             "eventIds": [row["message_id"] for row in final["outbox"]],
         }
 
@@ -1051,16 +1213,89 @@ class Run:
         )
         operate.require_closed(self.source)
 
+    def database_probe(self, role, password_file, accepted):
+        env = self.write(
+            "pg-probe.env",
+            "PGPASSWORD="
+            + Path(password_file).read_text()
+            + "\nPGSSLMODE=verify-full\nPGSSLROOTCERT=/run/ca.pem\n",
+        )
+        networks = json.loads(
+            docker("inspect", self.compose("ps", "-q", "postgres").decode().strip())
+        )[0]["NetworkSettings"]["Networks"]
+        require(len(networks) == 1, "postgres-probe-network")
+        result = bounded_run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--pull=never",
+                "--label",
+                "rss.identity.t3=" + self.prefix,
+                "--network",
+                next(iter(networks)),
+                "--env-file",
+                env,
+                "--mount",
+                "type=bind,source="
+                + self.data["runtime"]["database"]["caFile"]
+                + ",target=/run/ca.pem,readonly",
+                "--entrypoint",
+                "psql",
+                self.images["postgres"],
+                "-X",
+                "-qAt",
+                "-h",
+                "postgres",
+                "-U",
+                role,
+                "-d",
+                "identity",
+                "-c",
+                "SELECT current_user",
+            ],
+            timeout=30,
+            capture_output=True,
+        )
+        require(
+            result.returncode == 0 and result.stdout.decode().strip() == role
+            if accepted
+            else result.returncode != 0
+            and b"password authentication failed" in result.stderr,
+            "database-credential-probe",
+        )
+
     def database_rotation(self):
         self.op("close")
-        value, path = self.secret("next-runtime-password")
-        self.sql("ALTER ROLE identity_runtime WITH PASSWORD '" + value + "';")
+        fields = [
+            ("identity_runtime", self.data["runtime"]["database"], "passwordFile"),
+            ("identity_maintenance", self.data, "maintenancePasswordFile"),
+            ("postgres", self.data, "ownerPasswordFile"),
+        ]
+        _, wrong = self.secret("wrong-database-password")
+        for role, settings, field in fields:
+            old = settings[field]
+            self.database_probe(role, old, True)
+            self.database_probe(role, wrong, False)
+            value, path = self.secret("next-" + role + "-password")
+            self.sql("ALTER ROLE " + role + " WITH PASSWORD '" + value + "';")
+            self.database_probe(role, old, False)
+            self.database_probe(role, path, True)
+            settings[field] = path
         self.rejected_runtime_start()
-        self.data["runtime"]["database"]["passwordFile"] = path
-        self.render("new-database-password", self.data)
+        self.op("verify", reject=True)
+        admin_file = self.write("db-rotation-admin-password", self.admin_password)
+        self.op("recover", TENANTS[0], "operator", admin_file, reject=True)
+        self.render("new-database-passwords", self.data)
+        self.op("verify")
+        self.op("recover", TENANTS[0], "operator", admin_file)
         self.op("open")
         self.browser("pg-ready")
-        return {"retiredPasswordRejected": True, "newPasswordAccepted": True}
+        return {
+            "roles": [role for role, _, _ in fields],
+            "wrongAndRetiredPasswordsRejected": True,
+            "newPasswordsAccepted": True,
+        }
 
     def tls_rotation(self):
         self.op("close")
@@ -1175,6 +1410,9 @@ class Run:
         self.source = self.restored
         return {
             "matchedSafetyCut": True,
+            "outboxSha256": digest(
+                json.dumps(restored["outbox"], sort_keys=True).encode()
+            ),
             "sourceAndTargetGuards": True,
             "operatorOpenedAfterVerification": True,
             "dumpSha256": file_digest(self.backup_b),
@@ -1202,7 +1440,29 @@ class Run:
                 "SELECT count(*) FROM identity_authority.attempts WHERE key LIKE 't3-expired-%';"
             )
         )
+        ids = self.compose("ps", "--quiet").decode().split()
+
+        def stats():
+            return [
+                json.loads(row)
+                for row in docker(
+                    "stats", "--no-stream", "--format", "{{json .}}", *ids
+                )
+                .decode()
+                .splitlines()
+            ]
+
+        resources_before = stats()
+        event_count = int(
+            self.sql("SELECT count(*) FROM rss_transactional_messaging.outbox;")
+        )
         result = self.browser("capacity", recoveredAdminPassword=self.admin_password)
+        resources_after = stats()
+        committed_events = (
+            int(self.sql("SELECT count(*) FROM rss_transactional_messaging.outbox;"))
+            - event_count
+        )
+        require(committed_events >= 10, "capacity-durable-events")
         after = int(
             self.sql(
                 "SELECT count(*) FROM identity_authority.attempts WHERE key LIKE 't3-expired-%';"
@@ -1212,6 +1472,9 @@ class Run:
         self.record["measurements"].update(result["measurements"])
         self.record["measurements"]["expiredAttemptsRemoved"] = before - after
         return {
+            "resourcesBefore": resources_before,
+            "resourcesAfter": resources_after,
+            "committedEvents": committed_events,
             "expiredAttemptsBefore": before,
             "expiredAttemptsAfter": after,
             **result["counts"],
@@ -1291,17 +1554,12 @@ class Run:
             ]:
                 self.step(name, action)
         except BaseException as error:
-            self.record["failure"] = {
-                "stage": self.record["steps"][-1]["name"]
+            self.record["failure"] = failure_fact(
+                error,
+                self.record["steps"][-1]["name"]
                 if self.record["steps"]
                 else "preflight",
-                "reason": "interrupted"
-                if isinstance(error, (KeyboardInterrupt, SystemExit))
-                else str(error)
-                if isinstance(error, ValueError)
-                and re.fullmatch("[a-z-]{1,80}", str(error))
-                else "execution-or-assertion",
-            }
+            )
             # Diagnostic detail remains private, and must never contain a request/response dump.
             self.write("failure-type", type(error).__name__ + ": " + str(error)[:300])
         finally:
@@ -1313,7 +1571,13 @@ class Run:
                 self.record["result"] = "failed"
             else:
                 try:
-                    verify_record(self.record, self.config["subject"])
+                    verify_record(
+                        self.record,
+                        self.config["subject"],
+                        self.config["baseline"].encode()
+                        if self.config.get("baseline")
+                        else None,
+                    )
                 except ValueError:
                     self.record["failure"] = {
                         "stage": "acceptance",
@@ -1325,17 +1589,68 @@ class Run:
         return self.record["result"] != "failed"
 
 
+def cleanup_operator(prefix, operator, volume):
+    remaining = []
+    # Stop the operator first: a killed docker-exec client can leave its child alive.
+    # Do not let it create resources concurrently with the final sweep.
+    try:
+        ids = (
+            docker("ps", "--all", "--quiet", "--filter", "name=^/" + operator + "$")
+            .decode()
+            .split()
+        )
+        if ids:
+            docker("rm", "-f", "-v", *ids)
+    except BaseException:
+        remaining.append("operator")
+    for label in [
+        "com.docker.compose.project=" + prefix + suffix
+        for suffix in ["-source", "-restored", "-stale"]
+    ] + ["rss.identity.t3=" + prefix]:
+        try:
+            ids = (
+                docker("ps", "--all", "--quiet", "--filter", "label=" + label)
+                .decode()
+                .split()
+            )
+            if ids:
+                docker("rm", "-f", "-v", *ids)
+            for resource in ["volume", "network"]:
+                ids = (
+                    docker(resource, "ls", "--quiet", "--filter", "label=" + label)
+                    .decode()
+                    .split()
+                )
+                if ids:
+                    docker(resource, "rm", *ids)
+            require(
+                not docker(
+                    "ps", "--all", "--quiet", "--filter", "label=" + label
+                ).strip(),
+                "cleanup-container-remains",
+            )
+            for resource in ["volume", "network"]:
+                require(
+                    not docker(
+                        resource, "ls", "--quiet", "--filter", "label=" + label
+                    ).strip(),
+                    "cleanup-resource-remains",
+                )
+        except BaseException:
+            remaining.append(label)
+    return remaining
+
+
 def outside(args):
     require(
         args.record.is_absolute() and not args.record.exists(),
         "fresh-absolute-record-required",
     )
-    details, tool, subject, targets = candidate(args)
+    details, tool, subject, targets, baseline = candidate(args)
     prefix = "identity-t3-" + secrets.token_hex(5)
-    volume = prefix + "-private"
-    operator = prefix + "-operator"
-    mount = None
-    report = None
+    volume, operator = prefix + "-private", prefix + "-operator"
+    report = new_record(subject, targets)
+    save(args.record, report)
     try:
         docker("volume", "create", "--label", "rss.identity.t3=" + prefix, volume)
         mount = json.loads(docker("volume", "inspect", volume))[0]["Mountpoint"]
@@ -1369,6 +1684,7 @@ def outside(args):
                 "hack",
                 "deployment",
                 "crates/identity-postgres/src/schema-signature.sha256",
+                "crates/identity-postgres/src/security-event-v3.json",
             ]
         )
         docker("exec", operator, "mkdir", "-p", mount + "/source")
@@ -1389,6 +1705,7 @@ def outside(args):
             "prefix": prefix,
             "subject": subject,
             "targets": targets,
+            "baseline": baseline.decode() if baseline else None,
             "images": {k: v["Id"] for k, v in details.items()},
         }
         docker(
@@ -1415,83 +1732,40 @@ def outside(args):
             timeout=5400,
         )
         raw = docker("exec", operator, "cat", mount + "/result.json")
-        report = json.loads(raw)
-        require(report["subject"] == subject, "returned-subject-mismatch")
-        save(args.record, report)
-        if status.returncode or report["result"] == "failed":
-            # Retain only a closed classification from the private diagnostic, no raw message.
-            print("T3 failed at " + report["failure"]["stage"], file=sys.stderr)
-            return False
-        verify_record(report, subject)
-        return True
+        returned = json.loads(raw)
+        require(returned["subject"] == subject, "returned-subject-mismatch")
+        report = returned
+        if status.returncode and not report["failure"]:
+            raise ProcessFailure("operator", status.returncode)
+    except BaseException as error:
+        report["failure"] = failure_fact(error, "operator")
     finally:
-        failure = False
-        # A killed docker-exec client does not prove the remote child terminated.
-        # Reap only resources in this fresh run's exact ownership labels.
-        for project in [prefix + "-source", prefix + "-restored", prefix + "-stale"]:
+        # A copied child result is provisional until its operator and private volume are gone.
+        try:
+            remaining = cleanup_operator(prefix, operator, volume)
+        except BaseException as error:
+            report["failure"] = failure_fact(error, "cleanup")
+            remaining = ["operator-workspace"]
+        report["cleanup"] = {
+            "status": "failed" if remaining else "passed",
+            "remaining": remaining,
+        }
+        if report["failure"] or report["cleanup"]["status"] != "passed":
+            report["result"] = "failed"
+        else:
             try:
-                ids = (
-                    docker(
-                        "ps",
-                        "--all",
-                        "--quiet",
-                        "--filter",
-                        "label=com.docker.compose.project=" + project,
-                    )
-                    .decode()
-                    .split()
-                )
-                if ids:
-                    docker("rm", "-f", "-v", *ids)
-                for resource in ["volume", "network"]:
-                    ids = (
-                        docker(
-                            resource,
-                            "ls",
-                            "--quiet",
-                            "--filter",
-                            "label=com.docker.compose.project=" + project,
-                        )
-                        .decode()
-                        .split()
-                    )
-                    if ids:
-                        docker(resource, "rm", *ids)
-            except Exception:
-                failure = True
-        try:
-            ids = (
-                docker(
-                    "ps",
-                    "--all",
-                    "--quiet",
-                    "--filter",
-                    "label=rss.identity.t3=" + prefix,
-                )
-                .decode()
-                .split()
-            )
-            if ids:
-                docker("rm", "-f", "-v", *ids)
-        except Exception:
-            failure = True
-        try:
-            docker("rm", "-f", "-v", operator)
-        except Exception:
-            failure = True
-        try:
-            docker("volume", "rm", volume)
-        except Exception:
-            failure = True
-        if failure:
-            if report:
-                report["cleanup"] = {
-                    "status": "failed",
-                    "remaining": ["operator-workspace"],
-                }
+                verify_record(report, subject, baseline)
+            except BaseException as error:
+                report["failure"] = failure_fact(error, "finalize")
                 report["result"] = "failed"
-                save(args.record, report)
-            raise RuntimeError("operator-workspace-cleanup-unconfirmed")
+        save(args.record, report)
+    if report["result"] == "failed":
+        print(
+            "T3 failed: "
+            + (report["failure"] or {"reason": "cleanup-unconfirmed"})["reason"],
+            file=sys.stderr,
+        )
+    return report["result"] in ["measured", "passed"]
 
 
 def main():
@@ -1503,6 +1777,7 @@ def main():
     p.add_argument("--web-repo", type=Path)
     p.add_argument("--record", type=Path)
     p.add_argument("--targets", type=Path)
+    p.add_argument("--baseline", type=Path)
     args = p.parse_args()
 
     def interrupted(signum, frame):
@@ -1526,15 +1801,12 @@ def main():
                 "required-inputs",
             )
             result = outside(args)
-    except Exception:
+    except BaseException as error:
         if args.record and args.record.is_absolute() and not args.record.exists():
             record = new_record({}, None)
             record.update(
                 result="failed",
-                failure={
-                    "stage": "preflight-or-operator",
-                    "reason": "execution-or-input-rejected",
-                },
+                failure=failure_fact(error, "preflight-or-operator"),
                 cleanup={"status": "unconfirmed", "remaining": []},
             )
             save(args.record, record)
