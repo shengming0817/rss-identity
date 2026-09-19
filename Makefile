@@ -6,7 +6,7 @@ export PYTHONDONTWRITEBYTECODE := 1
 CARGO_TARGET_DIR ?= $(REPOSITORY_ROOT)/target
 export CARGO_TARGET_DIR
 .PHONY: ci check test test-pg test-oidc dependencies licenses
-ci: check test dependencies licenses test-pg test-oidc test-federated test-assembly
+ci: check test dependencies licenses test-pg test-oidc test-federated test-assembly test-gateway
 check:
 	cargo fmt --all -- --check
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -39,6 +39,10 @@ test-consumers:
 .PHONY: test-assembly
 test-assembly:
 	$(PYTHON) hack/providers.py assembly
+
+.PHONY: test-gateway
+test-gateway:
+	$(PYTHON) hack/gateway_t2.py
 
 .PHONY: test-ui image test-reference
 test-ui:
