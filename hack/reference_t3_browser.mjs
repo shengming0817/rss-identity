@@ -460,11 +460,15 @@ async function local() {
   await expectOldCookie(c, currentCookie);
   await login(c, "local", input.nextPassword);
   const allCookie = await c.context.cookies();
+  const peer = await open("local-peer", tenant, true);
+  await login(peer, "local", input.nextPassword);
+  const peerCookie = await peer.context.cookies();
   await c.page
     .getByRole("button", { name: /Sign out all sessions|退出全部会话/ })
     .click();
   await c.page.waitForURL(`**/tenants/${tenant}/login`);
   await expectOldCookie(c, allCookie);
+  await expectOldCookie(peer, peerCookie);
   const limited = await open("limited", tenant, true);
   let failures = 0;
   const failedTimes = [];
@@ -722,7 +726,16 @@ async function responseLoss() {
     .locator("xpath=ancestor::form")
     .locator("button[type=submit]")
     .click();
-  await a.page.getByRole("alert").waitFor();
+  // The shared session boundary marks transport loss unavailable and unmounts
+  // the management view; assert that actual product outcome rather than its old alert.
+  await a.page.waitForURL(
+    (u) =>
+      u.pathname === "/auth/error" &&
+      u.searchParams.get("reason") === "unavailable",
+  );
+  await a.page
+    .getByRole("heading", { name: "Identity service unavailable", exact: true })
+    .waitFor();
   await new Promise((r) => setTimeout(r, 300));
   check(requests === 1, "unknown-write-not-retried");
   await a.page.unroute(`${origin}/api/v2/tenants/${tenant}/accounts`);

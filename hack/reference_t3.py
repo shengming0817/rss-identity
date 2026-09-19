@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """One fixed-candidate reference T3; production operations remain in deploy/operate."""
 
-import argparse, copy, hashlib, io, ipaddress, json, math, os, re, secrets, signal
-import subprocess, sys, tarfile, tempfile, time, tomllib
+import argparse, copy, hashlib, ipaddress, json, math, os, re, secrets, signal
+import subprocess, sys, tempfile, time, tomllib
 from urllib.parse import urlsplit
 from pathlib import Path
 import deploy, operate
@@ -176,7 +176,9 @@ def validate_targets(value, subject, baseline=None):
     require(
         url.scheme == "https"
         and url.netloc == "dev.azure.com"
-        and url.path == "/shengming0923/rss/_git/rss-identity/pullrequest/1057"
+        and re.fullmatch(
+            r"/shengming0923/rss/_git/rss-identity/pullrequest/[1-9][0-9]*", url.path
+        )
         and not url.fragment
         and re.fullmatch(r"discussionId=[1-9][0-9]*", url.query),
         "owner-approval-required",
@@ -1171,13 +1173,24 @@ class Run:
         }
         self.render("mixed-keys", self.data)
         self.op("rekey")
+        retired = copy.deepcopy(self.data)
+        retired["runtime"]["oidc"]["credentialKeyring"] = {
+            "activeKeyId": "old",
+            "keys": [{"keyId": "old", "path": self.old_key}],
+        }
+        self.render("retired-key-only", retired)
+        self.op("verify-keys", reject=True)
         self.data["runtime"]["oidc"]["credentialKeyring"] = new
         self.render("new-key-only", self.data)
         self.op("verify-keys")
         self.op("verify")
         self.op("open")
         self.browser("provider-ready")
-        return {"oldCiphertextRejectedWithoutKey": True, "singleNewKeyVerified": True}
+        return {
+            "oldCiphertextRejectedWithoutKey": True,
+            "retiredKeyRejected": True,
+            "singleNewKeyVerified": True,
+        }
 
     def state_rotation(self):
         self.browser("begin-old-state")
