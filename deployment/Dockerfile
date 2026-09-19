@@ -1,10 +1,7 @@
 # syntax=docker/dockerfile:1
 ARG RUST_IMAGE
 ARG RUNTIME_IMAGE
-FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS build
-RUN apt-get update && apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu=4:12.2.0-3 libc6-dev-amd64-cross=2.36-8cross1 && rm -rf /var/lib/apt/lists/*
-RUN rustup target add x86_64-unknown-linux-gnu
-ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
+FROM ${RUST_IMAGE} AS build
 WORKDIR /build
 # The pinned image already contains this compiler; release needs no rustfmt/clippy download.
 ENV RUSTUP_TOOLCHAIN=1.96.0 CARGO_NET_GIT_FETCH_WITH_CLI=true
@@ -24,9 +21,9 @@ RUN --network=none python3 hack/check_dependencies.py --metadata /build/metadata
 FROM ${RUNTIME_IMAGE} AS runtime
 ARG IDENTITY_REVISION
 LABEL org.opencontainers.image.revision=${IDENTITY_REVISION}
-COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-server /usr/local/bin/identity-server
-COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-admin /usr/local/bin/identity-admin
-COPY --from=build /build/target/x86_64-unknown-linux-gnu/release/identity-migrate /usr/local/bin/identity-migrate
+COPY --from=build /build/target/release/identity-server /usr/local/bin/identity-server
+COPY --from=build /build/target/release/identity-admin /usr/local/bin/identity-admin
+COPY --from=build /build/target/release/identity-migrate /usr/local/bin/identity-migrate
 RUN test "${#IDENTITY_REVISION}" = 40 && test -z "$(printf '%s' "$IDENTITY_REVISION" | tr -d '0-9a-f')"
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/identity-server"]

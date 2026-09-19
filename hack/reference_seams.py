@@ -7,6 +7,14 @@ import operate
 
 STEPS=['reject-backend-as-web','render','install','initialize','open','tls-ui-context','recover','login-after-recover','seed-credential','close','reject-new-key-before-rekey','render-rotation','rekey','render-new-key','verify-keys','verify','open-after-rekey','login-after-rekey','close-after-rekey','backup','check-backup','render-web-update','check-backup-after-web-update','open-web-update','web-version','close-web-update','render-restore','restore','verify-restored-keys','open-restored','restored-login','close-restored']
 
+def product_image(image):
+    return {'id':image['Id'],'revision':image['Config']['Labels']['org.opencontainers.image.revision'],'platform':{'os':image['Os'],'architecture':image['Architecture'],'variant':image.get('Variant') or None}}
+
+def deployment_images(details,previous_web):
+    images={name:image['Id'] for name,image in details.items()}
+    updated_web=images['web'];images['web']=previous_web['Id']
+    return images,updated_web
+
 def save(path,record):
     fd,name=tempfile.mkstemp(prefix='.'+path.name,dir=path.parent)
     try:
@@ -18,7 +26,7 @@ def save(path,record):
 
 def verify_record(path,subject):
     record=json.loads(path.read_text())
-    if set(record)!={'formatVersion','scope','subject','steps','result','failure','cleanup'} or type(record['formatVersion']) is not int or record['formatVersion']!=2:raise ValueError('record schema')
+    if set(record)!={'formatVersion','scope','subject','steps','result','failure','cleanup'} or type(record['formatVersion']) is not int or record['formatVersion']!=3:raise ValueError('record schema')
     if record['scope']!='image-operation-seams' or record['subject']!=subject:raise ValueError('record subject')
     if record['result']!='passed' or record['failure'] is not None or record['cleanup']!={'status':'passed','remaining':[]}:raise ValueError('record not successful')
     if not isinstance(record['steps'],list) or len(record['steps'])!=len(STEPS):raise ValueError('record steps')
@@ -55,13 +63,12 @@ c.close()
 def run(identity_image,web_image,previous_web_image,output,work):
     if os.geteuid()!=0:raise ValueError('reference runner requires Linux deployment owner root')
     if output.exists() or work.exists():raise ValueError('fresh record and work directory required')
-    images=deploy.resolve_images(identity_image,web_image)
-    def version(name):return deploy.inspect_image(images[name],True)['Config']['Labels']['org.opencontainers.image.revision']
-    previous=deploy.inspect_image(previous_web_image,True)['Id']
-    if previous==images['web']:raise ValueError('web update requires different image IDs')
-    subject={'previousWebImage':previous,'identityImage':images['identity'],'webImage':images['web'],'identityRevision':version('identity'),'webRevision':version('web')}
-    updated_web=images['web'];images['web']=previous
-    record={'formatVersion':2,'scope':'image-operation-seams','subject':subject,'steps':[],'result':'running','failure':None,'cleanup':{'status':'pending','remaining':[]}}
+    details=deploy.resolve_image_details(identity_image,web_image)
+    previous_web=deploy.inspect_image(previous_web_image,True)
+    if previous_web['Id']==details['web']['Id']:raise ValueError('web update requires different image IDs')
+    subject={'images':{'identity':product_image(details['identity']),'web':product_image(details['web']),'previousWeb':product_image(previous_web)}}
+    images,updated_web=deployment_images(details,previous_web)
+    record={'formatVersion':3,'scope':'image-operation-seams','subject':subject,'steps':[],'result':'running','failure':None,'cleanup':{'status':'pending','remaining':[]}}
     save(output,record)
     work.mkdir(mode=0o700)
     prefix='identity-seam-'+secrets.token_hex(5);source=prefix+'-source';target=prefix+'-restored'
@@ -170,7 +177,7 @@ def run(identity_image,web_image,previous_web_image,output,work):
         def web_version():
             login(source)
             response=http(source,'/identity-build.json')
-            if response['status']!=200 or json.loads(response['body'])!={'revision':subject['webRevision']}:raise AssertionError('web update not served')
+            if response['status']!=200 or json.loads(response['body'])!={'revision':subject['images']['web']['revision']}:raise AssertionError('web update not served')
             ids=process(['docker','ps','--filter','label=com.docker.compose.project='+source,'--filter','label=com.docker.compose.service=identity','--quiet']).decode().split()
             actual=json.loads(process(['docker','inspect',*ids]))
             if len(actual)!=1 or actual[0]['Image']!=images['identity']:raise AssertionError('backend image changed')

@@ -30,7 +30,7 @@ JSON format_version 只表示文件结构；schema version 只表示数据库结
 
 ## 候选与来源
 
-部署 provider 和 builder/runtime 镜像的唯一锁为 deployment/providers.lock.json；测试引用相同锁。候选构建要求干净 Identity HEAD 和固定、干净 rss-web SHA + lock + dist identity。Git 凭据仅进入 BuildKit fetch secret，编译 RUN 离线；最终镜像只包含所需 binaries/静态 UI。Linux amd64 候选输出 server/operator/gateway OCI archives、独立 binaries 及实际编译 RSS feature 证据；不是 registry 发布或产品 T3。
+部署 provider 和 builder/runtime 镜像的唯一锁为 deployment/providers.lock.json；测试引用相同锁。该历史候选输出机制已经退出，当前镜像构建、平台选择与验证入口以[部署镜像文档](../../deployment/images.md)为准；本 ADR 不再保留候选平台或输出形态说明。
 
 #2357 的 owner 已在本项确认继续限定接受 RSA 公钥验签路径，必须以最终生产依赖图和用途复核为准，不扩大私钥操作或其它公告例外。
 

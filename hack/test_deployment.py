@@ -44,6 +44,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(compose['services']['postgres']['healthcheck']['test'],['CMD','pg_isready','-h','127.0.0.1','-U','postgres'])
             self.assertNotIn('keycloak',json.dumps(compose));self.assertNotIn('hydra',json.dumps(compose))
             for service in compose['services'].values():
+                self.assertNotIn('platform',service)
                 for volume in service.get('volumes',[]):
                     if volume['type']=='bind':self.assertTrue(Path(volume['source']).is_file())
     def test_compose_preserves_dollar_literals(self):
@@ -67,9 +68,11 @@ class DeploymentTests(unittest.TestCase):
             for call in run.call_args_list[:3]:
                 argv=call.args[0]
                 self.assertEqual(argv[argv.index('--network')+1],'none')
+                self.assertNotIn('--platform',argv)
                 self.assertIn('--check-config',argv)
             argv=run.call_args_list[3].args[0]
             self.assertEqual(argv[argv.index('--network')+1],'none')
+            self.assertNotIn('--platform',argv)
             self.assertEqual(argv[argv.index('--entrypoint')+1],'sh')
             self.assertIn(images['web'],argv)
             self.assertIn('nginx -t',argv[-1])
@@ -148,6 +151,7 @@ class OperationTests(unittest.TestCase):
             args=argparse.Namespace(command='check-backup',project='identity-source',deployment=root/'output',backup=archive)
             def execute(argv,**kwargs):
                 self.assertEqual(argv[argv.index('--network')+1],'none');self.assertEqual(argv[-2:],[images['postgres'],'--list']);self.assertEqual(kwargs['stdin'].read(),b'fixture')
+                self.assertNotIn('--platform',argv)
                 return subprocess.CompletedProcess(argv,0)
             with patch.object(operate,'deployment_images',return_value=images['identity']),patch.object(operate,'command',side_effect=execute) as run:
                 operate.operate(args);self.assertEqual(run.call_count,1)
@@ -165,12 +169,12 @@ class ImageContractTests(unittest.TestCase):
                 mounts=[v['target'] for v in services[name]['volumes']]
                 for secret in forbidden:self.assertNotIn('/run/input/'+secret,mounts)
 
-    def test_inspection_rejects_missing_wrong_platform_user_or_version(self):
-        good={'Id':'sha256:'+'1'*64,'Os':'linux','Architecture':'amd64','Config':{'User':'10001:10001','Labels':{'org.opencontainers.image.revision':'a'*40}}}
+    def test_inspection_uses_daemon_platform_and_rejects_invalid_identity_user_or_version(self):
+        good={'Id':'sha256:'+'1'*64,'Os':'linux','Architecture':'arm64','Variant':'v8','Config':{'User':'10001:10001','Labels':{'org.opencontainers.image.revision':'a'*40}}}
         with patch('subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout=json.dumps([good]))) as run:
             self.assertEqual(deploy.inspect_image('backend:ready',True),good)
-            self.assertEqual(run.call_args.args[0],['docker','image','inspect','--platform','linux/amd64',good['Id']])
-        for image in [[],[{**good,'Architecture':'arm64'}],[{**good,'Id':'mutable:tag'}],[{**good,'Config':{'User':'0'}}],[{**good,'Config':{'User':'10001:10001','Labels':{}}}]]:
+            run.assert_called_once_with(['docker','image','inspect','backend:ready'],check=True,capture_output=True,timeout=30)
+        for image in [[],[{**good,'Os':'windows'}],[{**good,'Id':'mutable:tag'}],[{**good,'Config':{'User':'0'}}],[{**good,'Config':{'User':'10001:10001','Labels':{}}}]]:
             with patch('subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout=json.dumps(image))):
                 with self.assertRaises(ValueError):deploy.inspect_image('fixture',True)
         with patch('subprocess.run',side_effect=subprocess.CalledProcessError(1,['docker'])):
@@ -217,13 +221,7 @@ class ImageContractTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stderr.decode())
             arguments=(root/'called').read_text()
             self.assertIn('IDENTITY_REVISION='+head,arguments);self.assertNotIn('untrusted',arguments);self.assertTrue(arguments.endswith('-\n'))
+            self.assertNotIn('--platform',arguments)
             (root/'called').unlink();(root/'Makefile').write_text((root/'Makefile').read_text()+'\n# dirty\n')
             result=subprocess.run(['make','image'],cwd=root,env=env,capture_output=True,timeout=10)
             self.assertNotEqual(result.returncode,0);self.assertFalse((root/'called').exists())
-
-    def test_platform_validation_keeps_daemon_addressable_index_identity(self):
-        index='sha256:'+'1'*64;child='sha256:'+'2'*64
-        selected={'Id':child,'Os':'linux','Architecture':'amd64','Config':{'User':'10001:10001','Labels':{'org.opencontainers.image.revision':'a'*40}}}
-        replies=[subprocess.CompletedProcess([],0,stdout=json.dumps([{'Id':index}])),subprocess.CompletedProcess([],0,stdout=json.dumps([selected]))]
-        with patch('subprocess.run',side_effect=replies):
-            self.assertEqual(deploy.inspect_image('registry/image:ready',True)['Id'],index)

@@ -24,7 +24,7 @@ python3 hack/operate.py --deployment /private/rendered --project identity-main o
 
 回退只允许已验证、同 schema 和同 instance/storage 配置的后端镜像。切换前 close，在新私有渲染目录绑定镜像，verify 后 open；不得回滚数据库撤销状态。未知提交不等于失败回滚。实际切换和故障恢复证据由 #2366 保存。
 
-全部服务（含 postgres、volume-init）由 compose.json 固定 image ID、平台和 pull_policy=never，操作前核对本地镜像存在。所有操作按 Docker daemon ID 与 project 获取跨进程排他锁；restore 按排序同时锁源、目标，锁竞争立即拒绝。每个 Docker 主机使用唯一部署 owner 和共享的 `/var/tmp/rss-identity-operations`；直接 Docker 操作或另一个未共享锁目录的控制主机不受该锁约束，维护期间必须禁止这些旁路。锁文件保留，文件描述符关闭释放锁；不要手删活跃锁文件。
+全部服务（含 postgres、volume-init）由 compose.json 固定 image ID 和 pull_policy=never，不写平台字段；操作前核对本地镜像存在，当前 Docker daemon 负责选择并运行其默认平台。所有操作按 Docker daemon ID 与 project 获取跨进程排他锁；restore 按排序同时锁源、目标，锁竞争立即拒绝。每个 Docker 主机使用唯一部署 owner 和共享的 `/var/tmp/rss-identity-operations`；直接 Docker 操作或另一个未共享锁目录的控制主机不受该锁约束，维护期间必须禁止这些旁路。锁文件保留，文件描述符关闭释放锁；不要手删活跃锁文件。
 
 操作输出是脱敏 JSON：`operation`、`stage`、`reason`、`outcomeKnown`、`status`。前置拒绝与只读核验失败标识已知结果；写入进程超时/失败或排空未确认标识未知，先运行 `verify`、`verify-keys` 或只读 `docker inspect`，不可自动重试写入。原始 stderr、配置和秘密值不进入诊断。
 

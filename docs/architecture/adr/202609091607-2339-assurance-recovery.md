@@ -28,7 +28,7 @@ step-up 复用 Login purpose、replacement_session 和唯一 callback，必须�
 
 T1 证明 claims/配置/时钟边界；真实 PG、Keycloak TOTP 和 Hydra T2 证明事务、回调、下游、原生恢复及轮换。`measure-capacity` 是有限组件测量，不进入 CI 性能门禁；记录资源/架构、源码/lock、请求数、成功/失败和耗时。清理指标只代表一次失效处理，不等于安全窗口末端的最终删除。
 
-当前未冻结真实生产容量、RPO/RTO；本机 ARM 组件结果不证明 Linux amd64 候选的生产 SLO。实际候选浏览器 MFA、恢复后重新开放与秘密注入/轮换 join 由独立 T3 持有。
+当前未冻结真实生产容量、RPO/RTO；单次本机组件结果不证明其它执行环境或生产 SLO。实际浏览器 MFA、恢复后重新开放与秘密注入/轮换 join 由独立 T3 持有。
 
 ## Primary upstream
 

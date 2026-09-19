@@ -29,27 +29,25 @@ def read(path,secret=False):
 
 def inspect_image(reference, product=False):
     require(isinstance(reference,str) and reference and not reference.startswith('-'),'image required')
-    def inspect(*args):
-        result=subprocess.run(['docker','image','inspect',*args],check=True,capture_output=True,timeout=30)
-        values=json.loads(result.stdout);require(len(values)==1,'ambiguous image')
-        return values[0]
-    # Containerd may return an unaddressable child manifest ID with --platform.
-    # Keep the daemon's addressable image/index ID and validate its selected platform.
-    identity=inspect(reference)['Id']
-    require(re.fullmatch(r'sha256:[a-f0-9]{64}',identity),'invalid image ID')
-    image=inspect('--platform','linux/amd64',identity)
-    image['Id']=identity
-    require(image['Os']=='linux' and image['Architecture']=='amd64','image platform must be linux/amd64')
+    result=subprocess.run(['docker','image','inspect',reference],check=True,capture_output=True,timeout=30)
+    values=json.loads(result.stdout);require(len(values)==1,'ambiguous image')
+    image=values[0]
+    require(re.fullmatch(r'sha256:[a-f0-9]{64}',image['Id']),'invalid image ID')
+    require(image.get('Os')=='linux','image OS must be linux')
+    require(isinstance(image.get('Architecture'),str) and image['Architecture'],'image architecture required')
     if product:
         require(image['Config']['User']=='10001:10001','image user must be 10001:10001')
         revision=(image['Config'].get('Labels') or {}).get('org.opencontainers.image.revision','')
         require(re.fullmatch('[a-f0-9]{40}',revision),'image revision required')
     return image
 
-def resolve_images(identity_image,web_image):
+def resolve_image_details(identity_image,web_image):
     # Inspect only: the deployment owner explicitly builds or pulls beforehand.
-    return {name:inspect_image(ref,name in ['identity','web'])['Id'] for name,ref in
+    return {name:inspect_image(ref,name in ['identity','web']) for name,ref in
             [('identity',identity_image),('web',web_image),('postgres',IMAGES['postgres']),('runtime',IMAGES['runtime'])]}
+
+def resolve_images(identity_image,web_image):
+    return {name:image['Id'] for name,image in resolve_image_details(identity_image,web_image).items()}
 
 def stage(data,out,images,final):
     fields(data,{'runtime','ownerPasswordFile','maintenancePasswordFile','tlsCertificateFile','tlsKeyFile','postgresCertificateFile','postgresKeyFile','backendSubnet'},'deployment')
@@ -134,7 +132,7 @@ http {{
     def files(names):
         return [mounts[n] if n in mounts else {'type':'bind','source':str(final/n),'target':'/run/config/'+n,'read_only':True} for n in names]
     def service(image,names,command=None):
-        v={'image':image,'pull_policy':'never','platform':'linux/amd64','user':'10001:10001','read_only':True,'cap_drop':['ALL'],'security_opt':['no-new-privileges:true'],'tmpfs':['/tmp:rw,noexec,nosuid,size=64m'],'networks':['backend'],'volumes':files(names)}
+        v={'image':image,'pull_policy':'never','user':'10001:10001','read_only':True,'cap_drop':['ALL'],'security_opt':['no-new-privileges:true'],'tmpfs':['/tmp:rw,noexec,nosuid,size=64m'],'networks':['backend'],'volumes':files(names)}
         if command:v['command']=command
         return v
     services={}
@@ -156,8 +154,7 @@ http {{
     app['healthcheck']={'test':['CMD','identity-server','--probe','127.0.0.1:8080'],'interval':'10s','timeout':'15s','start_period':'15s','retries':3}
     services['gateway']=service(images['web'],['gateway.conf','ui.json','public-cert','public-key'],['-c','/run/config/gateway.conf'])
     services['gateway'].update(ports=['443:8443'],networks={'backend':{'ipv4_address':gateway},'public':{}},depends_on={'identity':{'condition':'service_healthy'}})
-    services['volume-init']={'image':images['runtime'],'pull_policy':'never','platform':'linux/amd64','user':'0:0','network_mode':'none','profiles':['operator'],'entrypoint':['sh','-ec'],'command':['if [ -z "$(ls -A /volume)" ]; then chown 10001:10001 /volume; chmod 700 /volume; else test "$(stat -c %u:%g /volume)" = 10001:10001; fi'],'volumes':[{'type':'volume','source':'pg','target':'/volume','volume':{'nocopy':True}}]}
-    for name in ['identity','gateway','migrate','maintenance']:services[name]['platform']='linux/amd64'
+    services['volume-init']={'image':images['runtime'],'pull_policy':'never','user':'0:0','network_mode':'none','profiles':['operator'],'entrypoint':['sh','-ec'],'command':['if [ -z "$(ls -A /volume)" ]; then chown 10001:10001 /volume; chmod 700 /volume; else test "$(stat -c %u:%g /volume)" = 10001:10001; fi'],'volumes':[{'type':'volume','source':'pg','target':'/volume','volume':{'nocopy':True}}]}
     networks={'backend':{'internal':True,'ipam':{'config':[{'subnet':str(network)}]}},'public':{}}
     if c['oidc'] is not None:networks['egress']={}
     write('compose.json',json.dumps(compose_literals({'services':services,'networks':networks,'volumes':{'pg':{}}}),indent=2))
@@ -172,7 +169,7 @@ def preflight(out,images):
             target=mount['target']
             source=out/('input/' if target.startswith('/run/input/') else '')/Path(target).name
             volumes+=['--volume',str(source)+':'+target+':ro']
-        result=subprocess.run(['docker','run','--pull=never','--rm','--network','none','--platform','linux/amd64','--user','10001:10001','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=64m','--cap-drop','ALL','--security-opt','no-new-privileges:true',*volumes,'--entrypoint',binary,image,*arguments],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=60)
+        result=subprocess.run(['docker','run','--pull=never','--rm','--network','none','--user','10001:10001','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=64m','--cap-drop','ALL','--security-opt','no-new-privileges:true',*volumes,'--entrypoint',binary,image,*arguments],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=60)
         require(result.returncode==0,service+' image configuration rejected')
 
 
