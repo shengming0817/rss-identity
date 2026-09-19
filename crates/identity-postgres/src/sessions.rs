@@ -133,6 +133,17 @@ enum SessionAction {
     Revoked,
     AllRevoked,
 }
+// Both authentication and rotation must account for every database wait before success.
+fn checked_expiry(
+    loaded: &db::Loaded,
+    budget: Instant,
+) -> Result<Instant, rss_transactional_messaging_postgres::PgError> {
+    let expires = budget.min(loaded.expires);
+    if Instant::now() >= expires {
+        return Err(reject());
+    }
+    Ok(expires)
+}
 #[derive(Serialize)]
 pub(crate) struct SessionEvent {
     action: SessionAction,
@@ -284,10 +295,7 @@ impl Authority {
                             db::touch(c, &mut loaded).await?;
                         }
                         let authority = authority_id(c).await?;
-                        let expires = budget.0.min(loaded.expires);
-                        if Instant::now() >= expires {
-                            return Err(reject());
-                        }
+                        let expires = checked_expiry(&loaded, budget.0)?;
                         Ok(AuthenticatedSession {
                             identity: SessionIdentity::from_state(loaded.state),
                             assurance: loaded.assurance,
@@ -312,13 +320,15 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<IssuedSession, AuthorityError> {
         self.require_runtime()?;
+        let budget = Budget::new(deadline)?;
         let secret = SessionSecret::generate().map_err(|_| AuthorityError::Unavailable)?;
-        self.mutate(tenant,deadline,move|tx|Box::pin(async move {
+        self.mutate(tenant,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let mut loaded = db::lookup(c,tenant,&old.digest()).await?;
                 db::touch(c,&mut loaded).await?;
                 sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
                     .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;
+                checked_expiry(&loaded, budget.0)?;
                 let fact = event(SessionAction::Refreshed,loaded.state,loaded.view.id,None);
                 Ok((IssuedSession::new(secret,loaded.view,loaded.now,loaded.state),fact))
             })).await

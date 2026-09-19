@@ -78,7 +78,7 @@ let routes = routes.layer(axum::middleware::from_fn(client_address));
 
 安全事件版本为 account v3、federation v2、session v1。事件不含密码、cookie、code、verifier、上游 token；消费者须按新事件 schema 更新，旧事件定义不再作为活动协议。
 
-`authenticate_session` 验证并延长 idle，不改变原 absolute deadline；宿主须先实施请求/CSRF 与用户活动策略，不能让后台心跳无限续期。`inspect_session` 只读验证，用于登录替换前检查、浏览器 GET session 和不应续期的被动查询。HTTP POST refresh 显式续期并旋转凭据；两种验证入口都重新检查权威状态。
+`authenticate_session` 验证并延长 idle，不改变原 absolute deadline；宿主须先实施请求/CSRF 与用户活动策略，不能让后台心跳无限续期。`inspect_session` 只读验证，用于登录替换前检查、浏览器 GET session 和不应续期的被动查询。HTTP POST refresh 显式续期并旋转凭据；两种验证入口都重新检查权威状态。认证与 refresh 在最后一次会话查询/写入后共用单调期限复核，取会话期限与调用预算的较早值；数据库等待已耗尽期限时拒绝并回滚续期、凭据轮换与安全事件，不签发成功 cookie。
 
 HTTP 宿主资源可调用 `rss_identity_http_axum::inspect_session(&authority, tenant, headers, deadline)`，返回 `AuthenticatedSession` 或已安全投影的 HTTP response，不暴露 bearer/CSRF、不延长 idle。宿主仍持有资源授权、成功响应 no-store 与预算；该只读入口不代替写请求 CSRF。
 

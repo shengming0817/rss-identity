@@ -1,6 +1,35 @@
 //! Embedded reconstruction of #2433's real directory lifecycle; no central/client APIs.
 use super::*;
+use futures::FutureExt;
 use rss_identity_core::groups::{GroupFactsMaxAge, UnavailableReason};
+use std::{future::Future, panic::AssertUnwindSafe};
+
+async fn without_staff<T>(body: impl Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+    let membership = keycloak_support::StaffMembership::load().await?;
+    // Capture unwinding assertions as well as ordinary errors, then await restoration
+    // before propagating either. Include removal in the scope: a lost response may
+    // still have changed the provider.
+    let result = AssertUnwindSafe(async {
+        membership.set(false).await?;
+        body.await
+    })
+    .catch_unwind()
+    .await;
+    let restored = membership.restore().await;
+    if restored.is_err() {
+        eprintln!("fixture staff membership restoration failed");
+    }
+    match result {
+        Ok(result) => match (result, restored) {
+            (result, Ok(())) => result,
+            (Ok(_), Err(_)) => anyhow::bail!("fixture staff membership restoration failed"),
+            (Err(error), Err(_)) => {
+                Err(error.context("fixture staff membership restoration also failed"))
+            }
+        },
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
 
 fn available(actor: &AuthenticatedSession, provider: ProviderId) -> uuid::Uuid {
     let VerifiedGroups::Available(groups) = actor.groups().unwrap() else {
@@ -38,26 +67,59 @@ async fn login_browser(
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     Ok(cookie(&response))
 }
-struct Paused(String);
+struct Paused {
+    id: String,
+    active: bool,
+}
+fn docker(action: &str, id: &str) -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("docker")
+        .args([action, id])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                anyhow::ensure!(status.success(), "fixture docker {action} failed: {status}");
+                return Ok(());
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                result?;
+                anyhow::bail!("fixture docker {action} timed out");
+            }
+        }
+    }
+}
 impl Paused {
     fn new() -> anyhow::Result<Self> {
-        let id = std::env::var("IDENTITY_TEST_KEYCLOAK_CONTAINER")?;
-        anyhow::ensure!(
-            std::process::Command::new("docker")
-                .args(["pause", &id])
-                .output()?
-                .status
-                .success(),
-            "fixture pause failed"
-        );
-        Ok(Self(id))
+        // Own cleanup before invoking pause, including an uncertain command result.
+        let guard = Self {
+            id: std::env::var("IDENTITY_TEST_KEYCLOAK_CONTAINER")?,
+            active: true,
+        };
+        docker("pause", &guard.id)?;
+        Ok(guard)
+    }
+    fn restore(&mut self) -> anyhow::Result<()> {
+        if self.active {
+            docker("unpause", &self.id)?;
+            self.active = false;
+        }
+        Ok(())
     }
 }
 impl Drop for Paused {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("docker")
-            .args(["unpause", &self.0])
-            .output();
+        if let Err(error) = self.restore() {
+            eprintln!("fixture unpause fallback failed: {error}");
+        }
     }
 }
 
@@ -79,13 +141,49 @@ async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
     )?;
     let p = provider(&f, &s).await?;
     let app = app(&s);
+    let panic = AssertUnwindSafe(without_staff(async {
+        panic!("injected membership assertion failure");
+        #[allow(unreachable_code)]
+        Ok::<_, anyhow::Error>(())
+    }))
+    .catch_unwind()
+    .await;
+    assert!(panic.is_err());
+    let membership = keycloak_support::StaffMembership::load().await?;
+    assert!(membership.current().await?);
+    let error: anyhow::Result<()> =
+        without_staff(async { anyhow::bail!("injected body error") }).await;
+    assert!(error.is_err());
+    assert!(membership.current().await?);
+    without_staff(async {
+        assert!(!membership.current().await?);
+        without_staff(async { Ok(()) }).await?;
+        assert!(!membership.current().await?);
+        Ok(())
+    })
+    .await?;
+    assert!(membership.current().await?);
+    // A failed explicit restore must be surfaced and leave the fallback armed.
+    let mut missing = Paused {
+        id: format!("identity-missing-{}", uuid::Uuid::new_v4()),
+        active: true,
+    };
+    assert!(missing.restore().is_err());
+    assert!(missing.active);
+    drop(missing);
+    // Unwinding an assertion also releases a real paused fixture.
+    let panic = std::panic::catch_unwind(|| {
+        let _paused = Paused::new().unwrap();
+        panic!("injected pause assertion failure");
+    });
+    assert!(panic.is_err());
+    assert!(membership.current().await?);
     let first = login_browser(&app, &p, 'A').await?;
     let second = login_browser(&app, &p, 'B').await?;
     let actor = inspect(&f, &first).await?;
     let snapshot = available(&actor, p.id);
     assert_ne!(available(&inspect(&f, &second).await?, p.id), snapshot);
-    keycloak_support::staff_membership(false).await?;
-    let removed = async {
+    let removed = without_staff(async {
         assert_eq!(available(&inspect(&f, &first).await?, p.id), snapshot);
         available(&inspect(&f, &second).await?, p.id);
         let cookie = login_browser(&app, &p, 'C').await?;
@@ -97,10 +195,8 @@ async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
             "Keycloak omits groups for zero memberships"
         );
         Ok::<_, anyhow::Error>(cookie)
-    }
-    .await;
-    keycloak_support::staff_membership(true).await?;
-    let removed = removed?;
+    })
+    .await?;
     // Fresh request proof outlives the group snapshot while retaining the same signed deadline.
     let expiry: i64 = sqlx::query_scalar("SELECT max((auth_facts->'groups'->>'expires_at')::bigint) FROM identity_authority.sessions WHERE auth_facts IS NOT NULL")
         .fetch_one(&f.owner).await?;
@@ -153,7 +249,7 @@ async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
     let fresh = login_browser(&app, &p, 'D').await?;
     assert_ne!(available(&inspect(&f, &fresh).await?, p.id), snapshot);
     {
-        let _paused = Paused::new()?;
+        let mut paused = Paused::new()?;
         available(&inspect(&f, &fresh).await?, p.id);
         let response = app
             .clone()
@@ -166,6 +262,7 @@ async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
             ))
             .await?;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        paused.restore()?;
     }
     available(&inspect(&f, &fresh).await?, p.id);
     let mut settings = p.settings.input();

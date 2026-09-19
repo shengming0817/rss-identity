@@ -12,6 +12,14 @@
 
 证明到期优先报 `ProofExpired`。快照到期保留基础身份，新视图为 Expired，已保留 wrapper 读值为 SnapshotExpired。未来观察保持 NotYetValid，到下次请求才重新投影。管理策略使用当前数据库事实，并受原始传入证明上界约束。复制出的值、借出的原始引用与已经产生的业务授权效果由宿主负责，本组件不提供事后撤回机制。
 
+## PR #1034 修复补充
+
+认证与显式 refresh 共用结束前 `checked_expiry`，截止点取持久会话期限与入口操作预算之最小值；refresh 在 token UPDATE 返回后、构造事件和签发结果前拒绝跨期结果，原子回滚 idle/token 与事件。真实 PG 的 idle UPDATE 和 token UPDATE 延迟分别覆盖 idle 与 absolute 到期。
+
+共享 Keycloak 测试在修改前保存成员关系，捕获测试主体普通错误和 unwind panic，显式 await 恢复并读回原值后才传播原失败；恢复与主体同时失败时保留主体错误并附恢复诊断。Docker pause guard 显式检查 unpause，失败保留清理责任，Drop 只作有界兜底并输出受控状态诊断。测试验证 panic、普通错误、原本非成员、失败 unpause 与真实容器 unwind 恢复。进程被杀或 abort 时由外层 disposable provider runner 销毁容器，不承诺析构能恢复被终止的进程。
+
+以上是事务行为和真实 provider 的 Medium/T2 证明，不宣称 Hard 或产品 T3。完整诊断、方案比较和修复验证见 [现有验收记录](../../reviews/202609180100-2438-trusted-group-expiry.md)。
+
 ## 实施 DAG 与 owner
 
 主 agent 串行实现 A → B → C → D；探索与内置 review 才委派子 agent。

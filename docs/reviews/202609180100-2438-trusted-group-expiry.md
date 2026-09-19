@@ -35,3 +35,18 @@
 公开 API 消费没有读取 Identity 私表；完整 producer T2 在自有 fixture 中检查持久化快照。默认生产模式只证明构造/出口拒绝与构建闭包，未宣称生产网络连通。没有 MDM 接入、设备授权、产品 binary/image T3 或实时目录撤组承诺；已复制的组值和已作授权效果仍由宿主负责。
 
 最终产品 `make ci CI_BASE=origin/develop` 按 ship 在 findings 处置、pm:ship 与交接 label 后执行，实际结果追加 PR 评论；本记录不提前宣称该步骤通过。
+
+## PR #1034 最新 review 修复
+
+| Finding | 核实 / 范围 / 根因 | 处置 |
+| --- | --- | --- |
+| F1 · P2/Cx2 | CONFIRMED / IN_SCOPE。`sessions.rs` 的两个 db::touch 调用中，显式 refresh 缺少结束前期限复核；#2438 提交 2446727 加入单调期限后该路径未汇入检查。直接影响 refresh 返回值，间接影响 HTTP cookie 与安全事件。 | 认证和 refresh 共用 checked_expiry，入口固定 budget，在 token UPDATE 后拒绝过期结果并回滚。 |
+| F2 · P2/Cx2 | CONFIRMED / IN_SCOPE。同一提交新增生命周期测试的两段外部状态变更中，成员恢复只覆盖 Result，遗漏 panic；pause Drop 丢弃 unpause 结果。会污染同 fixture 串行的后续测试。 | 保存原始成员关系，显式异步恢复并读回，随后传播错误/panic；pause 显式可失败恢复，Drop 有界兜底并诊断。 |
+
+两项都是局部缺陷，未达到三处系统性模式；没有 trait/schema/依赖/组合根修改或前置阻塞，建议本轮完成。
+
+方案比较：F1 A 在 refresh 单独加检查（约 8 行，重复逻辑）；B 抽同文件私有检查供两个出口共用（约 20 行），采用 B。F2 A 捕获主体错误并检查 unpause（约 30 行，无法恢复原本非成员状态）；B 保存原状态、捕获 unwind、显式恢复/读回及有界析构兜底（两个既有测试文件），采用 B。参考源码见来源索引；不留兼容路径、TODO 或 deferred issue。
+
+复现与验证：旧实现的真实 PG 延迟用例失败于跨期 refresh 未拒绝；原成员恢复流程在注入 panic 后失败于下一次登录缺少 /staff。F1 修复后 idle UPDATE/idle 截止点、token UPDATE/absolute 截止点均拒绝，持久 token/idle 与事件数不变。真实 HTTPS Keycloak 七个规范测试通过，生命周期用例包含普通错误、panic、原本非成员、失败 unpause 及 unwind 恢复。
+
+固定实现 revision 的独立消费者复验与最终 make ci 结果在本节后续补充；先前固定 revision 的历史证明保留，不作为新实现已通过的依据。
