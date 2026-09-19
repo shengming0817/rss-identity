@@ -2,6 +2,7 @@
 mod attempts;
 mod auth_facts;
 mod credentials;
+mod department;
 mod federation;
 mod federation_link;
 mod federation_login;
@@ -18,6 +19,7 @@ mod storage;
 mod transaction;
 mod types;
 pub use credentials::CredentialKeys;
+pub use department::{DepartmentAccessError, TrustedDepartment, VerifiedDepartment};
 pub use federation::{
     FederatedOutcome, FederatedRedirect, Federation, FederationConfig, LinkRequest, LinkResult,
     LoginOption, LoginRequest, SessionSecurity,

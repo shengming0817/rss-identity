@@ -279,7 +279,7 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let upstream = ScriptedOidc::new();
     let s = service(&f, upstream.clone());
-    let p = enabled(&f, &s).await?;
+    let p = enabled_department(&f, &s, 60).await?;
     let old = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
     let now: i64 =
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
@@ -319,8 +319,18 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
     let token = step_begin(&f, &s, &p, &old).await?;
     let before_groups = stored_facts(&f, &old).await?;
     *upstream.groups.lock().unwrap() = vec!["/step-up".into()];
+    *upstream.department.lock().unwrap() =
+        rss_identity_core::department::UpstreamDepartment::NoDepartment;
     let upgraded = issued(step_finish(&s, token.clone(), &old, "alice").await?);
     let after_groups = stored_facts(&f, &upgraded).await?;
+    assert_eq!(
+        after_groups["department"]["assignment"]["status"],
+        "no_department"
+    );
+    assert_ne!(
+        before_groups["department"]["snapshot_id"],
+        after_groups["department"]["snapshot_id"]
+    );
     assert_ne!(
         before_groups["groups"]["snapshot_id"],
         after_groups["groups"]["snapshot_id"]
@@ -809,7 +819,7 @@ async fn federation_atomic_events_and_unknown_commit() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let upstream = ScriptedOidc::new();
     let s = service(&f, upstream.clone());
-    let p = enabled(&f, &s).await?;
+    let p = enabled_department(&f, &s, 60).await?;
     let management_sessions: i64 =
         sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
             .fetch_one(&f.owner)
@@ -866,7 +876,7 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let upstream = ScriptedOidc::new();
     let s = service(&f, upstream.clone());
-    let p = enabled(&f, &s).await?;
+    let p = enabled_department(&f, &s, 60).await?;
     let local = session(&f).await?;
     let proof = f
         .store
@@ -918,7 +928,7 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         local_facts.is_none(),
         "target groups must not become local origin"
     );
-    let other = enabled(&f, &s).await?;
+    let other = enabled_department(&f, &s, 60).await?;
     let fed = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
     let original = stored_facts(&f, &fed).await?;
     let fed = f
@@ -931,6 +941,10 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         "refresh preserves the entire snapshot"
     );
     *upstream.groups.lock().unwrap() = vec!["/source/new".into()];
+    *upstream.department.lock().unwrap() =
+        rss_identity_core::department::UpstreamDepartment::Present(
+            rss_identity_core::department::DepartmentId::new("source-new".into())?,
+        );
     let proof = f
         .store
         .inspect_session(f.key.tenant, secret(&fed), deadline())
@@ -974,6 +988,15 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         source_facts["groups"]["values"],
         serde_json::json!(["/source/new"])
     );
+    assert_eq!(source_facts["department"]["assignment"]["id"], "source-new");
+    assert_ne!(
+        source_facts["department"]["snapshot_id"],
+        original["department"]["snapshot_id"]
+    );
+    *upstream.department.lock().unwrap() =
+        rss_identity_core::department::UpstreamDepartment::Present(
+            rss_identity_core::department::DepartmentId::new("target-forbidden".into())?,
+        );
     *upstream.groups.lock().unwrap() = vec!["/target/forbidden".into()];
     let linked = issued(
         s.complete(
@@ -1429,7 +1452,7 @@ async fn federation_step_up_unknown_commit_and_event_rollback() -> anyhow::Resul
     f.bootstrap().await?;
     let upstream = ScriptedOidc::new();
     let s = service(&f, upstream.clone());
-    let p = enabled(&f, &s).await?;
+    let p = enabled_department(&f, &s, 60).await?;
     let now: i64 =
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
             .fetch_one(&f.owner)
@@ -1620,7 +1643,7 @@ async fn federation_group_snapshot_storage_bounds() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let upstream = ScriptedOidc::new();
     let s = service(&f, upstream.clone());
-    let p = enabled(&f, &s).await?;
+    let p = enabled_department(&f, &s, 60).await?;
     *upstream.groups.lock().unwrap() = (0..100)
         .map(|i| format!("{i:03}{}", "x".repeat(253)))
         .collect();
@@ -1694,7 +1717,7 @@ async fn federation_signed_time_skew_preserves_identity() -> anyhow::Result<()> 
     f.bootstrap().await?;
     let upstream = ScriptedOidc::new();
     let service = service(&f, upstream.clone());
-    let provider = enabled(&f, &service).await?;
+    let provider = enabled_department(&f, &service, 60).await?;
     upstream.issued_at_offset.store(10, Ordering::SeqCst);
     let session = issued(
         finish(
@@ -1716,9 +1739,21 @@ async fn federation_signed_time_skew_preserves_identity() -> anyhow::Result<()> 
         300
     );
     // Session loading projects future groups to unavailable without rejecting identity.
-    f.store
+    let future = f
+        .store
         .inspect_session(f.key.tenant, secret(&session), deadline())
         .await?;
+    assert!(matches!(
+        future.department()?,
+        VerifiedDepartment::Unavailable(
+            rss_identity_core::facts::FactUnavailableReason::NotYetValid
+        )
+    ));
+    assert_eq!(
+        snapshot["department"]["expires_at"].as_i64().unwrap()
+            - snapshot["department"]["observed_at"].as_i64().unwrap(),
+        60
+    );
     upstream.issued_at_offset.store(60, Ordering::SeqCst);
     assert!(
         finish(

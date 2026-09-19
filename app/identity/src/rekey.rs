@@ -33,7 +33,7 @@ pub async fn run(
         let signature: Option<String> = sqlx::query_scalar(rss_identity_postgres::SCHEMA_SIGNATURE_SQL).fetch_one(&mut *tx).await.map_err(|_| AppError::Migration)?;
         if signature.as_deref() != Some(rss_identity_postgres::SCHEMA_SIGNATURE.trim()) { return Err(AppError::Migration); }
         let versions: Vec<i32> = sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *tx).await.map_err(|_| AppError::Migration)?;
-        if versions != [9] { return Err(AppError::Migration); }
+        if versions != [rss_identity_postgres::SCHEMA_VERSION] { return Err(AppError::Migration); }
         for tenant in config.storage.tenants()? {
             sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target',$2,true),set_config('rss.storage_lineage',$3,true),set_config('rss.execution_epoch',$4,true)")
                 .bind(tenant.to_string()).bind(hex::encode(config.storage.target)).bind(hex::encode(config.storage.lineage)).bind(config.storage.generation.to_string()).execute(&mut *tx).await.map_err(|_| AppError::Migration)?;

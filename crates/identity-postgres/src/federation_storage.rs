@@ -108,7 +108,7 @@ pub(crate) async fn check_origin(
     c: &mut PgConnection,
     key: AccountKey,
     origin: &Origin,
-) -> Result<rss_identity_core::groups::GroupSource, rss_transactional_messaging_postgres::PgError> {
+) -> Result<rss_identity_core::facts::FactSource, rss_transactional_messaging_postgres::PgError> {
     let row = sqlx::query(concat!(
         "SELECT e.provider_id,e.issuer FROM identity_authority.external_identities e JOIN identity",
         "_authority.providers p USING(tenant_id,provider_id) WHERE e.tenant_id=$1::uuid A",
@@ -117,10 +117,8 @@ pub(crate) async fn check_origin(
     .bind(key.tenant.to_string()).bind(origin.identity).bind(origin.epoch)
     .bind(origin.facts.provider_config_version).bind(key.principal.as_uuid())
     .fetch_optional(c).await?.ok_or_else(reject)?;
-    Ok(rss_identity_core::groups::GroupSource {
-        provider_id: row.try_get("provider_id")?,
-        issuer: row.try_get("issuer")?,
-    })
+    rss_identity_core::facts::FactSource::new(row.try_get("provider_id")?, row.try_get("issuer")?)
+        .map_err(|_| corrupt())
 }
 pub(crate) async fn identity(
     c: &mut PgConnection,

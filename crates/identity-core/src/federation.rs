@@ -57,6 +57,7 @@ impl<'de> Deserialize<'de> for ProviderId {
 pub struct ClaimMapping {
     pub email: Option<String>,
     pub groups: Option<String>,
+    pub department: Option<crate::department::DepartmentClaim>,
 }
 
 /// Untrusted configuration input. Convert before entering the domain or restoring storage.
@@ -115,6 +116,15 @@ impl ProviderSettingsInput {
             {
                 return Err(FederationError::Configuration);
             }
+        }
+
+        if let Some(department) = &self.claims.department
+            && [&self.claims.email, &self.claims.groups]
+                .into_iter()
+                .flatten()
+                .any(|claim| claim == department.claim())
+        {
+            return Err(FederationError::Configuration);
         }
 
         for s in [&self.claims.email, &self.claims.groups]
@@ -382,6 +392,7 @@ pub struct UpstreamClaims {
     pub email: Option<String>,
     pub email_verified: bool,
     pub groups: crate::groups::UpstreamGroups,
+    pub department: crate::department::UpstreamDepartment,
     pub issued_at: i64,
     pub expires_at: i64,
     pub assurance: crate::assurance::Assurance,

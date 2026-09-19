@@ -185,6 +185,8 @@ impl Federation {
         session: Option<SessionSecret>,
         deadline: OperationDeadline,
     ) -> Result<FederatedOutcome, AuthorityError> {
+        // Keep the protocol/transaction orchestration off the caller's async frame.
+        Box::pin(async move {
         check_browser(&browser)?;
         let budget = Budget::new(deadline)?;
         let locator = self.signer.verify(&state)?;
@@ -347,7 +349,7 @@ impl Federation {
                             Some(db::Origin {
                                 identity: identity_id,
                                 epoch: view.revocation_epoch,
-                                facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, now)?,
+                                facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, view.settings.claims().department.as_ref(), now)?,
                             }),
                             attempt.replacement,
                         )
@@ -382,6 +384,7 @@ impl Federation {
                         ],
                     ))
                 }) }).await
+        }).await
     }
 }
 pub(crate) fn check_browser(browser: &str) -> Result<(), AuthorityError> {
