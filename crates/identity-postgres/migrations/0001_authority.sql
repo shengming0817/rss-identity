@@ -1,7 +1,7 @@
--- Fresh schema v9 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v10 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=9));
-INSERT INTO identity_authority.schema_version VALUES(9);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=10));
+INSERT INTO identity_authority.schema_version VALUES(10);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000')
@@ -78,7 +78,7 @@ CREATE TABLE identity_authority.sessions (
  external_identity_id uuid,
  provider_epoch bigint,
  auth_facts jsonb,
- CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL) OR (external_identity_id IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND octet_length(auth_facts::text)<=32768)),
+ CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL) OR (external_identity_id IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND octet_length(auth_facts::text)<=32768 AND (auth_facts->'format_version'='2'::jsonb AND jsonb_typeof(auth_facts->'department')='object') IS TRUE)),
  FOREIGN KEY(tenant_id,principal_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,principal_id,identity_id),
  PRIMARY KEY(tenant_id,session_id),
  UNIQUE(tenant_id,token_hash), UNIQUE(tenant_id,principal_id,session_id),
@@ -101,7 +101,7 @@ CREATE TABLE identity_authority.link_intents (
  FOREIGN KEY(tenant_id,session_id) REFERENCES identity_authority.sessions,
  FOREIGN KEY(tenant_id,target_provider) REFERENCES identity_authority.providers,
  FOREIGN KEY(tenant_id,source_identity) REFERENCES identity_authority.external_identities,
- CHECK((source_identity IS NULL AND source_epoch IS NULL AND source_facts IS NULL) OR (source_identity IS NOT NULL AND source_epoch IS NOT NULL AND source_epoch>0 AND source_facts IS NOT NULL))
+ CHECK((source_identity IS NULL AND source_epoch IS NULL AND source_facts IS NULL) OR (source_identity IS NOT NULL AND source_epoch IS NOT NULL AND source_epoch>0 AND source_facts IS NOT NULL AND jsonb_typeof(source_facts)='object' AND octet_length(source_facts::text)<=32768 AND (source_facts->'format_version'='2'::jsonb AND jsonb_typeof(source_facts->'department')='object') IS TRUE))
 );
 CREATE TABLE identity_authority.oidc_transactions (
  tenant_id uuid NOT NULL, attempt_id bytea NOT NULL CHECK(octet_length(attempt_id)=32),

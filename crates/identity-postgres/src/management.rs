@@ -38,6 +38,7 @@ pub struct ManagementContext<'a> {
     operation: ManagementOperation,
     assurance: &'a Assurance,
     groups: &'a GroupFacts,
+    department: &'a crate::department::DepartmentFacts,
     expires: Instant,
 }
 impl ManagementContext<'_> {
@@ -55,6 +56,12 @@ impl ManagementContext<'_> {
     }
     pub fn assurance(&self) -> &Assurance {
         self.assurance
+    }
+    pub fn department(
+        &self,
+    ) -> Result<crate::VerifiedDepartment<'_>, crate::DepartmentAccessError> {
+        self.department
+            .view(self.instance, self.actor, self.expires)
     }
     pub fn groups(&self) -> Result<VerifiedGroups<'_>, GroupAccessError> {
         self.groups.view(self.expires)
@@ -97,6 +104,7 @@ pub(crate) fn authorize(
             operation,
             assurance: &loaded.assurance,
             groups: &loaded.groups,
+            department: &loaded.department,
             expires: loaded.expires,
         })
         .map_err(|_| AccountRuleError::InsufficientPrivilege)?;

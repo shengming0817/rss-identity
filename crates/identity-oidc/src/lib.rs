@@ -576,6 +576,10 @@ impl UpstreamOidc for HttpOidc {
                 email_verified: c.claims().email.as_deref() == Some("email")
                     && claims.email_verified() == Some(true),
                 groups,
+                department: mapped_department(
+                    c.claims().department.as_ref().map(|d| d.claim()),
+                    &all,
+                )?,
                 issued_at: claims.issue_time().timestamp(),
                 expires_at: claims.expiration().timestamp(),
                 assurance: assurance::normalize(
@@ -640,6 +644,24 @@ fn mapped_groups(
                     .map(|v| v.as_str().map(str::to_owned).ok_or(FederationError::Claims))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
+            _ => Err(FederationError::Claims),
+        },
+    }
+}
+
+fn mapped_department(
+    claim: Option<&str>,
+    claims: &serde_json::Value,
+) -> Result<rss_identity_core::department::UpstreamDepartment, FederationError> {
+    use rss_identity_core::department::{DepartmentId, UpstreamDepartment};
+    match claim {
+        None => Ok(UpstreamDepartment::NotConfigured),
+        Some(key) => match claims.get(key) {
+            None => Ok(UpstreamDepartment::Missing),
+            Some(serde_json::Value::Null) => Ok(UpstreamDepartment::NoDepartment),
+            Some(serde_json::Value::String(value)) => Ok(UpstreamDepartment::Present(
+                DepartmentId::new(value.clone())?,
+            )),
             _ => Err(FederationError::Claims),
         },
     }

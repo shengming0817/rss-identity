@@ -1,6 +1,9 @@
 //! Borrowed group access bounded by both the request proof and the signed snapshot.
 use crate::{session_storage::TimeSample, transaction::corrupt};
-use rss_identity_core::groups::{GroupSource, Groups, UnavailableReason};
+use rss_identity_core::{
+    facts::{FactSource, FactUnavailableReason},
+    groups::Groups,
+};
 use rss_transactional_messaging_postgres::PgError;
 use std::time::Instant;
 
@@ -68,7 +71,7 @@ impl GroupFacts {
 /// Groups are borrowed from a checked identity; there is no standalone proof constructor.
 pub enum VerifiedGroups<'a> {
     Available(TrustedGroups<'a>),
-    Unavailable(UnavailableReason),
+    Unavailable(FactUnavailableReason),
     Expired,
 }
 /// Every values access checks both deadlines, even if this wrapper was retained.
@@ -78,7 +81,7 @@ pub enum VerifiedGroups<'a> {
 /// let groups: rss_identity_postgres::TrustedGroups<'_> = serde_json::from_str("{}").unwrap();
 /// ```
 pub struct TrustedGroups<'a> {
-    source: &'a GroupSource,
+    source: &'a FactSource,
     snapshot_id: uuid::Uuid,
     provider_config_version: i64,
     observed_at: i64,
@@ -88,7 +91,7 @@ pub struct TrustedGroups<'a> {
     expires: Instant,
 }
 impl TrustedGroups<'_> {
-    pub fn source(&self) -> &GroupSource {
+    pub fn source(&self) -> &FactSource {
         self.source
     }
     pub fn snapshot_id(&self) -> uuid::Uuid {
@@ -130,10 +133,8 @@ mod tests {
             let facts = GroupFacts {
                 facts: Groups::Available {
                     version: 1,
-                    source: GroupSource {
-                        provider_id: uuid::Uuid::new_v4(),
-                        issuer: "https://issuer.test".into(),
-                    },
+                    source: FactSource::new(uuid::Uuid::new_v4(), "https://issuer.test".into())
+                        .unwrap(),
                     snapshot_id: uuid::Uuid::new_v4(),
                     provider_config_version: 1,
                     observed_at: 100,
@@ -184,10 +185,10 @@ mod tests {
         let start = Instant::now();
         let proof = start + Duration::from_secs(10);
         for reason in [
-            UnavailableReason::LocalIdentity,
-            UnavailableReason::NotConfigured,
-            UnavailableReason::ClaimMissing,
-            UnavailableReason::NotYetValid,
+            FactUnavailableReason::LocalIdentity,
+            FactUnavailableReason::NotConfigured,
+            FactUnavailableReason::ClaimMissing,
+            FactUnavailableReason::NotYetValid,
         ] {
             let facts = GroupFacts {
                 facts: Groups::unavailable(reason),

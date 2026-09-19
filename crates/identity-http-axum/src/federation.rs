@@ -344,16 +344,23 @@ async fn callback(
 ) -> Response {
     match callback_result(state, budget, headers, query).await {
         Ok(response) => response,
-        Err(error) => callback_failure(if error.0 == StatusCode::SERVICE_UNAVAILABLE {
-            "unavailable"
-        } else {
-            "failed"
-        }),
+        Err(error) => callback_error_response(error.into_response()),
     }
 }
 pub(crate) fn callback_failure(reason: &str) -> Response {
     // Only closed literals selected in this module reach Location.
     axum::response::Redirect::to(&format!("/auth/error?reason={reason}")).into_response()
+}
+
+/// Keep host diagnostics in response parts while replacing the browser projection.
+pub(crate) fn callback_error_response(response: Response) -> Response {
+    let (parts, _) = response.into_parts();
+    let reason = if parts.status == StatusCode::SERVICE_UNAVAILABLE {
+        "unavailable"
+    } else {
+        "failed"
+    };
+    (parts.extensions, callback_failure(reason)).into_response()
 }
 
 async fn callback_result(
@@ -437,4 +444,49 @@ async fn callback_result(
     }
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod callback_tests {
+    use super::*;
+    use rss_identity_core::federation::FederationError;
+    use rss_identity_postgres::AuthorityError;
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct HostMarker;
+
+    #[tokio::test]
+    async fn callback_error_projection_keeps_all_host_extensions_and_hides_body() {
+        for (error, reason) in [
+            (
+                AuthorityError::Federation(FederationError::Claims),
+                "failed",
+            ),
+            (AuthorityError::Unavailable, "unavailable"),
+        ] {
+            let mut response = HttpError::from(error).into_response();
+            response.extensions_mut().insert(HostMarker);
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                "must-not-forward=secret".parse().unwrap(),
+            );
+            let response = callback_error_response(response);
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(
+                response.headers()[header::LOCATION],
+                format!("/auth/error?reason={reason}")
+            );
+            assert_eq!(
+                response.extensions().get::<HttpFailure>(),
+                Some(&HttpFailure::Authority(error))
+            );
+            assert_eq!(response.extensions().get::<HostMarker>(), Some(&HostMarker));
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            assert!(
+                axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
 }

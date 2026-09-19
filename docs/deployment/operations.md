@@ -28,7 +28,7 @@ python3 hack/operate.py --deployment /private/rendered --project identity-main o
 
 操作输出是脱敏 JSON：`operation`、`stage`、`reason`、`outcomeKnown`、`status`。前置拒绝与只读核验失败标识已知结果；写入进程超时/失败或排空未确认标识未知，先运行 `verify`、`verify-keys` 或只读 `docker inspect`，不可自动重试写入。原始 stderr、配置和秘密值不进入诊断。
 
-配置统一为 v4，旧 v3 输入直接拒绝；runtime、maintenance、migration 由同一渲染器生成，不转换旧目录。HTTP v2、schema v9 和备份格式不变。
+配置统一为 v4，旧 v3 输入直接拒绝；runtime、maintenance、migration 由同一渲染器生成，不转换旧目录。当前安装基线为 schema v10，HTTP v2 和备份格式不变。
 
 OIDC 存在时必须显式提供 `privateProviders`，空数组表示仅公网。宿主可按 `tenantId`、完整 `issuer`、`clientId` 精确授权 RFC1918/IPv6 ULA CIDR；最多 128 个绑定，每个 1–16 个规范化、不重复的网段。租户必须属于本实例配置。CIDR 不携带主机位，不接受通配 issuer；租户 ProviderSettings 无网络授权字段。例：
 

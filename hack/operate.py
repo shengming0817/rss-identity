@@ -31,7 +31,7 @@ def project_name(value):
 def check_backup(path,backend_version=None,config=None):
     record=json.loads(path.with_suffix(path.suffix+'.json').read_text())
     if not isinstance(record,dict) or set(record)!={'schema','instanceId','storage','backendVersion','project','sha256'}:raise Rejection('backup-receipt-fields')
-    if type(record['schema']) is not int or record['schema']!=9:raise Rejection('backup-schema')
+    if type(record['schema']) is not int or record['schema']!=10:raise Rejection('backup-schema')
     if not project_name(record['project']):raise Rejection('backup-project')
     for key,size in [('sha256',64)]:
         if not isinstance(record[key],str) or not re.fullmatch('[a-f0-9]{'+str(size)+'}',record[key]):raise Rejection('backup-digest-identity')
@@ -157,7 +157,7 @@ def execute(args,backend_version,compose,directory,record):
             os.chmod(path,0o600)
             run('exec','-T','postgres','pg_dump','-U','postgres','-d','identity','-Fc',stdout=stream)
         config=json.loads((directory/'migration.json').read_text())
-        record={'schema':9,'instanceId':config['instanceId'],'storage':config['storage'],'backendVersion':backend_version,'project':args.project,'sha256':sha(path)}
+        record={'schema':10,'instanceId':config['instanceId'],'storage':config['storage'],'backendVersion':backend_version,'project':args.project,'sha256':sha(path)}
         receipt=path.with_suffix(path.suffix+'.json');receipt.write_text(json.dumps(record));receipt.chmod(0o600)
     elif args.command=='restore':
         require_closed(record['project'])

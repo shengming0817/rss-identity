@@ -22,6 +22,7 @@ fn settings(issuer: &str, client: &str) -> ProviderSettings {
         claims: ClaimMapping {
             email: None,
             groups: None,
+            department: None,
         },
         jit: false,
     }
