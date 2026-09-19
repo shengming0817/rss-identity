@@ -4,6 +4,68 @@ import reference_t3 as t3
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_capacity_validation_uses_the_bound_workload(self):
+        record, subject = self.complete()
+        subject["workload"]["login"]["samples"] = 12
+        facts = record["steps"][-1]["observations"]
+        facts["createdAccounts"] -= 12
+        facts["committedEvents"] -= 12
+        facts["loginProfile"].update(
+            samples=12, statuses={"200": 12}, elapsedSeconds=12
+        )
+        t3.verify_observations("capacity", facts, subject, record["measurements"])
+
+    def test_passed_evidence_cannot_omit_coverage_boundaries(self):
+        record, subject = self.complete()
+        self.assertIn("uncovered", record)
+        record["uncovered"] = []
+        with self.assertRaises(ValueError):
+            t3.verify_record(record, subject)
+
+    def test_candidate_timeout_still_runs_owned_cleanup_and_writes_failure(self):
+        import argparse, json, tempfile, subprocess
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp:
+            args = argparse.Namespace(record=Path(temp) / "result.json")
+            with (
+                patch.object(
+                    t3, "candidate", side_effect=subprocess.TimeoutExpired("docker", 1)
+                ) as candidate,
+                patch.object(t3, "cleanup_operator", return_value=[]) as cleanup,
+            ):
+                self.assertFalse(t3.outside(args))
+            prefix = candidate.call_args.args[1]
+            self.assertEqual(
+                cleanup.call_args.args,
+                (prefix, prefix + "-operator", prefix + "-private"),
+            )
+            report = json.loads(args.record.read_text())
+            self.assertEqual(report["result"], "failed")
+            self.assertEqual(report["failure"]["kind"], "timeout")
+            self.assertEqual(report["cleanup"]["status"], "passed")
+
+    def test_candidate_probes_have_exact_cleanup_identity(self):
+        from unittest.mock import patch
+
+        with patch.object(t3, "docker", return_value=b"profile") as docker:
+            self.assertEqual(
+                t3.candidate_probe(
+                    "owned-prefix",
+                    "policy",
+                    "sha256:fixed",
+                    "identity-server",
+                    "--acceptance-profile",
+                ),
+                b"profile",
+            )
+        words = docker.call_args.args
+        self.assertEqual(words[words.index("--name") + 1], "owned-prefix-policy")
+        self.assertEqual(
+            words[words.index("--label") + 1], "rss.identity.t3=owned-prefix"
+        )
+
     def test_networks_are_reserved_before_deployment_and_retry_only_overlap(self):
         import subprocess
         from unittest.mock import patch
@@ -45,13 +107,14 @@ class EvidenceTests(unittest.TestCase):
             "formatVersion": 1,
             "schemaVersion": 10,
             **{
-                key: t3.POLICY[key] for key in ["session", "attempts", "kdfConcurrency"]
+                key: t3.POLICY[key]
+                for key in ["session", "attempts", "kdfConcurrency", "mfaMaxAgeSeconds"]
             },
         }
         with patch.object(
             t3, "docker", return_value=json.dumps(profile).encode()
         ) as docker:
-            self.assertEqual(t3.binary_profile("sha256:fixed"), profile)
+            self.assertEqual(t3.binary_profile("sha256:fixed", "owned-prefix"), profile)
         self.assertEqual(
             docker.call_args.args,
             (
@@ -59,6 +122,10 @@ class EvidenceTests(unittest.TestCase):
                 "--rm",
                 "--pull=never",
                 "--network=none",
+                "--name",
+                "owned-prefix-policy",
+                "--label",
+                "rss.identity.t3=owned-prefix",
                 "--entrypoint",
                 "identity-server",
                 "sha256:fixed",
@@ -68,13 +135,60 @@ class EvidenceTests(unittest.TestCase):
         for key, value in [
             ("session", {}),
             ("kdfConcurrency", 8),
+            ("mfaMaxAgeSeconds", 60),
+            ("schemaVersion", 9),
             ("schemaVersion", True),
             ("formatVersion", 2),
         ]:
             changed = {**profile, key: value}
             with patch.object(t3, "docker", return_value=json.dumps(changed).encode()):
                 with self.assertRaises(ValueError):
-                    t3.binary_profile("sha256:fixed")
+                    t3.binary_profile("sha256:fixed", "owned-prefix")
+
+    def test_migration_contract_is_read_from_same_image_and_checked(self):
+        import json
+        from unittest.mock import patch
+
+        value = {
+            "schema_version": 10,
+            "schema_contract": "a" * 64,
+            "identity_sql_sha256": "b" * 64,
+            "rss_sql_sha256": "c" * 64,
+        }
+        with patch.object(
+            t3, "docker", return_value=json.dumps(value).encode()
+        ) as docker:
+            actual = t3.migration_profile(
+                "sha256:fixed",
+                {"schemaVersion": 10},
+                "a" * 64,
+                "b" * 64,
+                "owned-prefix",
+            )
+        self.assertEqual(actual, value)
+        self.assertEqual(
+            docker.call_args.args[-3:],
+            ("identity-migrate", "sha256:fixed", "--describe"),
+        )
+        for key, replacement in [
+            ("schema_version", 9),
+            ("schema_contract", "d" * 64),
+            ("identity_sql_sha256", "d" * 64),
+            ("rss_sql_sha256", "invalid"),
+        ]:
+            with patch.object(
+                t3,
+                "docker",
+                return_value=json.dumps({**value, key: replacement}).encode(),
+            ):
+                with self.assertRaises(ValueError):
+                    t3.migration_profile(
+                        "sha256:fixed",
+                        {"schemaVersion": 10},
+                        "a" * 64,
+                        "b" * 64,
+                        "owned-prefix",
+                    )
 
     def test_each_step_requires_nonempty_facts(self):
         original, subject = self.complete()
@@ -183,13 +297,24 @@ class EvidenceTests(unittest.TestCase):
         subject = {
             "identity": {"revision": "a" * 40, "id": "sha256:" + "1" * 64},
             "pullRequest": 1057,
-            "schema": {"version": 10},
+            "schema": {"version": 10, "signature": "a" * 64},
+            "migrationProfile": {
+                "schema_version": 10,
+                "schema_contract": "a" * 64,
+                "identity_sql_sha256": "b" * 64,
+                "rss_sql_sha256": "c" * 64,
+            },
             "binaryProfile": {
                 "formatVersion": 1,
                 "schemaVersion": 10,
                 **{
                     key: copy.deepcopy(t3.POLICY[key])
-                    for key in ["session", "attempts", "kdfConcurrency"]
+                    for key in [
+                        "session",
+                        "attempts",
+                        "kdfConcurrency",
+                        "mfaMaxAgeSeconds",
+                    ]
                 },
             },
             "runtimeProfile": t3.runtime_profile(t3.runtime_template()),

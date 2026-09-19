@@ -74,12 +74,15 @@ fn private_response(mut response: Response) -> Response {
     response
 }
 
+/// Maximum accepted age of MFA for the protected reference resource.
+pub const MFA_MAX_AGE_SECONDS: i64 = 300;
+
 fn fresh_mfa(facts: &Assurance, now: i64) -> bool {
     facts.acr() == Acr::Mfa
         && facts
             .auth_time()
             .and_then(|time| now.checked_sub(time))
-            .is_some_and(|age| (0..300).contains(&age))
+            .is_some_and(|age| (0..MFA_MAX_AGE_SECONDS).contains(&age))
 }
 async fn mfa_example(
     State(state): State<Context>,

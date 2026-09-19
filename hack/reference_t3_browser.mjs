@@ -677,7 +677,7 @@ async function mfa() {
     "refresh-does-not-refresh-mfa",
   );
   await new Promise((r) =>
-    setTimeout(r, Math.max(0, (authTime + 301) * 1000 - Date.now())),
+    setTimeout(r, Math.max(0, (authTime + input.policy.mfaMaxAgeSeconds + 1) * 1000 - Date.now())),
   );
   check(
     (await read(c, `/api/identity-host/v1/tenants/${tenant}/mfa-example`))

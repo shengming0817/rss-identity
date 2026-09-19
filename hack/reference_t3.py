@@ -30,6 +30,16 @@ SCENARIOS = (
 )
 STEPS = tuple(row[0] for row in SCENARIOS)
 
+# Explicit exclusions travel with every archived result, including passed runs.
+UNCOVERED = [
+    "architectures-and-resources-other-than-subject",
+    "oidc-providers-other-than-fixed-keycloak",
+    "sustained-login-throughput",
+    "independent-multiple-session-throughput",
+    "disaster-recovery-without-prepared-images-and-configuration",
+    "consumer-products-and-legacy-environment-retirement",
+]
+
 MEASUREMENTS = (
     "loginBurstP95Ms",
     "loginBurstRequestsPerSecond",
@@ -356,6 +366,7 @@ def new_record(subject, targets):
         "measurements": {},
         "targets": targets,
         "approval": None,
+        "uncovered": list(UNCOVERED),
         "result": "running",
         "failure": None,
         "cleanup": {"status": "pending", "remaining": []},
@@ -463,6 +474,7 @@ def verify_observations(name, facts, subject, measurements):
         )
     if name != "capacity":
         return
+    workload = subject["workload"]
     require(
         facts["expiredAttemptsBefore"] == subject["workload"]["expiredAttempts"]
         and facts["expiredAttemptsAfter"] == 0
@@ -471,7 +483,14 @@ def verify_observations(name, facts, subject, measurements):
     )
     require(
         facts["committedEvents"] == facts["createdAccounts"]
-        and facts["createdAccounts"] == 36 + facts["accountEventProfile"]["samples"],
+        and facts["createdAccounts"]
+        == (
+            workload["login"]["warmup"]
+            + workload["login"]["samples"]
+            + workload["failedAttempt"]["accounts"]
+            + workload["accountEvent"]["warmup"]
+            + facts["accountEventProfile"]["samples"]
+        ),
         "observation-event-count",
     )
     for key in ["resourcesBefore", "resourcesAfter"]:
@@ -540,9 +559,21 @@ def verify_observations(name, facts, subject, measurements):
         for p in profiles
     ]
     definitions += [
-        (facts["loginProfile"], 200, "loginBurst", 24, 0),
-        (facts["failedAttemptProfile"], 401, "failedAttemptBurst", 20, 0),
-        (facts["accountEventProfile"], 201, "accountEventCommit", 20, 30),
+        (facts["loginProfile"], 200, "loginBurst", workload["login"]["samples"], 0),
+        (
+            facts["failedAttemptProfile"],
+            401,
+            "failedAttemptBurst",
+            workload["failedAttempt"]["samples"],
+            0,
+        ),
+        (
+            facts["accountEventProfile"],
+            201,
+            "accountEventCommit",
+            workload["accountEvent"]["minimumSamples"],
+            workload["accountEvent"]["seconds"],
+        ),
     ]
     for profile, status, prefix, minimum, seconds in definitions:
         fields = {
@@ -559,15 +590,18 @@ def verify_observations(name, facts, subject, measurements):
             require(profile["codes"] == {}, "observation-response-code")
         else:
             fields.add("warmup")
+            expected = workload[
+                {200: "login", 401: "failedAttempt", 201: "accountEvent"}[status]
+            ]
             require(
-                profile["concurrency"] == 4
-                and profile["warmup"] == (0 if status == 401 else 4),
+                profile["concurrency"] == expected["concurrency"]
+                and profile["warmup"] == expected.get("warmup", 0),
                 "observation-auth-profile",
             )
             if status == 401:
                 fields.add("limitedStatuses")
                 require(
-                    profile["limitedStatuses"] == {"429": 8},
+                    profile["limitedStatuses"] == {"429": expected["limitedChecks"]},
                     "observation-limited-checks",
                 )
             if status in {200, 401}:
@@ -660,6 +694,9 @@ def verify_record(record, subject, baseline=None):
         subject.get("schema", {}).get("version") == profile["schemaVersion"],
         "binary-schema-mismatch",
     )
+    validate_migration_profile(
+        subject.get("migrationProfile"), profile, subject["schema"]["signature"]
+    )
     require(
         subject.get("runtimeProfile") == runtime_profile(runtime_template())
         and subject.get("policy") == POLICY
@@ -674,6 +711,7 @@ def verify_record(record, subject, baseline=None):
         "record-fields",
     )
     require(record["subject"] == subject, "record-subject")
+    require(record["uncovered"] == UNCOVERED, "coverage-boundaries")
     require(
         record["failure"] is None
         and record["cleanup"] == {"status": "passed", "remaining": []},
@@ -791,39 +829,93 @@ def validate_binary_profile(profile):
     require(
         isinstance(profile, dict)
         and set(profile)
-        == {"formatVersion", "schemaVersion", "session", "attempts", "kdfConcurrency"}
+        == {
+            "formatVersion",
+            "schemaVersion",
+            "session",
+            "attempts",
+            "kdfConcurrency",
+            "mfaMaxAgeSeconds",
+        }
         and type(profile["formatVersion"]) is int
         and profile["formatVersion"] == 1
         and type(profile["schemaVersion"]) is int
-        and profile["schemaVersion"] > 0
+        and profile["schemaVersion"] == 10
         and all(
             json.dumps(profile[key], sort_keys=True)
             == json.dumps(POLICY[key], sort_keys=True)
-            for key in ["session", "attempts", "kdfConcurrency"]
+            for key in ["session", "attempts", "kdfConcurrency", "mfaMaxAgeSeconds"]
         ),
         "binary-policy-mismatch",
     )
     return profile
 
 
-def binary_profile(image):
+def candidate_probe(prefix, phase, image, entrypoint, *args):
+    # outside() establishes this ownership and cleanup boundary before preflight.
+    return docker(
+        "run",
+        "--rm",
+        "--pull=never",
+        "--network=none",
+        "--name",
+        prefix + "-" + phase,
+        "--label",
+        "rss.identity.t3=" + prefix,
+        "--entrypoint",
+        entrypoint,
+        image,
+        *args,
+    )
+
+
+def binary_profile(image, prefix):
     return validate_binary_profile(
         json.loads(
-            docker(
-                "run",
-                "--rm",
-                "--pull=never",
-                "--network=none",
-                "--entrypoint",
-                "identity-server",
+            candidate_probe(
+                prefix,
+                "policy",
                 image,
+                "identity-server",
                 "--acceptance-profile",
             )
         )
     )
 
 
-def candidate(args):
+def validate_migration_profile(value, profile, signature, identity_sql_sha=None):
+    require(
+        isinstance(value, dict)
+        and set(value)
+        == {
+            "schema_version",
+            "schema_contract",
+            "identity_sql_sha256",
+            "rss_sql_sha256",
+        }
+        and type(value["schema_version"]) is int
+        and value["schema_version"] == profile["schemaVersion"] == 10
+        and value["schema_contract"] == signature
+        and all(
+            isinstance(value[key], str) and re.fullmatch("[0-9a-f]{64}", value[key])
+            for key in ["schema_contract", "identity_sql_sha256", "rss_sql_sha256"]
+        )
+        and (
+            identity_sql_sha is None or value["identity_sql_sha256"] == identity_sql_sha
+        ),
+        "binary-migration-mismatch",
+    )
+    return value
+
+
+def migration_profile(image, profile, signature, identity_sql_sha, prefix):
+    value = json.loads(
+        candidate_probe(prefix, "migration", image, "identity-migrate", "--describe")
+    )
+    return validate_migration_profile(value, profile, signature, identity_sql_sha)
+
+
+def candidate(args, prefix):
     require(git(ROOT, "status", "--porcelain") == "", "committed-runner-required")
     require(
         type(args.pull_request) is int and args.pull_request > 0,
@@ -838,7 +930,7 @@ def candidate(args):
     )
     identity = image_identity(details["identity"])
     web = image_identity(details["web"])
-    profile = binary_profile(identity["id"])
+    profile = binary_profile(identity["id"], prefix)
     lock = process(
         ["/usr/bin/git", "-C", str(ROOT), "show", identity["revision"] + ":Cargo.lock"]
     )
@@ -875,6 +967,7 @@ def candidate(args):
     )
     for path in [
         "crates/identity-postgres/src/schema-signature.sha256",
+        "crates/identity-postgres/migrations/0001_authority.sql",
         "deployment/providers.lock.json",
         "deployment/deploy.example.json",
         "crates/identity-postgres/src/security-event-v3.json",
@@ -892,6 +985,13 @@ def candidate(args):
             == (ROOT / path).read_bytes(),
             "candidate-deployment-drift",
         )
+    migration = migration_profile(
+        identity["id"],
+        profile,
+        schema.decode().strip(),
+        file_digest(ROOT / "crates/identity-postgres/migrations/0001_authority.sql"),
+        prefix,
+    )
     info = json.loads(docker("info", "--format", "{{json .}}"))
     subject = {
         "runnerRevision": git(ROOT, "rev-parse", "HEAD"),
@@ -903,6 +1003,7 @@ def candidate(args):
             "signature": schema.decode().strip(),
         },
         "binaryProfile": profile,
+        "migrationProfile": migration,
         "providers": {
             k: image_identity(v)
             for k, v in details.items()
@@ -923,14 +1024,11 @@ def candidate(args):
     require(re.fullmatch("[0-9a-f]{40}", rss), "rss-revision")
     # Runtime package identity is independently checked inside the tools image.
     browser = json.loads(
-        docker(
-            "run",
-            "--rm",
-            "--pull=never",
-            "--network=none",
-            "--entrypoint",
-            "node",
+        candidate_probe(
+            prefix,
+            "browser",
             tool["Id"],
+            "node",
             "-e",
             "const p=require('/opt/playwright-core/package.json');console.log(JSON.stringify({version:p.version,integrity:require('fs').readFileSync('/opt/playwright-integrity','utf8')}))",
         )
@@ -2036,22 +2134,31 @@ class Run:
         }
 
     def capacity(self):
+        workload = self.config["subject"]["workload"]
+        attempts = self.config["subject"]["policy"]["attempts"]
         # Only fixture workload is seeded. The production request performs the actual bounded cleanup.
         delay = float(
             self.sql(
                 "SELECT coalesce(max(extract(epoch FROM expires_at-clock_timestamp())),0) FROM identity_authority.attempts WHERE tenant_id IN ('"
                 + "','".join(TENANTS)
-                + "') AND (key LIKE 's:%' OR (key='p:operator' AND count>=5)) AND expires_at>clock_timestamp();"
+                + "') AND (key LIKE 's:%' OR (key='p:operator' AND count>="
+                + str(attempts["scopeLimit"])
+                + ")) AND expires_at>clock_timestamp();"
             )
         )
         if delay > 0:
-            require(delay <= 900, "attempt-window-out-of-policy")
+            require(
+                delay <= max(attempts["sourceSeconds"], attempts["scopeSeconds"]),
+                "attempt-window-out-of-policy",
+            )
             print("T3 capacity: waiting for existing attempt windows", flush=True)
             time.sleep(delay + 1)
         self.sql(
             "INSERT INTO identity_authority.attempts(tenant_id,key,count,expires_at) SELECT '"
             + TENANTS[0]
-            + "'::uuid,'t3-expired-'||i,1,clock_timestamp()-interval '1 hour' FROM generate_series(1,256) i;"
+            + "'::uuid,'t3-expired-'||i,1,clock_timestamp()-interval '1 hour' FROM generate_series(1,"
+            + str(workload["expiredAttempts"])
+            + ") i;"
         )
         before = int(
             self.sql(
@@ -2253,14 +2360,18 @@ def outside(args):
         args.record.is_absolute() and not args.record.exists(),
         "fresh-absolute-record-required",
     )
-    details, tool, subject, targets, baseline = candidate(args)
-    approval = verify_approval(targets, subject["pullRequest"]) if targets else None
     prefix = "identity-t3-" + secrets.token_hex(5)
     volume, operator = prefix + "-private", prefix + "-operator"
-    report = new_record(subject, targets)
-    report["approval"] = approval
+    report = new_record({}, None)
     save(args.record, report)
+    phase = "preflight"
     try:
+        details, tool, subject, targets, baseline = candidate(args, prefix)
+        approval = verify_approval(targets, subject["pullRequest"]) if targets else None
+        report = new_record(subject, targets)
+        report["approval"] = approval
+        save(args.record, report)
+        phase = "operator"
         docker("volume", "create", "--label", "rss.identity.t3=" + prefix, volume)
         mount = json.loads(docker("volume", "inspect", volume))[0]["Mountpoint"]
         docker(
@@ -2353,7 +2464,7 @@ def outside(args):
         if status.returncode and not report["failure"]:
             raise ProcessFailure("operator", status.returncode)
     except BaseException as error:
-        report["failure"] = failure_fact(error, "operator")
+        report["failure"] = failure_fact(error, phase)
     finally:
         # A copied child result is provisional until its operator and private volume are gone.
         try:

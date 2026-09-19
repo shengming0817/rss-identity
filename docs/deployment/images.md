@@ -34,11 +34,13 @@ make test-reference IDENTITY_IMAGE=rss-identity:revision WEB_IMAGE=rss-identity-
 
 对标源码：[Moby ImageInspect](https://github.com/moby/moby/blob/v28.3.3/daemon/images/image_inspect.go)、[Playwright browser context](https://github.com/microsoft/playwright/blob/v1.60.0/packages/playwright-core/src/server/browserContext.ts)。
 
-
-`identity-server --acceptance-profile` 无需配置、数据库或网络，输出实际二进制使用的会话时限、失败预算、KDF 并发及 schema 版本。T3 在固定 identity image ID 内运行该命令，绑定输出至 subject，并与声明策略核对；不通过匹配 Rust 源码字符串证明策略。
+`identity-server --acceptance-profile` 无需配置、数据库或网络，输出实际二进制使用的会话时限、失败预算、KDF 并发、MFA 最大年龄及 schema 版本。T3 在固定 identity image ID 内运行该命令，以及 `identity-migrate --describe`，将实际策略、schema v10 契约与迁移 SQL 摘要绑定至 subject，并核对候选源码的 Identity 迁移契约和 SQL；不通过匹配 Rust 源码字符串证明策略。
 
 批准评论的完整正文格式为 `rss-identity-reference-approval/v1`，换行后仅包含一个 JSON 代码块。对象字段为 `approved: true`、基线的 `subject`、`baselineSha256`、批准的 `limits` 和 `humanApproval: {"requestId": "实际人类决定请求ID", "source": "feishu或codex或dingTalk"}`。必须先取得明确的人类批准，再发布该记录；超时不构成批准。运行环境提供 `AZURE_DEVOPS_EXT_PAT` 或已登录的 Azure CLI，只读调用固定组织/项目/仓库的 API，拒绝 HTTP 重定向。
 
 T3 在部署前原子预留 source、stale、restored 三个 Compose backend 网络及 provider 网络，仅在 Docker 明确报告子网重叠时换下一个候选。所有资源按本轮精确名称或标签清理；首次场景失败保留，外层清理失败单独记入 cleanup。
 
 机制来源：[Azure PR API](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/get-pull-request?view=azure-devops-rest-7.1)、[评论 API](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/get?view=azure-devops-rest-7.1)、[Moby 原子地址分配](https://github.com/moby/moby/blob/v28.5.1/libnetwork/ipams/defaultipam/address_space.go)、[Compose 网络接管](https://github.com/docker/compose/blob/v2.39.4/pkg/compose/create.go)。未复制上游代码。
+
+
+报告的 `uncovered` 明确保留本轮不覆盖的边界：受测环境以外的架构/资源、其它 OIDC provider、持续登录吞吐、多独立会话吞吐、未预备镜像与配置的灾难恢复、消费产品及旧环境退役。`passed` 仅表示已批准的固定范围通过，不会清空这些边界。候选预检的策略、迁移、浏览器 probe 也使用本轮精确名称与标签，外层在预检前建立失败记录与清理范围，超时/中断时一并回收。

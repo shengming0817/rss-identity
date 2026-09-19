@@ -22,7 +22,7 @@ fn profile_is_available_offline_from_the_actual_binary() {
             "formatVersion": 1, "schemaVersion": 10,
             "session": {"idleSeconds": 900, "absoluteSeconds": 14400},
             "attempts": {"sourceLimit": 30, "sourceSeconds": 300, "scopeLimit": 5, "scopeSeconds": 900},
-            "kdfConcurrency": 4
+            "kdfConcurrency": 4, "mfaMaxAgeSeconds": 300
         })
     );
 }
