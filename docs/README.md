@@ -7,7 +7,8 @@
 | guides | [开发与消费指南](guides/README.md) |
 | deployment | [运行与发布](deployment/README.md) |
 | reference | [历史和上游来源](reference/sources.md) |
-| reviews | [评审记录](reviews/README.md) |
 | rules | [稳定规则](rules/README.md) |
 
 需求以 PRD 为唯一 owner；实施计划引用需求编号，不另立冲突需求。目标、草案、实现与验证状态分开维护。
+
+评审与逐次验证结果记录在对应 PR；历史归档通过 Git 历史追溯，维护方式见[文档规则](rules/documentation.md)。

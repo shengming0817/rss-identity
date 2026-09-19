@@ -18,7 +18,7 @@
 
 共享 Keycloak 测试在修改前保存成员关系，捕获测试主体普通错误和 unwind panic，显式 await 恢复并读回原值后才传播原失败；恢复与主体同时失败时保留主体错误并附恢复诊断。Docker pause guard 显式检查 unpause，失败保留清理责任，Drop 只作有界兜底并输出受控状态诊断。测试验证 panic、普通错误、原本非成员、失败 unpause 与真实容器 unwind 恢复。进程被杀或 abort 时由外层 disposable provider runner 销毁容器，不承诺析构能恢复被终止的进程。
 
-以上是事务行为和真实 provider 的 Medium/T2 证明，不宣称 Hard 或产品 T3。完整诊断、方案比较和修复验证见 [现有验收记录](../../reviews/202609180100-2438-trusted-group-expiry.md)。
+以上是事务行为和真实 provider 的 Medium/T2 证明，不宣称 Hard 或产品 T3。完整诊断、方案比较和修复验证归属 [PR #1034](https://dev.azure.com/shengming0923/rss/_git/rss-identity/pullrequest/1034)，原始记录通过 Git 历史追溯。
 
 ## 实施 DAG 与 owner
 
@@ -28,14 +28,14 @@
 | --- | --- | --- |
 | A | postgres groups/session_storage/sessions/management/lib 与 embedded 测试 | 保留 wrapper、证明优先级、恰好到期、亚秒采样、SQL 续期延迟；管理拒绝且无安全事件 |
 | B | federated_http、group_lifecycle、keycloak_support、providers.py；独立 consumer/runner 与 runner 单测 | 真实撤组/多旧会话/到期/刷新/重登/断网/配置和禁用；生产与 fixture feature 分离 |
-| C | 本 ADR、embedding 指南、来源与评审索引 | 文档准确、源码/配置身份与固定 Git 消费证据 |
+| C | 本 ADR、embedding 指南、来源与 PR 验证记录 | 文档准确、源码/配置身份与固定 Git 消费证据 |
 | D | PR artifact、六维审查与修复、最终产品 make ci | findings 分流、same-head 交接 |
 
-TDD 已在旧代码复现：延迟续期 3 秒后组仍 Available；新 checked getter 用例在旧 API 编译失败。精确时间边界用私有测试时刻验证，SQL 延迟用真实 PG 触发器验证。producer T2 承担完整生命周期，独立消费者只承担公开 API 与构建来源证明。实际运行结果单独记入评审记录，不以测试存在替代通过证据。
+TDD 已在旧代码复现：延迟续期 3 秒后组仍 Available；新 checked getter 用例在旧 API 编译失败。精确时间边界用私有测试时刻验证，SQL 延迟用真实 PG 触发器验证。producer T2 承担完整生命周期，独立消费者只承担公开 API 与构建来源证明。实际运行结果记入对应 PR，不以测试存在替代通过证据。
 
 ## 消费与范围
 
-独立 local/OIDC workspace 使用同一固定完整 Git SHA，各自 lock/target，位于所有仓库祖先之外。OIDC 默认模式验证生产拒绝 loopback；显式 loopback-fixture 模式复用公开测试入口执行真实 TLS Keycloak。报告分别绑定 metadata 和 compiler features。固定实现提交 A 完成消费验证后，提交 B 仅补文档证据；变更有效实现/fixture/runner 输入须重新固定和验证。
+独立 local/OIDC workspace 使用同一固定完整 Git SHA，各自 lock/target，位于所有仓库祖先之外。OIDC 默认模式验证生产拒绝 loopback；显式 loopback-fixture 模式复用公开测试入口执行真实 TLS Keycloak。报告分别绑定 metadata 和 compiler features。固定实现提交完成消费验证后，在对应 PR 记录结果，完整报告的存放遵循[文档规则](../../rules/documentation.md)；变更有效实现/fixture/runner 输入须重新固定和验证。
 
 不恢复中央 client/Hydra，不修改 MDM 资源授权，不加入目录同步、生产 egress 放宽、旧库升级或产品 T3。
 
