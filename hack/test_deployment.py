@@ -191,7 +191,7 @@ class ImageContractTests(unittest.TestCase):
         arguments={
             'deploy.py':['--input','input','--output','output','--identity-image','backend','--web-image','web'],
             'operate.py':['--deployment','deployment','--project','identity-fixture','verify'],
-            'reference_seams.py':['--identity-image','backend','--web-image','web','--previous-web-image','previous','--record','record','--work','work'],
+            'reference_t3.py':['--identity-image','backend','--web-image','web','--tools-image','tools','--web-repo','web-repo','--record','record'],
         }
         for script,args in arguments.items():
             result=subprocess.run([sys.executable,str(deploy.ROOT/'hack'/script),*args,'--candidate','old'],capture_output=True,timeout=10)

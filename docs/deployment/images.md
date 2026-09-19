@@ -16,12 +16,19 @@ make image IDENTITY_IMAGE=rss-identity:my-version
 
 不再生产/消费 candidate.json、强制 OCI tar 或裸二进制目录。历史候选与验收记录只作历史来源，不构成新部署前提。备份回执格式见[恢复](recovery.md)。
 
-显式接缝验证在隔离 Linux Docker 主机以 root 部署 owner 运行，提供 Python、openssl、Docker/Compose 与已准备的工具镜像（providers.lock 的 rust，仅作为 HTTP 测试客户端）：
+综合参考应用 T3 由 #2366 持有，唯一入口为 `make test-reference`。它使用当前 Docker context 的默认环境，构建独立的测试工具镜像后，在 daemon 内一次性私有卷运行实际部署、真实 Chromium、TLS PG 和内网 Keycloak；不要求 macOS 宿主以 root 渲染文件。
 
 ```sh
-make test-reference IDENTITY_IMAGE=rss-identity:my-version WEB_IMAGE=rss-identity-web:my-version PREVIOUS_WEB_IMAGE=rss-identity-web:previous-version REFERENCE_RECORD=/private/result.json REFERENCE_WORK=/private/new-fixture
+make reference-tools REFERENCE_TOOLS_IMAGE=rss-identity-reference-tools:revision
+make test-reference IDENTITY_IMAGE=rss-identity:revision WEB_IMAGE=rss-identity-web:revision REFERENCE_TOOLS_IMAGE=rss-identity-reference-tools:revision REFERENCE_WEB_REPO=/absolute/fixed/rss-web REFERENCE_RECORD=/absolute/private/new-result.json
 ```
 
-PREVIOUS_WEB_IMAGE 仅是测试输入，需提供不同的已准备 Web image ID，以核验前端单独升级及旧备份继续可用。v3 结果记录三个产品镜像的不可变 ID、revision、实际 OS/architecture/variant、真实步骤与清理结果；只描述本次 Docker 环境，不把一个平台的结果声明为其它平台已验证，也不成为部署输入。源码 revision 可回查本次 providers.lock 的多架构索引摘要。源码 HTTP/UI 联调仍可显式运行 `make test-ui`，不进入后端常规 CI 或镜像构建。独立产品 T3 仍归 #2366。
+运行器从干净 Git 提交归档源码，核对产品镜像 revision、两仓 lock、RSS revision、schema、provider/tool image ID、浏览器和真实资源。测试使用随机一次性秘密，通过正式 v4 `privateProviders` 接通内网 Keycloak；测试 loopback 不进入产品镜像。前端仍由 rss-web 构建，本仓不维护第二个 npm 工程。工具镜像的 Playwright 包摘要与固定 Web lock 对齐。
 
-对标源码：[Moby v28.3.3 ImageInspect](https://github.com/moby/moby/blob/v28.3.3/daemon/images/image_inspect.go)、[NGINX release-1.30.0 proxy](https://github.com/nginx/nginx/blob/release-1.30.0/src/http/modules/ngx_http_proxy_module.c)。只复用公开 CLI/协议行为，未复制源码。
+省略 `REFERENCE_TARGETS` 时，只生成 `measured` 基线，不能标记生产目标验收通过。owner 根据基线确认支持规模、SLO、RPO/RTO 后，提供新的私有 JSON：`subject` 为基线固定候选对象，`approvalReference` 为记录批准的 PR/工作项评论链接，`limits` 明确包含 loginP95Ms、sessionP95Ms、sessionRequestsPerSecond、unexpectedErrors、restoreSeconds、lostSecurityChanges、expiredAttemptsRemoved。耗时、错误和丢失数量为上限；吞吐和清理数量为下限。再次调用同一入口并设置 `REFERENCE_TARGETS=/absolute/approved-targets.json`，使用全新输出和数据卷正式复测。
+
+结果只保存本次实际观测、材料摘要、测量和通过/失败/未覆盖；任何必要步骤、目标或清理不满足都不能通过。源码树不保存逐次结果，完整脱敏结果归档为 T3 PR 附件并回读校验摘要。实际密码、cookie、CSRF、TOTP seed、code、verifier、client secret 与浏览器存储仅存在私有 fixture，退出后删除，不进入报告。恢复直接消费 operate 的备份回执，不新增候选协议、恢复 seal 或激活系统。
+
+工具只清理本次精确随机 project/label 的容器、网络和卷。失败和中断也保存失败结果并确认清理；未知写入只读核对，不自动重放。普通 `make ci` 保持组件 T1/T2；浏览器 T3 不进入普通 CI。
+
+对标源码：[Moby ImageInspect](https://github.com/moby/moby/blob/v28.3.3/daemon/images/image_inspect.go)、[Playwright browser context](https://github.com/microsoft/playwright/blob/v1.60.0/packages/playwright-core/src/server/browserContext.ts)。

@@ -30,3 +30,6 @@ stateKeyFile 更换后重启，旧 OIDC state 拒绝，用户重新开始。上�
 旧 candidate 字段回执明确拒绝，无兼容读取或转换。新格式不记录前端镜像，前端独立升级不影响已有备份；schema、instance、storage lineage、source project 及 dump 摘要仍严格校验。数据库 dump 格式保持不变。
 
 backendVersion 与 Compose 的 identity image ID 精确相等；镜像的源码 revision 标签仅用于追溯展示，不作为恢复兼容凭据。同源码重建得到不同 image ID 时也须保留备份所属后端镜像，不能凭标签宣称兼容。
+
+
+综合 T3 分别演练两个真实切点：A 备份后源端重新开放并产生安全撤销，A 的隔离恢复只用于核对历史事实，保持关闭；随后停写形成 B，核对账户/member/provider、会话与 Outbox 完整切点，再从 B 恢复并显式开放。备份摘要、schema 或 image ID 匹配不证明 A 含有后来的撤销。运行器不向生产工具添加 freshness seal，也不承诺任意旧快照可直接安全开放。

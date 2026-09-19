@@ -40,7 +40,7 @@ test-consumers:
 test-assembly:
 	$(PYTHON) hack/providers.py assembly
 
-.PHONY: test-ui image test-reference
+.PHONY: test-ui image test-reference reference-tools
 test-ui:
 	$(PYTHON) hack/ui.py
 
@@ -58,6 +58,11 @@ image:
 	set -o pipefail; /usr/bin/git archive "$(IDENTITY_REVISION)" | docker buildx build --load --provenance=false -f deployment/Dockerfile --tag "$(IDENTITY_IMAGE)" --build-arg "IDENTITY_REVISION=$(IDENTITY_REVISION)" --build-arg "RUST_IMAGE=$(RUST_IMAGE)" --build-arg "RUNTIME_IMAGE=$(RUNTIME_IMAGE)" $(IMAGE_SECRET) -
 	@test "$$(/usr/bin/git rev-parse HEAD)" = "$(IDENTITY_REVISION)" && test -z "$$(/usr/bin/git status --porcelain)"
 
-# Explicit image/config seams on an isolated Linux Docker host; not part of CI.
+# Explicit fixed-candidate product T3; stays outside normal component CI.
+REFERENCE_TOOLS_IMAGE ?= rss-identity-reference-tools:local
+reference-tools:
+	@test -z "$$('/usr/bin/git' status --porcelain)" || { echo "tools image requires clean HEAD" >&2; exit 1; }
+	set -o pipefail; /usr/bin/git archive HEAD | docker buildx build --load --provenance=false -f deployment/reference-tools.Dockerfile --tag "$(REFERENCE_TOOLS_IMAGE)" --build-arg "REFERENCE_REVISION=$(IDENTITY_REVISION)" -
+
 test-reference:
-	$(PYTHON) hack/reference_seams.py --identity-image "$(IDENTITY_IMAGE)" --web-image "$(WEB_IMAGE)" --previous-web-image "$(PREVIOUS_WEB_IMAGE)" --record "$(REFERENCE_RECORD)" --work "$(REFERENCE_WORK)"
+	$(PYTHON) hack/reference_t3.py --identity-image "$(IDENTITY_IMAGE)" --web-image "$(WEB_IMAGE)" --tools-image "$(REFERENCE_TOOLS_IMAGE)" --web-repo "$(REFERENCE_WEB_REPO)" --record "$(REFERENCE_RECORD)" $(if $(REFERENCE_TARGETS),--targets "$(REFERENCE_TARGETS)")
