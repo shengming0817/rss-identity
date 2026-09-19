@@ -595,12 +595,19 @@ async function oidc() {
       replay.headers().location.startsWith("/auth/error?"),
     "callback-replay-rejected",
   );
+  const federatedCookie = await bound.context.cookies();
+  await bound.page
+    .getByRole("button", { name: /^Sign out$|^退出当前会话$/ })
+    .click();
+  await bound.page.waitForURL(`**/tenants/${tenant}/login`);
+  await expectOldCookie(bound, federatedCookie);
   await store(bound);
   return {
     jitAndExplicitLink: true,
     tenantIdentityIsolated: true,
     wrongPasswordRejected: true,
     browserBindingAndReplay: true,
+    federatedLogout: true,
   };
 }
 async function mfa() {
@@ -692,6 +699,38 @@ async function mfa() {
   await login(c, "linked", input.userPassword);
   journey = "mfa-after-reenable";
   await stepUp(c);
+  journey = "federated-account";
+  const federated = await sso("account-disable", "alice");
+  const retired = await federated.context.cookies();
+  check(
+    (
+      await write(a, "POST", `accounts/${data.alicePrincipal}/enabled`, {
+        enabled: false,
+      })
+    ).status === 200,
+    "federated-account-disabled",
+  );
+  check(
+    (await current(federated)).status === 401,
+    "federated-account-session-revoked",
+  );
+  const denied = await sso("disabled-account-login", "alice", tenant, {
+    success: false,
+  });
+  check(
+    (await current(denied)).status === 401,
+    "disabled-federated-login-denied",
+  );
+  check(
+    (
+      await write(a, "POST", `accounts/${data.alicePrincipal}/enabled`, {
+        enabled: true,
+      })
+    ).status === 200,
+    "federated-account-reenabled",
+  );
+  await expectOldCookie(federated, retired);
+  await sso("account-reenabled", "alice");
   await store(c);
   await store(a);
   return {
@@ -700,6 +739,7 @@ async function mfa() {
     oldSessionRejected: true,
     wrongSubjectAndDowngradeRejected: true,
     wrongTotpRejected: true,
+    federatedAccountRevocation: true,
   };
 }
 async function responseLoss() {
@@ -734,7 +774,10 @@ async function responseLoss() {
       u.searchParams.get("reason") === "unavailable",
   );
   await a.page
-    .getByRole("heading", { name: "Identity service unavailable", exact: true })
+    .getByRole("heading", {
+      name: /^(Identity service unavailable|身份服务暂时不可用)$/,
+      exact: true,
+    })
     .waitFor();
   await new Promise((r) => setTimeout(r, 300));
   check(requests === 1, "unknown-write-not-retried");
@@ -972,23 +1015,28 @@ try {
       break;
     }
     case "old-client-secret": {
-      const c = await sso("old-secret", "alice", tenant, { success: false });
-      check((await current(c)).status === 401, "old-secret-no-session");
+      for (const t of input.tenants) {
+        const c = await sso("old-secret-" + t, "alice", t, { success: false });
+        check((await current(c)).status === 401, "old-secret-no-session");
+      }
       observations = { oldSecretRejected: true };
       break;
     }
     case "update-client-secret": {
-      const a = await admin();
-      const p = await provider(a);
-      const r = await write(a, "PUT", `providers/${p.id}`, {
-        expectedVersion: p.version,
-        settings: p.settings,
-        clientSecret: input.clientSecret,
-        caPem: input.idpCa,
-      });
-      check(r.status === 200, "client-secret-updated");
-      await store(a);
-      observations = { updated: true };
+      for (const t of input.tenants) {
+        const a = await admin(t);
+        const p = await provider(a);
+        const r = await write(a, "PUT", `providers/${p.id}`, {
+          expectedVersion: p.version,
+          settings: p.settings,
+          clientSecret: input.clientSecret,
+          caPem: input.idpCa,
+        });
+        check(r.status === 200, "client-secret-updated");
+        await store(a);
+        await sso("new-secret-" + t, "alice", t);
+      }
+      observations = { allTenantBindingsUpdated: true };
       break;
     }
     case "recovery-state":
@@ -1012,7 +1060,7 @@ try {
         });
         check(r.status === 401, "restored-disabled-member");
       }
-      await sso("restored-sso", "alice");
+      for (const t of input.tenants) await sso("restored-sso-" + t, "alice", t);
       await store(a);
       observations = {
         oldCredentialsRejected: true,
