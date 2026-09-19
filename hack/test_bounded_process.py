@@ -1,18 +1,47 @@
-import subprocess,sys,time,unittest
+import subprocess, sys, time, unittest
 import bounded_process
+
+
 class ProcessTests(unittest.TestCase):
     def test_hung_fixture_process_is_reaped(self):
-        begin=time.monotonic()
+        begin = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired):
-            bounded_process.run([sys.executable,'-c','import time; time.sleep(20)'],timeout=.05,capture_output=True,text=True)
-        self.assertLess(time.monotonic()-begin,6)
+            bounded_process.run(
+                [sys.executable, "-c", "import time; time.sleep(20)"],
+                timeout=0.05,
+                capture_output=True,
+                text=True,
+            )
+        self.assertLess(time.monotonic() - begin, 6)
+
     def test_descendant_is_reaped_after_parent_exit(self):
-        code='import subprocess,sys; subprocess.Popen([sys.executable,"-c","import time; time.sleep(20)"])'
-        begin=time.monotonic()
+        code = 'import subprocess,sys; subprocess.Popen([sys.executable,"-c","import time; time.sleep(20)"])'
+        begin = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired):
-            bounded_process.run([sys.executable,'-c',code],timeout=.1,capture_output=True,text=True)
-        self.assertLess(time.monotonic()-begin,6)
+            bounded_process.run(
+                [sys.executable, "-c", code],
+                timeout=0.1,
+                capture_output=True,
+                text=True,
+            )
+        self.assertLess(time.monotonic() - begin, 6)
 
     def test_bounded_process_preserves_result(self):
-        result=bounded_process.run([sys.executable,'-c','print("fixture")'],timeout=5,capture_output=True,text=True,check=True)
-        self.assertEqual(result.stdout,'fixture\n')
+        result = bounded_process.run(
+            [sys.executable, "-c", 'print("fixture")'],
+            timeout=5,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(result.stdout, "fixture\n")
+
+    def test_private_input_reaches_stdin_without_argument_or_environment_exposure(self):
+        result = bounded_process.run(
+            [sys.executable, "-c", "import sys; print(len(sys.stdin.buffer.read()))"],
+            input=b"private-fixture-input",
+            timeout=5,
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(result.stdout, b"21\n")
