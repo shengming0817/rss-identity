@@ -66,6 +66,11 @@ pub(crate) struct VettedResolver {
     cidrs: Vec<IpNet>,
 }
 impl VettedResolver {
+    #[cfg(test)]
+    pub(crate) fn with_lookup(mut self, lookup: Arc<dyn Resolve>) -> Self {
+        self.lookup = lookup;
+        self
+    }
     pub(crate) fn new(loopback: bool, cidrs: Vec<IpNet>) -> Self {
         Self {
             lookup: Arc::new(SystemResolver),

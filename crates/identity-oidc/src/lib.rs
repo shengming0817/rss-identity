@@ -3,6 +3,8 @@
 #![deny(missing_docs)]
 mod assurance;
 mod egress;
+#[cfg(test)]
+mod private_provider_tests;
 pub use ipnet::IpNet;
 use openidconnect::{
     AsyncHttpClient, AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
@@ -54,6 +56,8 @@ pub struct HttpOidc {
     profiles: Vec<TrustedAssuranceProfile>,
     private_access: Vec<PrivateProviderAccess>,
     loopback: bool,
+    #[cfg(test)]
+    lookup: Option<std::sync::Arc<dyn reqwest::dns::Resolve>>,
 }
 impl HttpOidc {
     /// Production uses HTTPS and vetted public or explicitly authorized private addresses.
@@ -106,6 +110,8 @@ impl HttpOidc {
             profiles,
             private_access,
             loopback,
+            #[cfg(test)]
+            lookup: None,
         };
         let mut seen = std::collections::BTreeSet::new();
         for p in &result.profiles {
@@ -148,12 +154,15 @@ impl HttpOidc {
         let origin = parse_url(c.issuer().as_str(), self.loopback, cidrs)?
             .origin()
             .ascii_serialization();
+        let resolver = egress::VettedResolver::new(self.loopback, cidrs.to_vec());
+        #[cfg(test)]
+        let resolver = match &self.lookup {
+            Some(lookup) => resolver.with_lookup(lookup.clone()),
+            None => resolver,
+        };
         let mut builder = reqwest::Client::builder()
             .no_proxy()
-            .dns_resolver(std::sync::Arc::new(egress::VettedResolver::new(
-                self.loopback,
-                cidrs.to_vec(),
-            )))
+            .dns_resolver(std::sync::Arc::new(resolver))
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_secs(3));
