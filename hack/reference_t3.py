@@ -706,6 +706,11 @@ class Run:
             env={**os.environ, "NODE_EXTRA_CA_CERTS": self.trust_browser()},
         )
         result = json.loads(reply.stdout)
+        if result.get("diagnostics"):
+            assert_redacted(result["diagnostics"], self.secrets)
+            self.record["steps"][-1]["observations"]["diagnostics"] = result[
+                "diagnostics"
+            ]
         reason = result.get("diagnostic", "scenario")
         require(
             result.get("status") == "passed",

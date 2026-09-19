@@ -18,7 +18,8 @@ const percentile95 = (values) =>
 let browser,
   assertions = 0,
   diagnostic = "start",
-  journey = "idp";
+  journey = "idp",
+  diagnostics = {};
 const active = [];
 function check(ok, code) {
   diagnostic = code;
@@ -63,7 +64,13 @@ async function read(c, path) {
   try {
     body = await response.json();
   } catch {}
-  return { status: response.status(), body, headers: response.headers() };
+  const result = {
+    status: response.status(),
+    body,
+    headers: response.headers(),
+  };
+  await response.dispose();
+  return result;
 }
 async function current(c) {
   return read(c, `/api/v2/tenants/${c.t}/session`);
@@ -875,7 +882,11 @@ async function capacity() {
     "login-baseline-samples",
   );
   const started = performance.now();
+  const profiles = [];
   for (const concurrency of [1, 4, 16]) {
+    const samples = [],
+      statuses = {};
+    const profileStart = performance.now();
     const until = performance.now() + 30000;
     while (performance.now() < until)
       await Promise.all(
@@ -885,12 +896,24 @@ async function capacity() {
             a,
             `/api/identity-host/v1/tenants/${tenant}/context`,
           );
+          statuses[r.status] = (statuses[r.status] ?? 0) + 1;
           if (r.status !== 200) unexpected++;
-          sessionTimes.push(performance.now() - start);
+          const elapsed = performance.now() - start;
+          samples.push(elapsed);
+          sessionTimes.push(elapsed);
         }),
       );
+    profiles.push({
+      concurrency,
+      statuses,
+      samples: samples.length,
+      p95Ms: percentile95(samples),
+      requestsPerSecond:
+        samples.length / ((performance.now() - profileStart) / 1000),
+    });
   }
   const elapsed = (performance.now() - started) / 1000;
+  diagnostics = { capacityProfiles: profiles, unexpectedErrors: unexpected };
   check(unexpected === 0, "capacity-unexpected-errors");
   await store(a);
   return {
@@ -908,6 +931,7 @@ async function capacity() {
       loginSamples: success,
       limitedLogins: limited,
       sessionSamples: sessionTimes.length,
+      profiles,
     },
   };
 }
@@ -1099,7 +1123,12 @@ try {
     { mode: 0o600 },
   );
   console.log(
-    JSON.stringify({ status: "failed", phase: input.phase, diagnostic }),
+    JSON.stringify({
+      status: "failed",
+      phase: input.phase,
+      diagnostic,
+      diagnostics,
+    }),
   );
   process.exitCode = 1;
 } finally {
