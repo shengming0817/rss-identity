@@ -16,7 +16,7 @@ PostgreSQL 17.6、Keycloak 26.7.3 的镜像摘要由 [providers.lock.json](../..
 make test-consumers IDENTITY_CONSUMER_REVISION=<完整已提交并推送的SHA> IDENTITY_CONSUMER_OUTPUT=/tmp/identity-proof-<唯一编号>
 ```
 
-每个消费者拥有独立 workspace/Cargo.lock/target，无仓库祖先 Cargo 配置；组件与 RSS 均为固定 Git 来源，不能用路径样例代替此证明。先固定生产 commit A，再运行消费者，最后只提交证据/文档 B；report 记录生产文件摘要、精确依赖版本/features、Cargo.lock 摘要和实际运行计数，B 必须保持 A 的生产树不变。可执行消费者源码见 [embedding](embedding.md)。
+每个消费者拥有独立 workspace/Cargo.lock/target，无仓库祖先 Cargo 配置；组件与 RSS 均为固定 Git 来源，不能用路径样例代替此证明。先固定生产提交，再运行消费者，验证前后有效源码与配置必须一致。report 记录生产文件摘要、精确依赖版本/features、Cargo.lock 摘要和实际运行计数，生成文件保留在仓外输出目录；结果记录与持久归档遵循[文档规则](../rules/documentation.md)。可执行消费者源码见 [embedding](embedding.md)。
 
 本仓 worktree 常规检查共用 Identity 主 checkout 的 target；外部消费者使用自己的 target，不能套用该缓存配置。`make dependencies` 对测试 metadata 和实际生产 compiler artifacts 分别检查 RSS features、统一来源、无 patch/跨仓 path。schema 变更通过 `python3 hack/schema_signature.py` 从全新临时 PG 计算签名，不接受现有业务库漂移。
 
