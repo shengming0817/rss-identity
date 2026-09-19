@@ -90,9 +90,7 @@ pub struct AuthenticatedSession {
     pub(crate) view: SessionView,
     pub(crate) identity: SessionIdentity,
     assurance: rss_identity_core::assurance::Assurance,
-    groups: rss_identity_core::groups::Groups,
-    observed: Instant,
-    checked_at: i64,
+    groups: crate::groups::GroupFacts,
 }
 impl AuthenticatedSession {
     pub fn instance(&self) -> rss_identity_core::InstanceId {
@@ -109,42 +107,8 @@ impl AuthenticatedSession {
         }
         Ok(())
     }
-    pub fn groups(&self) -> Result<VerifiedGroups<'_>, AuthorityError> {
-        use rss_identity_core::groups::Groups;
-        self.check_live()?;
-        let now = self.checked_at.saturating_add(
-            self.observed
-                .elapsed()
-                .as_secs()
-                .try_into()
-                .unwrap_or(i64::MAX),
-        );
-        Ok(match &self.groups {
-            Groups::Unavailable { reason, .. } => VerifiedGroups::Unavailable(*reason),
-            Groups::Expired { .. } => VerifiedGroups::Expired,
-            Groups::Available { expires_at, .. } if now >= *expires_at => VerifiedGroups::Expired,
-            Groups::Available { observed_at, .. } if now < *observed_at => {
-                VerifiedGroups::Unavailable(
-                    rss_identity_core::groups::UnavailableReason::NotYetValid,
-                )
-            }
-            Groups::Available {
-                source,
-                snapshot_id,
-                provider_config_version,
-                observed_at,
-                expires_at,
-                values,
-                ..
-            } => VerifiedGroups::Available(TrustedGroups {
-                source,
-                snapshot_id: *snapshot_id,
-                provider_config_version: *provider_config_version,
-                observed_at: *observed_at,
-                expires_at: *expires_at,
-                values,
-            }),
-        })
+    pub fn groups(&self) -> Result<VerifiedGroups<'_>, GroupAccessError> {
+        self.groups.view(self.expires)
     }
     pub fn identity(&self) -> &SessionIdentity {
         &self.identity
@@ -168,6 +132,17 @@ enum SessionAction {
     Refreshed,
     Revoked,
     AllRevoked,
+}
+// Both authentication and rotation must account for every database wait before success.
+fn checked_expiry(
+    loaded: &db::Loaded,
+    budget: Instant,
+) -> Result<Instant, rss_transactional_messaging_postgres::PgError> {
+    let expires = budget.min(loaded.expires);
+    if Instant::now() >= expires {
+        return Err(reject());
+    }
+    Ok(expires)
 }
 #[derive(Serialize)]
 pub(crate) struct SessionEvent {
@@ -320,18 +295,11 @@ impl Authority {
                             db::touch(c, &mut loaded).await?;
                         }
                         let authority = authority_id(c).await?;
-                        let expires = budget.0.min(
-                            Instant::now()
-                                + Duration::from_secs(
-                                    (loaded.view.idle_expires_at - loaded.now) as u64,
-                                ),
-                        );
+                        let expires = checked_expiry(&loaded, budget.0)?;
                         Ok(AuthenticatedSession {
                             identity: SessionIdentity::from_state(loaded.state),
                             assurance: loaded.assurance,
                             groups: loaded.groups,
-                            observed: Instant::now(),
-                            checked_at: loaded.now,
                             key: loaded.state.key(),
                             digest,
                             authority,
@@ -352,13 +320,15 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<IssuedSession, AuthorityError> {
         self.require_runtime()?;
+        let budget = Budget::new(deadline)?;
         let secret = SessionSecret::generate().map_err(|_| AuthorityError::Unavailable)?;
-        self.mutate(tenant,deadline,move|tx|Box::pin(async move {
+        self.mutate(tenant,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let mut loaded = db::lookup(c,tenant,&old.digest()).await?;
                 db::touch(c,&mut loaded).await?;
                 sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
                     .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;
+                checked_expiry(&loaded, budget.0)?;
                 let fact = event(SessionAction::Refreshed,loaded.state,loaded.view.id,None);
                 Ok((IssuedSession::new(secret,loaded.view,loaded.now,loaded.state),fact))
             })).await
@@ -480,45 +450,5 @@ impl SessionIdentity {
             principal_id: state.key().principal,
             has_local_password: state.has_local_password(),
         }
-    }
-}
-
-use rss_identity_core::groups::{GroupSource, UnavailableReason};
-/// Groups are borrowed from a currently checked identity; there is no standalone proof constructor.
-pub enum VerifiedGroups<'a> {
-    Available(TrustedGroups<'a>),
-    Unavailable(UnavailableReason),
-    Expired,
-}
-/// Neither wire deserialization nor consumer-owned group names construct trusted groups.
-/// ```compile_fail
-/// let groups: rss_identity_postgres::TrustedGroups<'_> = serde_json::from_str("{}").unwrap();
-/// ```
-pub struct TrustedGroups<'a> {
-    source: &'a GroupSource,
-    snapshot_id: uuid::Uuid,
-    provider_config_version: i64,
-    observed_at: i64,
-    expires_at: i64,
-    values: &'a [String],
-}
-impl TrustedGroups<'_> {
-    pub fn source(&self) -> &GroupSource {
-        self.source
-    }
-    pub fn snapshot_id(&self) -> uuid::Uuid {
-        self.snapshot_id
-    }
-    pub fn provider_config_version(&self) -> i64 {
-        self.provider_config_version
-    }
-    pub fn observed_at(&self) -> i64 {
-        self.observed_at
-    }
-    pub fn expires_at(&self) -> i64 {
-        self.expires_at
-    }
-    pub fn values(&self) -> &[String] {
-        self.values
     }
 }

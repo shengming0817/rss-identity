@@ -22,7 +22,7 @@ def require(value, message):
     if not value:
         raise ValueError(message)
 
-def check(metadata, revision, rss_revision, profile):
+def check(metadata, revision, rss_revision, profile, fixture=False):
     packages = {p['id']: p for p in metadata['packages']}
     members = set(metadata['workspace_members'])
     expected = {'rss-identity-core', 'rss-identity-postgres', 'rss-identity-http-axum'}
@@ -48,13 +48,16 @@ def check(metadata, revision, rss_revision, profile):
             require(len(found) == 1 and found[0]['version'] == version, 'public verification exception version drift')
             parents = {packages[n['id']]['name'] for n in metadata['resolve']['nodes'] if any(d['pkg'] == found[0]['id'] for d in n['deps'])}
             require(parents == {parent}, 'public verification exception path drift')
+    oidc_nodes = [n for n in metadata['resolve']['nodes'] if packages[n['id']]['name'] == 'rss-identity-oidc']
+    if profile == 'oidc':
+        require(len(oidc_nodes) == 1 and ('test-support' in oidc_nodes[0]['features']) == fixture, 'OIDC fixture feature escaped its declared mode')
     return {n['id']: {'name': packages[n['id']]['name'], 'version': packages[n['id']]['version'], 'source': packages[n['id']]['source'], 'features': n['features']} for n in metadata['resolve']['nodes']}
 
 def source_hashes():
     # Production commit A and evidence commit B must have identical effective source/config.
     paths = [ROOT/'Cargo.toml', ROOT/'Cargo.lock', ROOT/'rust-toolchain.toml']
-    for base in ['crates', 'app', 'deployment']:
-        paths.extend(p for p in (ROOT/base).rglob('*') if p.is_file())
+    for base in ['crates', 'app', 'deployment', 'hack', 'tests/consumers']:
+        paths.extend(p for p in (ROOT/base).rglob('*') if p.is_file() and '__pycache__' not in p.parts)
     return {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(paths)}
 
 def manifest(profile, revision, rss_revision):
@@ -68,7 +71,7 @@ def manifest(profile, revision, rss_revision):
               'sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid"] }',
               'axum = "=0.8.9"', 'tower = { version = "0.5", features = ["util"] }']
     if profile == 'oidc':
-        lines += ['reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "cookies"] }', 'zeroize = "1"', '[dev-dependencies]', 'scraper = "=0.26.0"']
+        lines += ['reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "cookies"] }', 'zeroize = "1"', '[dev-dependencies]', 'scraper = "=0.26.0"', '[features]', 'default = []', 'loopback-fixture = ["rss-identity-oidc/test-support"]']
     return '\n'.join(lines) + '\n'
 
 def execute(command, directory, env, timeout=1800):
@@ -80,6 +83,24 @@ def execute(command, directory, env, timeout=1800):
         raise RuntimeError(f'consumer command failed: {command[0:2]} exit={result.returncode}')
     return result.stdout
 
+def verify_test(result, name):
+    expected = f'test {name} ... ok'
+    require(expected in result and 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' in result, 'consumer canonical execution incomplete')
+
+def compiled_features(result, closure, profile):
+    compiled = {}
+    for line in result.splitlines():
+        if not line.startswith('{'):
+            continue
+        item = json.loads(line)
+        if item.get('reason') == 'compiler-artifact':
+            compiled.setdefault(item['package_id'], set()).update(item['features'])
+    if profile == 'oidc':
+        oidc = [key for key, value in closure.items() if value['name'] == 'rss-identity-oidc']
+        require(len(oidc) == 1 and oidc[0] in compiled and compiled[oidc[0]] == set(closure[oidc[0]]['features']), 'actual OIDC compiler features differ from declared mode')
+    require(compiled, 'compiler evidence absent')
+    return {key: sorted(features) for key, features in compiled.items()}
+
 def run(revision, output):
     require(re.fullmatch(r'[0-9a-f]{40}', revision), 'complete Identity SHA required')
     output = output.resolve()
@@ -89,7 +110,7 @@ def run(revision, output):
         require(not (parent/'.git').exists() and not (parent/'Cargo.toml').exists(), 'consumer directory has repository/workspace ancestor')
         require(not (parent/'.cargo/config').exists() and not (parent/'.cargo/config.toml').exists(), 'consumer inherits ancestor Cargo configuration')
     require(subprocess.check_output(['/usr/bin/git','rev-parse','HEAD'],cwd=ROOT,text=True).strip() == revision, 'run from the committed source revision')
-    require(not subprocess.check_output(['/usr/bin/git','status','--porcelain','--','Cargo.toml','Cargo.lock','crates','app','deployment'],cwd=ROOT,text=True).strip(), 'production source must be committed')
+    require(not subprocess.check_output(['/usr/bin/git','status','--porcelain','--','Cargo.toml','Cargo.lock','rust-toolchain.toml','crates','app','deployment','hack','tests/consumers'],cwd=ROOT,text=True).strip(), 'production source must be committed')
     rss_revision = tomllib.loads((ROOT/'Cargo.toml').read_text())['workspace']['dependencies']['rss-request-context']['rev']
     output.mkdir(parents=True)
     report = {'identity_git': IDENTITY, 'identity_revision': revision, 'rss_revision': rss_revision, 'source_sha256': source_hashes(), 'providers': providers.IMAGES, 'consumers': {}}
@@ -114,18 +135,30 @@ def run(revision, output):
             deny = deny.replace('ignore = ["RUSTSEC-2023-0071"]','ignore = []')
         (directory/'deny.toml').write_text(deny)
         execute(['cargo','deny','--locked','check','advisories','licenses','sources'],directory,env)
+        modes = {}
+        if profile == 'oidc':
+            result = execute(['cargo','test','--locked','--lib','--message-format=json','--','--test-threads=1'],directory,env)
+            verify_test(result, 'production::production_transport_rejects_loopback')
+            modes['production'] = {'tests': {'passed':1,'failed':0,'ignored':0}, 'features': [], 'closure': closure, 'compiled_features': compiled_features(result, closure, profile)}
+            features = ['--features','loopback-fixture']
+            fixture_metadata = json.loads(execute(['cargo','metadata','--locked','--format-version','1',*features],directory,env))
+            fixture_closure = check(fixture_metadata,revision,rss_revision,profile,fixture=True)
+            (directory/'metadata-fixture.json').write_text(json.dumps(fixture_metadata,indent=2)+'\n')
+            execute(['cargo','clippy','--locked','--all-targets',*features,'--','-D','warnings'],directory,env,3600)
+        else:
+            features, fixture_closure = [], closure
         with contextlib.ExitStack() as stack:
             _, ports = stack.enter_context(providers.postgres())
             provider_env = {'IDENTITY_CONSUMER_PG_PORT': str(ports[5432])}
             if profile == 'oidc':
                 provider_env.update(stack.enter_context(providers.keycloak('https://embedded.example.test/api/v2/oidc/callback')))
-            result = execute(['cargo','test','--locked','--lib','--','--test-threads=1'],directory,{**env,**provider_env},1800)
-            expected = f'test tests::{NAMES[profile]} ... ok'
-            require(expected in result and 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' in result, 'consumer canonical execution incomplete')
+            result = execute(['cargo','test','--locked','--lib','--message-format=json',*features,'--','--test-threads=1'],directory,{**env,**provider_env},1800)
+            verify_test(result, f'tests::{NAMES[profile]}')
+        modes['loopback-fixture' if profile == 'oidc' else 'production'] = {'tests':{'passed':1,'failed':0,'ignored':0}, 'features':['loopback-fixture'] if features else [], 'closure':fixture_closure, 'compiled_features':compiled_features(result, fixture_closure, profile)}
         hashes = {name:hashlib.sha256((directory/name).read_bytes()).hexdigest() for name in ['Cargo.toml','Cargo.lock','src/lib.rs','src/host.rs']}
-        report['consumers'][profile] = {'directory':str(directory), 'tests':{'passed':1,'failed':0,'ignored':0}, 'checks':['fmt','clippy -D warnings','cargo deny advisories licenses sources','test --locked --lib'], 'sha256':hashes, 'closure':closure}
+        report['consumers'][profile] = {'directory':str(directory), 'modes':modes, 'checks':['fmt','clippy -D warnings (each mode)','cargo deny advisories licenses sources','test --locked --lib (each mode)'], 'sha256':hashes}
         (output/'report.json').write_text(json.dumps(report,indent=2,sort_keys=True)+'\n')
-        print(f'{profile} consumer: fixed Git, independent target, 1 passed')
+        print(f'{profile} consumer: fixed Git, independent target, {len(modes)} mode(s) passed', flush=True)
     require(source_hashes() == report['source_sha256'], 'production source changed while proving consumers')
 
 if __name__ == '__main__':

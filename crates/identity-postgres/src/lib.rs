@@ -6,6 +6,7 @@ mod federation;
 mod federation_link;
 mod federation_login;
 mod federation_storage;
+mod groups;
 mod maintenance;
 mod management;
 mod operations;
@@ -21,6 +22,7 @@ pub use federation::{
     FederatedOutcome, FederatedRedirect, Federation, FederationConfig, LinkRequest, LinkResult,
     LoginOption, LoginRequest, SessionSecurity,
 };
+pub use groups::{GroupAccessError, TrustedGroups, VerifiedGroups};
 pub use management::{
     ManagementContext, ManagementDenied, ManagementOperation, ManagementPolicy,
     ReauthenticationRequirement,
@@ -39,8 +41,7 @@ pub use schema::{
     verify_profile,
 };
 pub use sessions::{
-    AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView, TrustedGroups,
-    VerifiedGroups,
+    AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
 };
 use std::sync::Arc;
 pub use types::*;

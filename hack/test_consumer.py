@@ -42,3 +42,30 @@ class ConsumerBoundary(unittest.TestCase):
                 if name.startswith('rss-'):
                     self.assertEqual(dep['rev'],'a'*40 if name.startswith('rss-identity-') else 'b'*40)
                     self.assertNotIn('path',dep)
+
+    def test_oidc_fixture_feature_is_explicit_and_mode_checked(self):
+        import tomllib
+        m=tomllib.loads(c.manifest('oidc','a'*40,'b'*40))
+        self.assertEqual(m['features'], {'default': [], 'loopback-fixture': ['rss-identity-oidc/test-support']})
+        data=self.fixture()
+        data['packages'][0]['name']='identity-oidc-consumer'
+        for name, version, source in [('rss-identity-oidc','0.1.0',f'git+{c.IDENTITY}?rev={"a"*40}#{"a"*40}'),('openidconnect','4.0.1',c.REGISTRY),('rsa','0.9.10',c.REGISTRY)]:
+            data['packages'].append({'id':name,'name':name,'version':version,'source':source})
+            data['resolve']['nodes'].append({'id':name,'features':[],'deps':[]})
+        nodes={n['id']:n for n in data['resolve']['nodes']}
+        nodes['rss-identity-oidc']['deps']=[{'pkg':'openidconnect'}]
+        nodes['openidconnect']['deps']=[{'pkg':'rsa'}]
+        c.check(data,'a'*40,'b'*40,'oidc')
+        with self.assertRaises(ValueError):c.check(data,'a'*40,'b'*40,'oidc',fixture=True)
+        nodes['rss-identity-oidc']['features']=['test-support']
+        c.check(data,'a'*40,'b'*40,'oidc',fixture=True)
+        with self.assertRaises(ValueError):c.check(data,'a'*40,'b'*40,'oidc')
+
+    def test_actual_compiler_features_cannot_hide_fixture_mode(self):
+        import json
+        closure={'oidc': {'name':'rss-identity-oidc','features':[]}}
+        artifact={'reason':'compiler-artifact','package_id':'oidc','features':[]}
+        self.assertEqual(c.compiled_features(json.dumps(artifact),closure,'oidc'),{'oidc':[]})
+        artifact['features']=['test-support']
+        with self.assertRaises(ValueError):c.compiled_features(json.dumps(artifact),closure,'oidc')
+        with self.assertRaises(ValueError):c.compiled_features('',closure,'oidc')
