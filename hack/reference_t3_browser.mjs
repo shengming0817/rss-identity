@@ -9,10 +9,11 @@ const origin=input.origin, tenant=input.tenants[0], other=input.tenants[1];
 const data=state.data;
 let browser, assertions=0, diagnostic='start';
 const active=[];
-function check(ok,code){assertions++;if(!ok){diagnostic=code;throw Error(code);}}
+function check(ok,code){diagnostic=code;assertions++;if(!ok)throw Error(code);}
 function remember(value){if(value)state.secrets.push(value);return value;}
 function save(){fs.writeFileSync(input.privateFile,JSON.stringify(state),{mode:0o600});fs.chmodSync(input.privateFile,0o600);}
 async function open(role,t=tenant,fresh=false){
+ diagnostic='open-'+role;
  const context=await browser.newContext({baseURL:origin,storageState:fresh?undefined:state.contexts[role],locale:'en-US'});
  const page=await context.newPage();page.setDefaultTimeout(20000);page.setDefaultNavigationTimeout(30000);
  const value={role,t,context,page};active.push(value);await page.goto(`${origin}/tenants/${t}/login`);return value;
@@ -36,6 +37,7 @@ async function write(c,method,suffix,body){
 }
 async function sessions(c){await c.page.goto(`${origin}/tenants/${c.t}/sessions`);await c.page.locator('h1').waitFor();}
 async function login(c,name,password){
+ diagnostic='local-login-form';
  await c.page.goto(`${origin}/tenants/${c.t}/login`);
  await c.page.locator('#login-name').fill(name);await c.page.locator('#login-password').fill(password);
  const response=c.page.waitForResponse(r=>r.request().method()==='POST'&&new URL(r.url()).pathname===`/api/v2/tenants/${c.t}/login`);
@@ -199,7 +201,7 @@ async function capacity(){
 }
 let observations;
 try{
- browser=await chromium.launch({headless:true});
+ diagnostic='browser-launch';browser=await chromium.launch({headless:true});
  switch(input.phase){
  case 'local':observations=await local();break;
  case 'oidc':observations=await oidc();break;
@@ -223,7 +225,10 @@ try{
  for(const c of active)await store(c);
  observations.assertions=assertions;
  console.log(JSON.stringify({status:'passed',observations}));
-}catch{
+}catch(failure){
+ const network=String(failure?.message??'').match(/net::([A-Z_]+)/);
+ if(network)diagnostic+='-'+network[1].toLowerCase().replaceAll('_','-');
+ else if(failure?.name==='TimeoutError')diagnostic+='-timeout';
  save();fs.writeFileSync(input.privateFile+'.failure',JSON.stringify({phase:input.phase,diagnostic}),{mode:0o600});
  console.log(JSON.stringify({status:'failed',phase:input.phase,diagnostic}));process.exitCode=1;
 }finally{if(browser)await browser.close();}
