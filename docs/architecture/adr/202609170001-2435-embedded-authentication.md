@@ -1,6 +1,6 @@
 # #2435 内嵌认证组件与参考宿主
 
-状态：已实施，交付与验证归属 [PR #1028](https://dev.azure.com/shengming0923/rss/_git/rss-identity/pullrequest/1028)；PR/看板持有实时交接状态。替代中央认证运行模式的当前规则；历史 ADR 保留原始决策和验收语境。
+状态：已实施。本文替代中央认证运行模式的架构决定。
 
 ## 原则复核
 
@@ -28,13 +28,11 @@ schema owner 导出 fresh install 与有效权限 profile 授权函数；宿主�
 
 所有成功凭据及远端测试报告只在本地事务提交确认后释放。NotStarted、RolledBack、RollbackFailed、CommitUnknown、Fenced 保持不同内部错误，未知提交不返回 cookie。OIDC 使用原有 openidconnect 校验及持久 state/nonce/PKCE、JIT、link、step-up 流程，远程请求不伪装为 PG 原子操作。
 
-## 实施 DAG 与验证
+## 验证边界
 
-主 agent 是所有代码、测试、文档 owner：领域类型/策略 → PG facade/schema/事务 → HTTP/参考宿主 → 当前测试与独立消费者 → PR/review/fix/交接。探索与 reviewer 可以并行，实施不派发。
+组件 T1/T2 覆盖 PG 故障、并发锁序、OIDC 和组快照；密码及签发竞态由 postgres 私有测试覆盖，HTTP 与独立消费者只消费公开 facade。
 
-已取得的 RED：新增 embedded core 测试在旧 API 上因缺少 InstanceId、SessionPolicy 和无角色构造而失败；实现后最初 3 项通过。持续回归保留原有 PG fault、并发锁序、OIDC 和组快照场景；内部密码/签发竞态测试移到 postgres 的私有测试模块，HTTP 与独立消费者只消费公开 facade。完整验证结果写入交付记录，不用本 ADR 的设计承诺代替运行证据。
-
-独立消费者分本地、可选 OIDC 两种，必须各有 workspace/lock/target/PG，在仓库祖先配置之外执行；从产品 Git URL 和完整 revision 获取四个公开能力包，只运行公开 API。先固定生产实现提交，再执行消费者并在对应 PR 记录版本、命令、结果和限制；验证前后有效源码与配置必须一致，结果存放遵循[文档规则](../../rules/documentation.md)。OIDC 消费者使用真实 Keycloak，不能用 reference app 或 Hydra 充当组件依赖。
+独立消费者分本地、可选 OIDC 两种，各有 workspace/lock/target/PG，在仓库祖先配置之外执行；从产品 Git URL 和完整 revision 获取公开能力包，验证前后有效源码与配置必须一致。OIDC 消费者使用真实 Keycloak，不能用 reference app 或 Hydra 充当组件依赖。
 
 ## 范围与交接
 
