@@ -495,7 +495,12 @@ class Run:
         if command == "open" and not reject:
             operate.require_closed(project)
             self.compose(
-                "create", "--no-deps", "identity", project=project, directory=directory
+                "up",
+                "--no-start",
+                "--no-deps",
+                "identity",
+                project=project,
+                directory=directory,
             )
             container = (
                 self.compose(
