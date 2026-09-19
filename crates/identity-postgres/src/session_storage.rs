@@ -68,6 +68,7 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 pub(crate) struct Loaded {
     pub assurance: Assurance,
     pub groups: GroupFacts,
+    pub department: Box<crate::department::DepartmentFacts>,
     sample: TimeSample,
     pub expires: Instant,
     pub state: AccountState,
@@ -147,6 +148,18 @@ pub(crate) async fn by_id(
     if !lifetime.valid_at(now) {
         return Err(reject());
     }
+    let department = match (&origin, &source) {
+        (Some(origin), Some(source)) => crate::department::DepartmentFacts::new(
+            *origin.facts.department.clone(),
+            source.clone(),
+            origin.facts.provider_config_version,
+            &sample,
+        )?,
+        (None, None) => crate::department::DepartmentFacts::Unavailable(
+            rss_identity_core::groups::UnavailableReason::LocalIdentity,
+        ),
+        _ => return Err(corrupt()),
+    };
     let (assurance, groups) = match (origin, source) {
         (Some(origin), Some(source)) => (
             origin.facts.assurance.clone(),
@@ -166,6 +179,7 @@ pub(crate) async fn by_id(
     Ok(Loaded {
         assurance,
         groups: GroupFacts::new(groups, &sample)?,
+        department: Box::new(department),
         expires: sample.deadline(lifetime.idle_expires_at())?,
         sample,
         state,

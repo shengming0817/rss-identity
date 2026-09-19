@@ -7,7 +7,7 @@ WITH required_privileges AS (
  WHERE n.nspname='identity_authority' AND c.relkind='r'
 ), checks AS (
  SELECT
- (SELECT count(*)=1 AND bool_and(version=9) FROM identity_authority.schema_version) AS version_ok,
+ (SELECT count(*)=1 AND bool_and(version=10) FROM identity_authority.schema_version) AS version_ok,
  (NOT EXISTS(SELECT FROM pg_roles WHERE pg_has_role(current_user,oid,'MEMBER') AND (rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication))) AS role_ok,
  (has_schema_privilege(current_user,'identity_authority','USAGE')
  AND NOT has_schema_privilege(current_user,'identity_authority','CREATE')

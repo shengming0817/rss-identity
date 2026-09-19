@@ -133,6 +133,13 @@ impl From<rss_identity_postgres::SessionPage> for SessionPage {
 pub struct ClaimMapping {
     email: Option<String>,
     groups: Option<String>,
+    department: Option<DepartmentClaim>,
+}
+#[derive(serde::Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DepartmentClaim {
+    claim: String,
+    max_age_seconds: i64,
 }
 #[derive(serde::Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -159,6 +166,16 @@ impl ProviderSettings {
             claims: rss_identity_core::federation::ClaimMapping {
                 email: self.claims.email,
                 groups: self.claims.groups,
+                department: self
+                    .claims
+                    .department
+                    .map(|d| {
+                        rss_identity_core::department::DepartmentClaim::new(
+                            d.claim,
+                            d.max_age_seconds,
+                        )
+                    })
+                    .transpose()?,
             },
             jit: self.jit,
         }
@@ -175,6 +192,10 @@ impl From<&rss_identity_core::federation::ProviderSettings> for ProviderSettings
             claims: ClaimMapping {
                 email: v.claims().email.clone(),
                 groups: v.claims().groups.clone(),
+                department: v.claims().department.as_ref().map(|d| DepartmentClaim {
+                    claim: d.claim().into(),
+                    max_age_seconds: d.max_age_seconds(),
+                }),
             },
             jit: v.jit(),
         }
@@ -344,8 +365,50 @@ mod tests {
         );
     }
     #[test]
+    fn provider_department_is_atomic_camel_case_and_optional() {
+        let base = json!({"issuer":"https://idp.test","clientId":"client","redirectUri":"https://host.test/api/v2/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":null},"jit":false});
+        let settings = serde_json::from_value::<ProviderSettings>(base.clone())
+            .unwrap()
+            .into_domain()
+            .unwrap();
+        let wire = serde_json::to_value(ProviderSettings::from(&settings)).unwrap();
+        assert!(wire["claims"].get("department").unwrap().is_null());
+        for department in [
+            json!({"claim":"department_id","maxAgeSeconds":60}),
+            json!(null),
+        ] {
+            let mut input = base.clone();
+            input["claims"]["department"] = department;
+            let settings = serde_json::from_value::<ProviderSettings>(input.clone())
+                .unwrap()
+                .into_domain()
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(ProviderSettings::from(&settings)).unwrap(),
+                input
+            );
+        }
+        for department in [
+            json!("department_id"),
+            json!({"claim":"department_id"}),
+            json!({"claim":"department_id","maxAgeSeconds":0}),
+            json!({"claim":"department_id","max_age_seconds":60}),
+            json!({"claim":"email","maxAgeSeconds":60}),
+        ] {
+            let mut input = base.clone();
+            input["claims"]["department"] = department;
+            assert!(
+                serde_json::from_value::<ProviderSettings>(input)
+                    .ok()
+                    .and_then(|v| v.into_domain().ok())
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn provider_wire_owns_fields_and_excludes_internal_assurance() {
-        let input = json!({"issuer":"https://idp.example.test","clientId":"host","redirectUri":"https://host.example.test/api/v2/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":"groups"},"jit":true});
+        let input = json!({"issuer":"https://idp.example.test","clientId":"host","redirectUri":"https://host.example.test/api/v2/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":"groups","department":null},"jit":true});
         let settings = serde_json::from_value::<ProviderSettings>(input.clone())
             .unwrap()
             .into_domain()

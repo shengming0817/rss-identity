@@ -34,7 +34,9 @@ bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpO
 
 唯一回调 GET `/api/v2/oidc/callback`：state/code/iss 与独立 HttpOnly browser cookie 绑定；拒绝重放、过期、不匹配和不确定结算，不释放 cookie。returnTarget 是宿主白名单键，不接受任意 URL；不再接受中央 clientId。
 
-IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/providers/{provider}/enabled`、`/test`。写入使用 expectedVersion 乐观并发；创建初始配置不需要该字段。凭据只写，加密存储，不返回明文。provider 设置为 `{issuer,clientId,redirectUri,scopes,claims:{email,groups},jit}`；只写凭据字段为 `clientSecret` / `caPem`，与领域持久化形状分别由各自 owner 持有；资源授权仍归宿主。
+IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/providers/{provider}/enabled`、`/test`。写入使用 expectedVersion 乐观并发；创建初始配置不需要该字段。凭据只写，加密存储，不返回明文。provider 设置为 `{issuer,clientId,redirectUri,scopes,claims:{email,groups,department},jit}`；只写凭据字段为 `clientSecret` / `caPem`，与领域持久化形状分别由各自 owner 持有；资源授权仍归宿主。
+
+部门配置 `department` 为省略/null（禁用）或 `{claim,maxAgeSeconds}`，对象两字段均必填，期限为 1–300 秒；输出统一包含 `department`。JSON 使用 `maxAgeSeconds`，拒绝 snake_case、字符串简写及缺失期限。修改映射或期限使用同一完整 update/expectedVersion/credentials 流程，推进版本并撤销旧会话及在途认证。部门值只来自已验证 ID Token，不能通过登录/回调/会话 DTO 提交；浏览器会话响应不增加部门授权证明。
 
 ## 失败与可信边界
 

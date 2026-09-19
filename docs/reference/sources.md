@@ -132,3 +132,8 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - [ASP.NET Core v10.0.0 CookieAuthenticationHandler](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Security/Authentication/Cookies/src/CookieAuthenticationHandler.cs)：实际读取异步 session store 返回后的时钟复核；本仓另在最后一次会话写之后复核自身单调期限，不复制其 cookie 续期策略。
 - [Rust 1.90.0 std/panic.rs](https://github.com/rust-lang/rust/blob/1.90.0/library/std/src/panic.rs)：实际读取 catch_unwind/resume_unwind，用于测试清理后传播断言失败，不吞掉 panic。
 - [futures-util 0.3.32 catch_unwind](https://github.com/rust-lang/futures-rs/blob/d9bba94c239daa1175a5bb2958f37a5c72db3f6a/futures-util/src/future/future/catch_unwind.rs)：实际读取本地 registry 发布源码及 cargo_vcs_info，poll 内捕获 unwind。沿用现有 futures 开发依赖，实际构建版本仍由 Cargo.lock 固定。
+
+## #2447 部门事实
+
+- [openidconnect-rs 4.0.1 AdditionalClaims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/claims.rs#L19-L26) 与 [verified_claims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/verification/mod.rs#L680-L804)：实际读取扩展 claim 与签名/issuer/audience/expiry/nonce 验证顺序，之后才解释部门；iat 上界仍由组件显式检查。
+- [Keycloak 26.7.3 OIDCAttributeMapperHelper](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/OIDCAttributeMapperHelper.java#L315-L352)：实际读取空值省略逻辑；不将缺失当作显式 null，无 sentinel 或目录推断。

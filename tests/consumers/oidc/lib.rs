@@ -44,6 +44,10 @@ mod tests {
             redirect_uri: callback.into(),
             scopes: vec!["openid".into(), "profile".into(), "email".into()],
             claims: ClaimMapping {
+                department: Some(rss_identity_core::department::DepartmentClaim::new(
+                    "department_id".into(),
+                    5,
+                )?),
                 email: Some("email".into()),
                 groups: Some("groups".into()),
             },
@@ -158,9 +162,26 @@ mod tests {
         };
         assert_eq!(groups.values()?, ["/staff"]);
         assert_eq!(groups.source().issuer, issuer);
+        let VerifiedDepartment::Available(department) = actor.department()? else {
+            anyhow::bail!("department unavailable");
+        };
+        assert_eq!(department.value()?.unwrap().as_str(), "dept-01");
+        assert_eq!(department.account(), actor.account());
+        assert_eq!(department.instance(), actor.instance());
+        assert_eq!(department.issuer(), issuer);
+        assert_eq!(
+            department.provider_id().to_string(),
+            provider.id.to_string()
+        );
+
         tokio::time::sleep(Duration::from_secs(6)).await;
         assert_eq!(groups.values(), Err(GroupAccessError::SnapshotExpired));
         assert!(matches!(actor.groups()?, VerifiedGroups::Expired));
+        assert_eq!(
+            department.value(),
+            Err(DepartmentAccessError::SnapshotExpired)
+        );
+        assert!(matches!(actor.department()?, VerifiedDepartment::Expired));
         assert!(actor.assurance().is_ok());
         federation
             .enable_provider(

@@ -8,7 +8,7 @@ mod tests {
         http::{Request, StatusCode},
     };
     use rss_identity_core::groups::UnavailableReason;
-    use rss_identity_postgres::VerifiedGroups;
+    use rss_identity_postgres::{VerifiedDepartment, VerifiedGroups};
     use tower::ServiceExt;
     #[tokio::test]
     async fn local_host_authentication_and_router_composition() -> anyhow::Result<()> {
@@ -61,6 +61,10 @@ mod tests {
             first.view().absolute_expires_at
         );
         assert_eq!(actor.account(), host.key);
+        assert!(matches!(
+            actor.department()?,
+            VerifiedDepartment::Unavailable(UnavailableReason::LocalIdentity)
+        ));
         assert!(matches!(
             actor.groups()?,
             VerifiedGroups::Unavailable(UnavailableReason::LocalIdentity)

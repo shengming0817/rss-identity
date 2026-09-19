@@ -57,6 +57,10 @@ fn config() -> anyhow::Result<ProviderSettings> {
         redirect_uri: CALLBACK.into(),
         scopes: vec!["openid".into(), "profile".into(), "email".into()],
         claims: ClaimMapping {
+            department: Some(rss_identity_core::department::DepartmentClaim::new(
+                "department_id".into(),
+                60,
+            )?),
             email: Some("email".into()),
             groups: Some("groups".into()),
         },
@@ -463,6 +467,17 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
         .inspect_session(f.key.tenant, secret(&bob), deadline())
         .await?;
     assert_ne!(a.account(), b.account());
+    let VerifiedDepartment::Available(department) = a.department()? else {
+        anyhow::bail!("signed department missing");
+    };
+    assert_eq!(department.value()?.unwrap().as_str(), "dept-01");
+    assert_eq!(department.account(), a.account());
+    assert_eq!(department.provider_id().to_string(), p.id.to_string());
+    assert!(matches!(
+        b.department()?,
+        VerifiedDepartment::Unavailable(rss_identity_core::groups::UnavailableReason::ClaimMissing)
+    ));
+
     let principal = a.account();
     let facts:Value=sqlx::query_scalar("SELECT auth_facts FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid").bind(A).bind(a.view().id.to_string()).fetch_one(&f.owner).await?;
     assert_eq!(facts["email"], "same@example.test");

@@ -1,4 +1,5 @@
 //! Public embedding contract. These tests cannot access password candidates or session issuance internals.
+mod department_lifecycle;
 mod federation_support;
 mod support;
 use rss_identity_core::{
@@ -465,7 +466,7 @@ async fn construction_verifies_every_declared_tenant_fence() -> anyhow::Result<(
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
-    use federation_support::{RETURN, ScriptedOidc, begin, enabled, finish, issued};
+    use federation_support::{RETURN, ScriptedOidc, begin, enabled_department, finish, issued};
     use rss_identity_core::federation::StateSigner;
     let f = Fixture::new().await?;
     f.bootstrap().await?;
@@ -480,7 +481,7 @@ async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
             targets: std::collections::BTreeMap::from([("home".into(), RETURN.into())]),
         },
     )?;
-    let provider = enabled(&f, &federation).await?;
+    let provider = enabled_department(&f, &federation, 2).await?;
     let session = issued(
         finish(
             &federation,
@@ -503,6 +504,7 @@ async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
         matches!(actor.groups()?, VerifiedGroups::Expired),
         "group facts must expire before returning a delayed authentication result (DB now={database_now})"
     );
+    assert!(matches!(actor.department()?, VerifiedDepartment::Expired));
     assert!(actor.assurance().is_ok());
     f.close().await;
     Ok(())

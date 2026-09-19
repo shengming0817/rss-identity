@@ -23,6 +23,7 @@ pub struct ScriptedOidc {
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
     pub groups: Mutex<Vec<String>>,
+    pub department: Mutex<rss_identity_core::department::UpstreamDepartment>,
     pub issued_at_offset: AtomicI64,
     pub gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     pub arrivals: AtomicUsize,
@@ -38,6 +39,9 @@ impl ScriptedOidc {
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
             groups: Mutex::new(vec!["staff".into()]),
+            department: Mutex::new(rss_identity_core::department::UpstreamDepartment::Present(
+                rss_identity_core::department::DepartmentId::new("dept-01".into()).unwrap(),
+            )),
             issued_at_offset: AtomicI64::new(0),
             gate: Mutex::new(None),
             arrivals: AtomicUsize::new(0),
@@ -99,6 +103,11 @@ impl UpstreamOidc for ScriptedOidc {
                 return Err(FederationError::Unavailable);
             }
             Ok(UpstreamClaims {
+                department: if c.claims().department.is_some() {
+                    self.department.lock().unwrap().clone()
+                } else {
+                    rss_identity_core::department::UpstreamDepartment::NotConfigured
+                },
                 issuer: c.issuer().as_str().to_owned(),
                 subject: code.to_string(),
                 email: Some("same@example.test".into()),
@@ -184,6 +193,7 @@ pub fn settings() -> ProviderSettings {
         redirect_uri: "https://identity.example.test/api/v2/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
+            department: None,
             email: Some("email".into()),
             groups: Some("groups".into()),
         },
@@ -197,10 +207,29 @@ pub async fn actor(f: &Fixture) -> anyhow::Result<AuthenticatedSession> {
     f.actor().await
 }
 pub async fn enabled(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
+    enabled_settings(f, s, settings()).await
+}
+pub async fn enabled_department(
+    f: &Fixture,
+    s: &Federation,
+    max_age: i64,
+) -> anyhow::Result<ProviderView> {
+    let mut input = settings().input();
+    input.claims.department = Some(rss_identity_core::department::DepartmentClaim::new(
+        "department_id".into(),
+        max_age,
+    )?);
+    enabled_settings(f, s, input.try_into()?).await
+}
+async fn enabled_settings(
+    f: &Fixture,
+    s: &Federation,
+    settings: ProviderSettings,
+) -> anyhow::Result<ProviderView> {
     let p = s
         .create_provider(
             actor(f).await?,
-            settings(),
+            settings,
             rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
                 .unwrap(),
             deadline(),

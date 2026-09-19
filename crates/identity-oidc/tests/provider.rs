@@ -41,6 +41,10 @@ fn provider(issuer: &str) -> anyhow::Result<(HttpOidc, ProviderSettings)> {
         redirect_uri: REDIRECT.into(),
         scopes: vec!["openid".into(), "profile".into()],
         claims: ClaimMapping {
+            department: Some(rss_identity_core::department::DepartmentClaim::new(
+                "department_id".into(),
+                60,
+            )?),
             email: None,
             groups: None,
         },
@@ -108,6 +112,9 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
         .await?;
     assert_eq!(claims.issuer, issuer);
     assert!(!claims.subject.is_empty());
+    assert!(
+        matches!(claims.department, rss_identity_core::department::UpstreamDepartment::Present(ref id) if id.as_str() == "dept-01")
+    );
     let (_, material) = prepare(&p, &c).await?;
     assert!(
         p.exchange(

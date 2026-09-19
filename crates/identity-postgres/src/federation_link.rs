@@ -331,6 +331,7 @@ impl Federation {
                             &claims,
                             source.version,
                             group_policy,
+                            current_source.settings.claims().department.as_ref(),
                             now,
                         )?
                         .encode(c)

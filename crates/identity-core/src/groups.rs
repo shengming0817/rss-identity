@@ -142,13 +142,7 @@ impl GroupFactsMaxAge {
         expires_at: i64,
         now: i64,
     ) -> Result<i64, FederationError> {
-        if !acceptable_observation(issued_at, now) || expires_at <= issued_at || expires_at <= now {
-            return Err(FederationError::Claims);
-        }
-        Ok(issued_at
-            .checked_add(self.0)
-            .ok_or(FederationError::Claims)?
-            .min(expires_at))
+        crate::fact_time::expires_at(self.0, issued_at, expires_at, now)
     }
 }
 
