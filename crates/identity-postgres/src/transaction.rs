@@ -6,7 +6,7 @@ use rss_request_context::TenantId;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     message::*,
-    outbox::{AppendOutcome, OutboxStore, PendingMessage},
+    outbox::{AppendOutcome, OutboxWriter, PendingMessage},
     policy::OperationDeadline,
 };
 use rss_transactional_messaging_postgres::{PgError, PgTransaction};

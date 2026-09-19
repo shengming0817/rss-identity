@@ -1,6 +1,6 @@
 //! Fixed ingress trust. Accepted TCP peer remains separate from client attribution.
 use axum::{
-    extract::{ConnectInfo, Request, State},
+    extract::{Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -32,8 +32,14 @@ impl Ingress {
 pub async fn trusted(State(ingress): State<Ingress>, mut request: Request, next: Next) -> Response {
     let source = request
         .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .and_then(|p| ingress.client(p.0.ip(), request.uri().path(), request.headers()));
+        .get::<rss_axum::AcceptedConnectionInfo<()>>()
+        .and_then(|p| {
+            ingress.client(
+                p.socket_peer().ip(),
+                request.uri().path(),
+                request.headers(),
+            )
+        });
     let Some(source) = source else {
         return StatusCode::FORBIDDEN.into_response();
     };

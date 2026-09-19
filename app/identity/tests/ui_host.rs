@@ -50,14 +50,53 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .with_graceful_shutdown(async {
-            let _ = stopped.await;
-        })
-        .await
+        let mut scope = rss_runtime::LifecycleScope::<(), anyhow::Error, ()>::try_new(
+            rss_runtime::TotalDrainBudget::new(Duration::from_secs(10))?,
+            Arc::new(assembly::Timer),
+        )?;
+        let outcome = scope
+            .drive(
+                |startup| {
+                    Box::pin(async move {
+                        let mut launch = startup.commit();
+                        launch.stage_task_with_token(
+                            rss_axum::serve_http1_registration(
+                                listener,
+                                app,
+                                rss_axum::PlainTransport,
+                                "ui-host",
+                                rss_axum::Http1ServePolicy::new(
+                                    rss_axum::ServePolicy::new(
+                                        256,
+                                        Duration::from_secs(5),
+                                        Duration::from_secs(5),
+                                        Duration::from_secs(5),
+                                    )?,
+                                    Duration::from_secs(5),
+                                    64,
+                                    32768,
+                                )?,
+                            )
+                            .critical(),
+                        );
+                        let (control, _gate) =
+                            launch.finish_with_admission("ui-requests", Duration::from_secs(5));
+                        control.open()?;
+                        let _control = control;
+                        std::future::pending().await
+                    })
+                },
+                async {
+                    let _ = stopped.await;
+                    Ok(())
+                },
+            )
+            .await?;
+        anyhow::ensure!(
+            outcome.shutdown().as_ref().is_ok_and(|r| r.is_clean()),
+            "UI host shutdown failed"
+        );
+        Ok::<(), anyhow::Error>(())
     });
     let runner = std::env::var("IDENTITY_UI_RUNNER")?;
     let result = tokio::task::spawn_blocking(move || {

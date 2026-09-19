@@ -9,6 +9,6 @@ GRANT UPDATE(auth_epoch) ON identity_authority.accounts TO {role};
 GRANT UPDATE(password_hash) ON identity_authority.local_credentials TO {role};
 GRANT USAGE ON SCHEMA rss_transactional_messaging TO {role};
 GRANT SELECT ON rss_transactional_messaging.policy TO {role};
-GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO {role};
-GRANT USAGE ON SEQUENCE rss_transactional_messaging.outbox_seq_seq TO {role};
+GRANT SELECT ON rss_transactional_messaging.outbox TO {role};
+GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb), rss_transactional_messaging.append_outbox(bytea,jsonb) TO {role};
 GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO {role};
