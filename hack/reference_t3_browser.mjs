@@ -297,6 +297,7 @@ async function sso(role, user, t = tenant, options = {}) {
   return c;
 }
 async function stepUp(c, user = "bob", options = {}) {
+  await c.context.clearCookies({ domain: new URL(input.issuer).hostname });
   await sessions(c);
   diagnostic = "step-up-button";
   await c.page
@@ -599,6 +600,7 @@ async function mfa() {
     (await current(c)).body.identity.principalId === data.accounts.linked,
     "wrong-subject-did-not-rebind",
   );
+  await c.context.clearCookies({ domain: new URL(input.issuer).hostname });
   let downgraded = false;
   await c.page.route(
     input.issuer.split("/realms")[0] + "/**",
@@ -848,7 +850,15 @@ try {
       const a = await admin();
       await createAccount(a, "rolled-back", input.userPassword, 503);
       await store(a);
-      observations = { uiRejected: true };
+      const rejected = await open("rollback-login", tenant, true);
+      const failed = await request(
+        rejected,
+        "POST",
+        `/api/v2/tenants/${tenant}/login`,
+        { login: "linked", password: "wrong-private-password" },
+      );
+      check(failed.status === 401, "rollback-independent-attempt-budget");
+      observations = { uiRejected: true, failedAuthentication: true };
       break;
     }
     case "response-loss":

@@ -1044,6 +1044,11 @@ class Run:
             and after["outbox"] == before["outbox"],
             "rollback-state-and-events",
         )
+        require(
+            sum(row["count"] for row in after["attempts"])
+            > sum(row["count"] for row in before["attempts"]),
+            "failed-attempt-budget-committed",
+        )
         self.browser("response-loss")
         require(
             self.sql(
@@ -1098,6 +1103,7 @@ class Run:
         )
         return {
             "rollbackPreserved": True,
+            "failedAttemptBudgetCommitted": True,
             "responseLossObservedCommitted": True,
             "durableEvents": len(final["outbox"]),
             "outboxSha256": digest(
