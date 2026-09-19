@@ -477,15 +477,16 @@ async function oidc() {
     await new Promise((r) => setTimeout(r, 50));
   check(Boolean(callback), "captured-callback");
   const foreign = await browser.newContext();
-  const rejected = await foreign.request.get(callback);
-  check(rejected.status() >= 400, "callback-browser-binding");
+  const rejected = await foreign.request.get(callback, { maxRedirects: 0 });
+  check(rejected.status() === 303 && rejected.headers().location.startsWith("/auth/error?"), "callback-browser-binding");
+  check((await foreign.request.get(`${origin}/api/v2/tenants/${tenant}/session`)).status() === 401, "foreign-callback-no-session");
   await foreign.close();
   await bound.page.unroute(callbackRoute);
   await bound.page.goto(callback);
   await bound.page.waitForURL(`**/tenants/${tenant}/sessions`);
   check((await current(bound)).status === 200, "bound-callback-completes");
-  const replay = await bound.context.request.get(callback);
-  check(replay.status() >= 400, "callback-replay-rejected");
+  const replay = await bound.context.request.get(callback, { maxRedirects: 0 });
+  check(replay.status() === 303 && replay.headers().location.startsWith("/auth/error?"), "callback-replay-rejected");
   await store(bound);
   return {
     jitAndExplicitLink: true,
