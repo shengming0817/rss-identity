@@ -49,4 +49,10 @@
 
 复现与验证：旧实现的真实 PG 延迟用例失败于跨期 refresh 未拒绝；原成员恢复流程在注入 panic 后失败于下一次登录缺少 /staff。F1 修复后 idle UPDATE/idle 截止点、token UPDATE/absolute 截止点均拒绝，持久 token/idle 与事件数不变。真实 HTTPS Keycloak 七个规范测试通过，生命周期用例包含普通错误、panic、原本非成员、失败 unpause 及 unwind 恢复。
 
-固定实现 revision 的独立消费者复验与最终 make ci 结果在本节后续补充；先前固定 revision 的历史证明保留，不作为新实现已通过的依据。
+修复实现固定于 `b48ac9b22da138fa61660fb5b5029fe7e3a29175`。本轮独立 workspace/lock/target 的 local production、OIDC production、OIDC loopback-fixture 三种模式均为 1 passed / 0 failed / 0 ignored；fmt、各模式 clippy -D warnings、cargo-deny advisories/licenses/sources 与编译器实际 features 核验全部通过。见 [新 report.json](202609190032-2438-fix-consumers/report.json)、[local lock](202609190032-2438-fix-consumers/local/Cargo.lock)、[OIDC lock](202609190032-2438-fix-consumers/oidc/Cargo.lock)。
+
+复现：从该固定实现运行 `python3 hack/check_consumer.py --revision b48ac9b22da138fa61660fb5b5029fe7e3a29175 --output /tmp/identity-1034-reproduce`；本轮实际独立目录为 `/tmp/identity-1034-consumers-b48ac9b`。如需本轮精确依赖闭包，使用本节保存的 manifest/lock。证据提交只新增文档与报告，118 个有效源码/配置文件的 hash 与固定实现一致。
+
+最终本仓 `make ci CI_BASE=origin/develop` 在 pm:fix 和交接 label 后执行，实际结果留在 PR 评论；此处不提前声明最终 CI 已通过。
+
+本轮 report SHA-256：`7146b716579dbf12fa8d248aff7a34d218bfdbca6057af4ad36219ee0124077e`。
