@@ -37,7 +37,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .unwrap()
         .push(json!("33333333-3333-4333-8333-333333333333"));
     value["bootstrapAccounts"].as_array_mut().unwrap().push(json!({"tenantId":"33333333-3333-4333-8333-333333333333","principalId":"44444444-4444-4444-8444-444444444444"}));
-    let install_value = json!({"formatVersion":3,"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
+    let install_value = json!({"formatVersion":4,"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
     let install_config =
         || serde_json::from_value::<MigrationConfig>(install_value.clone()).unwrap();
     for (corrupt, restore) in [
@@ -158,10 +158,11 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .await?,
     );
     let authority = assembly::authority(&config, runtime.clone(), kdf.clone()).await?;
+    let upstream = federation_support::ScriptedOidc::new();
     let federation = Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
         authority.clone(),
-        federation_support::ScriptedOidc::new(),
+        upstream.clone(),
         rss_identity_core::federation::StateSigner::new([7; 32], &config.public_origin)?,
         FederationConfig {
             callback: format!("{}/api/v2/oidc/callback", config.public_origin),
@@ -172,6 +173,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             )]),
         },
     )?;
+    let mut last_cookie = String::new();
     for key in &keys {
         let issued = authority
             .login_local(
@@ -183,6 +185,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 assembly::deadline(),
             )
             .await?;
+        last_cookie = issued.secret().expose().to_owned();
         let http = rss_identity_http_axum::HttpConfig::new(
             &config.public_origin,
             config.budgets.request(),
@@ -230,7 +233,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         let manager = authority
             .inspect_session(key.tenant, actor(), assembly::deadline())
             .await?;
-        federation
+        let provider = federation
             .create_provider(
                 manager,
                 federation_support::settings(),
@@ -241,6 +244,92 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 assembly::deadline(),
             )
             .await?;
+        // The host consumes persisted assurance through the public request boundary.
+        // Scripted upstream supplies T2 facts; real Keycloak/browser proof belongs to #2366.
+        let host = rss_identity_app::context::router(
+            authority.clone(),
+            &config,
+            rss_identity_http_axum::HttpConfig::new(
+                &config.public_origin,
+                config.budgets.request(),
+            )?,
+        )?;
+        assert_mfa_response(&host, key.tenant, Some(issued.secret().expose()), 403).await?;
+        assert_mfa_response(&host, key.tenant, None, 401).await?;
+        let manager = authority
+            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .await?;
+        let provider = federation
+            .enable_provider(
+                manager,
+                provider.id,
+                provider.version,
+                true,
+                assembly::deadline(),
+            )
+            .await?;
+        for (age, expected) in [(0_i64, 200_u16), (300, 403), (-20, 403)] {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs() as i64;
+            *upstream.assurance.lock().unwrap() =
+                Some(rss_identity_core::assurance::Assurance::new(
+                    Some(now - age),
+                    rss_identity_core::assurance::Acr::Mfa,
+                    vec![],
+                )?);
+            let redirect = federation
+                .begin_login(
+                    LoginRequest {
+                        tenant: key.tenant,
+                        provider: provider.id,
+                        browser: federation_support::BROWSER.into(),
+                        target: "resume".into(),
+                        replacement: None,
+                        source: AttemptSource::parse("mfa-host-fixture")?,
+                    },
+                    assembly::deadline(),
+                )
+                .await?;
+            let outcome = federation
+                .complete(
+                    federation_support::state(redirect),
+                    federation_support::BROWSER.into(),
+                    String::from("mfa-host-subject").into(),
+                    "https://idp.example.test".into(),
+                    None,
+                    assembly::deadline(),
+                )
+                .await?;
+            let FederatedOutcome::Session { issued: mfa, .. } = outcome else {
+                anyhow::bail!("expected session")
+            };
+            let before: i64 = sqlx::query_scalar("SELECT idle_expires_at FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
+                .bind(key.tenant.to_string()).bind(mfa.view().id.to_string()).fetch_one(&mut owner).await?;
+            assert_mfa_response(&host, key.tenant, Some(mfa.secret().expose()), expected).await?;
+            let after: i64 = sqlx::query_scalar("SELECT idle_expires_at FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
+                .bind(key.tenant.to_string()).bind(mfa.view().id.to_string()).fetch_one(&mut owner).await?;
+            assert_eq!(before, after, "passive MFA resource must not renew idle");
+            let other = keys
+                .iter()
+                .find(|other| other.tenant != key.tenant)
+                .unwrap();
+            assert_mfa_response(&host, other.tenant, Some(mfa.secret().expose()), 401).await?;
+            if expected == 200 {
+                let proof = authority
+                    .inspect_session(
+                        key.tenant,
+                        federation_support::secret(&mfa),
+                        assembly::deadline(),
+                    )
+                    .await?;
+                authority
+                    .revoke_current_session(proof, assembly::deadline())
+                    .await?;
+                assert_mfa_response(&host, key.tenant, Some(mfa.secret().expose()), 401).await?;
+            }
+        }
+        *upstream.assurance.lock().unwrap() = None;
         let manager = authority
             .inspect_session(key.tenant, actor(), assembly::deadline())
             .await?;
@@ -347,6 +436,12 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     rss_identity_app::rekey::run(install_config(), ring(false), false).await?;
     rss_identity_app::rekey::run(install_config(), ring(true), true).await?;
     runtime.close().await;
+    let closed_host = rss_identity_app::context::router(
+        authority.clone(),
+        &config,
+        rss_identity_http_axum::HttpConfig::new(&config.public_origin, config.budgets.request())?,
+    )?;
+    assert_mfa_response(&closed_host, keys[1].tenant, Some(&last_cookie), 503).await?;
     maintenance_runtime.close().await;
     kdf.close();
     kdf.wait_closed().await;
@@ -524,5 +619,37 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     restored.database.database = "restored".into();
     migration::verify(restored).await?;
     owner.close().await?;
+    Ok(())
+}
+
+async fn assert_mfa_response(
+    app: &axum::Router,
+    tenant: rss_request_context::TenantId,
+    cookie: Option<&str>,
+    expected: u16,
+) -> anyhow::Result<()> {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder().uri(format!(
+        "/api/identity-host/v1/tenants/{tenant}/mfa-example"
+    ));
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", format!("__Host-identity-session={cookie}"));
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(axum::body::Body::empty())?)
+        .await?;
+    assert_eq!(response.status().as_u16(), expected);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(!response.headers().contains_key("set-cookie"));
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
+    if expected == 200 {
+        assert_eq!(body["authentication"]["acr"], "mfa");
+        assert_eq!(body["tenantId"], tenant.to_string());
+    }
+    if expected == 403 {
+        assert_eq!(body["code"], "reauthentication_required");
+    }
     Ok(())
 }

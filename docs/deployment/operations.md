@@ -20,7 +20,7 @@ python3 hack/operate.py --deployment /private/rendered --project identity-main o
 
 `verify` 是只读安装核验，检查 schema、instance、目标角色及有效权限、storage identity 和完整 tenant fence；不补建、不修授权、不初始化。`close` 先停网关再排空 Identity，并核对容器身份、终态、退出码与 OOM 状态；重启中/暂停/未知状态不视为关闭。`open` 先核验、再等待 Identity 内部健康检查、最后开放网关。非零退出或中断均不确认成功，先检查实际状态；不自动重发写命令。
 
-网关固定提供 `/api/identity-host/v1/config.json`（canonicalOrigin/oidcEnabled）；UI 缺失或畸形时拒绝启动。唯一动态宿主资源 `/api/identity-host/v1/tenants/{tenant}/context` 读取权威会话，展示与宿主策略一致的管理提示；管理请求仍由组件事务内授权。网关覆盖来源头、保留原 API 路径且关闭代理重试，PG 不向宿主发布端口。日常容器不挂载 owner/maintenance 秘密。
+网关固定提供 `/api/identity-host/v1/config.json`（canonicalOrigin/oidcEnabled）；UI 缺失或畸形时拒绝启动。宿主资源 `/api/identity-host/v1/tenants/{tenant}/context` 读取权威会话，展示与宿主策略一致的管理提示；管理请求仍由组件事务内授权。网关覆盖来源头、保留原 API 路径且关闭代理重试，PG 不向宿主发布端口。日常容器不挂载 owner/maintenance 秘密。
 
 回退只允许已验证、同 schema 和同 instance/storage 配置的后端镜像。切换前 close，在新私有渲染目录绑定镜像，verify 后 open；不得回滚数据库撤销状态。未知提交不等于失败回滚。实际切换和故障恢复证据由 #2366 保存。
 
@@ -28,6 +28,21 @@ python3 hack/operate.py --deployment /private/rendered --project identity-main o
 
 操作输出是脱敏 JSON：`operation`、`stage`、`reason`、`outcomeKnown`、`status`。前置拒绝与只读核验失败标识已知结果；写入进程超时/失败或排空未确认标识未知，先运行 `verify`、`verify-keys` 或只读 `docker inspect`，不可自动重试写入。原始 stderr、配置和秘密值不进入诊断。
 
-OIDC 默认只连接公网单播目标。拒绝私网、loopback、link-local、metadata、保留地址、IPv4 映射及过渡 IPv6；DNS 的全部 A/AAAA 必须通过校验，reqwest 直接消费这组地址，禁止代理和重定向。私网 IdP 不在当前参考部署支持范围，测试 loopback 仅由 test-support 显式构造，不由生产配置开启。
+配置统一为 v4，旧 v3 输入直接拒绝；runtime、maintenance、migration 由同一渲染器生成，不转换旧目录。当前安装基线为 schema v10，HTTP v2 和备份格式不变。
+
+OIDC 存在时必须显式提供 `privateProviders`，空数组表示仅公网。宿主可按 `tenantId`、完整 `issuer`、`clientId` 精确授权 RFC1918/IPv6 ULA CIDR；最多 128 个绑定，每个 1–16 个规范化、不重复的网段。租户必须属于本实例配置。CIDR 不携带主机位，不接受通配 issuer；租户 ProviderSettings 无网络授权字段。例：
+
+```json
+"privateProviders": [{
+  "tenantId": "11111111-1111-4111-8111-111111111111",
+  "issuer": "https://keycloak.example.internal:8443/realms/reference",
+  "clientId": "reference",
+  "cidrs": ["10.42.0.9/32"]
+}]
+```
+
+DNS 的全部 A/AAAA 必须属于公网基线或该绑定授权的私网；reqwest 直接消费已检查地址。HTTPS、证书校验、精确协议 origin、禁止代理/重定向保持有效；loopback、link-local/metadata、保留及转换地址不可授权。测试 loopback 仅由 test-support 显式构造，不由生产配置开启。私有 CA 仍通过既有 provider `caPem` 提供，网络许可不授予 MFA，也不修改已有 session 的撤销 epoch；撤销已有联合会话使用 provider 停用。
+
+网关同时提供 `GET /api/identity-host/v1/tenants/{tenant}/mfa-example`：同租户权威会话必须具有可信 `acr=mfa` 且认证年龄在 `[0,300)` 秒内，否则要求重新认证。此资源不续期、无业务副作用并返回 no-store；普通管理与预建本地账户策略不变。只有实际候选 T3 才证明真实内网 Keycloak、浏览器及网关的完整闭环。
 
 仅更新前端时，保持 --identity-image 和宿主配置不变，以新 --web-image 渲染新目录。通过原部署 close 后在新目录 verify/open；后端不需重建，备份只绑定后端版本。前端管理导航请求的网络、超时或合法 503 暂不可用保留已接受会话，隐藏提示依赖的入口并提供手动重试；401、协议错误与身份不匹配继续拒绝。

@@ -3,6 +3,8 @@
 #![deny(missing_docs)]
 mod assurance;
 mod egress;
+#[cfg(test)]
+mod private_provider_tests;
 pub use ipnet::IpNet;
 use openidconnect::{
     AsyncHttpClient, AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
@@ -30,6 +32,19 @@ pub struct TrustedAssuranceProfile {
     /// The operator verified this client uses the Keycloak password/TOTP LoA 2 flow.
     pub keycloak_totp: bool,
 }
+/// Host-owned permission for one tenant's exact upstream client to reach private networks.
+/// This grants transport access only, never trusted MFA or resource authorization.
+#[derive(Clone)]
+pub struct PrivateProviderAccess {
+    /// Exact tenant permitted to use this destination.
+    pub tenant: TenantId,
+    /// Full HTTPS issuer, including its realm path and port.
+    pub issuer: String,
+    /// Exact upstream RP client.
+    pub client_id: String,
+    /// Canonical, unique RFC1918 or IPv6 ULA subnets (1 to 16).
+    pub cidrs: Vec<IpNet>,
+}
 fn failure(stage: ProviderStage, reason: ProviderReason) -> FederationError {
     FederationError::provider(stage, reason)
 }
@@ -39,32 +54,72 @@ struct EgressDenied;
 /// Protocol transport with tenant credentials supplied for each exact provider version.
 pub struct HttpOidc {
     profiles: Vec<TrustedAssuranceProfile>,
+    private_access: Vec<PrivateProviderAccess>,
     loopback: bool,
+    #[cfg(test)]
+    lookup: Option<std::sync::Arc<dyn reqwest::dns::Resolve>>,
 }
 impl HttpOidc {
-    /// Production uses HTTPS, certificate verification and only vetted public unicast addresses.
-    /// Every DNS answer must be public; special/private IP literals are rejected at binding.
-    /// Empty assurance profile sets are valid and do not relax the destination policy.
-    pub fn new(profiles: Vec<TrustedAssuranceProfile>) -> Result<Self, FederationError> {
-        Self::build(profiles, false)
+    /// Production uses HTTPS and vetted public or explicitly authorized private addresses.
+    /// Every DNS answer is checked against the current tenant/issuer/client permission.
+    pub fn new(
+        profiles: Vec<TrustedAssuranceProfile>,
+        private_access: Vec<PrivateProviderAccess>,
+    ) -> Result<Self, FederationError> {
+        Self::build(profiles, private_access, false)
     }
     /// Explicit loopback fixture (HTTP or HTTPS). Never enabled by production configuration.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_loopback_test(
         profiles: Vec<TrustedAssuranceProfile>,
     ) -> Result<Self, FederationError> {
-        Self::build(profiles, true)
+        Self::build(profiles, vec![], true)
     }
     fn build(
         profiles: Vec<TrustedAssuranceProfile>,
+        private_access: Vec<PrivateProviderAccess>,
         loopback: bool,
     ) -> Result<Self, FederationError> {
-        if profiles.len() > 128 {
+        if profiles.len() > 128 || private_access.len() > 128 {
             return Err(FederationError::Configuration);
         }
+        let mut grants = std::collections::BTreeSet::new();
+        for grant in &private_access {
+            let mut networks = std::collections::BTreeSet::new();
+            if grant.cidrs.is_empty()
+                || grant.cidrs.len() > 16
+                || grant
+                    .cidrs
+                    .iter()
+                    .any(|n| !egress::private_network(*n) || !networks.insert(*n))
+                || !grants.insert((
+                    grant.tenant.to_string(),
+                    grant.issuer.clone(),
+                    grant.client_id.clone(),
+                ))
+            {
+                return Err(FederationError::Configuration);
+            }
+            rss_identity_core::IssuerId::parse(&grant.issuer)
+                .map_err(|_| FederationError::Configuration)?;
+            rss_identity_core::ClientId::parse(&grant.client_id)
+                .map_err(|_| FederationError::Configuration)?;
+            parse_url(&grant.issuer, false, &grant.cidrs)?;
+        }
+        let result = Self {
+            profiles,
+            private_access,
+            loopback,
+            #[cfg(test)]
+            lookup: None,
+        };
         let mut seen = std::collections::BTreeSet::new();
-        for p in &profiles {
-            parse_url(&p.issuer, loopback)?;
+        for p in &result.profiles {
+            parse_url(
+                &p.issuer,
+                loopback,
+                result.private_for(p.tenant, &p.issuer, &p.client_id),
+            )?;
             if p.client_id.is_empty()
                 || p.client_id.len() > 256
                 || !seen.insert((p.tenant.to_string(), p.issuer.clone(), p.client_id.clone()))
@@ -72,7 +127,13 @@ impl HttpOidc {
                 return Err(FederationError::Configuration);
             }
         }
-        Ok(Self { profiles, loopback })
+        Ok(result)
+    }
+    fn private_for(&self, tenant: TenantId, issuer: &str, client_id: &str) -> &[IpNet] {
+        self.private_access
+            .iter()
+            .find(|g| g.tenant == tenant && g.issuer == issuer && g.client_id == client_id)
+            .map_or(&[], |g| g.cidrs.as_slice())
     }
     fn trusted(&self, tenant: TenantId, c: &ProviderSettings) -> bool {
         self.profiles.iter().any(|p| {
@@ -89,14 +150,19 @@ impl HttpOidc {
         credentials: &ProviderCredentials,
     ) -> Result<Transport, FederationError> {
         self.validate(tenant, c, credentials)?;
-        let origin = parse_url(c.issuer().as_str(), self.loopback)?
+        let cidrs = self.private_for(tenant, c.issuer().as_str(), c.client_id().as_str());
+        let origin = parse_url(c.issuer().as_str(), self.loopback, cidrs)?
             .origin()
             .ascii_serialization();
+        let resolver = egress::VettedResolver::new(self.loopback, cidrs.to_vec());
+        #[cfg(test)]
+        let resolver = match &self.lookup {
+            Some(lookup) => resolver.with_lookup(lookup.clone()),
+            None => resolver,
+        };
         let mut builder = reqwest::Client::builder()
             .no_proxy()
-            .dns_resolver(std::sync::Arc::new(egress::VettedResolver::new(
-                self.loopback,
-            )))
+            .dns_resolver(std::sync::Arc::new(resolver))
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_secs(3));
@@ -168,7 +234,7 @@ fn certificates(
         }
     }
 }
-fn parse_url(value: &str, loopback: bool) -> Result<Url, FederationError> {
+fn parse_url(value: &str, loopback: bool, cidrs: &[IpNet]) -> Result<Url, FederationError> {
     let u = Url::parse(value).map_err(|_| FederationError::Configuration)?;
     let local = loopback
         && u.scheme() == "http"
@@ -186,7 +252,7 @@ fn parse_url(value: &str, loopback: bool) -> Result<Url, FederationError> {
     if host
         .trim_matches(['[', ']'])
         .parse::<std::net::IpAddr>()
-        .is_ok_and(|ip| !egress::allowed(ip, loopback))
+        .is_ok_and(|ip| !egress::allowed(ip, loopback, cidrs))
     {
         return Err(failure(
             ProviderStage::Binding,
@@ -355,12 +421,16 @@ impl UpstreamOidc for HttpOidc {
     }
     fn validate(
         &self,
-        _tenant: TenantId,
+        tenant: TenantId,
         c: &ProviderSettings,
         credentials: &ProviderCredentials,
     ) -> Result<(), FederationError> {
-        parse_url(c.issuer().as_str(), self.loopback)?;
-        parse_url(c.redirect_uri(), self.loopback)?;
+        parse_url(
+            c.issuer().as_str(),
+            self.loopback,
+            self.private_for(tenant, c.issuer().as_str(), c.client_id().as_str()),
+        )?;
+        parse_url(c.redirect_uri(), self.loopback, &[])?;
         let roots = certificates(credentials)?;
         if !roots.is_empty() {
             let mut builder = reqwest::Client::builder().no_proxy();

@@ -108,7 +108,7 @@ def run(identity_image,web_image,previous_web_image,output,work):
         runtime['database'].update(passwordFile=write('runtime-password',secrets.token_hex(24)),caFile=str(work/'cert'))
         data.update(ownerPasswordFile=write('owner-password',secrets.token_hex(24)),maintenancePasswordFile=write('maintenance-password',secrets.token_hex(24)),tlsCertificateFile=str(work/'cert'),tlsKeyFile=str(work/'cert-key'),postgresCertificateFile=str(work/'cert'),postgresKeyFile=str(work/'cert-key'))
         old=write('old-key',secrets.token_hex(32));new=write('new-key',secrets.token_hex(32))
-        runtime['oidc']={'groupFactsMaxAgeSeconds':300,'assuranceProfiles':[],'stateKeyFile':write('state-key',secrets.token_hex(32)),'credentialKeyring':{'activeKeyId':'old','keys':[{'keyId':'old','path':old}]},'returnTargets':{'resume':'https://identity.example.test/auth/resume'}}
+        runtime['oidc']={'groupFactsMaxAgeSeconds':300,'privateProviders':[],'assuranceProfiles':[],'stateKeyFile':write('state-key',secrets.token_hex(32)),'credentialKeyring':{'activeKeyId':'old','keys':[{'keyId':'old','path':old}]},'returnTargets':{'resume':'https://identity.example.test/auth/resume'}}
         def render(name,ring,subnet):
             value=copy.deepcopy(data);value['backendSubnet']=subnet;value['runtime']['publicGateway']=subnet.rsplit('.',1)[0]+'.2';value['runtime']['oidc']['credentialKeyring']=ring
             deploy.render(value,work/name,images)

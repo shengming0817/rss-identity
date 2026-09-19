@@ -56,7 +56,7 @@ def stage(data,out,images,final):
     require(all(re.fullmatch(r'sha256:[a-f0-9]{64}',v) for v in images.values()),'immutable image IDs required')
     c=copy.deepcopy(data['runtime'])
     fields(c,{'formatVersion','instanceId','publicOrigin','bootstrapAccounts','database','storage','listen','publicGateway','budgets','oidc'},'runtime')
-    require(c['formatVersion']==3,'unsupported runtime config')
+    require(c['formatVersion']==4,'unsupported runtime config')
     origin=c['publicOrigin'];u=urlsplit(origin)
     require(u.scheme=='https' and u.hostname and not u.username and not u.password and not u.path and not u.query and not u.fragment and u.port is None and re.fullmatch(r'[a-z0-9.-]+',u.hostname),'canonical HTTPS origin required')
     network=ipaddress.ip_network(data['backendSubnet']);require(network.version==4 and network.prefixlen==24 and network.is_private,'private /24 required')
@@ -120,7 +120,7 @@ http {{
   add_header Cache-Control no-store always;
   location = /api/identity-host/v1/config.json {{ alias /run/config/ui.json; default_type application/json; }}
   location ^~ /api/v2/ {{ {proxy} }}
-  location ~ "^/api/identity-host/v1/tenants/[0-9a-f-]{{36}}/context$" {{ {proxy} }}
+  location ~ "^/api/identity-host/v1/tenants/[0-9a-f-]{{36}}/(context|mfa-example)$" {{ {proxy} }}
   location ^~ /internal/ {{ return 404; }}
   location = /livez {{ return 404; }}
   location = /readyz {{ return 404; }}

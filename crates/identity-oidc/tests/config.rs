@@ -23,7 +23,7 @@ fn credentials() -> ProviderCredentials {
 }
 #[test]
 fn self_service_rejects_special_network_destinations() {
-    let adapter = HttpOidc::new(vec![]).unwrap();
+    let adapter = HttpOidc::new(vec![], vec![]).unwrap();
     for issuer in ["https://idp.example.test", "https://8.8.8.8"] {
         let mut c = input();
         c.issuer = issuer.into();
@@ -71,13 +71,16 @@ fn self_service_rejects_special_network_destinations() {
 #[test]
 fn trusted_assurance_is_independent_and_exactly_scoped() {
     let c: ProviderSettings = input().try_into().unwrap();
-    let weak = HttpOidc::new(vec![]).unwrap();
-    let trusted = HttpOidc::new(vec![TrustedAssuranceProfile {
-        tenant: tenant(),
-        issuer: c.issuer().as_str().into(),
-        client_id: c.client_id().as_str().into(),
-        keycloak_totp: true,
-    }])
+    let weak = HttpOidc::new(vec![], vec![]).unwrap();
+    let trusted = HttpOidc::new(
+        vec![TrustedAssuranceProfile {
+            tenant: tenant(),
+            issuer: c.issuer().as_str().into(),
+            client_id: c.client_id().as_str().into(),
+            keycloak_totp: true,
+        }],
+        vec![],
+    )
     .unwrap();
     let approved = trusted.assurance_profile(tenant(), &c);
     assert!(approved.supports_step_up);

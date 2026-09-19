@@ -64,6 +64,8 @@ match actor.groups()? {
 
 `Federation` 单独接收 Authority、UpstreamOidc、StateSigner、CredentialKeys、GroupFactsMaxAge、固定 HTTPS callback 和 return-target 白名单。`rss-identity-oidc::HttpOidc` 是具体上游适配器；本地消费者闭包中没有它、openidconnect 或 reqwest。上游 client_id 是 IdP 协议配置，不是中央服务客户端注册。
 
+生产 adapter 唯一构造方式为 `HttpOidc::new(profiles, private_access)`；调用方必须显式传入网络授权列表（仅公网为 `vec![]`），不保留旧单参数签名。`PrivateProviderAccess` 仅包含 tenant、完整 issuer、client_id 和 CIDRs，构造时统一验证范围、数量和重复项；其授权与 `TrustedAssuranceProfile` 的 MFA 解释互相独立。详细部署字段与地址规则见[运维](../deployment/operations.md)。
+
 callback 必须为 `<宿主 origin>/api/v2/oidc/callback`。begin/complete 持久化并原子消费 state、nonce、PKCE 和浏览器绑定；JIT、显式关联、step-up、凭据加密和组来源验证保持单一入口。禁用 provider 推进撤销 epoch，重新启用不复活旧会话。
 
 ```rust,ignore
@@ -102,4 +104,4 @@ HTTP 宿主资源统一调用 `rss_identity_http_axum::authenticate_request(&aut
 部署 owner 轮换凭据时调用 `CredentialKeys::reencrypt_tenant(&mut tx, instance, tenant)`；组件持有 guard、AAD、密文和 SQL，宿主先绑定 storage fence 与 SQL 预算，最后提交或回滚。逐值重加密不是公开接口，runtime/maintenance 角色不会因轮换扩权。
 
 
-固定 Git 消费验证：`make test-consumers IDENTITY_CONSUMER_REVISION=<完整 SHA> IDENTITY_CONSUMER_OUTPUT=<仓库祖先之外的新目录>`。OIDC 独立 workspace 默认构建不启用 `test-support`，执行生产 `HttpOidc::new` 拒绝 loopback 的用例；显式 `loopback-fixture` 仅映射依赖的 `rss-identity-oidc/test-support`，通过 `for_loopback_test` 跑真实 PG＋Keycloak。报告分别保存两种模式的解析闭包与实际 compiler features。fixture 成功不表示生产出口已连通，生产出口限制保持不变。
+固定 Git 消费验证：`make test-consumers IDENTITY_CONSUMER_REVISION=<完整 SHA> IDENTITY_CONSUMER_OUTPUT=<仓库祖先之外的新目录>`。OIDC 独立 workspace 默认构建不启用 `test-support`，执行生产 `HttpOidc::new` 拒绝 loopback 的用例；显式 `loopback-fixture` 仅映射依赖的 `rss-identity-oidc/test-support`，通过 `for_loopback_test` 跑真实 PG＋Keycloak。报告分别保存两种模式的解析闭包与实际 compiler features。fixture 成功不表示生产出口已连通，生产私网接线须以显式授权和真实候选另行验证。

@@ -711,7 +711,7 @@ async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
     let mut private = config()?.input();
     private.issuer = "https://127.0.0.1".into();
     assert!(
-        HttpOidc::new(vec![])?
+        HttpOidc::new(vec![], vec![])?
             .validate(tenant(), &private.try_into()?, &credentials(false)?)
             .is_err()
     );

@@ -155,3 +155,10 @@ I01/I02 的依赖顺序为协议→core→PG→OIDC→CI。该历史阶段使用
 系统域、平台角色、动态租户开通与 SSO CLI 属于已退出的中央模式，设计见[历史 ADR](adr/202609130900-2427-platform-onboarding.md)，不作为当前交付或 T3 指引。
 
 当前采用 [#2435 嵌入式架构](adr/202609170001-2435-embedded-authentication.md)；安装版本由 [SCHEMA_VERSION](../../crates/identity-postgres/src/lib.rs) 及其安装探测持有。#2436 持有[参考宿主部署与运维](../deployment/README.md)，实际浏览器、部署恢复和容量 T3 由独立 #2366 持有。
+
+
+## 当前参考宿主验收
+
+- [#2448](https://dev.azure.com/shengming0923/rss/_workitems/edit/2448)：正式内网 OIDC、配置 v4、fresh MFA 示范资源及必要 T1/T2；参考宿主综合 T3 的实现前置。
+- [#2366](https://dev.azure.com/shengming0923/rss/_workitems/edit/2366)：唯一综合 T3，合并 #2367 的恢复、轮换与目标冻结范围；使用 Docker 默认环境并记录实际资源，不以架构名称推定容量。
+- #2367 的合并不代表运行通过；上方历史登记表只描述当时分工。MDM T3 继续由其产品持有。

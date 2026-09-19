@@ -131,14 +131,47 @@ impl CredentialKeyringConfig {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrivateProviderConfig {
+    pub tenant_id: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub cidrs: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OidcConfig {
     pub group_facts_max_age_seconds: i64,
     pub assurance_profiles: Vec<AssuranceProfileConfig>,
+    pub private_providers: Vec<PrivateProviderConfig>,
     pub state_key_file: String,
     pub credential_keyring: CredentialKeyringConfig,
     pub return_targets: std::collections::BTreeMap<String, String>,
 }
 impl OidcConfig {
+    pub fn private_access(
+        &self,
+        tenants: &[TenantId],
+    ) -> Result<Vec<rss_identity_oidc::PrivateProviderAccess>, AppError> {
+        self.private_providers
+            .iter()
+            .map(|value| {
+                let tenant = TenantId::parse(&value.tenant_id).map_err(|_| AppError::Tenant)?;
+                if !tenants.contains(&tenant) {
+                    return Err(AppError::Tenant);
+                }
+                Ok(rss_identity_oidc::PrivateProviderAccess {
+                    tenant,
+                    issuer: value.issuer.clone(),
+                    client_id: value.client_id.clone(),
+                    cidrs: value
+                        .cidrs
+                        .iter()
+                        .map(|v| v.parse().map_err(|_| AppError::Configuration))
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect()
+    }
     pub fn group_policy(&self) -> Result<rss_identity_core::groups::GroupFactsMaxAge, AppError> {
         rss_identity_core::groups::GroupFactsMaxAge::new(self.group_facts_max_age_seconds)
             .map_err(|_| AppError::Configuration)
@@ -194,7 +227,7 @@ impl RuntimeConfig {
         Ok(v)
     }
     pub fn validate(&self) -> Result<(), AppError> {
-        if self.format_version != 3
+        if self.format_version != 4
             || self.public_gateway.is_unspecified()
             || self.public_gateway.is_multicast()
             || self.listen.port() == 0
@@ -248,7 +281,7 @@ pub struct MaintenanceConfig {
 }
 impl MaintenanceConfig {
     pub fn validate(&self) -> Result<(), AppError> {
-        if self.format_version != 3 {
+        if self.format_version != 4 {
             return Err(AppError::Configuration);
         }
         InstanceId::parse(&self.instance_id).map_err(|_| AppError::Configuration)?;

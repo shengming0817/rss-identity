@@ -340,7 +340,7 @@ async fn production_dns_denial_prevents_connecting_to_loopback() {
     let tenant = TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap();
     let credentials = ProviderCredentials::new("private-fixture".into(), None).unwrap();
     assert_eq!(
-        HttpOidc::new(vec![])
+        HttpOidc::new(vec![], vec![])
             .unwrap()
             .test(tenant, &settings, &credentials)
             .await

@@ -28,6 +28,12 @@ schema owner 导出 fresh install 与有效权限 profile 授权函数；宿主�
 
 所有成功凭据及远端测试报告只在本地事务提交确认后释放。NotStarted、RolledBack、RollbackFailed、CommitUnknown、Fenced 保持不同内部错误，未知提交不返回 cookie。OIDC 使用原有 openidconnect 校验及持久 state/nonce/PKCE、JIT、link、step-up 流程，远程请求不伪装为 PG 原子操作。
 
+## 参考宿主内网接入与 MFA 资源
+
+[#2448](https://dev.azure.com/shengming0923/rss/_workitems/edit/2448) 扩展正式 OIDC 的显式私网网络授权，并将部署配置原子升级为 v4。网络授权由宿主持有，按 tenant/完整 issuer/client 精确匹配；只开放配置的 RFC1918/ULA，TLS、DNS 全答案校验及精确协议目的地继续生效。该策略不进入 provider 业务版本或 assurance 指纹，不能隐式授予 MFA 或撤销已有会话。
+
+参考宿主提供固定 300 秒 MFA 示范资源，直接消费当前权威 session 的可信 assurance，并在网关挂载。它不改变普通管理、本地应急或核心认证策略。Rust 构造器直接替换，旧 v3 配置拒绝；当前安装基线为 schema v10，HTTP 仍为 v2。真实浏览器、恢复及容量证据归 #2366。
+
 ## 验证边界
 
 组件 T1/T2 覆盖 PG 故障、并发锁序、OIDC 和组快照；密码及签发竞态由 postgres 私有测试覆盖，HTTP 与独立消费者只消费公开 facade。
