@@ -7,7 +7,9 @@ use axum::{
     http::{Request, StatusCode},
     response::Response,
 };
-use rss_identity_http_axum::{HttpConfig, router};
+use rss_identity_http_axum::{
+    HttpConfig, HttpFailure, SessionActivity, authenticate_request, router,
+};
 use rss_transactional_messaging_postgres::PgTransactionFault;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -18,32 +20,244 @@ const ORIGIN: &str = "https://identity.example.test";
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
-async fn public_session_reader_is_passive_and_rejects_revoked_credentials() -> anyhow::Result<()> {
+async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let app = app(&f);
+    let config = HttpConfig::new(ORIGIN, Duration::from_secs(10))?;
     let (cookie, csrf, initial) = successful_login(&app).await?;
-    let headers = request("GET", "session", Some(&cookie), None, json!(null))
+    let mut headers = request("GET", "session", Some(&cookie), None, json!(null))
         .headers()
         .clone();
-    let proof =
-        rss_identity_http_axum::inspect_session(&f.store, f.key.tenant, &headers, deadline())
-            .await
-            .unwrap();
+    headers.remove("origin");
+    headers.remove("x-identity-request");
+    let (proof, credential) = authenticate_request(
+        &f.store,
+        &config,
+        f.key.tenant,
+        &headers,
+        SessionActivity::Passive,
+        deadline(),
+    )
+    .await
+    .unwrap();
     assert_eq!(proof.view().id.to_string(), initial["session"]["id"]);
+    assert_eq!(credential.expose(), cookie.split_once('=').unwrap().1);
     assert_eq!(
         proof.view().idle_expires_at,
         initial["session"]["idleExpiresAt"]
     );
-    let mut ambiguous = headers.clone();
-    ambiguous.append("cookie", cookie.parse()?);
-    let error =
-        rss_identity_http_axum::inspect_session(&f.store, f.key.tenant, &ambiguous, deadline())
+    let active = request("POST", "resource", Some(&cookie), Some(&csrf), json!(null))
+        .headers()
+        .clone();
+    for mode in [SessionActivity::Passive, SessionActivity::Active] {
+        for value in [
+            format!("{cookie}; broken"),
+            format!("{cookie}; {cookie}"),
+            format!("{cookie}; extra={}", "x".repeat(8192)),
+        ] {
+            let mut malformed = active.clone();
+            malformed.insert("cookie", value.parse()?);
+            let error = authenticate_request(
+                &f.store,
+                &config,
+                f.key.tenant,
+                &malformed,
+                mode,
+                deadline(),
+            )
             .await
             .err()
             .unwrap();
-    assert_eq!(error.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(error.headers()["cache-control"], "no-store");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(error.headers()["cache-control"], "no-store");
+            assert_eq!(error.headers()["referrer-policy"], "no-referrer");
+            assert!(!error.headers().contains_key("set-cookie"));
+        }
+        let mut duplicate = active.clone();
+        duplicate.append("cookie", cookie.parse()?);
+        assert_eq!(
+            authenticate_request(
+                &f.store,
+                &config,
+                f.key.tenant,
+                &duplicate,
+                mode,
+                deadline()
+            )
+            .await
+            .err()
+            .unwrap()
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for name in ["origin", "x-identity-request", "x-csrf-token"] {
+        for duplicate in [false, true] {
+            let mut rejected = active.clone();
+            if duplicate {
+                rejected.append(name, rejected[name].clone());
+            } else {
+                rejected.remove(name);
+            }
+            let error = authenticate_request(
+                &f.store,
+                &config,
+                f.key.tenant,
+                &rejected,
+                SessionActivity::Active,
+                deadline(),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(
+                error.status(),
+                if duplicate && name != "origin" {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+        }
+    }
+    for (name, value) in [
+        ("origin", "https://evil.example.test"),
+        ("x-csrf-token", "wrong"),
+        ("x-identity-request", "0"),
+    ] {
+        let mut rejected = active.clone();
+        rejected.insert(name, value.parse()?);
+        assert_eq!(
+            authenticate_request(
+                &f.store,
+                &config,
+                f.key.tenant,
+                &rejected,
+                SessionActivity::Active,
+                deadline()
+            )
+            .await
+            .err()
+            .unwrap()
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    for mode in [SessionActivity::Passive, SessionActivity::Active] {
+        let error = authenticate_request(
+            &f.store,
+            &config,
+            rss_request_context::TenantId::parse(B)?,
+            &active,
+            mode,
+            deadline(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+        let error = authenticate_request(
+            &f.maintenance,
+            &config,
+            f.key.tenant,
+            &active,
+            mode,
+            deadline(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+        // Either the caller or HTTP configuration may provide the tighter budget.
+        for (timeout, remaining) in [
+            (Duration::from_secs(10), Duration::ZERO),
+            (Duration::from_nanos(1), Duration::from_secs(10)),
+        ] {
+            let bounded = HttpConfig::new(ORIGIN, timeout)?;
+            let error = authenticate_request(
+                &f.store,
+                &bounded,
+                f.key.tenant,
+                &active,
+                mode,
+                rss_transactional_messaging::policy::OperationDeadline::from_remaining(remaining),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                error.extensions().get::<HttpFailure>(),
+                Some(&HttpFailure::Authority(
+                    rss_identity_postgres::AuthorityError::DeadlineElapsed
+                ))
+            );
+        }
+    }
+    // Every rejected request above leaves idle expiry unchanged.
+    let (proof, _) = authenticate_request(
+        &f.store,
+        &config,
+        f.key.tenant,
+        &headers,
+        SessionActivity::Passive,
+        deadline(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        proof.view().idle_expires_at,
+        initial["session"]["idleExpiresAt"]
+    );
+    sqlx::query("UPDATE identity_authority.sessions SET idle_expires_at=idle_expires_at-5 WHERE session_id=$1::uuid")
+        .bind(initial["session"]["id"].as_str().unwrap()).execute(&f.owner).await?;
+    let (passive, _) = authenticate_request(
+        &f.store,
+        &config,
+        f.key.tenant,
+        &headers,
+        SessionActivity::Passive,
+        deadline(),
+    )
+    .await
+    .unwrap();
+    let (proof, _) = authenticate_request(
+        &f.store,
+        &config,
+        f.key.tenant,
+        &active,
+        SessionActivity::Active,
+        deadline(),
+    )
+    .await
+    .unwrap();
+    assert!(proof.view().idle_expires_at > passive.view().idle_expires_at);
+    assert_eq!(
+        proof.view().absolute_expires_at,
+        passive.view().absolute_expires_at
+    );
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    let error = authenticate_request(
+        &f.store,
+        &config,
+        f.key.tenant,
+        &active,
+        SessionActivity::Active,
+        deadline(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(matches!(
+        error.extensions().get::<HttpFailure>(),
+        Some(HttpFailure::Authority(
+            rss_identity_postgres::AuthorityError::CommitUnknown(_)
+        ))
+    ));
+    assert!(!error.headers().contains_key("set-cookie"));
     app.oneshot(request(
         "POST",
         "session/logout",
@@ -52,15 +266,31 @@ async fn public_session_reader_is_passive_and_rejects_revoked_credentials() -> a
         json!(null),
     ))
     .await?;
-    let error =
-        rss_identity_http_axum::inspect_session(&f.store, f.key.tenant, &headers, deadline())
-            .await
-            .err()
-            .unwrap();
-    assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+    for mode in [SessionActivity::Passive, SessionActivity::Active] {
+        let error =
+            authenticate_request(&f.store, &config, f.key.tenant, &active, mode, deadline())
+                .await
+                .err()
+                .unwrap();
+        assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+    }
+    f.runtime.close().await;
+    let error = authenticate_request(
+        &f.store,
+        &config,
+        f.key.tenant,
+        &headers,
+        SessionActivity::Passive,
+        deadline(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
     f.close().await;
     Ok(())
 }
+
 fn app(f: &Fixture) -> Router {
     router(
         f.store.clone(),

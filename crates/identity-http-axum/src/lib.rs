@@ -145,24 +145,64 @@ mod tests {
 #[derive(Clone, Copy, Debug)]
 pub struct ClientAddress(pub std::net::IpAddr);
 
-/// Read a host resource's cookie using the adapter's strict parser and authoritative session check.
-/// This does not extend idle expiry or expose credentials. The host owns its request budget,
-/// resource authorization and successful response cache policy; failures are safe and no-store.
-/// Use only for passive reads. This is not a CSRF check for host mutations.
-pub async fn inspect_session(
+/// Host-selected activity policy. Passive background reads never extend idle expiry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionActivity {
+    Passive,
+    /// Requires the configured Origin, X-Identity-Request: 1 and credential-bound CSRF.
+    Active,
+}
+
+/// Authenticate a host resource request using the same strict cookie/CSRF boundary as the routes.
+/// Active requests extend idle expiry; passive reads do not. Both recheck authoritative state.
+/// The returned proof is request-local. The zeroizing credential is for server-side protocol
+/// continuation only: do not log it, expose it in a response or cache a successful proof.
+/// Hosts still own resource authorization, activity selection and successful response no-store.
+/// The smaller of the caller budget and HTTP timeout bounds the operation. Await settlement;
+/// do not wrap this future in a timeout that could discard a committed/unknown outcome.
+pub async fn authenticate_request(
     authority: &Authority,
+    config: &HttpConfig,
     tenant: rss_request_context::TenantId,
     headers: &axum::http::HeaderMap,
+    activity: SessionActivity,
     deadline: rss_transactional_messaging::policy::OperationDeadline,
-) -> Result<rss_identity_postgres::AuthenticatedSession, axum::response::Response> {
+) -> Result<
+    (
+        rss_identity_postgres::AuthenticatedSession,
+        rss_identity_core::session::SessionSecret,
+    ),
+    axum::response::Response,
+> {
     use axum::response::IntoResponse;
+    let budget = boundary::RequestBudget::new(deadline.timeout().min(config.timeout));
     let result = async {
         authority.require_runtime()?;
+        if activity == SessionActivity::Active {
+            boundary::same_origin(headers, config)?;
+            if boundary::unique(headers, "x-identity-request")? != Some("1") {
+                return Err(boundary::FORBIDDEN);
+            }
+        }
         let secret = boundary::cookie(headers)?.ok_or(boundary::UNAUTH)?;
-        authority
-            .inspect_session(tenant, secret, deadline)
-            .await
-            .map_err(boundary::HttpError::from)
+        if activity == SessionActivity::Active {
+            boundary::csrf(headers, &secret)?;
+        }
+        let credential = rss_identity_core::session::SessionSecret::parse(secret.expose().into())
+            .map_err(|_| boundary::UNAUTH)?;
+        let proof = match activity {
+            SessionActivity::Passive => {
+                authority
+                    .inspect_session(tenant, secret, budget.remaining())
+                    .await
+            }
+            SessionActivity::Active => {
+                authority
+                    .authenticate_session(tenant, secret, budget.remaining())
+                    .await
+            }
+        }?;
+        Ok((proof, credential))
     }
     .await;
     result.map_err(|error: boundary::HttpError| {
