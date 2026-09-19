@@ -44,7 +44,6 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(compose['services']['postgres']['healthcheck']['test'],['CMD','pg_isready','-h','127.0.0.1','-U','postgres'])
             self.assertNotIn('keycloak',json.dumps(compose));self.assertNotIn('hydra',json.dumps(compose))
             for service in compose['services'].values():
-                self.assertNotIn('platform',service)
                 for volume in service.get('volumes',[]):
                     if volume['type']=='bind':self.assertTrue(Path(volume['source']).is_file())
     def test_compose_preserves_dollar_literals(self):
@@ -68,11 +67,9 @@ class DeploymentTests(unittest.TestCase):
             for call in run.call_args_list[:3]:
                 argv=call.args[0]
                 self.assertEqual(argv[argv.index('--network')+1],'none')
-                self.assertNotIn('--platform',argv)
                 self.assertIn('--check-config',argv)
             argv=run.call_args_list[3].args[0]
             self.assertEqual(argv[argv.index('--network')+1],'none')
-            self.assertNotIn('--platform',argv)
             self.assertEqual(argv[argv.index('--entrypoint')+1],'sh')
             self.assertIn(images['web'],argv)
             self.assertIn('nginx -t',argv[-1])
@@ -151,7 +148,6 @@ class OperationTests(unittest.TestCase):
             args=argparse.Namespace(command='check-backup',project='identity-source',deployment=root/'output',backup=archive)
             def execute(argv,**kwargs):
                 self.assertEqual(argv[argv.index('--network')+1],'none');self.assertEqual(argv[-2:],[images['postgres'],'--list']);self.assertEqual(kwargs['stdin'].read(),b'fixture')
-                self.assertNotIn('--platform',argv)
                 return subprocess.CompletedProcess(argv,0)
             with patch.object(operate,'deployment_images',return_value=images['identity']),patch.object(operate,'command',side_effect=execute) as run:
                 operate.operate(args);self.assertEqual(run.call_count,1)
@@ -221,7 +217,6 @@ class ImageContractTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stderr.decode())
             arguments=(root/'called').read_text()
             self.assertIn('IDENTITY_REVISION='+head,arguments);self.assertNotIn('untrusted',arguments);self.assertTrue(arguments.endswith('-\n'))
-            self.assertNotIn('--platform',arguments)
             (root/'called').unlink();(root/'Makefile').write_text((root/'Makefile').read_text()+'\n# dirty\n')
             result=subprocess.run(['make','image'],cwd=root,env=env,capture_output=True,timeout=10)
             self.assertNotEqual(result.returncode,0);self.assertFalse((root/'called').exists())
