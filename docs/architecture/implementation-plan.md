@@ -92,7 +92,7 @@ T32 的历史载体说明见 [本地认证候选验收](../../t3/access-local-au
 
 验收真实 MDM API 对可信身份、错误 tenant/audience、账户禁用/撤销、无权限设备动作的行为；按 MDM 规则判定是否需要独立产品 T3。禁止仅把 Identity client DTO 构造成功当作身份验证，不在 MDM 重跑整套 IdP 登录。
 
-本次未修改 MDM PRD：该仓已有并行需求工作；通过 M01 对齐唯一 owner，避免两个仓各自宣称拥有账户 authority。
+M01 在 MDM PRD 中对齐 AuthN/session 与资源授权 owner，避免两个仓各自持有账户 authority。
 
 ## 登记约定
 
@@ -100,15 +100,15 @@ T32 的历史载体说明见 [本地认证候选验收](../../t3/access-local-au
 
 全部工作项已登记，正文包含验收与来源，依赖通过原生 Predecessor 表达。I01 是首个无前置实施项；后续按依赖推进。I05 的 I04 依赖约束完整交付，配置准备可先行；二级 I09 与 T3 不因登记而自动宣称就绪或完成。
 
-## I01/I02 合并交付决定（2026-09-08）
+## I01/I02 协议与基础能力
 
-#2331 与 #2332 在同一个 PR 内按协议→core→PG→OIDC→CI 顺序实施，保留原有逻辑 Predecessor。当前基准为 RSS `bf5dd1350997d01aa834094a3347fce30247814e`，未来升级必须显式修改 rev/lock 并重新验证。未发布 registry 包不再构成阻塞。
+I01/I02 的依赖顺序为协议→core→PG→OIDC→CI。该历史阶段使用 RSS `bf5dd1350997d01aa834094a3347fce30247814e`，未来升级必须显式修改 rev/lock 并重新验证。未发布 registry 包不再构成阻塞。
 
 [协议 ADR](adr/202609080001-2331-access-identity-protocol.md) 与 [wire 草案](identity-wire-v1.md) 为新设计入口；I03 自有账户和事件，I04 自有会话及撤销，I05 openidconnect/Keycloak 上游，I06 Hydra 下游和单一验证接缝，I07 自有登录/管理 UI，I08 包含 Hydra 装配。I09/T31–T33/M01 分别证明恢复、生产 join 和 MDM 权限，不能用本次接缝测试替代。
 
 ## I03 后续简化
 
-[#2358](https://dev.azure.com/shengming0923/rss/_workitems/edit/2358) 收敛初始化/管理员恢复为独立维护身份的单条命令，删除授权票据与文件交付。日常 CLI 已由 #2337 的中央会话 API/UI 替代；#2338/#2339 分别持有生产注入与恢复治理，#2341 仍独立证明 T3。schema 2 仅按已确认的可丢弃开发库重建，实际测试与交付状态以 PR/看板为准。
+[#2358](https://dev.azure.com/shengming0923/rss/_workitems/edit/2358) 收敛初始化/管理员恢复为独立维护身份的单条命令，删除授权票据与文件交付。日常 CLI 已由 #2337 的中央会话 API/UI 替代；#2338/#2339 分别持有生产注入与恢复治理，#2341 仍独立证明 T3。schema 2 仅按已确认的可丢弃开发库重建。
 
 ## #2359 工程身份更名
 
@@ -116,31 +116,31 @@ T32 的历史载体说明见 [本地认证候选验收](../../t3/access-local-au
 
 仅有可重建测试数据且没有外部事件消费者：初始安装使用 `identity_authority`、`identity_account_runtime` / `identity_account_maintenance`，事件使用 `identity.security` / `identity.account.security`。没有旧入口别名、升级迁移、双读或旧事件桥接；已有开发库及 Outbox 须停用后重建，数据库角色属于集群对象，须单独核实依赖再清理。该一次性切换不进入产品启动逻辑。
 
-该历史更名阶段使用 schema version 2，事件 V1 payload、账户/租户/authority/lineage/epoch 的业务语义不因名称改变；新测试安装自行生成身份，不将重建视为保留旧数据。历史 `ACCESS-*` / `ACC-*` 编号、工作项 ID、ADR 文件名与固定来源继续用于追溯。Hydra 架构不变，#2360 不属于本项。实际验证和本地切换证据由 #2359 PR 持有。
+该历史更名阶段使用 schema version 2，事件 V1 payload、账户/租户/authority/lineage/epoch 的业务语义不因名称改变；新测试安装自行生成身份，不将重建视为保留旧数据。历史 `ACCESS-*` / `ACC-*` 编号、工作项 ID、ADR 文件名与固定来源继续用于追溯。Hydra 架构不变，#2360 不属于本项。
 
-## I04 实施落点
+## I04 会话边界
 
-#2334 的会话决定见 [中央会话 ADR](adr/202609080900-2334-central-session.md)：identity-core 会话策略、identity-postgres 单表/统一 auth_epoch 与事务事件、identity-http-axum Router。该历史阶段直接替换初始安装，不兼容旧开发库。仅 T1/T2，验证结果随实现 PR 记录，I05/I06/I07/I08 与独立 T3 的退出条件保持独立。
+#2334 的会话决定见 [中央会话 ADR](adr/202609080900-2334-central-session.md)：identity-core 会话策略、identity-postgres 单表/统一 auth_epoch 与事务事件、identity-http-axum Router。该历史阶段直接替换初始安装，不兼容旧开发库。组件验证属于 T1/T2，I05/I06/I07/I08 与独立 T3 的退出条件保持独立。
 
-## I05 实施决定（#2335）
+## I05 联合身份（#2335）
 
-用户决定一个 PR 完成账户/本地凭据替换与全部联合身份闭环，不保留旧内存 LoginAttempt 或 schema 兼容。
-实现模型与安全边界由 [I05 ADR](adr/202609082050-2335-federated-identity.md) 持有，管理与接入见[指南](../guides/federation.md)。实际版本/SHA/lock、provider digest 和验证结果记录于实现 PR，不以文档更新代替运行验收。
+联合身份依赖账户与本地凭据模型，不保留旧内存 LoginAttempt 或 schema 兼容。
+实现模型与安全边界由 [I05 ADR](adr/202609082050-2335-federated-identity.md) 持有，管理与接入见[指南](../guides/federation.md)。
 
-## I06 实施决定（#2336）
+## I06 下游交接（#2336）
 
-[下游 ADR](adr/202609090513-2336-downstream-identity.md) 持有真实 Hydra bridge、唯一 PG 关联、只读在线验证与有界清理；[接入指南](../guides/downstream.md) 持有公共消费面。该历史阶段直接替换 I05 初始安装，不保留兼容。实际验证结果和版本身份由实现 PR 持有。
+[下游 ADR](adr/202609090513-2336-downstream-identity.md) 持有真实 Hydra bridge、唯一 PG 关联、只读在线验证与有界清理；[接入指南](../guides/downstream.md) 持有公共消费面。该历史阶段直接替换 I05 初始安装，不保留兼容。
 
-## I07 当前决定
+## I07 管理入口
 
-[单一管理入口 ADR](adr/202609090801-2337-central-management-ui.md) 固定无兼容替换、CLI 退出与 rss-web/apps/identity UI owner。双仓 PR 分别持有后端管理和前端；实际源码版本与验证结果以交付记录为准。
+[单一管理入口 ADR](adr/202609090801-2337-central-management-ui.md) 固定无兼容替换、CLI 退出与 rss-web/apps/identity UI owner。后端管理由 Identity 持有，网页交互由 rss-web 持有。
 
 
-## I09 实施决定（#2339）
+## I09 Assurance 与恢复（#2339）
 
 [Assurance 与恢复 ADR](adr/202609091607-2339-assurance-recovery.md) 固定 Keycloak password/TOTP 的可信事实、显式 step-up 和下游传播。该历史阶段直接替换 I08 初始安装，无旧部署兼容。应急沿用现有维护权限；恢复采用原生 PG 切点、真实 provider T2 和部署隔离规程，不增加 seal/激活业务状态机。
 
-`make measure-capacity` 只提供组件测量，真实生产目标待测后冻结；#2339 不随实现 PR 自动关闭。已登记独立 PBI，Parent 均为 #2330，原生 Predecessor 为已完成的 #2338；额外执行前提是 #2339 实现 PR 合入后的精确候选/API，不以 #2339 Done 为启动条件：
+历史入口 `make measure-capacity` 只提供组件测量，真实生产目标须通过独立验收冻结。以下独立任务依赖 #2338，以及 #2339 的固定候选/API，不以 #2339 Done 为启动条件：
 
 | 项目 | 工作项 | Owner |
 | --- | --- | --- |
@@ -150,6 +150,6 @@ T32 的历史载体说明见 [本地认证候选验收](../../t3/access-local-au
 
 登记不表示已实施或运行通过；避免把实现项的完整验收条件反向变为 T3 的执行阻塞。
 
-## #2427 + #2428 同 PR 实施
+## #2427 / #2428 平台开通与 CLI
 
-系统域、显式平台角色、动态租户开通/新增管理员、自助加密 OIDC、持久会话与 SSO CLI 按 [当前 ADR](adr/202609130900-2427-platform-onboarding.md) 交付。当前安装版本由 [SCHEMA_VERSION](../../crates/identity-postgres/src/lib.rs) 及其安装探测持有，上述阶段的版本说明只用于历史追溯。#2368 消费替换后的网页协议；#2342 绑定新的 CLI/API 候选做 T3。实施与验收状态以 PR 实际记录为准。
+系统域、显式平台角色、动态租户开通/新增管理员、自助加密 OIDC、持久会话与 SSO CLI 按 [当前 ADR](adr/202609130900-2427-platform-onboarding.md) 交付。当前安装版本由 [SCHEMA_VERSION](../../crates/identity-postgres/src/lib.rs) 及其安装探测持有，上述阶段的版本说明只用于历史追溯。#2368 消费替换后的网页协议；#2342 绑定新的 CLI/API 候选做 T3。

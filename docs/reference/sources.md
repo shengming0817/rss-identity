@@ -79,7 +79,7 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - [RSS 历史 auth_grant_lifecycle.rs](https://dev.azure.com/shengming0923/rss/_git/rss?path=/adapters/postgres/src/auth_grant_lifecycle.rs&version=GC5b63e10a1b396b0ff70b7d1e6e55db296cd7a891)：账户锁、代际复核、凭据提交后释放；实际执行仍复用固定 RSS bf5dd1350997d01aa834094a3347fce30247814e 的 PG transaction。
 - [Axum state extractor](https://github.com/tokio-rs/axum/blob/c59208c86fded335cd85e388030ad59347b0e5ae/axum/src/extract/state.rs#L296-L324)、[Router](https://github.com/tokio-rs/axum/blob/c59208c86fded335cd85e388030ad59347b0e5ae/axum/src/routing/mod.rs)：实际读取本机 registry 的 axum 0.8.9 发布源码与 .cargo_vcs_info.json，MIT；复用 Router/state/JSON/ConnectInfo，不复制其源码，不引入第二个 session store。
 
-## PR #968 fix：查询、策略与结算边界
+## 查询、策略与结算边界
 
 - 实际读取固定 RSS `bf5dd1350997d01aa834094a3347fce30247814e` 的 `crates/transactional-messaging-postgres/src/transaction.rs:402–525,731–801`：local_tx 是单一截止点与结算 owner，drop 不证明回滚，未确认连接隔离；本项复用其 CommitUnknown/RollbackFailed，不额外发明 HTTP 结算窗口。
 - [Tower 0.5.3 timeout future](https://github.com/tower-rs/tower/blob/4b0a6b0e688bd177eb2c9c97f5268dd9703c66fc/tower/src/timeout/future.rs#L35-L53)：超时可结束 response future，所以将 HTTP 取消限定在 JSON body 读取，事务阶段交给其 owner。读取了 registry 源码和 .cargo_vcs_info.json；未复制源码。
@@ -98,7 +98,7 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - [Hydra introspection](https://github.com/ory/hydra/blob/0b84568fffccf151dc5e6c7955fdfb738555bf4b/oauth2/handler.go#L1031-L1081)：ext 仅作关联定位，当前身份由 PG 复核。
 - [Hydra 精确撤销](https://github.com/ory/hydra/blob/0b84568fffccf151dc5e6c7955fdfb738555bf4b/consent/handler.go#L64-L141)：按 consent_request_id 清理；204 不替代迟到 verifier 的窗口证明。
 
-## PR #972 fix 参考（2026-09-09）
+## 下游凭据、并发与时钟
 
 - [oauth2-rs secret types](https://github.com/ramosbugs/oauth2-rs/blob/main/oauth2/src/types.rs)：读取独立 CSRF/PKCE secret 类型及脱敏实现；BrowserBindingSecret 由 Identity 自己持有，未复制宏或引入通用 credential 层。
 - [Tokio Semaphore](https://github.com/tokio-rs/tokio/blob/master/tokio/src/sync/semaphore.rs)：读取 try_acquire/RAII permit 与请求并发限制示例；直接复用现有 Tokio，PrepareAdmission 使用无队列拒绝及共享窗口预算。
@@ -127,7 +127,7 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - 本仓 `fa7019922162158704cc47c6ac7ad36a67c8ae5a` 的 `crates/identity-http-axum/tests/group_facts_support/mod.rs`：历史真实 Keycloak 撤组与断网语义；按嵌入式 API 重建 producer T2，删除旧中央 client/Hydra 假设。
 - ASP.NET Core v10.0.0 [UserClaimsPrincipalFactory](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Extensions.Core/src/UserClaimsPrincipalFactory.cs) 与 [SecurityStampValidatorOptions](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Core/src/SecurityStampValidatorOptions.cs)：实际读取 Manager 生成 claims/roles 与默认 30 分钟 stamp 间隔；不将其等同 RSS 的 IdP 组时效。
 
-### PR #1034 review 修复参考
+### 会话截止与测试清理
 
 - [ASP.NET Core v10.0.0 CookieAuthenticationHandler](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Security/Authentication/Cookies/src/CookieAuthenticationHandler.cs)：实际读取异步 session store 返回后的时钟复核；本仓另在最后一次会话写之后复核自身单调期限，不复制其 cookie 续期策略。
 - [Rust 1.90.0 std/panic.rs](https://github.com/rust-lang/rust/blob/1.90.0/library/std/src/panic.rs)：实际读取 catch_unwind/resume_unwind，用于测试清理后传播断言失败，不吞掉 panic。

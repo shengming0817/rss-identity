@@ -2,7 +2,7 @@
 
 # #2427 / #2428：系统管理域、租户开通与受认证 CLI
 
-状态：用户已批准实施；验证结果由 PR 的实际命令记录持有。
+状态：历史决定，已由嵌入式架构替代。
 
 ## 唯一授权与不兼容替换
 
@@ -28,8 +28,8 @@ identity-platform 只通过 HTTP 工作，纯协议 binding 与中央会话/平�
 
 浏览器 SSO 使用外部浏览器、loopback 和 PKCE S256，唯一上游 callback 仍为 /api/v1/oidc/callback。五分钟登录事务完成后签发一分钟单次 CLI code，HTTPS 兑换时重新验证身份和平台权限后创建会话；浏览器不接收中央 session cookie。已验证的 CLI binding 在后续完成失败时接收封闭错误回传；无法验证绑定时维持原同源错误页及五分钟总等待上限。不存在长期 token、M2M 或自动写重试。
 
-## 交付与证据
+## 验证范围
 
-同一个 rss-identity PR 关联 #2427/#2428；主 agent 实施、测试与修复。T1/T2 覆盖角色、原子性、并发、结算未知、动态运行绑定、三域 OIDC 隔离、秘密轮换及 CLI 会话/SSO。完整 make ci 收尾统一运行。网页 #2368 消费新接口，固定候选双租户 SSO T3 由 #2342 持有，旧 UI 与旧 T3 记录不是新版本验收。
+T1/T2 覆盖角色、原子性、并发、结算未知、动态运行绑定、三域 OIDC 隔离、秘密轮换及 CLI 会话/SSO。网页 #2368 消费新接口，固定候选双租户 SSO T3 由 #2342 持有，旧 UI 与旧 T3 记录不是新版本验收。
 
 参考：Keycloak AdminRoles.java@06f4cad3925fd2cd95dc81d55b58b6d0282a7806；ZITADEL administrator-hardening；RFC 8252；oauth2-rs src/types.rs@f3424b4b2190c83c6d031fdc71eed2351d49e0df；ring 0.17.14 src/aead/less_safe_key.rs；固定 RSS 93ce684 的 fence.rs/transaction.rs。只采纳具体机制，不引入通用 IAM 或全局 runtime 平台。
