@@ -55,7 +55,7 @@ IMAGE_SECRET := --secret id=azure_token,env=SYSTEM_ACCESSTOKEN
 endif
 image:
 	@test -z "$$(/usr/bin/git status --porcelain)" || { echo "image requires clean HEAD" >&2; exit 1; }
-	set -o pipefail; /usr/bin/git archive "$(IDENTITY_REVISION)" | docker buildx build --platform linux/amd64 --load --provenance=false -f deployment/Dockerfile --tag "$(IDENTITY_IMAGE)" --build-arg "IDENTITY_REVISION=$(IDENTITY_REVISION)" --build-arg "RUST_IMAGE=$(RUST_IMAGE)" --build-arg "RUNTIME_IMAGE=$(RUNTIME_IMAGE)" $(IMAGE_SECRET) -
+	set -o pipefail; /usr/bin/git archive "$(IDENTITY_REVISION)" | docker buildx build --load --provenance=false -f deployment/Dockerfile --tag "$(IDENTITY_IMAGE)" --build-arg "IDENTITY_REVISION=$(IDENTITY_REVISION)" --build-arg "RUST_IMAGE=$(RUST_IMAGE)" --build-arg "RUNTIME_IMAGE=$(RUNTIME_IMAGE)" $(IMAGE_SECRET) -
 	@test "$$(/usr/bin/git rev-parse HEAD)" = "$(IDENTITY_REVISION)" && test -z "$$(/usr/bin/git status --porcelain)"
 
 # Explicit image/config seams on an isolated Linux Docker host; not part of CI.

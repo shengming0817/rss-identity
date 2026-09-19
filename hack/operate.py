@@ -97,7 +97,7 @@ def deployment_images(spec):
     services=spec['services']
     if set(services)!={'identity','gateway','migrate','maintenance','postgres','volume-init'}:raise Rejection('deployment-services')
     for service in services.values():
-        if not re.fullmatch(r'sha256:[a-f0-9]{64}',service['image']) or service.get('pull_policy')!='never' or service.get('platform')!='linux/amd64':raise Rejection('deployment-image-not-fixed')
+        if not re.fullmatch(r'sha256:[a-f0-9]{64}',service['image']) or service.get('pull_policy')!='never':raise Rejection('deployment-image-not-fixed')
     identity=services['identity']['image']
     if any(services[name]['image']!=identity for name in ['migrate','maintenance']):raise Rejection('backend-image-mismatch')
     inspected={image:deploy.inspect_image(image,image in [identity,services['gateway']['image']]) for image in {s['image'] for s in services.values()}}
@@ -114,7 +114,7 @@ def operate(args):
     if args.command in ['check-backup','restore']:
         record=check_backup(args.backup,backend_version,json.loads((directory/'migration.json').read_text()))
     if args.command=='check-backup':
-        with args.backup.open('rb') as stream:command(['docker','run','--pull=never','--platform','linux/amd64','--rm','--network','none','--user','10001:10001','--interactive','--entrypoint','pg_restore',spec['services']['postgres']['image'],'--list'],stage='check-backup',stdin=stream,stdout=subprocess.DEVNULL)
+        with args.backup.open('rb') as stream:command(['docker','run','--pull=never','--rm','--network','none','--user','10001:10001','--interactive','--entrypoint','pg_restore',spec['services']['postgres']['image'],'--list'],stage='check-backup',stdin=stream,stdout=subprocess.DEVNULL)
         return
     projects=[args.project]
     if args.command=='restore':

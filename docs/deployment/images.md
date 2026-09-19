@@ -1,6 +1,6 @@
 # 独立镜像构建
 
-后端只产出一个 linux/amd64 镜像，包含 identity-server、identity-migrate、identity-admin，默认入口为服务。正式入口要求干净 HEAD，以 git archive 固定构建上下文；revision 和基础镜像从该提交与 providers.lock 派生，不接受外部覆盖。构建仅使用本仓源码和固定 Cargo.lock；不读取 rss-web 或静态目录，不需要 Node。生产 release compiler artifacts 由现有 check_dependencies.check_artifacts/check_features 验证，私有 Git 凭据仅提供给 cargo fetch 的 BuildKit secret。
+后端只产出一个 Linux 镜像，包含 identity-server、identity-migrate、identity-admin，默认入口为服务。标准入口不传平台参数，由当前 Docker context 的 BuildKit daemon 选择默认平台，并从 providers.lock 固定的多架构索引摘要选择对应变体；不从 macOS 等客户端系统名推导平台。正式入口要求干净 HEAD，以 git archive 固定构建上下文；revision 和基础镜像从该提交与 providers.lock 派生，不接受外部覆盖。构建仅使用本仓源码和固定 Cargo.lock；Rust 使用镜像原生工具链与普通 target/release 产物，不读取 rss-web 或静态目录，不需要 Node。生产 release compiler artifacts 由现有 check_dependencies.check_artifacts/check_features 验证，私有 Git 凭据仅提供给 cargo fetch 的 BuildKit secret。
 
 ```sh
 make image IDENTITY_IMAGE=rss-identity:my-version
@@ -10,9 +10,9 @@ make image IDENTITY_IMAGE=rss-identity:my-version
 
 前端在 rss-web 通过 `pnpm image:identity --tag rss-identity-web:my-version` 独立构建。该薄入口也使用干净 HEAD 的源码归档并派生 Web revision。它拥有 Node 构建、静态检查、Web revision 和 Nginx 镜像；后端和前端版本独立。交付镜像的 revision 必须对应构建源码，正式联合验证使用各仓最终提交。
 
-在目标 Docker daemon 上准备镜像，跨主机可显式从选定来源 `docker pull --platform linux/amd64 <image>`。PostgreSQL 与 volume-init 的 Debian 镜像使用 deployment/providers.lock.json 中固定来源，也须预先显式拉取对应平台。本轮不提供 registry 或发布流水线。
+在目标 Docker daemon 上准备镜像；跨主机时在目标 context 从选定来源执行普通 `docker pull <image>`，由该 daemon 选择变体。PostgreSQL 与 volume-init 的 Debian 镜像使用 deployment/providers.lock.json 中固定的多架构索引摘要，也须预先显式拉取。本轮不提供 registry 或发布流水线。
 
-渲染只接受 `--identity-image` 与 `--web-image`：本地 inspect 验证平台、非 root 用户和各自 revision，再将不可变 image ID 写入 compose.json。identity、migrate、maintenance 共用同一个 ID，gateway 使用 Web ID；所有服务禁止隐式拉取。Compose 是运行配置，无额外候选清单。缺失镜像、错误平台或旧 `--candidate`、`make candidate` 参数失败，不自动转换。
+渲染只接受 `--identity-image` 与 `--web-image`：本地 inspect 验证 Linux 镜像、非 root 用户和各自 revision，再将不可变 image ID 写入 compose.json。Compose 不写平台字段，构建、预检、运行、迁移和维护统一使用当前 Docker context 的默认选择；identity、migrate、maintenance 共用同一个 ID，gateway 使用 Web ID，所有服务禁止隐式拉取。Compose 是生成的运行配置，无额外候选清单；切换本路径后重新渲染，不转换旧目录。缺失镜像或旧 `--candidate`、`make candidate` 参数失败。
 
 不再生产/消费 candidate.json、强制 OCI tar 或裸二进制目录。历史候选与验收记录只作历史来源，不构成新部署前提。备份回执格式见[恢复](recovery.md)。
 
@@ -22,6 +22,6 @@ make image IDENTITY_IMAGE=rss-identity:my-version
 make test-reference IDENTITY_IMAGE=rss-identity:my-version WEB_IMAGE=rss-identity-web:my-version PREVIOUS_WEB_IMAGE=rss-identity-web:previous-version REFERENCE_RECORD=/private/result.json REFERENCE_WORK=/private/new-fixture
 ```
 
-PREVIOUS_WEB_IMAGE 仅是测试输入，需提供不同的已准备 Web image ID，以核验前端单独升级及旧备份继续可用。结果记录 image ID、双方 revision、真实步骤与清理结果，只记录验证结果，不成为部署输入。源码 HTTP/UI 联调仍可显式运行 `make test-ui`，不进入后端常规 CI 或镜像构建。独立产品 T3 仍归 #2366。
+PREVIOUS_WEB_IMAGE 仅是测试输入，需提供不同的已准备 Web image ID，以核验前端单独升级及旧备份继续可用。v3 结果记录三个产品镜像的不可变 ID、revision、实际 OS/architecture/variant、真实步骤与清理结果；只描述本次 Docker 环境，不把一个平台的结果声明为其它平台已验证，也不成为部署输入。源码 revision 可回查本次 providers.lock 的多架构索引摘要。源码 HTTP/UI 联调仍可显式运行 `make test-ui`，不进入后端常规 CI 或镜像构建。独立产品 T3 仍归 #2366。
 
 对标源码：[Moby v28.3.3 ImageInspect](https://github.com/moby/moby/blob/v28.3.3/daemon/images/image_inspect.go)、[NGINX release-1.30.0 proxy](https://github.com/nginx/nginx/blob/release-1.30.0/src/http/modules/ngx_http_proxy_module.c)。只复用公开 CLI/协议行为，未复制源码。
