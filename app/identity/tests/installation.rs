@@ -183,6 +183,46 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 assembly::deadline(),
             )
             .await?;
+        let http = rss_identity_http_axum::HttpConfig::new(
+            &config.public_origin,
+            config.budgets.request(),
+        )?;
+        let context = rss_identity_app::context::router(authority.clone(), &config, http)?;
+        for (suffix, expected) in [
+            ("", axum::http::StatusCode::OK),
+            ("; broken", axum::http::StatusCode::BAD_REQUEST),
+        ] {
+            use tower::ServiceExt;
+            let response = context
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!(
+                            "/api/identity-host/v1/tenants/{}/context",
+                            key.tenant
+                        ))
+                        .header(
+                            "cookie",
+                            format!(
+                                "__Host-identity-session={}{suffix}",
+                                issued.secret().expose()
+                            ),
+                        )
+                        .body(axum::body::Body::empty())?,
+                )
+                .await?;
+            assert_eq!(response.status(), expected);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert!(!response.headers().contains_key("set-cookie"));
+            if expected == axum::http::StatusCode::OK {
+                let body: serde_json::Value = serde_json::from_slice(
+                    &axum::body::to_bytes(response.into_body(), 4096).await?,
+                )?;
+                assert_eq!(body["tenantId"], key.tenant.to_string());
+                assert_eq!(body["principalId"], key.principal.as_uuid().to_string());
+                assert_eq!(body["navigation"]["manageAccounts"], true);
+            }
+        }
         let actor = || {
             rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())
                 .unwrap()

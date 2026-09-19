@@ -42,6 +42,7 @@ zeroize.workspace = true
 libc = "0.2"
 sqlx = { workspace = true, features = ["uuid"] }
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 anyhow.workspace = true
 uuid.workspace = true
 sqlx.workspace = true

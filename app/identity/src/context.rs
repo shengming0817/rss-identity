@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use rss_identity_http_axum::{HttpConfig, SessionActivity, authenticate_request};
 use rss_identity_postgres::Authority;
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
@@ -18,8 +19,13 @@ struct Context {
     authority: Authority,
     policy: Arc<BootstrapPolicy>,
     timeout: Duration,
+    http: HttpConfig,
 }
-pub fn router(authority: Authority, config: &RuntimeConfig) -> Result<Router, AppError> {
+pub fn router(
+    authority: Authority,
+    config: &RuntimeConfig,
+    http: HttpConfig,
+) -> Result<Router, AppError> {
     Ok(Router::new()
         .route(
             "/api/identity-host/v1/tenants/{tenant}/context",
@@ -29,6 +35,7 @@ pub fn router(authority: Authority, config: &RuntimeConfig) -> Result<Router, Ap
             authority,
             policy: Arc::new(BootstrapPolicy(config.bootstrap_keys()?)),
             timeout: config.budgets.request(),
+            http,
         }))
 }
 async fn context(
@@ -38,9 +45,9 @@ async fn context(
 ) -> Response {
     let mut response = match TenantId::parse(&raw) {
         Err(_) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"code":"malformed_request"}))).into_response(),
-        Ok(tenant) => match rss_identity_http_axum::inspect_session(&state.authority, tenant, &headers, OperationDeadline::from_remaining(state.timeout)).await {
+        Ok(tenant) => match authenticate_request(&state.authority, &state.http, tenant, &headers, SessionActivity::Passive, OperationDeadline::from_remaining(state.timeout)).await {
             Err(response) => response,
-            Ok(session) => Json(serde_json::json!({
+            Ok((session, _credential)) => Json(serde_json::json!({
                 "tenantId":session.account().tenant.to_string(),
                 "principalId":session.account().principal.as_uuid().to_string(),
                 "sessionId":session.view().id.to_string(),

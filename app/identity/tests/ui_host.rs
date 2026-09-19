@@ -38,8 +38,11 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     )?;
     let http = rss_identity_http_axum::HttpConfig::new(&origin, Duration::from_secs(30))?;
     let app = rss_identity_http_axum::router(authority.clone(), http.clone())?
-        .merge(rss_identity_http_axum::federated_router(federation, http)?)
-        .merge(rss_identity_app::context::router(authority, &config)?)
+        .merge(rss_identity_http_axum::federated_router(
+            federation,
+            http.clone(),
+        )?)
+        .merge(rss_identity_app::context::router(authority, &config, http)?)
         .layer(axum::middleware::from_fn_with_state(
             rss_identity_app::transport::Ingress {
                 public: config.public_gateway,
