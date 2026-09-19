@@ -102,12 +102,13 @@ def stage(data,out,images,final):
     pgcert=mount(data['postgresCertificateFile'],'postgres-cert');pgkey=mount(data['postgresKeyFile'],'postgres-key',True)
     # PostgreSQL loopback is operator-only; every remote connection requires TLS and SCRAM.
     write('pg_hba.conf','local all all trust\nhostssl all all 0.0.0.0/0 scram-sha-256\nhostssl all all ::/0 scram-sha-256\nhostnossl all all 0.0.0.0/0 reject\nhostnossl all all ::/0 reject\n')
-    proxy=f'proxy_bind {gateway}; proxy_http_version 1.1; proxy_set_header X-Forwarded-For $remote_addr; proxy_set_header Forwarded ""; proxy_set_header X-Real-IP ""; proxy_set_header X-Forwarded-Host ""; proxy_set_header X-Forwarded-Proto ""; proxy_set_header Host {u.hostname}; proxy_ignore_client_abort on; proxy_pass http://{identity}:8080;'
+    proxy=f'proxy_bind {gateway}; proxy_http_version 1.1; proxy_set_header Connection ""; proxy_set_header X-Forwarded-For $remote_addr; proxy_set_header Forwarded ""; proxy_set_header X-Real-IP ""; proxy_set_header X-Forwarded-Host ""; proxy_set_header X-Forwarded-Proto ""; proxy_set_header Host {u.hostname}; proxy_ignore_client_abort on; proxy_pass http://identity_backend;'
     write('gateway.conf',f'''pid /tmp/nginx.pid;
 error_log stderr crit;
 events {{}}
 http {{
  access_log off; include /etc/nginx/mime.types;
+ upstream identity_backend {{ server {identity}:8080; keepalive 32; }}
  client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi;
  proxy_next_upstream off; proxy_read_timeout 70s; proxy_send_timeout 70s; client_max_body_size 32k;
  server {{
