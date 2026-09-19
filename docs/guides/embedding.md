@@ -83,7 +83,7 @@ let routes = routes.layer(axum::middleware::from_fn(client_address));
 
 `authenticate_session` 验证并延长 idle，不改变原 absolute deadline；宿主须先实施请求/CSRF 与用户活动策略，不能让后台心跳无限续期。`inspect_session` 只读验证，用于登录替换前检查、浏览器 GET session 和不应续期的被动查询。HTTP POST refresh 显式续期并旋转凭据；两种验证入口都重新检查权威状态。认证与 refresh 在最后一次会话查询/写入后共用单调期限复核，取会话期限与调用预算的较早值；数据库等待已耗尽期限时拒绝并回滚续期、凭据轮换与安全事件，不签发成功 cookie。
 
-HTTP 宿主资源可调用 `rss_identity_http_axum::inspect_session(&authority, tenant, headers, deadline)`，返回 `AuthenticatedSession` 或已安全投影的 HTTP response，不暴露 bearer/CSRF、不延长 idle。宿主仍持有资源授权、成功响应 no-store 与预算；该只读入口不代替写请求 CSRF。
+HTTP 宿主资源统一调用 `rss_identity_http_axum::authenticate_request(&authority, &http, tenant, headers, activity, deadline)`。`SessionActivity::Passive` 严格解析 cookie 并只读验证；`Active` 额外要求唯一且匹配配置的 Origin、`X-Identity-Request: 1` 和凭据绑定的 CSRF，再权威验证并延长 idle。格式错误、重复或超限 cookie 均拒绝。返回请求级 `AuthenticatedSession` 与可零化的 `SessionSecret`；凭据仅用于必要的服务端协议续接，不写日志或返回浏览器，后续请求必须再次权威验证，不能缓存成功证明。宿主仍持有活动分类、资源授权和成功响应 no-store。操作使用宿主剩余预算与 HTTP timeout 的较小值，由组件完成有界事务收尾；失败保留 `HttpFailure`，不签发 cookie。
 
 部署 owner 轮换凭据时调用 `CredentialKeys::reencrypt_tenant(&mut tx, instance, tenant)`；组件持有 guard、AAD、密文和 SQL，宿主先绑定 storage fence 与 SQL 预算，最后提交或回滚。逐值重加密不是公开接口，runtime/maintenance 角色不会因轮换扩权。
 

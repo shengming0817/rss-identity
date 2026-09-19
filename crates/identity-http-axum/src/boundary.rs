@@ -42,6 +42,9 @@ impl HttpConfig {
 #[derive(Clone, Copy)]
 pub(crate) struct RequestBudget(Instant);
 impl RequestBudget {
+    pub fn new(timeout: Duration) -> Self {
+        Self(Instant::now() + timeout)
+    }
     pub fn cutoff(self) -> tokio::time::Instant {
         self.0.into()
     }
@@ -181,6 +184,12 @@ pub(crate) fn named_cookie<'a>(
     }
     Ok(found)
 }
+pub(crate) fn same_origin(headers: &HeaderMap, config: &HttpConfig) -> Result<(), HttpError> {
+    match unique(headers, "origin") {
+        Ok(Some(origin)) if origin == config.origin => Ok(()),
+        _ => Err(FORBIDDEN),
+    }
+}
 pub(crate) fn csrf(headers: &HeaderMap, secret: &SessionSecret) -> Result<(), HttpError> {
     if !secret.check_csrf(unique(headers, "x-csrf-token")?.ok_or(FORBIDDEN)?) {
         return Err(FORBIDDEN);
@@ -210,17 +219,14 @@ pub(crate) async fn request_boundary(
 ) -> Response {
     let callback = request.method() == axum::http::Method::GET
         && request.uri().path() == "/api/v2/oidc/callback";
-    let budget = RequestBudget(Instant::now() + state.config.timeout);
+    let budget = RequestBudget::new(state.config.timeout);
     request.extensions_mut().insert(budget);
     let origin = if request.uri().to_string().len() > 8192 {
         Err(BAD)
     } else if request.method().is_safe() {
         Ok(())
     } else {
-        match unique(request.headers(), "origin") {
-            Ok(Some(origin)) if origin == state.config.origin => Ok(()),
-            _ => Err(FORBIDDEN),
-        }
+        same_origin(request.headers(), &state.config)
     };
     let mut response = match origin {
         // Authority/RSS owns bounded settlement after a transaction starts. A second
