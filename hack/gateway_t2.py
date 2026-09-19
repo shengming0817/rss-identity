@@ -13,7 +13,7 @@ import uuid
 from unittest.mock import patch
 
 import deploy
-from providers import IMAGES, container, docker
+from providers import IMAGES, container, docker, wait
 from test_deployment import fixture
 
 
@@ -93,10 +93,10 @@ http {
                 "-g",
                 "daemon off;",
             ]
-            stack.enter_context(
+            _, backend_ports = stack.enter_context(
                 container(
                     IMAGES["nginx"],
-                    [],
+                    [8080],
                     args=args,
                     user=user,
                     network=name,
@@ -104,6 +104,7 @@ http {
                     mounts=[f"{probe}:/etc/nginx/nginx.conf:ro"],
                 )
             )
+            wait(f"http://127.0.0.1:{backend_ports[8080]}/ready")
             _, ports = stack.enter_context(
                 container(
                     IMAGES["nginx"],
