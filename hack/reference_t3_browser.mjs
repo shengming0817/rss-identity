@@ -455,7 +455,8 @@ async function oidc() {
   // Capture a real callback and deliver it without the originating browser cookie first.
   const bound = await open("bound", tenant, true);
   let callback;
-  await bound.page.route(`${origin}/api/v2/oidc/callback**`, async (route) => {
+  const callbackRoute = (url) => url.origin === origin && url.pathname === "/api/v2/oidc/callback";
+  await bound.page.route(callbackRoute, async (route) => {
     callback = route.request().url();
     for (const [, v] of new URL(callback).searchParams) remember(v);
     await route.abort();
@@ -473,7 +474,7 @@ async function oidc() {
   const rejected = await foreign.request.get(callback);
   check(rejected.status() >= 400, "callback-browser-binding");
   await foreign.close();
-  await bound.page.unroute(`${origin}/api/v2/oidc/callback**`);
+  await bound.page.unroute(callbackRoute);
   await bound.page.goto(callback);
   await bound.page.waitForURL(`**/tenants/${tenant}/sessions`);
   check((await current(bound)).status === 200, "bound-callback-completes");
