@@ -22,7 +22,7 @@ python3 hack/operate.py --deployment /private/rendered --project identity-main o
 
 网关固定提供 `/api/identity-host/v1/config.json`（canonicalOrigin/oidcEnabled）；UI 缺失或畸形时拒绝启动。宿主资源 `/api/identity-host/v1/tenants/{tenant}/context` 读取权威会话，展示与宿主策略一致的管理提示；管理请求仍由组件事务内授权。网关覆盖来源头、保留原 API 路径且关闭代理重试，PG 不向宿主发布端口。日常容器不挂载 owner/maintenance 秘密。
 
-回退只允许已验证、同 schema 和同 instance/storage 配置的后端镜像。切换前 close，在新私有渲染目录绑定镜像，verify 后 open；不得回滚数据库撤销状态。未知提交不等于失败回滚。实际切换和故障恢复证据由 #2366 保存。
+回退只允许已验证、同 schema 和同 instance/storage 配置的后端镜像。切换前 close，在新私有渲染目录绑定镜像，verify 后 open；不得回滚数据库撤销状态。未知提交不等于失败回滚。本项 #2366 保存固定候选的配置/凭据轮换与故障恢复证据；跨 Web 镜像版本切换另按所属产品交付评估。
 
 全部服务（含 postgres、volume-init）由 compose.json 固定 image ID 和 pull_policy=never，不写平台字段；操作前核对本地镜像存在，当前 Docker daemon 负责选择并运行其默认平台。所有操作按 Docker daemon ID 与 project 获取跨进程排他锁；restore 按排序同时锁源、目标，锁竞争立即拒绝。每个 Docker 主机使用唯一部署 owner 和共享的 `/var/tmp/rss-identity-operations`；直接 Docker 操作或另一个未共享锁目录的控制主机不受该锁约束，维护期间必须禁止这些旁路。锁文件保留，文件描述符关闭释放锁；不要手删活跃锁文件。
 

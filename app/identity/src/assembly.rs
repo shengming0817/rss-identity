@@ -74,11 +74,15 @@ impl ManagementPolicy for BootstrapPolicy {
         )))
     }
 }
+/// Session policy used by the reference host and its offline acceptance profile.
+pub fn session_policy() -> Result<SessionPolicy, AppError> {
+    SessionPolicy::new(900, 14400).map_err(|_| AppError::Configuration)
+}
 pub fn authority_config(config: &RuntimeConfig) -> Result<AuthorityConfig, AppError> {
     Ok(AuthorityConfig::new(
         config.instance()?,
         config.storage.tenants()?,
-        SessionPolicy::new(900, 14400).map_err(|_| AppError::Configuration)?,
+        session_policy()?,
         delivery_budget()?,
     )?)
 }

@@ -14,11 +14,31 @@ fn main() {
     }
     if args == ["--help"] {
         println!(
-            "identity-server --config FILE\nidentity-server --check-config FILE\nidentity-server --version\nidentity-server --probe LOOPBACK:PORT"
+            "identity-server --config FILE\nidentity-server --check-config FILE\nidentity-server --version\nidentity-server --acceptance-profile\nidentity-server --probe LOOPBACK:PORT"
         );
         return;
     }
     let result = (|| {
+        if args == ["--acceptance-profile"] {
+            let policy = rss_identity_app::assembly::session_policy()?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "formatVersion": 1,
+                    "schemaVersion": rss_identity_postgres::SCHEMA_VERSION,
+                    "session": {"idleSeconds": policy.idle_seconds(), "absoluteSeconds": policy.absolute_seconds()},
+                    "attempts": {
+                        "sourceLimit": rss_identity_postgres::ATTEMPT_SOURCE_LIMIT,
+                        "sourceSeconds": rss_identity_postgres::ATTEMPT_SOURCE_SECONDS,
+                        "scopeLimit": rss_identity_postgres::ATTEMPT_SCOPE_LIMIT,
+                        "scopeSeconds": rss_identity_postgres::ATTEMPT_SCOPE_SECONDS
+                    },
+                    "kdfConcurrency": rss_identity_core::account::PasswordKdf::MAX_CONCURRENCY,
+                    "mfaMaxAgeSeconds": rss_identity_app::context::MFA_MAX_AGE_SECONDS
+                })
+            );
+            return Ok(());
+        }
         if args.len() != 2 || !["--config", "--check-config"].contains(&args[0].as_str()) {
             return Err(AppError::Arguments);
         }

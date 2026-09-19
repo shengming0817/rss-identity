@@ -92,9 +92,11 @@ impl Default for PasswordKdf {
     }
 }
 impl PasswordKdf {
+    /// Maximum concurrent password computations, shared by all clones.
+    pub const MAX_CONCURRENCY: usize = 4;
     pub fn new() -> Self {
         Self {
-            gate: Arc::new(Semaphore::new(4)),
+            gate: Arc::new(Semaphore::new(Self::MAX_CONCURRENCY)),
             admission: Arc::new(Mutex::new(true)),
             tasks: tokio_util::task::TaskTracker::new(),
         }

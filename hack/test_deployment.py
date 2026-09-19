@@ -1,5 +1,4 @@
 import argparse
-import contextlib
 import copy
 import json
 import os
@@ -12,19 +11,7 @@ from unittest.mock import patch
 import deploy
 import operate
 
-@contextlib.contextmanager
-def fixture():
-    with tempfile.TemporaryDirectory() as temp:
-        root=Path(temp)
-        value=json.loads((deploy.ROOT/'deployment/example.json').read_text())
-        for name in ['runtime','owner','maintenance','ca','cert','key','pgcert','pgkey']:
-            p=root/name;p.write_text('fixture-'+name);p.chmod(0o600)
-        value['database'].update(passwordFile=str(root/'runtime'),caFile=str(root/'ca'))
-        data={'runtime':value,'ownerPasswordFile':str(root/'owner'),'maintenancePasswordFile':str(root/'maintenance'),'tlsCertificateFile':str(root/'cert'),'tlsKeyFile':str(root/'key'),'postgresCertificateFile':str(root/'pgcert'),'postgresKeyFile':str(root/'pgkey'),'backendSubnet':'172.29.0.0/24'}
-        images={k:'sha256:'+str(i)*64 for i,k in enumerate(['identity','web','postgres','runtime'],1)}
-        with patch('os.geteuid',return_value=0),patch('os.chown'),patch.object(deploy,'preflight'):
-            deploy.render(data,root/'output',images)
-        yield root,data,images
+from deployment_fixture import fixture
 
 def receipt(path,data,images):
     path.write_bytes(b'fixture')
@@ -191,7 +178,7 @@ class ImageContractTests(unittest.TestCase):
         arguments={
             'deploy.py':['--input','input','--output','output','--identity-image','backend','--web-image','web'],
             'operate.py':['--deployment','deployment','--project','identity-fixture','verify'],
-            'reference_seams.py':['--identity-image','backend','--web-image','web','--previous-web-image','previous','--record','record','--work','work'],
+            'reference_t3.py':['--identity-image','backend','--web-image','web','--tools-image','tools','--web-repo','web-repo','--record','record'],
         }
         for script,args in arguments.items():
             result=subprocess.run([sys.executable,str(deploy.ROOT/'hack'/script),*args,'--candidate','old'],capture_output=True,timeout=10)

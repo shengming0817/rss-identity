@@ -18,6 +18,9 @@ mod sessions;
 mod storage;
 mod transaction;
 mod types;
+pub use attempts::{
+    ATTEMPT_SCOPE_LIMIT, ATTEMPT_SCOPE_SECONDS, ATTEMPT_SOURCE_LIMIT, ATTEMPT_SOURCE_SECONDS,
+};
 pub use credentials::CredentialKeys;
 pub use department::{DepartmentAccessError, TrustedDepartment, VerifiedDepartment};
 pub use federation::{

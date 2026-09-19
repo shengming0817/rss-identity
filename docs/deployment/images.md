@@ -16,12 +16,31 @@ make image IDENTITY_IMAGE=rss-identity:my-version
 
 不再生产/消费 candidate.json、强制 OCI tar 或裸二进制目录。历史候选与验收记录只作历史来源，不构成新部署前提。备份回执格式见[恢复](recovery.md)。
 
-显式接缝验证在隔离 Linux Docker 主机以 root 部署 owner 运行，提供 Python、openssl、Docker/Compose 与已准备的工具镜像（providers.lock 的 rust，仅作为 HTTP 测试客户端）：
+综合参考应用 T3 由 #2366 持有，唯一入口为 `make test-reference`。它使用当前 Docker context 的默认环境，由该入口先构建与 HEAD 绑定的测试工具镜像后，在 daemon 内一次性私有卷运行实际部署、真实 Chromium、TLS PG 和内网 Keycloak；不要求 macOS 宿主以 root 渲染文件。
 
 ```sh
-make test-reference IDENTITY_IMAGE=rss-identity:my-version WEB_IMAGE=rss-identity-web:my-version PREVIOUS_WEB_IMAGE=rss-identity-web:previous-version REFERENCE_RECORD=/private/result.json REFERENCE_WORK=/private/new-fixture
+make test-reference IDENTITY_IMAGE=rss-identity:revision WEB_IMAGE=rss-identity-web:revision REFERENCE_TOOLS_IMAGE=rss-identity-reference-tools:revision REFERENCE_WEB_REPO=/absolute/fixed/rss-web REFERENCE_RECORD=/absolute/private/new-result.json REFERENCE_PR=<本次T3的PR号>
 ```
 
-PREVIOUS_WEB_IMAGE 仅是测试输入，需提供不同的已准备 Web image ID，以核验前端单独升级及旧备份继续可用。v3 结果记录三个产品镜像的不可变 ID、revision、实际 OS/architecture/variant、真实步骤与清理结果；只描述本次 Docker 环境，不把一个平台的结果声明为其它平台已验证，也不成为部署输入。源码 revision 可回查本次 providers.lock 的多架构索引摘要。源码 HTTP/UI 联调仍可显式运行 `make test-ui`，不进入后端常规 CI 或镜像构建。独立产品 T3 仍归 #2366。
+运行器从干净 Git 提交归档源码，核对产品镜像 revision、两仓 lock、RSS revision、schema、provider/tool image ID、浏览器和真实资源。测试使用随机一次性秘密，通过正式 v4 `privateProviders` 接通内网 Keycloak；测试 loopback 不进入产品镜像。前端仍由 rss-web 构建，本仓不维护第二个 npm 工程。工具镜像的 Playwright 包摘要与固定 Web lock 对齐。
 
-对标源码：[Moby v28.3.3 ImageInspect](https://github.com/moby/moby/blob/v28.3.3/daemon/images/image_inspect.go)、[NGINX release-1.30.0 proxy](https://github.com/nginx/nginx/blob/release-1.30.0/src/http/modules/ngx_http_proxy_module.c)。只复用公开 CLI/协议行为，未复制源码。
+省略 `REFERENCE_TARGETS` 时，只生成 `measured` 基线，不能标记生产目标验收通过。owner 根据基线确认支持规模、SLO、RPO/RTO 后，提供新的私有 JSON：`subject` 为基线固定候选对象，`baselineSha256` 为完整 measured 基线文件摘要；`approvalReference` 为本次 T3 PR 的批准评论链接（必须属于基线启动参数 `REFERENCE_PR` 绑定的 PR，固定组织/项目，仅允许 `discussionId` 参数），`limits` 明确包含 loginBurstP95Ms、loginBurstRequestsPerSecond、failedAttemptBurstP95Ms、failedAttemptBurstRequestsPerSecond、accountEventCommitP95Ms、accountEventCommitsPerSecond、session1P95Ms、session1RequestsPerSecond、session4P95Ms、session4RequestsPerSecond、session16P95Ms、session16RequestsPerSecond、unexpectedErrors、restoreSeconds、lostSecurityChanges、expiredAttemptsRemoved。subject 固定非秘密 runtimeProfile、900/14400 秒会话策略、同步权威撤销（下一次请求拒绝、请求 deadline 30 秒）、30/300 秒 source 与 5/900 秒 login scope 预算、KDF 并发 4、MFA 300 秒、Keycloak 镜像及所测流程、轮换策略、完整 workload；install 从实际配置独立规范化并比对。随机 instance/storage 身份、私网地址和秘密文件根目录每轮重新生成，只有这些运行身份被归一化。报告逐步骤验证必需事实、正数断言/样本、摘要、状态分布和指标相关性，缺失或 false 不能通过。
+
+容量在既有预算自然到期后测量：租户 A 使用 4 个预热账户与 24 个不同计量账户，以并发 4 做成功登录突发；租户 B 的 4 个账户各进行 5 次错误密码，共 20 个 401 样本，并另行验证 8 个 429（含正确密码仍受限），429 不混入 KDF 失败延迟。账户事件在 4 次预热后，以并发 4 测 30 秒窗口（至少 20 次成功），逐一核对成功创建数与持久账户事件增量。同一个权威会话分别以 1/4/16 并发持续 30 秒，每档独立门控。这是单一热点会话争用与限流内的认证突发，不代表持续登录容量或 16 个独立会话。恢复前的数据规模与容量后的数据规模分别记录，RTO 仅覆盖已准备镜像和配置的停写恢复闭环；资源占用为测量前后快照。耗时、错误和丢失数量为上限；吞吐和清理数量为下限。再次调用同一入口并设置 `REFERENCE_TARGETS=/absolute/approved-targets.json REFERENCE_BASELINE=/absolute/measured-result.json`，回读并验证原基线、候选、场景和清理完整，再使用全新输出和数据卷正式复测。正式运行前和清理后，宿主使用 Azure 凭据在线回读 PR 与批准评论；只接受 Azure 返回的 PR 创建者发布的批准记录，并逐项核对固定 subject、完整基线摘要与 limits。评论被删除、内容变化、来源分支变更或接口不可达都不能通过。凭据仅留在宿主，不传入工具容器。报告保存评论 ID、作者 ID、内容摘要与人类决定请求 ID；Azure 验证发布者及内容，人类在飞书/Codex 的实际决定由操作人如实记录。
+
+结果只保存本次实际观测、材料摘要、测量和通过/失败/未覆盖；任何必要步骤、目标或清理不满足都不能通过。源码树不保存逐次结果，完整脱敏 JSON 结果归档为 T3 PR 附件并回读校验摘要；Azure 附件使用 `.json.txt` 文件名以满足允许扩展名，内容仍是同一 JSON 字节。实际密码、cookie、CSRF、TOTP seed、code、verifier、client secret 与浏览器存储仅存在私有 fixture，退出后删除，不进入报告。恢复直接消费 operate 的备份回执，不新增候选协议、恢复 seal 或激活系统。
+
+工具只支持内层 socket 与当前 context 可核验为相同 daemon ID 的环境；不一致在启动产品之前失败。Keycloak 在本次独立的 Docker internal 网络内使用 RFC1918 地址，不发布宿主端口；operator 与每次正式 open 前创建的停止态身份容器加入该网络，open 后再次核验连接，浏览器、生产 resolver 与 TLS 仍完整执行。工具只清理本次精确随机 project/label 的容器、网络和卷。外层先保存 running，再停止 operator、清理并验证产品及私有卷，最后原子发布最终结果；失败和中断也保存失败结果并确认清理；未知写入只读核对，不自动重放。普通 `make ci` 保持组件 T1/T2；浏览器 T3 不进入普通 CI。
+
+对标源码：[Moby ImageInspect](https://github.com/moby/moby/blob/v28.3.3/daemon/images/image_inspect.go)、[Playwright browser context](https://github.com/microsoft/playwright/blob/v1.60.0/packages/playwright-core/src/server/browserContext.ts)。
+
+`identity-server --acceptance-profile` 无需配置、数据库或网络，输出实际二进制使用的会话时限、失败预算、KDF 并发、MFA 最大年龄及 schema 版本。T3 在固定 identity image ID 内运行该命令，以及 `identity-migrate --describe`，将实际策略、schema v10 契约与迁移 SQL 摘要绑定至 subject，并核对候选源码的 Identity 迁移契约和 SQL；不通过匹配 Rust 源码字符串证明策略。
+
+批准评论的完整正文格式为 `rss-identity-reference-approval/v1`，换行后仅包含一个 JSON 代码块。对象字段为 `approved: true`、基线的 `subject`、`baselineSha256`、批准的 `limits` 和 `humanApproval: {"requestId": "实际人类决定请求ID", "source": "feishu或codex或dingTalk"}`。必须先取得明确的人类批准，再发布该记录；超时不构成批准。运行环境提供 `AZURE_DEVOPS_EXT_PAT` 或已登录的 Azure CLI，只读调用固定组织/项目/仓库的 API，拒绝 HTTP 重定向。
+
+T3 在部署前原子预留 source、stale、restored 三个 Compose backend 网络及 provider 网络，仅在 Docker 明确报告子网重叠时换下一个候选。所有资源按本轮精确名称或标签清理；首次场景失败保留，外层清理失败单独记入 cleanup。
+
+机制来源：[Azure PR API](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/get-pull-request?view=azure-devops-rest-7.1)、[评论 API](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/get?view=azure-devops-rest-7.1)、[Moby 原子地址分配](https://github.com/moby/moby/blob/v28.5.1/libnetwork/ipams/defaultipam/address_space.go)、[Compose 网络接管](https://github.com/docker/compose/blob/v2.39.4/pkg/compose/create.go)。未复制上游代码。
+
+
+报告的 `uncovered` 明确保留本轮不覆盖的边界：受测环境以外的架构/资源、其它 OIDC provider、持续登录吞吐、多独立会话吞吐、未预备镜像与配置的灾难恢复、消费产品及旧环境退役。`passed` 仅表示已批准的固定范围通过，不会清空这些边界。候选预检的策略、迁移、浏览器 probe 也使用本轮精确名称与标签，外层在预检前建立失败记录与清理范围，超时/中断时一并回收。

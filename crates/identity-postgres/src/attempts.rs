@@ -2,6 +2,14 @@ use crate::{AttemptSource, Authority, AuthorityError, storage::lock_guard};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
 use sqlx::Row;
+/// Maximum attempts from one source within its window.
+pub const ATTEMPT_SOURCE_LIMIT: i32 = 30;
+/// Source attempt window in seconds.
+pub const ATTEMPT_SOURCE_SECONDS: i32 = 300;
+/// Maximum attempts for one login scope within its window.
+pub const ATTEMPT_SCOPE_LIMIT: i32 = 5;
+/// Login scope attempt window in seconds.
+pub const ATTEMPT_SCOPE_SECONDS: i32 = 900;
 impl Authority {
     /// Reservation commits independently; rejected authentication never refunds it.
     pub(crate) async fn reserve(
@@ -21,9 +29,13 @@ impl Authority {
         source: &AttemptSource,
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
-        let mut keys = vec![(format!("s:{}", source.value()), 30_i32, 300_i32)];
+        let mut keys = vec![(
+            format!("s:{}", source.value()),
+            ATTEMPT_SOURCE_LIMIT,
+            ATTEMPT_SOURCE_SECONDS,
+        )];
         if let Some(scope) = scope {
-            keys.push((scope, 5, 900));
+            keys.push((scope, ATTEMPT_SCOPE_LIMIT, ATTEMPT_SCOPE_SECONDS));
         }
         let allowed=self.read(tenant,deadline,move|tx|Box::pin(async move {
             crate::transaction::connection(tx,move|c|Box::pin(async move {
