@@ -841,7 +841,8 @@ async function capacity() {
   const a = await admin();
   const times = [],
     sessionTimes = [],
-    eventTimes = [];
+    eventTimes = [],
+    loginContexts = [];
   let unexpected = 0,
     limited = 0,
     success = 0;
@@ -853,7 +854,10 @@ async function capacity() {
     });
     eventTimes.push(performance.now() - eventStart);
     check(created.status === 201, "capacity-account");
-    const c = await open("capacity-" + i, tenant, true);
+    loginContexts.push(await open("capacity-" + i, tenant, true));
+  }
+  const loginStarted = performance.now();
+  for (const [i, c] of loginContexts.entries()) {
     const begin = performance.now();
     const result = await request(c, "POST", `/api/v2/tenants/${tenant}/login`, {
       login: "capacity-" + i,
@@ -865,6 +869,7 @@ async function capacity() {
     } else if (result.status === 429) limited++;
     else unexpected++;
   }
+  const loginElapsed = (performance.now() - loginStarted) / 1000;
   check(
     success === 5 && limited === 0 && unexpected === 0,
     "login-baseline-samples",
@@ -891,6 +896,7 @@ async function capacity() {
   return {
     measurements: {
       loginP95Ms: percentile95(times),
+      loginBurstRequestsPerSecond: success / loginElapsed,
       accountEventCommitP95Ms: percentile95(eventTimes),
       accountEventCommitsPerSecond:
         5000 / eventTimes.reduce((a, b) => a + b, 0),

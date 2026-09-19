@@ -28,6 +28,7 @@ STEPS = (
 )
 MEASUREMENTS = (
     "loginP95Ms",
+    "loginBurstRequestsPerSecond",
     "failedAttemptP95Ms",
     "failedAttemptRequestsPerSecond",
     "accountEventCommitP95Ms",
@@ -42,6 +43,7 @@ MEASUREMENTS = (
 )
 LIMITS = {
     "loginP95Ms": "max",
+    "loginBurstRequestsPerSecond": "min",
     "failedAttemptP95Ms": "max",
     "failedAttemptRequestsPerSecond": "min",
     "accountEventCommitP95Ms": "max",
@@ -551,10 +553,10 @@ class Run:
             capture_output=True,
         )
         status = json.loads(result.stdout)
-        require(
-            (result.returncode != 0) if reject else result.returncode == 0,
-            "operation-outcome",
-        )
+        if not (result.returncode != 0 if reject else result.returncode == 0):
+            if reject:
+                raise ValueError("expected-rejection-" + command)
+            raise ProcessFailure("operate-" + command, result.returncode)
         if reject:
             require(status["status"] != "passed", "expected-operation-rejection")
         if command == "open" and not reject:
@@ -1395,10 +1397,10 @@ class Run:
         self.rejected_runtime_start()
         self.op("verify", reject=True)
         admin_file = self.write("db-rotation-admin-password", self.admin_password)
-        self.op("recover", TENANTS[0], "operator", admin_file, reject=True)
+        self.op("recover", TENANTS[0], PRINCIPALS[0], admin_file, reject=True)
         self.render("new-database-passwords", self.data)
         self.op("verify")
-        self.op("recover", TENANTS[0], "operator", admin_file)
+        self.op("recover", TENANTS[0], PRINCIPALS[0], admin_file)
         self.op("open")
         self.browser("pg-ready")
         return {
@@ -1582,6 +1584,7 @@ class Run:
         self.record["measurements"].update(result["measurements"])
         self.record["measurements"]["expiredAttemptsRemoved"] = before - after
         return {
+            "datasetRows": {name: len(rows) for name, rows in self.snapshot().items()},
             "resourcesBefore": resources_before,
             "resourcesAfter": resources_after,
             "committedEvents": committed_events,
