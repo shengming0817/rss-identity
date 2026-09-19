@@ -17,7 +17,8 @@ const percentile95 = (values) =>
   ];
 let browser,
   assertions = 0,
-  diagnostic = "start";
+  diagnostic = "start",
+  journey = "idp";
 const active = [];
 function check(ok, code) {
   diagnostic = code;
@@ -242,7 +243,7 @@ async function keycloak(
   user,
   { otp = false, badPassword = false, badOtp = false, success = true } = {},
 ) {
-  diagnostic = "idp-password-form";
+  diagnostic = journey + "-password-form";
   await c.page.locator("#username").waitFor();
   await c.page.locator("#username").fill(user);
   await c.page
@@ -261,7 +262,7 @@ async function keycloak(
     await c.page.locator("#kc-login").click();
   }
   if (otp) {
-    diagnostic = "idp-otp-form";
+    diagnostic = journey + "-otp-form";
     await c.page.locator("#otp").waitFor();
     if (badOtp) {
       const wrong = String((Number(totp()) + 123456) % 1000000).padStart(
@@ -272,10 +273,17 @@ async function keycloak(
       await c.page.locator("#kc-login").click();
       await c.page.locator("#otp").waitFor();
     }
+    data.otpCounters ??= {};
+    const counter = Math.floor(Date.now() / 30000);
+    if (data.otpCounters[user] === counter)
+      await new Promise((r) =>
+        setTimeout(r, (counter + 1) * 30000 - Date.now() + 100),
+      );
+    data.otpCounters[user] = Math.floor(Date.now() / 30000);
     await c.page.locator("#otp").fill(totp());
     await c.page.locator("#kc-login").click();
   }
-  diagnostic = "idp-callback";
+  diagnostic = journey + "-callback";
   await c.page.waitForURL((u) => u.origin === origin);
   if (success) {
     await c.page.waitForURL(`**/tenants/${c.t}/sessions`);
@@ -595,12 +603,14 @@ async function mfa() {
   const c = await open("linked");
   await sessions(c);
   const before = await c.context.cookies();
+  journey = "mfa-wrong-subject";
   await stepUp(c, "alice", { success: false });
   check(
     (await current(c)).body.identity.principalId === data.accounts.linked,
     "wrong-subject-did-not-rebind",
   );
   await c.context.clearCookies({ domain: new URL(input.issuer).hostname });
+  journey = "mfa-downgrade";
   let downgraded = false;
   await c.page.route(
     input.issuer.split("/realms")[0] + "/**",
@@ -620,6 +630,7 @@ async function mfa() {
   await keycloak(c, "bob", { success: false });
   await c.page.unroute(input.issuer.split("/realms")[0] + "/**");
   check(downgraded, "browser-assurance-downgrade-exercised");
+  journey = "mfa-fresh";
   await stepUp(c, "bob", { badOtp: true });
   await expectOldCookie(c, before);
   let resource = await read(
@@ -650,6 +661,7 @@ async function mfa() {
       .status === 403,
     "mfa-real-expiry",
   );
+  journey = "mfa-after-expiry";
   await stepUp(c);
   check(
     (await read(c, `/api/identity-host/v1/tenants/${tenant}/mfa-example`))
@@ -674,6 +686,7 @@ async function mfa() {
     "provider-enable-does-not-revive-session",
   );
   await login(c, "linked", input.userPassword);
+  journey = "mfa-after-reenable";
   await stepUp(c);
   await store(c);
   await store(a);
