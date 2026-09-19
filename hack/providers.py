@@ -3,6 +3,7 @@
 import contextlib
 from enum import Enum
 import json
+import ipaddress
 import os
 import re
 from pathlib import Path
@@ -32,7 +33,7 @@ def docker(*args):
     return subprocess.check_output(["docker", *args], text=True, stderr=subprocess.PIPE, timeout=180).strip()
 
 @contextlib.contextmanager
-def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), network=None, on_container=None):
+def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), network=None, on_container=None, bind_address="127.0.0.1"):
     name = "identity-t2-" + uuid.uuid4().hex
     command = ["run", "-d", "--name", name]
     if network is not None: command += ["--network", network]
@@ -40,7 +41,7 @@ def container(image, ports, env=(), args=(), mounts=(), user=None, sysctls=(), n
     for value in sysctls: command += ["--sysctl", value]
     for port in ports:
         host = ports[port] if isinstance(ports, dict) else ""
-        command += ["-p", f"127.0.0.1:{host}:{port}"]
+        command += ["-p", f"{bind_address}:{host}:{port}"]
     for key, value in env:
         command += ["-e", f"{key}={value}"]
     for mount in mounts:
@@ -110,7 +111,7 @@ def report_tests(package, test, expected, result):
             print(f'{package}/{test}: {name}: {status}')
     print(f'{package}/{test}: cargo exit={result.returncode}; raw output withheld')
 
-SUITES = {('rss-identity-app', 'ui_host'): {'ui_host_public_components'}, ('rss-identity-http-axum', 'management_http'): {'management_rejects_password_for_federated_only_account', 'callback_cancellation_consumes_only_bound_attempts', 'management_rechecks_inflight_provider_authority', 'provider_capacity_is_atomic_and_keeps_management_available', 'management_accounts_sessions_and_boundaries', 'management_provider_operations_safe_and_scoped'}, ('rss-identity-http-axum', 'federated_http'): {'group_lifecycle::real_group_snapshot_lifecycle', 'federated_http_rejects_mismatch_and_uncertain_commit', 'real_provider_management_and_encrypted_credentials', 'real_federated_login_and_linking', 'real_upstream_client_secret_rotation', 'real_step_up_rotates_only_the_bound_session', 'federated_tls_and_self_service_policy'}, ('rss-identity-postgres', 'federated_atomic'): {'tenant_reencryption_is_atomic_scoped_and_authenticates_every_value', 'session_security_is_subject_bound_and_revocable', 'federation_jit_isolated_subjects_and_membership', 'federation_atomic_events_and_unknown_commit', 'federation_link_conflict_logout_and_wrong_reauthentication', 'federation_assurance_change_revokes_attempts_and_sessions', 'federation_signed_time_skew_preserves_identity', 'federation_state_restart_expiry_and_replay', 'federation_config_races_and_provider_revocation', 'federation_group_snapshot_storage_bounds', 'federation_concurrent_linking_keeps_one_owner', 'federation_concurrent_jit_rls_and_schema_drift', 'federation_configuration_authorization_and_versions', 'federation_step_up_binding_and_settlement', 'federation_local_and_federated_linking', 'federation_step_up_unknown_commit_and_event_rollback'}, ('rss-identity-postgres', 'atomic'): {'maintenance_races_preserve_current_state', 'maintenance_permissions_and_schema_are_exact', 'attempts_are_shared_and_bounded', 'account_transition_matrix_and_events', 'maintenance_runbook_respects_forced_rls', 'storage_contract_is_checked', 'settlement_never_releases_uncertain_success', 'initialization_and_recovery', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_races_and_isolation', 'source_budgets_are_shared'}, ('rss-identity-postgres', 'session_atomic'): {'session_isolation_replacement_and_restart', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations', 'session_settlement_and_event_failure_are_atomic', 'session_rotation_and_revocation', 'session_account_changes_fence_racing_credentials'}, ('rss-identity-http-axum', 'session_http'): {'public_host_requests_enforce_activity_and_revocation', 'session_http_login_cookie_csrf_and_replacement', 'session_http_recovery_current_logout_and_deadline', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_pending_commit_preserves_settlement', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_v2_reauthentication_is_bound_and_has_no_legacy_role_surface'}, ('rss-identity-app', 'operator'): {'maintenance_file_and_settlement'}, ('rss-identity-oidc', 'provider'): {'real_provider_flows'}, ('rss-identity-postgres', 'embedded'): {'refresh_rejects_expiry_during_writes_without_rotating_or_emitting', 'group_deadline_includes_session_touch_latency', 'own_password_change_requires_current_host_policy', 'construction_verifies_every_declared_tenant_fence', 'trusted_groups_expire_without_extending_identity_or_snapshot', 'host_role_names_and_session_policy_survive_composition', 'local_facade_reauthenticates_and_host_policy_is_current', 'instances_tenants_and_borrowed_pool_are_separate'}, ('rss-identity-app', 'installation'): {'installation_and_reference_host_seams_are_verified'}}
+SUITES = {('rss-identity-oidc', 'private_provider'): {'real_private_provider_transport'}, ('rss-identity-app', 'ui_host'): {'ui_host_public_components'}, ('rss-identity-http-axum', 'management_http'): {'management_rejects_password_for_federated_only_account', 'callback_cancellation_consumes_only_bound_attempts', 'management_rechecks_inflight_provider_authority', 'provider_capacity_is_atomic_and_keeps_management_available', 'management_accounts_sessions_and_boundaries', 'management_provider_operations_safe_and_scoped'}, ('rss-identity-http-axum', 'federated_http'): {'group_lifecycle::real_group_snapshot_lifecycle', 'federated_http_rejects_mismatch_and_uncertain_commit', 'real_provider_management_and_encrypted_credentials', 'real_federated_login_and_linking', 'real_upstream_client_secret_rotation', 'real_step_up_rotates_only_the_bound_session', 'federated_tls_and_self_service_policy'}, ('rss-identity-postgres', 'federated_atomic'): {'tenant_reencryption_is_atomic_scoped_and_authenticates_every_value', 'session_security_is_subject_bound_and_revocable', 'federation_jit_isolated_subjects_and_membership', 'federation_atomic_events_and_unknown_commit', 'federation_link_conflict_logout_and_wrong_reauthentication', 'federation_assurance_change_revokes_attempts_and_sessions', 'federation_signed_time_skew_preserves_identity', 'federation_state_restart_expiry_and_replay', 'federation_config_races_and_provider_revocation', 'federation_group_snapshot_storage_bounds', 'federation_concurrent_linking_keeps_one_owner', 'federation_concurrent_jit_rls_and_schema_drift', 'federation_configuration_authorization_and_versions', 'federation_step_up_binding_and_settlement', 'federation_local_and_federated_linking', 'federation_step_up_unknown_commit_and_event_rollback'}, ('rss-identity-postgres', 'atomic'): {'maintenance_races_preserve_current_state', 'maintenance_permissions_and_schema_are_exact', 'attempts_are_shared_and_bounded', 'account_transition_matrix_and_events', 'maintenance_runbook_respects_forced_rls', 'storage_contract_is_checked', 'settlement_never_releases_uncertain_success', 'initialization_and_recovery', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_races_and_isolation', 'source_budgets_are_shared'}, ('rss-identity-postgres', 'session_atomic'): {'session_isolation_replacement_and_restart', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations', 'session_settlement_and_event_failure_are_atomic', 'session_rotation_and_revocation', 'session_account_changes_fence_racing_credentials'}, ('rss-identity-http-axum', 'session_http'): {'public_host_requests_enforce_activity_and_revocation', 'session_http_login_cookie_csrf_and_replacement', 'session_http_recovery_current_logout_and_deadline', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_pending_commit_preserves_settlement', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_v2_reauthentication_is_bound_and_has_no_legacy_role_surface'}, ('rss-identity-app', 'operator'): {'maintenance_file_and_settlement'}, ('rss-identity-oidc', 'provider'): {'real_provider_flows'}, ('rss-identity-postgres', 'embedded'): {'refresh_rejects_expiry_during_writes_without_rotating_or_emitting', 'group_deadline_includes_session_touch_latency', 'own_password_change_requires_current_host_policy', 'construction_verifies_every_declared_tenant_fence', 'trusted_groups_expire_without_extending_identity_or_snapshot', 'host_role_names_and_session_policy_survive_composition', 'local_facade_reauthenticates_and_host_policy_is_current', 'instances_tenants_and_borrowed_pool_are_separate'}, ('rss-identity-app', 'installation'): {'installation_and_reference_host_seams_are_verified'}}
 
 def cargo(package, test, env, features=()):
     expected = SUITES[(package,test)]
@@ -159,9 +160,9 @@ def pg():
         cargo("rss-identity-app", "operator", env)
 
 
-def free_port():
+def free_port(host="127.0.0.1"):
     with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
+        sock.bind((host, 0))
         return sock.getsockname()[1]
 
 def oidc():
@@ -181,6 +182,8 @@ def oidc():
         wait(kc + "/.well-known/openid-configuration")
         cargo("rss-identity-oidc", "provider", {"IDENTITY_TEST_KEYCLOAK_ISSUER": kc}, ["--features", "test-support"])
 
+    private_oidc()
+
 def configure_totp(realm):
     """Keycloak 26.7.3 conditional LoA flow; test credentials, never production defaults.
     ref: Keycloak server_admin Creating a browser login flow with step-up mechanism.
@@ -190,7 +193,7 @@ def configure_totp(realm):
         user['credentials'].append({'type':'otp','userLabel':'fixture-totp','secretData':json.dumps({'value':'fixture-totp-secret-2339'}),'credentialData':json.dumps({'digits':6,'counter':0,'period':30,'algorithm':'HmacSHA1','subType':'totp'})})
 
 @contextlib.contextmanager
-def keycloak(redirect_uri="https://identity.example.test/api/v2/oidc/callback", database_env=(), network=None, on_container=None):
+def keycloak(redirect_uri="https://identity.example.test/api/v2/oidc/callback", database_env=(), network=None, on_container=None, host="127.0.0.1"):
     realm = {"realm":"identity", "enabled":True, "sslRequired":"all", "duplicateEmailsAllowed":True,
              "loginWithEmailAllowed":False,
              "groups":[{"name":"staff"}],
@@ -208,12 +211,12 @@ def keycloak(redirect_uri="https://identity.example.test/api/v2/oidc/callback", 
         tmp=Path(tmp);cert=tmp/"tls.crt";key=tmp/"tls.key";realm_file=tmp/"identity-realm.json"
         realm_file.write_text(json.dumps(realm))
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-keyout",str(key),"-out",str(cert),"-days","2",
-                        "-subj","/CN=identity-t2", "-addext","basicConstraints=critical,CA:FALSE","-addext","keyUsage=critical,digitalSignature,keyEncipherment","-addext","extendedKeyUsage=serverAuth","-addext","subjectAltName=IP:127.0.0.1,DNS:localhost"],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+                        "-subj","/CN=identity-t2", "-addext","basicConstraints=critical,CA:FALSE","-addext","keyUsage=critical,digitalSignature,keyEncipherment","-addext","extendedKeyUsage=serverAuth","-addext",f"subjectAltName=IP:{host},DNS:localhost"],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
         key.chmod(0o644)  # Synthetic disposable fixture key readable by the container's unprivileged uid.
-        port=free_port();origin=f"https://127.0.0.1:{port}";issuer=origin+"/realms/identity"
+        port=free_port(host);origin=f"https://{host}:{port}";issuer=origin+"/realms/identity"
         kc_id, _ = stack.enter_context(container(KEYCLOAK,{8443:port},env=[('KC_BOOTSTRAP_ADMIN_USERNAME','fixture-operator'),('KC_BOOTSTRAP_ADMIN_PASSWORD','fixture-operator-password'),*database_env],network=network,args=["start-dev","--import-realm","--http-enabled=false",f"--hostname={origin}",
             "--https-certificate-file=/opt/keycloak/conf/tls.crt","--https-certificate-key-file=/opt/keycloak/conf/tls.key"],
-            mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro",f"{cert}:/opt/keycloak/conf/tls.crt:ro",f"{key}:/opt/keycloak/conf/tls.key:ro"], on_container=on_container))
+            mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro",f"{cert}:/opt/keycloak/conf/tls.crt:ro",f"{key}:/opt/keycloak/conf/tls.key:ro"], on_container=on_container, bind_address=host))
         context=ssl.create_default_context(cafile=str(cert));deadline=time.monotonic()+120
         while time.monotonic()<deadline:
             try:
@@ -222,6 +225,34 @@ def keycloak(redirect_uri="https://identity.example.test/api/v2/oidc/callback", 
             except (OSError,urllib.error.URLError):time.sleep(.5)
         else:raise RuntimeError("Keycloak TLS readiness timed out")
         yield {"IDENTITY_TEST_FEDERATED_ISSUER":issuer,"IDENTITY_TEST_FEDERATED_CA":str(cert),"IDENTITY_TEST_KEYCLOAK_CONTAINER":kc_id}
+
+def private_host():
+    """Use an owned RFC1918 interface, never weaken the production address policy."""
+    candidates=[]
+    configured=os.environ.get('IDENTITY_TEST_PRIVATE_HOST')
+    if configured:
+        candidates=[configured]
+    else:
+        try:candidates.extend(a[4][0] for a in socket.getaddrinfo(socket.gethostname(),None,socket.AF_INET))
+        except OSError:pass
+        try:
+            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as route:
+                route.connect(('10.255.255.255',9));candidates.append(route.getsockname()[0])
+        except OSError:pass
+    networks=[ipaddress.ip_network(n) for n in ['10.0.0.0/8','172.16.0.0/12','192.168.0.0/16']]
+    for value in dict.fromkeys(candidates):
+        address=ipaddress.ip_address(value)
+        if any(address in network for network in networks):
+            try:
+                with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as probe:probe.bind((value,0))
+                return value
+            except OSError:pass
+    raise RuntimeError('production private OIDC T2 requires an owned RFC1918 interface; set IDENTITY_TEST_PRIVATE_HOST')
+
+def private_oidc():
+    with keycloak(host=private_host()) as env:
+        cargo('rss-identity-oidc','private_provider',env)
+
 
 def federated():
     with keycloak() as env, postgres() as (_, ports):
@@ -247,6 +278,7 @@ def assembly():
 if __name__ == "__main__":
     if sys.argv[1:] == ["pg"]: pg()
     elif sys.argv[1:] == ["oidc"]: oidc()
+    elif sys.argv[1:] == ["private-oidc"]: private_oidc()
     elif sys.argv[1:] == ["federated"]: federated()
     elif sys.argv[1:] == ["assembly"]: assembly()
-    else: raise SystemExit("usage: providers.py pg|oidc|federated|assembly")
+    else: raise SystemExit("usage: providers.py pg|oidc|private-oidc|federated|assembly")

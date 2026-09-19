@@ -61,3 +61,19 @@ class SafeTestReportTests(unittest.TestCase):
         self.assertIn('known: FAILED',output.getvalue())
         self.assertIn('exit=101',output.getvalue())
         self.assertNotIn('secret',output.getvalue())
+
+class PrivateTransportEnvironmentTests(unittest.TestCase):
+    def test_private_host_requires_owned_rfc1918_address(self):
+        with patch.dict('os.environ', {'IDENTITY_TEST_PRIVATE_HOST':'192.168.5.10'}, clear=True), patch('providers.socket.socket') as socket:
+            self.assertEqual(providers.private_host(),'192.168.5.10')
+            socket.return_value.__enter__.return_value.bind.assert_called_once_with(('192.168.5.10',0))
+        for address in ['127.0.0.1','169.254.169.254','198.18.0.1','8.8.8.8']:
+            with patch.dict('os.environ', {'IDENTITY_TEST_PRIVATE_HOST':address}, clear=True):
+                with self.assertRaisesRegex(RuntimeError,'owned RFC1918'):
+                    providers.private_host()
+
+    def test_explicit_unowned_interface_is_rejected(self):
+        with patch.dict('os.environ', {'IDENTITY_TEST_PRIVATE_HOST':'10.42.0.9'}, clear=True), patch('providers.socket.socket') as socket:
+            socket.return_value.__enter__.return_value.bind.side_effect=OSError('not owned')
+            with self.assertRaisesRegex(RuntimeError,'owned RFC1918'):
+                providers.private_host()
