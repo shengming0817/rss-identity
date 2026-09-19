@@ -167,7 +167,7 @@ async function createAccount(c, name, password, expected = 201) {
     const value = await r.json();
     data.accounts ??= {};
     data.accounts[name] = value.principalId;
-    await c.page.getByText(name, { exact: true }).first().waitFor();
+    await c.page.locator("tbody tr").filter({ hasText: value.principalId }).waitFor();
     return value;
   }
   await c.page.getByRole("alert").waitFor();
