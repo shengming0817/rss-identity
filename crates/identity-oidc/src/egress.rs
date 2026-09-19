@@ -1,14 +1,25 @@
 //! Vetted addresses are the addresses consumed by reqwest, without a second lookup.
 //! ref: reqwest 0.12.28 src/dns/resolve.rs (Resolve / Addrs).
 use crate::EgressDenied;
+use ipnet::IpNet;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
 };
 
-pub(crate) fn allowed(ip: IpAddr, loopback: bool) -> bool {
+pub(crate) fn private_network(network: IpNet) -> bool {
+    network == network.trunc()
+        && ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
+            .iter()
+            .any(|parent| parent.parse::<IpNet>().unwrap().contains(&network))
+}
+
+pub(crate) fn allowed(ip: IpAddr, loopback: bool, cidrs: &[IpNet]) -> bool {
     if loopback && ip.is_loopback() {
+        return true;
+    }
+    if cidrs.iter().any(|network| network.contains(&ip)) {
         return true;
     }
     let blocked: &[&str] = match ip {
@@ -52,12 +63,14 @@ impl Resolve for SystemResolver {
 pub(crate) struct VettedResolver {
     lookup: Arc<dyn Resolve>,
     loopback: bool,
+    cidrs: Vec<IpNet>,
 }
 impl VettedResolver {
-    pub(crate) fn new(loopback: bool) -> Self {
+    pub(crate) fn new(loopback: bool, cidrs: Vec<IpNet>) -> Self {
         Self {
             lookup: Arc::new(SystemResolver),
             loopback,
+            cidrs,
         }
     }
 }
@@ -65,9 +78,11 @@ impl Resolve for VettedResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let pending = self.lookup.resolve(name);
         let loopback = self.loopback;
+        let cidrs = self.cidrs.clone();
         Box::pin(async move {
             let addresses: Vec<SocketAddr> = pending.await?.collect();
-            if addresses.is_empty() || addresses.iter().any(|a| !allowed(a.ip(), loopback)) {
+            if addresses.is_empty() || addresses.iter().any(|a| !allowed(a.ip(), loopback, &cidrs))
+            {
                 return Err(Box::new(EgressDenied) as Box<dyn std::error::Error + Send + Sync>);
             }
             Ok(Box::new(addresses.into_iter()) as Addrs)
@@ -98,6 +113,7 @@ mod tests {
                     answers.iter().map(|a| a.parse().unwrap()).collect(),
                 )),
                 loopback: false,
+                cidrs: vec![],
             };
             assert!(resolver.resolve("idp.test".parse().unwrap()).await.is_err());
         }
@@ -108,6 +124,7 @@ mod tests {
         let resolver = VettedResolver {
             lookup: Arc::new(Answers(addresses.clone())),
             loopback: false,
+            cidrs: vec![],
         };
         assert_eq!(
             resolver
@@ -141,9 +158,37 @@ mod tests {
             "ff02::1",
             "2001:db8::1",
         ] {
-            assert!(!allowed(address.parse().unwrap(), false), "{address}");
+            assert!(!allowed(address.parse().unwrap(), false, &[]), "{address}");
         }
-        assert!(allowed("127.0.0.1".parse().unwrap(), true));
-        assert!(!allowed("10.0.0.1".parse().unwrap(), true));
+        assert!(allowed("127.0.0.1".parse().unwrap(), true, &[]));
+        assert!(!allowed("10.0.0.1".parse().unwrap(), true, &[]));
+    }
+    #[tokio::test]
+    async fn private_dns_checks_every_answer_and_preserves_vetted_addresses() {
+        for (answers, accepted) in [
+            (vec!["10.42.0.9:0", "[fd12::9]:0"], true),
+            (vec!["10.42.0.9:0", "8.8.8.8:0"], true),
+            (vec!["10.42.0.9:0", "10.42.0.10:0"], false),
+            (vec!["10.42.0.9:0", "169.254.169.254:0"], false),
+            (vec!["127.0.0.1:0"], false),
+        ] {
+            let addresses = answers
+                .iter()
+                .map(|v| v.parse().unwrap())
+                .collect::<Vec<_>>();
+            let resolver = VettedResolver {
+                lookup: Arc::new(Answers(addresses.clone())),
+                loopback: false,
+                cidrs: vec![
+                    "10.42.0.9/32".parse().unwrap(),
+                    "fd12::9/128".parse().unwrap(),
+                ],
+            };
+            let result = resolver.resolve("idp.test".parse().unwrap()).await;
+            assert_eq!(result.is_ok(), accepted);
+            if accepted {
+                assert_eq!(result.unwrap().collect::<Vec<_>>(), addresses);
+            }
+        }
     }
 }

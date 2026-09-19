@@ -4,7 +4,7 @@ use rss_identity_core::InstanceId;
 use rss_identity_postgres::{AuthorityProfile, grant_profile};
 use sqlx::{Connection, PgConnection};
 pub(crate) fn validate(config: &MigrationConfig) -> Result<InstanceId, AppError> {
-    if config.format_version != 3
+    if config.format_version != 4
         || config.runtime_role == config.maintenance_role
         || config.runtime_role == config.database.user
         || config.maintenance_role == config.database.user
@@ -169,7 +169,7 @@ mod tests {
             serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
         for role in ["".to_owned(), "x".repeat(64), "bad\0role".to_owned()] {
             let config = serde_json::from_value(serde_json::json!({
-                "formatVersion": 3, "instanceId": runtime["instanceId"],
+                "formatVersion": 4, "instanceId": runtime["instanceId"],
                 "storage": runtime["storage"], "database": runtime["database"],
                 "runtimeRole": role, "maintenanceRole": "maintenance"
             }))

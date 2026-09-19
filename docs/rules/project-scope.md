@@ -4,7 +4,7 @@ rss-identity 拥有可嵌入的本地认证、租户成员身份、联合 IdP �
 
 宿主持有管理角色、防锁死、资源授权、配置、实例标识、租户 admission、数据库角色与 fenced PgRuntime；组件强制实例/租户/主体/epoch/会话绑定并在事务内调用宿主策略。组和 assurance 仅提供可信认证事实，不生成资源权限。MDM/ZT 持有设备 authority、attestation、posture 和业务授权。
 
-仅支持 HTTP v2 和 fresh schema v9，无旧配置、旧库升级、v1 alias、legacy feature 或中央 downstream/client/Hydra 模式。重新部署及真实产品迁移须由其独立任务闭合。
+仅支持配置 v4、HTTP v2 和 fresh schema v9，无旧配置、旧库升级、v1 alias、legacy feature 或中央 downstream/client/Hydra 模式。重新部署及真实产品迁移须由其独立任务闭合。
 
 RSS 公共 runtime、事务消息及必要基础库使用同一 Git URL/完整 SHA，独立 Cargo.lock 与实际 feature 闭包。禁止消费方跨仓 path、源码副本、浮动 branch/tag 或 Git/registry 双来源。固定 Git checkout 内的包间 path 属于同一源码闭包。源码消费不等于 registry 发布。
 

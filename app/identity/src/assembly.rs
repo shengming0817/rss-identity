@@ -142,7 +142,8 @@ fn federation_inputs(config: &RuntimeConfig) -> Result<Option<FederationInputs>,
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
-    let oidc = HttpOidc::new(profiles).map_err(|_| AppError::Provider)?;
+    let oidc = HttpOidc::new(profiles, c.private_access(&config.storage.tenants()?)?)
+        .map_err(|_| AppError::Provider)?;
     let raw = read_secret(Path::new(&c.state_key_file))?;
     let mut key = zeroize::Zeroizing::new([0; 32]);
     hex::decode_to_slice(raw.as_str(), key.as_mut()).map_err(|_| AppError::Configuration)?;

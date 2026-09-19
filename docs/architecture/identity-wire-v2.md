@@ -47,3 +47,6 @@ HTTP 宿主资源请求统一调用 `authenticate_request`：用户活动选择 
 ## 参考宿主资源
 
 `GET /api/identity-host/v1/tenants/{tenant}/context` 由 app/identity 持有，通过 HTTP adapter 的公开 `authenticate_request` 选择 `SessionActivity::Passive`，严格读取同一 cookie 并权威验证，不续期。响应为 `{tenantId,principalId,sessionId,navigation:{manageAccounts,manageProviders}}`，no-store；导航由 BootstrapPolicy 派生，仅作展示。组件管理事务始终重新验证会话与宿主策略。UI 静态配置使用网关固定同源 `/api/identity-host/v1/config.json`，严格 `{canonicalOrigin,oidcEnabled}`；并非动态能力发现。
+
+
+`GET /api/identity-host/v1/tenants/{tenant}/mfa-example` 复用同一被动请求认证，检查本次 `AuthenticatedSession::assurance()`。只接受 `acr=mfa`、非空认证时间及 `0 <= now-authTime < 300` 秒；未来时间、缺失或过期事实返回 403 `reauthentication_required`，无效会话为 401，权威存储不可用为 503。成功返回 `{tenantId,principalId,sessionId,authentication:{acr,authTime}}`；全部响应 no-store，无 Set-Cookie，不延长 idle。宿主服务端时钟必须正确。此固定示范策略不改变账户/IdP 管理授权，也不由浏览器提供 MFA 事实。

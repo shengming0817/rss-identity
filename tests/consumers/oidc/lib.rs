@@ -197,7 +197,14 @@ mod production {
             client_id: "identity-test".into(),
             keycloak_totp: true,
         };
-        assert!(rss_identity_oidc::HttpOidc::new(vec![profile]).is_err());
+        assert!(rss_identity_oidc::HttpOidc::new(vec![profile], vec![]).is_err());
+        let access = rss_identity_oidc::PrivateProviderAccess {
+            tenant: rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111")?,
+            issuer: "https://10.42.0.9:8443/realms/reference".into(),
+            client_id: "reference".into(),
+            cidrs: vec!["10.42.0.9/32".parse()?],
+        };
+        rss_identity_oidc::HttpOidc::new(vec![], vec![access])?;
         Ok(())
     }
 }
