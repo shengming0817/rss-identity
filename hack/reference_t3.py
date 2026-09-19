@@ -9,28 +9,30 @@ import deploy, operate
 from bounded_process import run as bounded_run
 
 ROOT = Path(__file__).resolve().parents[1]
-STEPS = (
-    "install",
-    "local",
-    "oidc",
-    "mfa",
-    "events",
-    "availability",
-    "credential-rotation",
-    "state-rotation",
-    "client-secret-rotation",
-    "database-rotation",
-    "tls-rotation",
-    "backup",
-    "stale-backup",
-    "restore",
-    "capacity",
+SCENARIOS = (
+    ("install", "install", None),
+    ("local", "browser", "local"),
+    ("oidc", "browser", "oidc"),
+    ("mfa", "browser", "mfa"),
+    ("events", "events", None),
+    ("availability", "availability", None),
+    ("credential-rotation", "credential_rotation", None),
+    ("state-rotation", "state_rotation", None),
+    ("client-secret-rotation", "client_rotation", None),
+    ("database-rotation", "database_rotation", None),
+    ("tls-rotation", "tls_rotation", None),
+    ("backup", "backup", None),
+    ("stale-backup", "stale_backup", None),
+    ("restore", "restore", None),
+    ("capacity", "capacity", None),
 )
+STEPS = tuple(row[0] for row in SCENARIOS)
+
 MEASUREMENTS = (
-    "loginP95Ms",
+    "loginBurstP95Ms",
     "loginBurstRequestsPerSecond",
-    "failedAttemptP95Ms",
-    "failedAttemptRequestsPerSecond",
+    "failedAttemptBurstP95Ms",
+    "failedAttemptBurstRequestsPerSecond",
     "accountEventCommitP95Ms",
     "accountEventCommitsPerSecond",
     "session1P95Ms",
@@ -46,10 +48,10 @@ MEASUREMENTS = (
     "expiredAttemptsRemoved",
 )
 LIMITS = {
-    "loginP95Ms": "max",
+    "loginBurstP95Ms": "max",
     "loginBurstRequestsPerSecond": "min",
-    "failedAttemptP95Ms": "max",
-    "failedAttemptRequestsPerSecond": "min",
+    "failedAttemptBurstP95Ms": "max",
+    "failedAttemptBurstRequestsPerSecond": "min",
     "accountEventCommitP95Ms": "max",
     "accountEventCommitsPerSecond": "min",
     "session1P95Ms": "max",
@@ -72,6 +74,160 @@ PRINCIPALS = [
     "44444444-4444-4444-8444-444444444444",
 ]
 ORIGIN = "https://identity.example.test"
+WORKLOAD = {
+    "login": {
+        "kind": "bounded-burst",
+        "tenantIndex": 0,
+        "warmup": 4,
+        "samples": 24,
+        "concurrency": 4,
+    },
+    "failedAttempt": {
+        "kind": "bounded-burst",
+        "tenantIndex": 1,
+        "accounts": 4,
+        "samples": 20,
+        "concurrency": 4,
+        "limitedChecks": 8,
+    },
+    "accountEvent": {
+        "warmup": 4,
+        "seconds": 30,
+        "concurrency": 4,
+        "minimumSamples": 20,
+    },
+    "sessionConcurrency": [1, 4, 16],
+    "sessionDistribution": "one-shared-authoritative-session",
+    "secondsPerConcurrency": 30,
+    "expiredAttempts": 256,
+}
+POLICY = {
+    "session": {"idleSeconds": 900, "absoluteSeconds": 14400},
+    "attempts": {
+        "sourceLimit": 30,
+        "sourceSeconds": 300,
+        "scopeLimit": 5,
+        "scopeSeconds": 900,
+    },
+    "kdfConcurrency": 4,
+    "revocation": {"maxStaleRequests": 0, "requestDeadlineSeconds": 30},
+    "mfaMaxAgeSeconds": 300,
+    "rotation": {
+        "credential": "close-mixed-rekey-retire",
+        "state": "reject-pending-flow",
+        "clientSecret": "replace-both-tenants",
+        "database": "close-replace-all-three-roles",
+        "tls": "independent-public-and-database-trust",
+        "restore": "closed-verify-explicit-open",
+    },
+}
+
+
+def oidc_settings(issuer, address, state, key):
+    return {
+        "groupFactsMaxAgeSeconds": 300,
+        "stateKeyFile": state,
+        "credentialKeyring": {
+            "activeKeyId": "old",
+            "keys": [{"keyId": "old", "path": key}],
+        },
+        "returnTargets": {"resume": ORIGIN + "/auth/resume"},
+        "assuranceProfiles": [
+            {
+                "tenantId": t,
+                "issuer": issuer,
+                "clientId": "reference",
+                "keycloakTotp": True,
+            }
+            for t in TENANTS
+        ],
+        "privateProviders": [
+            {
+                "tenantId": t,
+                "issuer": issuer,
+                "clientId": "reference",
+                "cidrs": [address + "/32"],
+            }
+            for t in TENANTS
+        ],
+    }
+
+
+def runtime_template():
+    value = json.loads((ROOT / "deployment/deploy.example.json").read_text())["runtime"]
+    value["publicGateway"] = "10.243.254.2"
+    value["storage"]["tenants"] = TENANTS
+    value["bootstrapAccounts"] = [
+        {"tenantId": t, "principalId": p} for t, p in zip(TENANTS, PRINCIPALS)
+    ]
+    value["database"].update(
+        passwordFile="/private/runtime-password", caFile="/private/postgres-ca.pem"
+    )
+    value["oidc"] = oidc_settings(
+        "https://10.243.255.3:8443/realms/identity",
+        "10.243.255.3",
+        "/private/state-key",
+        "/private/credential-old",
+    )
+    return value
+
+
+def runtime_profile(runtime):
+    """Normalize only disposable fixture identities; retain every policy field."""
+    import uuid
+
+    value = copy.deepcopy(runtime)
+    uuid.UUID(value["instanceId"])
+    value["instanceId"] = "per-run-instance"
+    for field in ["target", "lineage"]:
+        raw = value["storage"][field]
+        require(
+            isinstance(raw, list)
+            and len(raw) == 16
+            and all(type(i) is int and 0 <= i < 256 for i in raw),
+            "profile-storage-identity",
+        )
+        value["storage"][field] = "per-run-" + field
+    require(
+        ipaddress.ip_address(value["publicGateway"])
+        in ipaddress.ip_network("10.243.0.0/16")
+        and value["publicGateway"].endswith(".2"),
+        "profile-gateway",
+    )
+    value["publicGateway"] = "source-backend-gateway"
+    oidc = value["oidc"]
+    issuer = oidc["privateProviders"][0]["issuer"]
+    url = urlsplit(issuer)
+    require(
+        url.scheme == "https"
+        and url.port == 8443
+        and url.path == "/realms/identity"
+        and not url.query
+        and not url.fragment
+        and not url.username
+        and ipaddress.ip_address(url.hostname) in ipaddress.ip_network("10.243.0.0/16")
+        and url.hostname.endswith(".3"),
+        "profile-provider",
+    )
+    for binding in oidc["privateProviders"]:
+        require(
+            binding["issuer"] == issuer and binding["cidrs"] == [url.hostname + "/32"],
+            "profile-provider-binding",
+        )
+        binding.update(issuer="private-provider-issuer", cidrs=["private-provider/32"])
+    for binding in oidc["assuranceProfiles"]:
+        require(binding["issuer"] == issuer, "profile-assurance-binding")
+        binding["issuer"] = "private-provider-issuer"
+    for holder, field in [
+        (value["database"], "passwordFile"),
+        (value["database"], "caFile"),
+        (oidc, "stateKeyFile"),
+        *[(key, "path") for key in oidc["credentialKeyring"]["keys"]],
+    ]:
+        path = Path(holder[field])
+        require(path.is_absolute(), "profile-private-path")
+        holder[field] = "private-file/" + path.name
+    return value
 
 
 def require(ok, reason):
@@ -88,14 +244,32 @@ def file_digest(path):
 
 
 class ProcessFailure(RuntimeError):
-    def __init__(self, action, exit_code):
-        self.action, self.exit_code = action, exit_code
+    def __init__(self, action, exit_code, kind="exit"):
+        self.action, self.exit_code, self.kind = action, exit_code, kind
         super().__init__("process-failed")
 
 
 def failure_fact(error, stage):
+    kind = next(
+        (
+            name
+            for cls, name in [
+                (subprocess.TimeoutExpired, "timeout"),
+                (json.JSONDecodeError, "decode"),
+                (UnicodeError, "decode"),
+                (OSError, "spawn"),
+                (AssertionError, "assertion"),
+                (ValueError, "validation"),
+                (KeyboardInterrupt, "interrupted"),
+                (SystemExit, "interrupted"),
+            ]
+            if isinstance(error, cls)
+        ),
+        "execution",
+    )
     value = {
         "stage": stage,
+        "kind": kind,
         "reason": "interrupted"
         if isinstance(error, (KeyboardInterrupt, SystemExit))
         else str(error)
@@ -104,7 +278,10 @@ def failure_fact(error, stage):
     }
     if isinstance(error, ProcessFailure):
         value.update(
-            reason="process-failed", action=error.action, exitCode=error.exit_code
+            reason="process-failed",
+            kind=error.kind,
+            action=error.action,
+            exitCode=error.exit_code,
         )
     return value
 
@@ -137,8 +314,12 @@ def process(args, **kwargs):
         result = bounded_run(
             args, timeout=kwargs.pop("timeout", 240), capture_output=True, **kwargs
         )
-    except (OSError, subprocess.SubprocessError):
-        raise ProcessFailure(action, None) from None
+    except subprocess.TimeoutExpired:
+        raise ProcessFailure(action, None, "timeout") from None
+    except OSError:
+        raise ProcessFailure(action, None, "spawn") from None
+    except subprocess.SubprocessError:
+        raise ProcessFailure(action, None, "execution") from None
     if result.returncode:
         raise ProcessFailure(action, result.returncode)
     return result.stdout
@@ -173,6 +354,257 @@ def new_record(subject, targets):
     }
 
 
+TRUE_FACTS = {
+    "install": "initializationReplayRejected",
+    "local": "cookieAttributes tenantAndPrivilegeDenied sessionRotationAndRevocation authoritativePolicyMatched",
+    "oidc": "jitAndExplicitLink tenantIdentityIsolated wrongPasswordRejected browserBindingAndReplay federatedLogout",
+    "mfa": "freshMfaConsumed realExpiryRejected oldSessionRejected wrongSubjectAndDowngradeRejected wrongTotpRejected federatedAccountRevocation",
+    "events": "rollbackPreserved failedAttemptBudgetCommitted responseLossObservedCommitted",
+    "availability": "localSurvivesIdpFailure storageFailureClosed",
+    "credential-rotation": "oldCiphertextRejectedWithoutKey retiredKeyRejected singleNewKeyVerified",
+    "state-rotation": "oldStateRejected newFlowAccepted",
+    "client-secret-rotation": "oldClientSecretRejected newClientSecretAccepted",
+    "database-rotation": "wrongAndRetiredPasswordsRejected newPasswordsAccepted",
+    "tls-rotation": "publicAndDatabaseTrustRotated retiredTrustRejected",
+    "backup": "tamperRejected",
+    "stale-backup": "staleCutIdentified staleAuthorityRemainsClosed",
+    "restore": "matchedSafetyCut sourceAndTargetGuards operatorOpenedAfterVerification",
+    "capacity": "",
+}
+EXTRA_FACTS = {
+    "install": "tenants configurationSha256",
+    "local": "failedAttempts assertions",
+    "oidc": "assertions",
+    "mfa": "assertions",
+    "events": "durableEvents outboxSha256 eventIds",
+    "database-rotation": "roles",
+    "backup": "backupBytes dumpSha256 receiptSha256",
+    "restore": "outboxSha256 dumpSha256 receiptSha256 datasetRows",
+    "capacity": "datasetRows resourcesBefore resourcesAfter committedEvents expiredAttemptsBefore expiredAttemptsAfter createdAccounts sessionSamples sessionBefore sessionAfter profiles loginProfile failedAttemptProfile accountEventProfile assertions",
+}
+TABLES = {
+    "accounts",
+    "memberships",
+    "credentials",
+    "providers",
+    "providerCredentials",
+    "externalIdentities",
+    "sessions",
+    "attempts",
+    "linkIntents",
+    "oidcTransactions",
+    "outbox",
+}
+
+
+def number(value, minimum=0):
+    return type(value) in (int, float) and math.isfinite(value) and value >= minimum
+
+
+def verify_observations(name, facts, subject, measurements):
+    truth = TRUE_FACTS[name].split()
+    require(
+        set(facts) == set(truth + EXTRA_FACTS.get(name, "").split()),
+        "observation-fields",
+    )
+    require(all(facts[key] is True for key in truth), "observation-false")
+    for key, value in facts.items():
+        if key.endswith("Sha256"):
+            require(
+                isinstance(value, str) and re.fullmatch("[a-f0-9]{64}", value),
+                "observation-digest",
+            )
+        if key in {"assertions", "failedAttempts", "durableEvents", "backupBytes"}:
+            require(type(value) is int and value > 0, "observation-count")
+    if name == "install":
+        require(
+            facts["tenants"] == len(subject["runtimeProfile"]["storage"]["tenants"])
+            and facts["configurationSha256"]
+            == digest(json.dumps(subject["runtimeProfile"], sort_keys=True).encode()),
+            "observation-configuration",
+        )
+    if name == "local":
+        require(facts["failedAttempts"] == 6, "observation-attempts")
+    if name == "events":
+        import uuid
+
+        ids = facts["eventIds"]
+        require(
+            isinstance(ids, list)
+            and len(ids) == facts["durableEvents"]
+            and len(set(ids)) == len(ids),
+            "observation-events",
+        )
+        for value in ids:
+            require(str(uuid.UUID(value)) == value, "observation-event-id")
+    if name == "database-rotation":
+        require(
+            facts["roles"] == ["identity_runtime", "identity_maintenance", "postgres"],
+            "observation-database-roles",
+        )
+    if name in {"restore", "capacity"}:
+        rows = facts["datasetRows"]
+        require(
+            isinstance(rows, dict)
+            and set(rows) == TABLES
+            and all(type(v) is int and v >= 0 for v in rows.values())
+            and rows["accounts"] >= 6
+            and rows["providers"] == 2
+            and rows["outbox"] > 0,
+            "observation-dataset",
+        )
+    if name != "capacity":
+        return
+    require(
+        facts["expiredAttemptsBefore"] == subject["workload"]["expiredAttempts"]
+        and facts["expiredAttemptsAfter"] == 0
+        and measurements["expiredAttemptsRemoved"] == facts["expiredAttemptsBefore"],
+        "observation-cleanup",
+    )
+    require(
+        facts["committedEvents"] == facts["createdAccounts"]
+        and facts["createdAccounts"] == 36 + facts["accountEventProfile"]["samples"],
+        "observation-event-count",
+    )
+    for key in ["resourcesBefore", "resourcesAfter"]:
+        rows = facts[key]
+        require(isinstance(rows, list) and len(rows) == 3, "observation-resources")
+        keys = {
+            "BlockIO",
+            "CPUPerc",
+            "Container",
+            "ID",
+            "MemPerc",
+            "MemUsage",
+            "Name",
+            "NetIO",
+            "PIDs",
+        }
+        require(
+            all(
+                isinstance(row, dict)
+                and set(row) == keys
+                and all(isinstance(v, str) and v for v in row.values())
+                for row in rows
+            ),
+            "observation-resource-fields",
+        )
+    for key in ["sessionBefore", "sessionAfter"]:
+        row = facts[key]
+        require(
+            set(row)
+            == {
+                "status",
+                "sessionIdSha256",
+                "idleRemainingSeconds",
+                "absoluteRemainingSeconds",
+            }
+            and row["status"] == 200
+            and re.fullmatch("[a-f0-9]{64}", row["sessionIdSha256"])
+            and number(row["idleRemainingSeconds"], 1)
+            and number(row["absoluteRemainingSeconds"], 1),
+            "observation-session-lifetime",
+        )
+    require(
+        facts["sessionBefore"]["sessionIdSha256"]
+        == facts["sessionAfter"]["sessionIdSha256"],
+        "observation-session-replaced",
+    )
+    profiles = facts["profiles"]
+    require(
+        isinstance(profiles, list)
+        and [p["concurrency"] for p in profiles]
+        == subject["workload"]["sessionConcurrency"],
+        "observation-concurrency",
+    )
+    require(
+        facts["sessionSamples"] == sum(p["samples"] for p in profiles),
+        "observation-session-samples",
+    )
+    definitions = [
+        (
+            p,
+            200,
+            f"session{p['concurrency']}",
+            1,
+            subject["workload"]["secondsPerConcurrency"],
+        )
+        for p in profiles
+    ]
+    definitions += [
+        (facts["loginProfile"], 200, "loginBurst", 24, 0),
+        (facts["failedAttemptProfile"], 401, "failedAttemptBurst", 20, 0),
+        (facts["accountEventProfile"], 201, "accountEventCommit", 20, 30),
+    ]
+    for profile, status, prefix, minimum, seconds in definitions:
+        fields = {
+            "concurrency",
+            "samples",
+            "elapsedSeconds",
+            "statuses",
+            "p95Ms",
+            "maxMs",
+            "requestsPerSecond",
+        }
+        if prefix.startswith("session"):
+            fields.add("codes")
+            require(profile["codes"] == {}, "observation-response-code")
+        else:
+            fields.add("warmup")
+            require(
+                profile["concurrency"] == 4
+                and profile["warmup"] == (0 if status == 401 else 4),
+                "observation-auth-profile",
+            )
+            if status == 401:
+                fields.add("limitedStatuses")
+                require(
+                    profile["limitedStatuses"] == {"429": 8},
+                    "observation-limited-checks",
+                )
+            if status in {200, 401}:
+                require(profile["samples"] == minimum, "observation-burst-samples")
+        require(
+            set(profile) == fields
+            and type(profile["samples"]) is int
+            and profile["samples"] >= minimum
+            and profile["statuses"] == {str(status): profile["samples"]},
+            "observation-profile-status",
+        )
+        require(
+            number(profile["elapsedSeconds"], max(seconds, 0.000001))
+            and number(profile["p95Ms"], 0.000001)
+            and number(profile["requestsPerSecond"], 0.000001)
+            and number(profile["maxMs"], profile["p95Ms"])
+            and profile["maxMs"]
+            <= subject["policy"]["revocation"]["requestDeadlineSeconds"] * 1000,
+            "observation-profile-measurement",
+        )
+        require(
+            math.isclose(
+                profile["requestsPerSecond"],
+                profile["samples"] / profile["elapsedSeconds"],
+                rel_tol=1e-9,
+            ),
+            "observation-throughput",
+        )
+        rate_key = (
+            "accountEventCommitsPerSecond"
+            if status == 201
+            else prefix + "RequestsPerSecond"
+        )
+        require(
+            measurements[prefix + "P95Ms"] == profile["p95Ms"]
+            and measurements[rate_key] == profile["requestsPerSecond"],
+            "observation-measurement-correlation",
+        )
+    require(
+        measurements["unexpectedErrors"] == 0
+        and measurements["lostSecurityChanges"] == 0,
+        "observation-errors",
+    )
+
+
 def validate_targets(value, subject, baseline=None):
     require(
         isinstance(value, dict)
@@ -186,9 +618,8 @@ def validate_targets(value, subject, baseline=None):
     require(
         url.scheme == "https"
         and url.netloc == "dev.azure.com"
-        and re.fullmatch(
-            r"/shengming0923/rss/_git/rss-identity/pullrequest/[1-9][0-9]*", url.path
-        )
+        and url.path
+        == f"/shengming0923/rss/_git/rss-identity/pullrequest/{subject['pullRequest']}"
         and not url.fragment
         and re.fullmatch(r"discussionId=[1-9][0-9]*", url.query),
         "owner-approval-required",
@@ -216,6 +647,13 @@ def validate_targets(value, subject, baseline=None):
 
 
 def verify_record(record, subject, baseline=None):
+    require(
+        subject.get("runtimeProfile") == runtime_profile(runtime_template())
+        and subject.get("policy") == POLICY
+        and subject.get("workload") == WORKLOAD
+        and subject.get("scenarios") == list(STEPS),
+        "frozen-profile-mismatch",
+    )
     require(
         set(record) == set(new_record(subject, None))
         and record["formatVersion"] == 1
@@ -250,6 +688,12 @@ def verify_record(record, subject, baseline=None):
         ),
         "measurements",
     )
+    require(
+        measurements["restoreSeconds"] > 0 and measurements["backupBytes"] > 0,
+        "restore-measurements",
+    )
+    for step in record["steps"]:
+        verify_observations(step["name"], step["observations"], subject, measurements)
     if record["targets"] is None:
         require(record["result"] == "measured", "baseline-is-not-acceptance")
     else:
@@ -328,6 +772,10 @@ def verify_browser_lock(lock, browser):
 
 def candidate(args):
     require(git(ROOT, "status", "--porcelain") == "", "committed-runner-required")
+    require(
+        type(args.pull_request) is int and args.pull_request > 0,
+        "pull-request-required",
+    )
     details = deploy.resolve_image_details(args.identity_image, args.web_image)
     tool = deploy.inspect_image(args.tools_image)
     require(
@@ -431,13 +879,17 @@ def candidate(args):
     )
     verify_browser_lock(web_lock, browser)
     subject["browser"] = browser
-    subject["workload"] = {
-        "successfulLogins": 5,
-        "sessionConcurrency": [1, 4, 16],
-        "sessionDistribution": "one-shared-authoritative-session",
-        "secondsPerConcurrency": 30,
-        "expiredAttempts": 256,
-    }
+    subject.update(
+        pullRequest=args.pull_request,
+        runtimeProfile=runtime_profile(runtime_template()),
+        policy=copy.deepcopy(POLICY),
+        supportedProviders={
+            "keycloak": subject["keycloak"],
+            "flows": ["code-pkce", "jit", "explicit-link", "totp-step-up"],
+        },
+        scenarios=list(STEPS),
+        workload=copy.deepcopy(WORKLOAD),
+    )
     require(bool(args.targets) == bool(args.baseline), "targets-require-baseline")
     baseline = args.baseline.read_bytes() if args.baseline else None
     targets = (
@@ -930,7 +1382,7 @@ class Run:
             require(time.monotonic() < until, "keycloak-readiness")
             time.sleep(0.5)
         value = json.loads((ROOT / "deployment/deploy.example.json").read_text())
-        runtime = value["runtime"]
+        runtime = value["runtime"] = runtime_template()
         self.data = value
         runtime["instanceId"] = str(__import__("uuid").uuid4())
         runtime["storage"]["target"] = list(secrets.token_bytes(16))
@@ -954,34 +1406,16 @@ class Run:
         _, self.old_key = self.secret("credential-old", 32)
         _, self.new_key = self.secret("credential-new", 32)
         _, state = self.secret("state-key", 32)
-        runtime["oidc"] = {
-            "groupFactsMaxAgeSeconds": 300,
-            "stateKeyFile": state,
-            "credentialKeyring": {
-                "activeKeyId": "old",
-                "keys": [{"keyId": "old", "path": self.old_key}],
-            },
-            "returnTargets": {"resume": ORIGIN + "/auth/resume"},
-            "assuranceProfiles": [
-                {
-                    "tenantId": t,
-                    "issuer": self.issuer,
-                    "clientId": "reference",
-                    "keycloakTotp": True,
-                }
-                for t in TENANTS
-            ],
-            "privateProviders": [
-                {
-                    "tenantId": t,
-                    "issuer": self.issuer,
-                    "clientId": "reference",
-                    "cidrs": [provider_address + "/32"],
-                }
-                for t in TENANTS
-            ],
-        }
+        runtime["oidc"] = oidc_settings(
+            self.issuer, provider_address, state, self.old_key
+        )
+        profile = runtime_profile(runtime)
+        require(
+            profile == self.record["subject"]["runtimeProfile"], "runtime-profile-drift"
+        )
         self.browser_config = {
+            "workload": self.record["subject"]["workload"],
+            "policy": self.record["subject"]["policy"],
             "origin": ORIGIN,
             "tenants": TENANTS,
             "adminPassword": self.admin_password,
@@ -1048,19 +1482,7 @@ class Run:
                 (checked.returncode == 0) == accepted, "mounted-secret-uid-boundary"
             )
 
-        configuration_digest = digest(
-            json.dumps(
-                {
-                    **runtime,
-                    "database": {
-                        **runtime["database"],
-                        "passwordFile": "private-file",
-                        "caFile": "private-ca",
-                    },
-                },
-                sort_keys=True,
-            ).encode()
-        )
+        configuration_digest = digest(json.dumps(profile, sort_keys=True).encode())
         return {
             "tenants": 2,
             "initializationReplayRejected": True,
@@ -1536,6 +1958,7 @@ class Run:
         self.source = self.restored
         return {
             "matchedSafetyCut": True,
+            "datasetRows": {name: len(rows) for name, rows in restored.items()},
             "outboxSha256": digest(
                 json.dumps(restored["outbox"], sort_keys=True).encode()
             ),
@@ -1549,13 +1972,15 @@ class Run:
         # Only fixture workload is seeded. The production request performs the actual bounded cleanup.
         delay = float(
             self.sql(
-                "SELECT coalesce(max(extract(epoch FROM expires_at-clock_timestamp())),0) FROM identity_authority.attempts WHERE tenant_id='"
-                + TENANTS[0]
-                + "'::uuid AND key LIKE 's:%' AND count>=24 AND expires_at>clock_timestamp();"
+                "SELECT coalesce(max(extract(epoch FROM expires_at-clock_timestamp())),0) FROM identity_authority.attempts WHERE tenant_id IN ('"
+                + "','".join(TENANTS)
+                + "') AND (key LIKE 's:%' OR (key='p:operator' AND count>=5)) AND expires_at>clock_timestamp();"
             )
         )
         if delay > 0:
-            time.sleep(min(delay + 1, 301))
+            require(delay <= 900, "attempt-window-out-of-policy")
+            print("T3 capacity: waiting for existing attempt windows", flush=True)
+            time.sleep(delay + 1)
         self.sql(
             "INSERT INTO identity_authority.attempts(tenant_id,key,count,expires_at) SELECT '"
             + TENANTS[0]
@@ -1579,16 +2004,15 @@ class Run:
             ]
 
         resources_before = stats()
-        event_count = int(
-            self.sql("SELECT count(*) FROM rss_transactional_messaging.outbox;")
-        )
+        account_events = "SELECT count(*) FROM rss_transactional_messaging.outbox WHERE envelope->>'contract'='identity.account.security';"
+        event_count = int(self.sql(account_events))
         result = self.browser("capacity", recoveredAdminPassword=self.admin_password)
         resources_after = stats()
-        committed_events = (
-            int(self.sql("SELECT count(*) FROM rss_transactional_messaging.outbox;"))
-            - event_count
+        committed_events = int(self.sql(account_events)) - event_count
+        require(
+            committed_events == result["counts"]["createdAccounts"],
+            "capacity-durable-events",
         )
-        require(committed_events >= 10, "capacity-durable-events")
         after = int(
             self.sql(
                 "SELECT count(*) FROM identity_authority.attempts WHERE key LIKE 't3-expired-%';"
@@ -1604,6 +2028,7 @@ class Run:
             "committedEvents": committed_events,
             "expiredAttemptsBefore": before,
             "expiredAttemptsAfter": after,
+            "assertions": result["assertions"],
             **result["counts"],
         }
 
@@ -1662,24 +2087,9 @@ class Run:
 
     def execute(self):
         try:
-            for name, action in [
-                ("install", self.install),
-                ("local", lambda: self.browser("local")),
-                ("oidc", lambda: self.browser("oidc")),
-                ("mfa", lambda: self.browser("mfa")),
-                ("events", self.events),
-                ("availability", self.availability),
-                ("credential-rotation", self.credential_rotation),
-                ("state-rotation", self.state_rotation),
-                ("client-secret-rotation", self.client_rotation),
-                ("database-rotation", self.database_rotation),
-                ("tls-rotation", self.tls_rotation),
-                ("backup", self.backup),
-                ("stale-backup", self.stale_backup),
-                ("restore", self.restore),
-                ("capacity", self.capacity),
-            ]:
-                self.step(name, action)
+            for name, method, phase in SCENARIOS:
+                action = getattr(self, method)
+                self.step(name, lambda: action(phase) if phase else action())
         except BaseException as error:
             self.record["failure"] = failure_fact(
                 error,
@@ -1909,6 +2319,7 @@ def main():
     p.add_argument("--record", type=Path)
     p.add_argument("--targets", type=Path)
     p.add_argument("--baseline", type=Path)
+    p.add_argument("--pull-request", type=int)
     args = p.parse_args()
 
     def interrupted(signum, frame):
@@ -1927,6 +2338,7 @@ def main():
                         args.tools_image,
                         args.web_repo,
                         args.record,
+                        args.pull_request,
                     ]
                 ),
                 "required-inputs",

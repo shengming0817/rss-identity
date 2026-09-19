@@ -326,6 +326,14 @@ async function stepUp(c, user = "bob", options = {}) {
 }
 async function local() {
   const a = await admin();
+  const initialSession = (await current(a)).body.session;
+  check(
+    initialSession.idleExpiresAt - initialSession.authTime ===
+      input.policy.session.idleSeconds &&
+      initialSession.absoluteExpiresAt - initialSession.authTime ===
+        input.policy.session.absoluteSeconds,
+    "authoritative-session-policy",
+  );
   const b = await admin(other);
   const cookies = await a.context.cookies(origin);
   const cookie = cookies.find((x) => x.name === "__Host-identity-session");
@@ -482,16 +490,13 @@ async function local() {
   await expectOldCookie(peer, peerCookie);
   const limited = await open("limited", tenant, true);
   let failures = 0;
-  const failedTimes = [];
   for (let i = 0; i < 6; i++) {
-    const started = performance.now();
     const r = await request(
       limited,
       "POST",
       `/api/v2/tenants/${tenant}/login`,
       { login: "limited", password: "wrong-private-password" },
     );
-    failedTimes.push(performance.now() - started);
     check(r.status === (i < 5 ? 401 : 429), "failed-attempt-budget");
     failures++;
   }
@@ -508,11 +513,7 @@ async function local() {
     cookieAttributes: true,
     tenantAndPrivilegeDenied: true,
     failedAttempts: failures,
-    measurements: {
-      failedAttemptP95Ms: percentile95(failedTimes),
-      failedAttemptRequestsPerSecond:
-        6000 / failedTimes.reduce((a, b) => a + b, 0),
-    },
+    authoritativePolicyMatched: true,
     sessionRotationAndRevocation: true,
   };
 }
@@ -845,41 +846,141 @@ async function recoveryState() {
   return { disabledAndInactivePresent: true };
 }
 async function capacity() {
-  const a = await admin();
-  const times = [],
-    eventTimes = [],
-    loginContexts = [];
-  let unexpected = 0,
-    limited = 0,
-    success = 0;
-  for (let i = 0; i < 5; i++) {
-    const eventStart = performance.now();
-    const created = await write(a, "POST", "accounts", {
-      login: "capacity-" + i,
+  const w = input.workload;
+  const a = await admin(),
+    b = await admin(other);
+  let createdAccounts = 0;
+  const create = async (actor, login) => {
+    const r = await write(actor, "POST", "accounts", {
+      login,
       password: input.userPassword,
     });
-    eventTimes.push(performance.now() - eventStart);
-    check(created.status === 201, "capacity-account");
-    loginContexts.push(await open("capacity-" + i, tenant, true));
+    check(r.status === 201, "capacity-account");
+    createdAccounts++;
+    return r;
+  };
+  const successful = [],
+    failed = [];
+  for (let i = 0; i < w.login.warmup + w.login.samples; i++) {
+    await create(a, "capacity-login-" + i);
+    successful.push(await open("capacity-login-" + i, tenant, true));
   }
-  const loginStarted = performance.now();
-  for (const [i, c] of loginContexts.entries()) {
-    const begin = performance.now();
-    const result = await request(c, "POST", `/api/v2/tenants/${tenant}/login`, {
-      login: "capacity-" + i,
-      password: input.userPassword,
-    });
-    if (result.status === 200) {
-      times.push(performance.now() - begin);
-      success++;
-    } else if (result.status === 429) limited++;
-    else unexpected++;
+  for (let i = 0; i < w.failedAttempt.accounts; i++) {
+    await create(b, "capacity-failed-" + i);
+    failed.push(await open("capacity-failed-" + i, other, true));
   }
-  const loginElapsed = (performance.now() - loginStarted) / 1000;
-  check(
-    success === 5 && limited === 0 && unexpected === 0,
-    "login-baseline-samples",
+  const profile = (samples, start, concurrency, status, extra = {}) => {
+    const elapsedSeconds = (performance.now() - start) / 1000;
+    return {
+      concurrency,
+      samples: samples.length,
+      elapsedSeconds,
+      statuses: { [status]: samples.length },
+      p95Ms: percentile95(samples),
+      maxMs: samples.reduce((maximum, value) => Math.max(maximum, value), 0),
+      requestsPerSecond: samples.length / elapsedSeconds,
+      ...extra,
+    };
+  };
+  const measured = async (action, status, samples) => {
+    const start = performance.now();
+    const r = await action();
+    const ms = performance.now() - start;
+    check(r.status === status, "capacity-profile-status");
+    check(
+      ms <= input.policy.revocation.requestDeadlineSeconds * 1000,
+      "capacity-request-deadline",
+    );
+    samples.push(ms);
+  };
+  await Promise.all(
+    Array.from({ length: w.accountEvent.warmup }, (_, i) =>
+      create(a, "capacity-event-warmup-" + i),
+    ),
   );
+  const eventTimes = [],
+    eventStart = performance.now();
+  let eventIndex = 0;
+  while (performance.now() - eventStart < w.accountEvent.seconds * 1000)
+    await Promise.all(
+      Array.from({ length: w.accountEvent.concurrency }, () => {
+        const login = "capacity-event-" + eventIndex++;
+        return measured(() => create(a, login), 201, eventTimes);
+      }),
+    );
+  check(
+    eventTimes.length >= w.accountEvent.minimumSamples,
+    "capacity-event-samples",
+  );
+  const accountEventProfile = profile(
+    eventTimes,
+    eventStart,
+    w.accountEvent.concurrency,
+    "201",
+    { warmup: w.accountEvent.warmup },
+  );
+  const login = (c, password) =>
+    request(c, "POST", `/api/v2/tenants/${c.t}/login`, {
+      login: c.role,
+      password,
+    });
+  await Promise.all(
+    successful
+      .slice(0, w.login.warmup)
+      .map(async (c) =>
+        check(
+          (await login(c, input.userPassword)).status === 200,
+          "capacity-login-warmup",
+        ),
+      ),
+  );
+  const loginTimes = [],
+    loginStart = performance.now();
+  for (let i = w.login.warmup; i < successful.length; i += w.login.concurrency)
+    await Promise.all(
+      successful
+        .slice(i, i + w.login.concurrency)
+        .map((c) =>
+          measured(() => login(c, input.userPassword), 200, loginTimes),
+        ),
+    );
+  check(loginTimes.length === w.login.samples, "capacity-login-samples");
+  const loginProfile = profile(
+    loginTimes,
+    loginStart,
+    w.login.concurrency,
+    "200",
+    { warmup: w.login.warmup },
+  );
+  const failureTimes = [],
+    failureStart = performance.now();
+  for (let round = 0; round < input.policy.attempts.scopeLimit; round++)
+    await Promise.all(
+      failed.map((c) =>
+        measured(() => login(c, "wrong-private-password"), 401, failureTimes),
+      ),
+    );
+  check(
+    failureTimes.length === w.failedAttempt.samples,
+    "capacity-failure-samples",
+  );
+  const failedAttemptProfile = profile(
+    failureTimes,
+    failureStart,
+    w.failedAttempt.concurrency,
+    "401",
+    { warmup: 0, limitedStatuses: { 429: 0 } },
+  );
+  for (const password of ["wrong-private-password", input.userPassword])
+    await Promise.all(
+      failed.map(async (c) => {
+        check(
+          (await login(c, password)).status === 429,
+          "capacity-correct-and-wrong-budget",
+        );
+        failedAttemptProfile.limitedStatuses["429"]++;
+      }),
+    );
   const lifetime = (value) =>
     value.status === 200
       ? {
@@ -895,18 +996,18 @@ async function capacity() {
             Math.floor(Date.now() / 1000),
         }
       : { status: value.status };
-  const sessionBefore = lifetime(await current(a));
-  const profiles = [];
-  for (const concurrency of [1, 4, 16]) {
+  const sessionBefore = lifetime(await current(a)),
+    profiles = [];
+  let unexpected = 0;
+  for (const concurrency of w.sessionConcurrency) {
     const samples = [],
       statuses = {},
       codes = {};
-    const profileStart = performance.now();
-    const until = performance.now() + 30000;
-    while (performance.now() < until)
+    const start = performance.now();
+    while (performance.now() - start < w.secondsPerConcurrency * 1000)
       await Promise.all(
         Array.from({ length: concurrency }, async () => {
-          const start = performance.now();
+          const begin = performance.now();
           const r = await read(
             a,
             `/api/identity-host/v1/tenants/${tenant}/context`,
@@ -929,18 +1030,13 @@ async function capacity() {
                 : "unrecognized";
             codes[code] = (codes[code] ?? 0) + 1;
           }
-          const elapsed = performance.now() - start;
-          samples.push(elapsed);
+          samples.push(performance.now() - begin);
         }),
       );
     profiles.push({
-      concurrency,
+      ...profile(samples, start, concurrency, "200"),
       statuses,
       codes,
-      samples: samples.length,
-      p95Ms: percentile95(samples),
-      requestsPerSecond:
-        samples.length / ((performance.now() - profileStart) / 1000),
     });
   }
   const sessionAfter = lifetime(await current(a));
@@ -954,11 +1050,13 @@ async function capacity() {
   await store(a);
   return {
     measurements: {
-      loginP95Ms: percentile95(times),
-      loginBurstRequestsPerSecond: success / loginElapsed,
-      accountEventCommitP95Ms: percentile95(eventTimes),
-      accountEventCommitsPerSecond:
-        5000 / eventTimes.reduce((a, b) => a + b, 0),
+      loginBurstP95Ms: loginProfile.p95Ms,
+      loginBurstRequestsPerSecond: loginProfile.requestsPerSecond,
+      failedAttemptBurstP95Ms: failedAttemptProfile.p95Ms,
+      failedAttemptBurstRequestsPerSecond:
+        failedAttemptProfile.requestsPerSecond,
+      accountEventCommitP95Ms: accountEventProfile.p95Ms,
+      accountEventCommitsPerSecond: accountEventProfile.requestsPerSecond,
       ...Object.fromEntries(
         profiles.flatMap((p) => [
           [`session${p.concurrency}P95Ms`, p.p95Ms],
@@ -968,8 +1066,10 @@ async function capacity() {
       unexpectedErrors: unexpected,
     },
     counts: {
-      loginSamples: success,
-      limitedLogins: limited,
+      createdAccounts,
+      loginProfile,
+      failedAttemptProfile,
+      accountEventProfile,
       sessionSamples: profiles.reduce((sum, p) => sum + p.samples, 0),
       sessionBefore,
       sessionAfter,
