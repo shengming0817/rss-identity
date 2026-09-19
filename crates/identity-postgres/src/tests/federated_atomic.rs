@@ -1745,7 +1745,9 @@ async fn federation_signed_time_skew_preserves_identity() -> anyhow::Result<()> 
         .await?;
     assert!(matches!(
         future.department()?,
-        VerifiedDepartment::Unavailable(rss_identity_core::groups::UnavailableReason::NotYetValid)
+        VerifiedDepartment::Unavailable(
+            rss_identity_core::facts::FactUnavailableReason::NotYetValid
+        )
     ));
     assert_eq!(
         snapshot["department"]["expires_at"].as_i64().unwrap()

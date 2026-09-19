@@ -6,7 +6,8 @@ use rss_identity_core::{
     InstanceId,
     account::{AccountKey, AccountRuleError, PasswordKdf},
     assurance::{Acr, Amr},
-    groups::{GroupFactsMaxAge, UnavailableReason},
+    facts::FactUnavailableReason,
+    groups::GroupFactsMaxAge,
     session::{SessionPolicy, SessionSecret},
 };
 use rss_identity_postgres::*;
@@ -89,7 +90,7 @@ async fn local_facade_reauthenticates_and_host_policy_is_current() -> anyhow::Re
     assert_eq!(actor.instance(), f.instance);
     assert!(matches!(
         actor.groups()?,
-        VerifiedGroups::Unavailable(UnavailableReason::LocalIdentity)
+        VerifiedGroups::Unavailable(FactUnavailableReason::LocalIdentity)
     ));
     assert_eq!(actor.assurance()?.amr(), [Amr::Pwd]);
     assert_eq!(actor.assurance()?.acr(), Acr::Unspecified);
@@ -326,7 +327,7 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     };
     assert_eq!(groups.values()?, ["staff"]);
     assert_eq!(
-        groups.source().provider_id.to_string(),
+        groups.source().provider_id().to_string(),
         provider.id.to_string()
     );
     struct StaffPolicy;

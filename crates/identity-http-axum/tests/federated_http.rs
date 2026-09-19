@@ -475,7 +475,9 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
     assert_eq!(department.provider_id().to_string(), p.id.to_string());
     assert!(matches!(
         b.department()?,
-        VerifiedDepartment::Unavailable(rss_identity_core::groups::UnavailableReason::ClaimMissing)
+        VerifiedDepartment::Unavailable(
+            rss_identity_core::facts::FactUnavailableReason::ClaimMissing
+        )
     ));
 
     let principal = a.account();
@@ -718,6 +720,63 @@ async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
 
 fn tenant() -> rss_request_context::TenantId {
     rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires make test-federated"]
+async fn real_department_claim_rejection_preserves_host_diagnostic() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let federation = service(&f, Arc::new(fixture_transport(true)?));
+    let mut input = config()?.input();
+    // Keycloak signs groups as an array. Selecting it as the single department
+    // claim exercises a real verified-token shape rejection, not a browser error.
+    input.claims.groups = None;
+    input.claims.department = Some(rss_identity_core::department::DepartmentClaim::new(
+        "groups".into(),
+        60,
+    )?);
+    let provider = federation
+        .create_provider(
+            f.actor().await?,
+            input.try_into()?,
+            credentials(true)?,
+            deadline(),
+        )
+        .await?;
+    let provider = federation
+        .enable_provider(
+            f.actor().await?,
+            provider.id,
+            provider.version,
+            true,
+            deadline(),
+        )
+        .await?;
+    let app = app(&federation);
+    let url = begin(&app, &provider, BROWSER, None, None, false).await?;
+    let callback_url = authorize(&url, "alice").await?;
+    let response = callback(&app, &callback_url, BROWSER).await?;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], "/auth/error?reason=failed");
+    assert!(!response.headers().contains_key("set-cookie"));
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert_eq!(
+        response
+            .extensions()
+            .get::<rss_identity_http_axum::HttpFailure>(),
+        Some(&rss_identity_http_axum::HttpFailure::Authority(
+            AuthorityError::Federation(FederationError::Claims),
+        )),
+    );
+    let body = to_bytes(response.into_body(), 1024).await?;
+    assert!(
+        body.is_empty(),
+        "internal failure must not reach the browser body"
+    );
+    f.close().await;
+    Ok(())
 }
 
 #[tokio::test]

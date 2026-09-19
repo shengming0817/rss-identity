@@ -1,13 +1,11 @@
 //! The only persisted authentication-facts codec. Provider authority stays in Origin.
 use crate::transaction::{corrupt, reject};
-use rss_identity_core::department::{DepartmentClaim, DepartmentId, UpstreamDepartment};
-use rss_identity_core::groups::{
-    GroupSource, Groups, UnavailableReason, VERSION, acceptable_observation, valid_snapshot_window,
-};
 use rss_identity_core::{
     assurance::Assurance,
+    department::{DepartmentClaim, DepartmentId, UpstreamDepartment},
+    facts::{FactSource, FactUnavailableReason, acceptable_observation, valid_snapshot_window},
     federation::{FederationError, UpstreamClaims},
-    groups::{GroupFactsMaxAge, UpstreamGroups},
+    groups::{GroupFactsMaxAge, Groups, UpstreamGroups, VERSION},
 };
 use rss_transactional_messaging_postgres::PgError;
 use serde::{Deserialize, Serialize};
@@ -28,7 +26,7 @@ pub(crate) struct AuthenticationFacts {
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum Snapshot {
     Unavailable {
-        reason: UnavailableReason,
+        reason: FactUnavailableReason,
     },
     Available {
         snapshot_id: Uuid,
@@ -48,7 +46,7 @@ pub(crate) enum DepartmentAssignment {
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum DepartmentSnapshot {
     Unavailable {
-        reason: UnavailableReason,
+        reason: FactUnavailableReason,
     },
     Available {
         snapshot_id: Uuid,
@@ -66,12 +64,12 @@ impl DepartmentSnapshot {
         let (mapping, assignment) = match (&claims.department, mapping) {
             (UpstreamDepartment::NotConfigured, None) => {
                 return Ok(Self::Unavailable {
-                    reason: UnavailableReason::NotConfigured,
+                    reason: FactUnavailableReason::NotConfigured,
                 });
             }
             (UpstreamDepartment::Missing, Some(_)) => {
                 return Ok(Self::Unavailable {
-                    reason: UnavailableReason::ClaimMissing,
+                    reason: FactUnavailableReason::ClaimMissing,
                 });
             }
             (UpstreamDepartment::NoDepartment, Some(mapping)) => {
@@ -92,7 +90,7 @@ impl DepartmentSnapshot {
     fn validate(&self) -> Result<(), PgError> {
         match self {
             Self::Unavailable {
-                reason: UnavailableReason::NotConfigured | UnavailableReason::ClaimMissing,
+                reason: FactUnavailableReason::NotConfigured | FactUnavailableReason::ClaimMissing,
             } => Ok(()),
             Self::Available {
                 snapshot_id,
@@ -122,10 +120,10 @@ impl AuthenticationFacts {
         }
         let groups = match &claims.groups {
             UpstreamGroups::NotConfigured => Snapshot::Unavailable {
-                reason: UnavailableReason::NotConfigured,
+                reason: FactUnavailableReason::NotConfigured,
             },
             UpstreamGroups::Missing => Snapshot::Unavailable {
-                reason: UnavailableReason::ClaimMissing,
+                reason: FactUnavailableReason::ClaimMissing,
             },
             UpstreamGroups::Present(values) => Snapshot::Available {
                 snapshot_id: Uuid::new_v4(),
@@ -158,7 +156,7 @@ impl AuthenticationFacts {
         facts.department.validate()?;
         match &facts.groups {
             Snapshot::Unavailable {
-                reason: UnavailableReason::LocalIdentity | UnavailableReason::NotYetValid,
+                reason: FactUnavailableReason::LocalIdentity | FactUnavailableReason::NotYetValid,
             } => return Err(corrupt()),
             Snapshot::Available {
                 snapshot_id,
@@ -190,7 +188,7 @@ impl AuthenticationFacts {
         }
         Ok(value)
     }
-    pub fn project(&self, source: GroupSource, now: i64) -> Result<Groups, PgError> {
+    pub fn project(&self, source: FactSource, now: i64) -> Result<Groups, PgError> {
         match &self.groups {
             Snapshot::Unavailable { reason } => Ok(Groups::unavailable(*reason)),
             Snapshot::Available {
@@ -203,7 +201,7 @@ impl AuthenticationFacts {
                     return Err(reject());
                 }
                 if now < *observed_at {
-                    return Ok(Groups::unavailable(UnavailableReason::NotYetValid));
+                    return Ok(Groups::unavailable(FactUnavailableReason::NotYetValid));
                 }
                 if now >= *expires_at {
                     return Ok(Groups::Expired { version: VERSION });
@@ -238,11 +236,8 @@ mod tests {
             assurance: Assurance::password(1000).unwrap(),
         }
     }
-    fn source() -> GroupSource {
-        GroupSource {
-            provider_id: Uuid::new_v4(),
-            issuer: "https://idp.test".into(),
-        }
+    fn source() -> FactSource {
+        FactSource::new(Uuid::new_v4(), "https://idp.test".into()).unwrap()
     }
     #[test]
     fn department_format_is_explicit_and_legacy_is_rejected() {
@@ -372,9 +367,9 @@ mod tests {
         for (groups, reason) in [
             (
                 UpstreamGroups::NotConfigured,
-                UnavailableReason::NotConfigured,
+                FactUnavailableReason::NotConfigured,
             ),
-            (UpstreamGroups::Missing, UnavailableReason::ClaimMissing),
+            (UpstreamGroups::Missing, FactUnavailableReason::ClaimMissing),
         ] {
             let facts = AuthenticationFacts::collect(
                 &claims(groups),

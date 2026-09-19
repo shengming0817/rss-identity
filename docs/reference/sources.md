@@ -139,3 +139,8 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - [Keycloak 26.7.3 OIDCAttributeMapperHelper](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/OIDCAttributeMapperHelper.java#L315-L352)：实际读取空值省略逻辑；不将缺失当作显式 null，无 sentinel 或目录推断。
 
 - [OpenID Connect Back-Channel Logout 1.0](https://openid.net/specs/openid-connect-backchannel-1_0.html#BCSupport)：sid 是 ID Token 中的会话标识，部门映射明确拒绝该协议字段。
+
+### #1055 再审修复：共享事实与 callback 诊断
+
+- [openidconnect-rs 4.0.1 claims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/claims.rs#L19-L63)：实际读取固定 registry 源码及 cargo_vcs_info，区分标准与扩展 claim 的独立职责；本仓只提升共同事实原语，不建立泛型 claims 框架。
+- [Axum core 0.5.6 Extensions 响应组合](https://github.com/tokio-rs/axum/blob/e710a97a5a8e1e2f629f78e0377d7ab17e597eaf/axum-core/src/response/into_response_parts.rs#L257-L263)：实际读取固定 registry 源码，直接使用 `(Extensions, Response).into_response()` 保留宿主诊断，替换浏览器错误投影。

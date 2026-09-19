@@ -2,7 +2,7 @@
 pub mod account;
 pub mod assurance;
 pub mod department;
-mod fact_time;
+pub mod facts;
 pub mod federation;
 pub mod groups;
 pub mod session;

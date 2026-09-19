@@ -161,7 +161,7 @@ mod tests {
             anyhow::bail!("groups unavailable")
         };
         assert_eq!(groups.values()?, ["/staff"]);
-        assert_eq!(groups.source().issuer, issuer);
+        assert_eq!(groups.source().issuer(), issuer);
         let VerifiedDepartment::Available(department) = actor.department()? else {
             anyhow::bail!("department unavailable");
         };

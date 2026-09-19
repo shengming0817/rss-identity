@@ -46,6 +46,8 @@ match actor.groups()? {
 
 期限从锁与 provider 复核后的数据库微秒采样推导，单调时钟锚点在查询发送前；查询、续期和事务返回耗时均消耗预算。管理策略还受传入证明的原期限约束。`NotYetValid` 在本次证明内保持不可用，需要下次权威读取重新投影。公开 API 直接替换旧 unchecked getter，无兼容别名，当前安装基线由 #2447 更新为 schema v10，HTTP 仍为 v2。
 
+组与部门的共享事实类型统一从 `rss_identity_core::facts::{FactSource, FactUnavailableReason}` 导入。FactSource 通过校验构造器和 `provider_id()` / `issuer()` 读取元数据；`TrustedGroups::source()` 返回它。旧 groups 来源/原因路径已删除，没有兼容 re-export。此 Rust API 迁移不改变有效 JSON 形状、schema v10 或 auth_facts v2；消费者更新同一完整 Git SHA 和自己的 lock。
+
 ## 可选可信部门
 
 在 provider settings 配置 `claims.department: {"claim":"department_id","maxAgeSeconds":120}`；省略/null 为禁用，输出统一为 null 或完整对象。只有管理配置使用这个对象，上游 ID Token 对应 claim 的值必须是字符串或显式 null。无需新增宿主全局配置；部门 TTL 独立于组，范围 1–300 秒且无默认。
@@ -89,7 +91,7 @@ let routes = routes.layer(axum::middleware::from_fn(client_address));
 
 该中间件忽略请求中的 forwarded headers。反向代理部署须由宿主先验证真实 peer 是否为配置的可信网关，再读取其覆盖的来源头；参考宿主的 transport 模块实现该边界。[独立本地消费者](../../tests/consumers/local/lib.rs) 实际发送登录请求，验证缺少扩展的失败、正确注入后的 cookie 和 camelCase JSON。
 
-宿主诊断以 `AuthorityError::Configuration` 区分无效配置，以 `InvalidInput` 表示操作输入错误，以 `DeadlineElapsed` 表示事务开始前截止期耗尽。已经进入数据库事务的错误仍保留 `NotStarted` / `RolledBack` / `RollbackFailed` / `CommitUnknown` 及其原因，禁止据 503 推断是否可重试。HTTP 对输入错误返回 400，对配置/截止期错误返回脱敏的 503；完整分类仅通过响应扩展 `HttpFailure` 提供给宿主。
+宿主诊断以 `AuthorityError::Configuration` 区分无效配置，以 `InvalidInput` 表示操作输入错误，以 `DeadlineElapsed` 表示事务开始前截止期耗尽。已经进入数据库事务的错误仍保留 `NotStarted` / `RolledBack` / `RollbackFailed` / `CommitUnknown` 及其原因，禁止据 503 推断是否可重试。HTTP 对输入错误返回 400，对配置/截止期错误返回脱敏的 503；完整分类仅通过响应扩展 `HttpFailure` 提供给宿主。OIDC callback 的失败重定向同样保留该扩展，浏览器仍只收到闭集失败原因；内部错误 body、凭据 headers 不会被转发。
 
 安全事件版本为 account v3、federation v2、session v1。事件不含密码、cookie、code、verifier、上游 token；消费者须按新事件 schema 更新，旧事件定义不再作为活动协议。
 

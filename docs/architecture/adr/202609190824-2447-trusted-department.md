@@ -8,7 +8,7 @@
 
 不向后兼容：只接受 fresh schema v10 与 auth_facts format v2；部门持久状态必填，拒绝旧库、旧事实、缺字段和未知分支，无旧格式转换、双读、默认事实或旧输出投影。HTTP v2 新增可选配置，未启用输出 department:null；参考宿主配置结构仍是 v3。
 
-优雅简洁：每个 provider 的可选 DepartmentClaim 同时持有 claim 与 1–300 秒 maxAgeSeconds，受控构造/反序列化拒绝不完整配置。不增加全局部门策略、crate、feature、目录表、通用 claims 框架或授权平台；仅共用包内期限计算及已有数据库采样。内部快照和请求事实以 Box 持有，避免扩大嵌套异步状态体。
+优雅简洁：每个 provider 的可选 DepartmentClaim 同时持有 claim 与 1–300 秒 maxAgeSeconds，受控构造/反序列化拒绝不完整配置。不增加全局部门策略、crate、feature、目录表、通用 claims 框架或授权平台；共享来源、不可用原因和观察时间规则由中性 `identity-core::facts` 唯一拥有；组与部门直接依赖 `FactSource`、`FactUnavailableReason`，旧 groups 类型路径和 fact_time 模块删除，无 alias/re-export。共用已有数据库采样。内部快照和请求事实以 Box 持有，避免扩大嵌套异步状态体。
 
 Identity 提供事实，宿主持有资源权限。部门不编码成安全组；MDM 规则、用户组、权限申请审批、Web、组织树和目录同步不属于本项。部门可选，不阻塞 #2363 的安全组授权路径。
 
@@ -30,7 +30,9 @@ provider HTTP settings 的 claims.department 为 null/省略（禁用）或 {"cl
 
 明确无部门使用带 snapshot ID/时间的闭集持久 assignment，与字段缺失分开；它也会过期。会话 getter、管理 Context 及保留 wrapper 共享私有 DepartmentFacts。每次 value() 检查 proof 与 snapshot 截止，proof 到期优先。查询发送前的 Instant 和锁后数据库微秒采样扣除所有查询/返回耗时；时钟信任边界沿用 #2438。
 
-wrapper 的实例、AccountKey、provider、issuer、配置版本由同一权威会话派生，不新增可写来源记录。公开值本身不是认证证明；TrustedDepartment 无公开构造、Clone 或 Deserialize。复制出的值、借出的原始引用和已产生的业务效果由宿主负责；新请求和管理事务重新检查权威状态。
+wrapper 的实例、AccountKey、provider、issuer、配置版本由同一权威会话派生，不新增可写来源记录。FactSource 字段私有，构造与反序列化共用非 nil provider/合法 issuer 校验；该类型只验证元数据结构，不自行证明上游认证。公开值本身不是认证证明；TrustedDepartment 无公开构造、Clone 或 Deserialize。复制出的值、借出的原始引用和已产生的业务效果由宿主负责；新请求和管理事务重新检查权威状态。
+
+callback 的内部错误先生成含 HttpFailure 的响应，再通过唯一的 callback_error_response 转为安全重定向；handler 与请求 boundary 共用 Axum Extensions 响应组合，保留宿主诊断及其它扩展，丢弃内部错误 body/headers。诊断仅在进程内传递，不进入浏览器重定向 URL 或 body。
 
 ## 验证与来源
 

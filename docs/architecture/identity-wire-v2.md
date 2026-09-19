@@ -40,6 +40,8 @@ IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/provid
 
 ## 失败与可信边界
 
+OIDC callback 的错误投影由统一转换函数保留进程内 `HttpFailure` 与其它 response extensions；浏览器只收到原有 303 和闭集 reason，不包含内部错误内容或凭据。
+
 外部错误为 `{code}`：malformed_request、invalid_credential、csrf_rejected、rate_limited、configuration_changed、insufficient_privilege、reauthentication_required 等闭集；基础设施失败为 503 identity_unavailable。内部 `HttpFailure` response extension 保留安全 settlement 分类，不暴露 SQL/IdP 原文，也不代表写入可自动重试。
 
 HTTP 宿主资源请求统一调用 `authenticate_request`：用户活动选择 `SessionActivity::Active`，组件先验证严格 cookie、同源、请求标记和 CSRF，再读取权威状态并延长 idle；被动查询选择 `Passive`，不续期。宿主获得 `AuthenticatedSession` 后才执行资源授权，组事实通过 `VerifiedGroups` 借用；详细来源、过期和授权边界见 [嵌入指南](../guides/embedding.md)。HTTP JSON 只是前端交互投影。

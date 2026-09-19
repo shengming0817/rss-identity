@@ -158,7 +158,7 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
             .inspect_session(f.key.tenant, secret(&missing), deadline())
             .await?
             .department()?,
-        VerifiedDepartment::Unavailable(UnavailableReason::ClaimMissing)
+        VerifiedDepartment::Unavailable(FactUnavailableReason::ClaimMissing)
     ));
     let groups_only = enabled(&f, &federation).await?;
     let session = issued(
@@ -175,12 +175,12 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
         .await?;
     assert!(matches!(
         actor.department()?,
-        VerifiedDepartment::Unavailable(UnavailableReason::NotConfigured)
+        VerifiedDepartment::Unavailable(FactUnavailableReason::NotConfigured)
     ));
     assert!(matches!(actor.groups()?, VerifiedGroups::Available(_)));
     assert!(matches!(
         f.actor().await?.department()?,
-        VerifiedDepartment::Unavailable(UnavailableReason::LocalIdentity)
+        VerifiedDepartment::Unavailable(FactUnavailableReason::LocalIdentity)
     ));
     f.close().await;
     Ok(())

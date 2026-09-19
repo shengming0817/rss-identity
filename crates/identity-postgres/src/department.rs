@@ -8,7 +8,7 @@ use rss_identity_core::{
     InstanceId,
     account::AccountKey,
     department::DepartmentId,
-    groups::{GroupSource, UnavailableReason, acceptable_observation},
+    facts::{FactSource, FactUnavailableReason, acceptable_observation},
 };
 use rss_transactional_messaging_postgres::PgError;
 use std::time::Instant;
@@ -23,10 +23,10 @@ pub enum DepartmentAccessError {
 }
 
 pub(crate) enum DepartmentFacts {
-    Unavailable(UnavailableReason),
+    Unavailable(FactUnavailableReason),
     Expired,
     Available {
-        source: GroupSource,
+        source: FactSource,
         provider_config_version: i64,
         snapshot_id: Uuid,
         observed_at: i64,
@@ -38,7 +38,7 @@ pub(crate) enum DepartmentFacts {
 impl DepartmentFacts {
     pub(crate) fn new(
         snapshot: DepartmentSnapshot,
-        source: GroupSource,
+        source: FactSource,
         version: i64,
         sample: &TimeSample,
     ) -> Result<Self, PgError> {
@@ -54,7 +54,7 @@ impl DepartmentFacts {
                     return Err(reject());
                 }
                 if sample.seconds() < observed_at {
-                    return Ok(Self::Unavailable(UnavailableReason::NotYetValid));
+                    return Ok(Self::Unavailable(FactUnavailableReason::NotYetValid));
                 }
                 if sample.seconds() >= expires_at {
                     return Ok(Self::Expired);
@@ -123,7 +123,7 @@ impl DepartmentFacts {
 /// Only Available contains a component-issued snapshot, including explicit no-department.
 pub enum VerifiedDepartment<'a> {
     Available(TrustedDepartment<'a>),
-    Unavailable(UnavailableReason),
+    Unavailable(FactUnavailableReason),
     Expired,
 }
 /// Metadata identifies an observation; value access checks both fixed deadlines.
@@ -134,7 +134,7 @@ pub enum VerifiedDepartment<'a> {
 pub struct TrustedDepartment<'a> {
     instance: InstanceId,
     account: AccountKey,
-    source: &'a GroupSource,
+    source: &'a FactSource,
     provider_config_version: i64,
     snapshot_id: Uuid,
     observed_at: i64,
@@ -151,10 +151,10 @@ impl TrustedDepartment<'_> {
         self.account
     }
     pub fn provider_id(&self) -> Uuid {
-        self.source.provider_id
+        self.source.provider_id()
     }
     pub fn issuer(&self) -> &str {
-        &self.source.issuer
+        self.source.issuer()
     }
     pub fn provider_config_version(&self) -> i64 {
         self.provider_config_version
@@ -209,10 +209,7 @@ mod tests {
         ] {
             let absent = matches!(assignment, DepartmentAssignment::NoDepartment {});
             let facts = DepartmentFacts::Available {
-                source: GroupSource {
-                    provider_id: Uuid::new_v4(),
-                    issuer: "https://idp.test".into(),
-                },
+                source: FactSource::new(Uuid::new_v4(), "https://idp.test".into()).unwrap(),
                 provider_config_version: 1,
                 snapshot_id: Uuid::new_v4(),
                 observed_at: 100,
@@ -254,10 +251,10 @@ mod tests {
             }
         }
         for reason in [
-            UnavailableReason::LocalIdentity,
-            UnavailableReason::NotConfigured,
-            UnavailableReason::ClaimMissing,
-            UnavailableReason::NotYetValid,
+            FactUnavailableReason::LocalIdentity,
+            FactUnavailableReason::NotConfigured,
+            FactUnavailableReason::ClaimMissing,
+            FactUnavailableReason::NotYetValid,
         ] {
             let facts = DepartmentFacts::Unavailable(reason);
             assert!(

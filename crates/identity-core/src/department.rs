@@ -1,5 +1,5 @@
 //! Optional, source-scoped department codes. Parsed values alone are not trusted facts.
-use crate::{federation::FederationError, groups::valid_max_age};
+use crate::{facts::valid_max_age, federation::FederationError};
 use serde::{Deserialize, Serialize};
 
 /// An exact controlled code, not a display name or globally unique identifier.
@@ -125,7 +125,7 @@ impl DepartmentClaim {
         expires_at: i64,
         now: i64,
     ) -> Result<i64, FederationError> {
-        crate::fact_time::expires_at(self.max_age_seconds, issued_at, expires_at, now)
+        crate::facts::expires_at(self.max_age_seconds, issued_at, expires_at, now)
     }
 }
 

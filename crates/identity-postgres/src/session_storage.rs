@@ -156,7 +156,7 @@ pub(crate) async fn by_id(
             &sample,
         )?,
         (None, None) => crate::department::DepartmentFacts::Unavailable(
-            rss_identity_core::groups::UnavailableReason::LocalIdentity,
+            rss_identity_core::facts::FactUnavailableReason::LocalIdentity,
         ),
         _ => return Err(corrupt()),
     };
@@ -168,7 +168,7 @@ pub(crate) async fn by_id(
         (None, None) => (
             Assurance::password(lifetime.auth_time()).map_err(|_| corrupt())?,
             rss_identity_core::groups::Groups::unavailable(
-                rss_identity_core::groups::UnavailableReason::LocalIdentity,
+                rss_identity_core::facts::FactUnavailableReason::LocalIdentity,
             ),
         ),
         _ => return Err(corrupt()),

@@ -1,42 +1,10 @@
 //! Bounded group observations. Values alone confer no authentication.
+use crate::facts::{
+    FactSource, FactUnavailableReason, MAX_TTL_SECONDS, MIN_TTL_SECONDS, acceptable_observation,
+    valid_max_age, valid_snapshot_window,
+};
 use serde::{Deserialize, Serialize};
 pub const VERSION: u32 = 1;
-/// Deployment TTL and persisted/wire snapshot window share these bounds.
-pub const MIN_TTL_SECONDS: i64 = 1;
-pub const MAX_TTL_SECONDS: i64 = 300;
-/// A future observation may authenticate, but never grants groups before its iat.
-pub const MAX_FUTURE_SKEW_SECONDS: i64 = 30;
-pub fn valid_max_age(seconds: i64) -> bool {
-    (MIN_TTL_SECONDS..=MAX_TTL_SECONDS).contains(&seconds)
-}
-pub fn valid_snapshot_window(observed_at: i64, expires_at: i64) -> bool {
-    observed_at > 0
-        && expires_at
-            .checked_sub(observed_at)
-            .is_some_and(valid_max_age)
-}
-pub fn acceptable_observation(observed_at: i64, now: i64) -> bool {
-    observed_at > 0
-        && now > 0
-        && observed_at
-            .checked_sub(now)
-            .is_some_and(|ahead| ahead <= MAX_FUTURE_SKEW_SECONDS)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UnavailableReason {
-    LocalIdentity,
-    NotConfigured,
-    ClaimMissing,
-    NotYetValid,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GroupSource {
-    pub provider_id: uuid::Uuid,
-    pub issuer: String,
-}
 /// Only available contains values. Unknown states/fields fail deserialization;
 /// consumers must also validate the explicit version and metadata.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,7 +12,7 @@ pub struct GroupSource {
 pub enum Groups {
     Available {
         version: u32,
-        source: GroupSource,
+        source: FactSource,
         snapshot_id: uuid::Uuid,
         provider_config_version: i64,
         observed_at: i64,
@@ -53,7 +21,7 @@ pub enum Groups {
     },
     Unavailable {
         version: u32,
-        reason: UnavailableReason,
+        reason: FactUnavailableReason,
     },
     Expired {
         version: u32,
@@ -65,7 +33,7 @@ impl std::fmt::Debug for Groups {
     }
 }
 impl Groups {
-    pub fn unavailable(reason: UnavailableReason) -> Self {
+    pub fn unavailable(reason: FactUnavailableReason) -> Self {
         Self::Unavailable {
             version: VERSION,
             reason,
@@ -78,7 +46,7 @@ impl Groups {
             Self::Unavailable { version, .. } | Self::Expired { version } => *version == VERSION,
             Self::Available {
                 version,
-                source,
+                source: _,
                 snapshot_id,
                 provider_config_version,
                 observed_at,
@@ -86,29 +54,14 @@ impl Groups {
                 values,
             } => {
                 *version == VERSION
-                    && !source.provider_id.is_nil()
                     && !snapshot_id.is_nil()
                     && *provider_config_version > 0
                     && acceptable_observation(*observed_at, now)
                     && valid_snapshot_window(*observed_at, *expires_at)
                     && canonical_values(values)
-                    && valid_issuer(&source.issuer)
             }
         }
     }
-}
-fn valid_issuer(value: &str) -> bool {
-    value.len() <= 2048
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
-        && url::Url::parse(value).is_ok_and(|u| {
-            matches!(u.scheme(), "https" | "http")
-                && u.host_str().is_some()
-                && u.username().is_empty()
-                && u.password().is_none()
-                && u.query().is_none()
-                && u.fragment().is_none()
-        })
 }
 pub fn bounded_values(values: &[String]) -> bool {
     values.len() <= 100
@@ -142,7 +95,7 @@ impl GroupFactsMaxAge {
         expires_at: i64,
         now: i64,
     ) -> Result<i64, FederationError> {
-        crate::fact_time::expires_at(self.0, issued_at, expires_at, now)
+        crate::facts::expires_at(self.0, issued_at, expires_at, now)
     }
 }
 
