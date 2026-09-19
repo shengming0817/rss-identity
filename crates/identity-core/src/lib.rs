@@ -1,6 +1,8 @@
 //! Identity account, session and protocol policy. Authentication is owned by the authority.
 pub mod account;
 pub mod assurance;
+pub mod department;
+pub mod facts;
 pub mod federation;
 pub mod groups;
 pub mod session;

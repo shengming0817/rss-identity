@@ -1,11 +1,13 @@
 //! Public embedding contract. These tests cannot access password candidates or session issuance internals.
+mod department_lifecycle;
 mod federation_support;
 mod support;
 use rss_identity_core::{
     InstanceId,
     account::{AccountKey, AccountRuleError, PasswordKdf},
     assurance::{Acr, Amr},
-    groups::{GroupFactsMaxAge, UnavailableReason},
+    facts::FactUnavailableReason,
+    groups::GroupFactsMaxAge,
     session::{SessionPolicy, SessionSecret},
 };
 use rss_identity_postgres::*;
@@ -88,7 +90,7 @@ async fn local_facade_reauthenticates_and_host_policy_is_current() -> anyhow::Re
     assert_eq!(actor.instance(), f.instance);
     assert!(matches!(
         actor.groups()?,
-        VerifiedGroups::Unavailable(UnavailableReason::LocalIdentity)
+        VerifiedGroups::Unavailable(FactUnavailableReason::LocalIdentity)
     ));
     assert_eq!(actor.assurance()?.amr(), [Amr::Pwd]);
     assert_eq!(actor.assurance()?.acr(), Acr::Unspecified);
@@ -325,7 +327,7 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     };
     assert_eq!(groups.values()?, ["staff"]);
     assert_eq!(
-        groups.source().provider_id.to_string(),
+        groups.source().provider_id().to_string(),
         provider.id.to_string()
     );
     struct StaffPolicy;
@@ -465,7 +467,7 @@ async fn construction_verifies_every_declared_tenant_fence() -> anyhow::Result<(
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
-    use federation_support::{RETURN, ScriptedOidc, begin, enabled, finish, issued};
+    use federation_support::{RETURN, ScriptedOidc, begin, enabled_department, finish, issued};
     use rss_identity_core::federation::StateSigner;
     let f = Fixture::new().await?;
     f.bootstrap().await?;
@@ -480,7 +482,7 @@ async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
             targets: std::collections::BTreeMap::from([("home".into(), RETURN.into())]),
         },
     )?;
-    let provider = enabled(&f, &federation).await?;
+    let provider = enabled_department(&f, &federation, 2).await?;
     let session = issued(
         finish(
             &federation,
@@ -503,6 +505,7 @@ async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
         matches!(actor.groups()?, VerifiedGroups::Expired),
         "group facts must expire before returning a delayed authentication result (DB now={database_now})"
     );
+    assert!(matches!(actor.department()?, VerifiedDepartment::Expired));
     assert!(actor.assurance().is_ok());
     f.close().await;
     Ok(())

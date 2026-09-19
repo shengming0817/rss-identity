@@ -1,7 +1,7 @@
 //! Embedded reconstruction of #2433's real directory lifecycle; no central/client APIs.
 use super::*;
 use futures::FutureExt;
-use rss_identity_core::groups::{GroupFactsMaxAge, UnavailableReason};
+use rss_identity_core::{facts::FactUnavailableReason, groups::GroupFactsMaxAge};
 use std::{future::Future, panic::AssertUnwindSafe};
 
 async fn without_staff<T>(body: impl Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
@@ -37,11 +37,11 @@ fn available(actor: &AuthenticatedSession, provider: ProviderId) -> uuid::Uuid {
     };
     assert_eq!(groups.values().unwrap(), ["/staff"]);
     assert_eq!(
-        groups.source().provider_id.to_string(),
+        groups.source().provider_id().to_string(),
         provider.to_string()
     );
     assert_eq!(
-        groups.source().issuer,
+        groups.source().issuer(),
         std::env::var("IDENTITY_TEST_FEDERATED_ISSUER").unwrap()
     );
     groups.snapshot_id()
@@ -190,7 +190,7 @@ async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
         assert!(
             matches!(
                 inspect(&f, &cookie).await?.groups()?,
-                VerifiedGroups::Unavailable(UnavailableReason::ClaimMissing)
+                VerifiedGroups::Unavailable(FactUnavailableReason::ClaimMissing)
             ),
             "Keycloak omits groups for zero memberships"
         );
@@ -283,7 +283,7 @@ async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
     let missing = login_browser(&app, &changed, 'E').await?;
     assert!(matches!(
         inspect(&f, &missing).await?.groups()?,
-        VerifiedGroups::Unavailable(UnavailableReason::ClaimMissing)
+        VerifiedGroups::Unavailable(FactUnavailableReason::ClaimMissing)
     ));
     let disabled = s
         .enable_provider(f.actor().await?, p.id, changed.version, false, deadline())

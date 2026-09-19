@@ -91,6 +91,7 @@ pub struct AuthenticatedSession {
     pub(crate) identity: SessionIdentity,
     assurance: rss_identity_core::assurance::Assurance,
     groups: crate::groups::GroupFacts,
+    department: Box<crate::department::DepartmentFacts>,
 }
 impl AuthenticatedSession {
     pub fn instance(&self) -> rss_identity_core::InstanceId {
@@ -106,6 +107,10 @@ impl AuthenticatedSession {
             return Err(AuthorityError::Rejected);
         }
         Ok(())
+    }
+    pub fn department(&self) -> Result<VerifiedDepartment<'_>, DepartmentAccessError> {
+        self.department
+            .view(self.instance(), self.account(), self.expires)
     }
     pub fn groups(&self) -> Result<VerifiedGroups<'_>, GroupAccessError> {
         self.groups.view(self.expires)
@@ -300,6 +305,7 @@ impl Authority {
                             identity: SessionIdentity::from_state(loaded.state),
                             assurance: loaded.assurance,
                             groups: loaded.groups,
+                            department: loaded.department,
                             key: loaded.state.key(),
                             digest,
                             authority,

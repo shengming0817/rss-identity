@@ -235,14 +235,7 @@ pub(crate) async fn request_boundary(
         Err(error) => error.into_response(),
     };
     if callback && (response.status().is_client_error() || response.status().is_server_error()) {
-        let reason = if response.status() == StatusCode::SERVICE_UNAVAILABLE {
-            "unavailable"
-        } else {
-            "failed"
-        };
-        let extensions = std::mem::take(response.extensions_mut());
-        response = crate::federation::callback_failure(reason);
-        response.extensions_mut().extend(extensions);
+        response = crate::federation::callback_error_response(response);
     }
     response.headers_mut().insert(
         header::REFERRER_POLICY,

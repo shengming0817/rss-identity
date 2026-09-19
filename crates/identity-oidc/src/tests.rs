@@ -103,6 +103,7 @@ fn config(issuer: &str) -> ProviderSettings {
         redirect_uri: "http://127.0.0.1/callback".into(),
         scopes: vec!["openid".into()],
         claims: rss_identity_core::federation::ClaimMapping {
+            department: None,
             email: None,
             groups: None,
         },
@@ -328,6 +329,7 @@ async fn production_dns_denial_prevents_connecting_to_loopback() {
         redirect_uri: "https://identity.example.test/api/v2/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
+            department: None,
             email: None,
             groups: None,
         },
@@ -350,4 +352,95 @@ async fn production_dns_denial_prevents_connecting_to_loopback() {
             .await
             .is_err()
     );
+}
+
+#[test]
+fn department_mapping_distinguishes_signed_null_missing_and_invalid_values() {
+    use rss_identity_core::department::{DepartmentId, UpstreamDepartment};
+    assert_eq!(
+        mapped_department(None, &json!({"department_id":"ignored"})).unwrap(),
+        UpstreamDepartment::NotConfigured
+    );
+    assert_eq!(
+        mapped_department(Some("department_id"), &json!({})).unwrap(),
+        UpstreamDepartment::Missing
+    );
+    assert_eq!(
+        mapped_department(Some("department_id"), &json!({"department_id":null})).unwrap(),
+        UpstreamDepartment::NoDepartment
+    );
+    assert_eq!(
+        mapped_department(
+            Some("department_id"),
+            &json!({"department_id":"Engineering"})
+        )
+        .unwrap(),
+        UpstreamDepartment::Present(DepartmentId::new("Engineering".into()).unwrap())
+    );
+    for value in [
+        json!(""),
+        json!(" bad"),
+        json!("x".repeat(257)),
+        json!([]),
+        json!({}),
+        json!(1),
+        json!(true),
+    ] {
+        assert!(mapped_department(Some("department_id"), &json!({"department_id":value})).is_err());
+    }
+}
+
+#[test]
+fn signed_department_claims_preserve_null_and_reject_invalid_authentication() {
+    let client = ClientId::new("client".into());
+    let verifier = CoreIdTokenVerifier::new_confidential_client(
+        client.clone(),
+        ClientSecret::new("fixture-secret".into()),
+        IssuerUrl::new("https://issuer.test".into()).unwrap(),
+        CoreJsonWebKeySet::new(vec![]),
+    )
+    .set_allowed_algs(vec![CoreJwsSigningAlgorithm::HmacSha256]);
+    for value in [json!(null), json!("dept-01"), json!([])] {
+        for (field, bad, accepted) in [
+            ("unused", json!(true), true),
+            ("iss", json!("https://other.test"), false),
+            ("aud", json!(["other"]), false),
+            ("nonce", json!("other"), false),
+            ("exp", json!(1), false),
+        ] {
+            let mut raw = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce","department_id":value});
+            raw[field] = bad;
+            let claims: openidconnect::IdTokenClaims<Extra, openidconnect::core::CoreGenderClaim> =
+                serde_json::from_value(raw).unwrap();
+            for secret in ["fixture-secret", "wrong-secret"] {
+                let token = MappedToken::new(
+                    claims.clone(),
+                    &CoreHmacKey::new(secret),
+                    CoreJwsSigningAlgorithm::HmacSha256,
+                    None,
+                    None,
+                )
+                .unwrap();
+                let verified = verify(&token, &verifier, &Nonce::new("nonce".into()), &client);
+                assert_eq!(verified.is_ok(), accepted && secret == "fixture-secret");
+                if let Ok(verified) = verified {
+                    let mapped = mapped_department(
+                        Some("department_id"),
+                        &serde_json::to_value(verified).unwrap(),
+                    );
+                    match &value {
+                        serde_json::Value::Null => assert_eq!(
+                            mapped.unwrap(),
+                            rss_identity_core::department::UpstreamDepartment::NoDepartment
+                        ),
+                        serde_json::Value::String(_) => assert!(matches!(
+                            mapped.unwrap(),
+                            rss_identity_core::department::UpstreamDepartment::Present(_)
+                        )),
+                        _ => assert!(mapped.is_err()),
+                    }
+                }
+            }
+        }
+    }
 }

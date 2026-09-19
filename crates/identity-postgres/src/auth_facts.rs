@@ -1,12 +1,11 @@
 //! The only persisted authentication-facts codec. Provider authority stays in Origin.
 use crate::transaction::{corrupt, reject};
-use rss_identity_core::groups::{
-    GroupSource, Groups, UnavailableReason, VERSION, acceptable_observation, valid_snapshot_window,
-};
 use rss_identity_core::{
     assurance::Assurance,
+    department::{DepartmentClaim, DepartmentId, UpstreamDepartment},
+    facts::{FactSource, FactUnavailableReason, acceptable_observation, valid_snapshot_window},
     federation::{FederationError, UpstreamClaims},
-    groups::{GroupFactsMaxAge, UpstreamGroups},
+    groups::{GroupFactsMaxAge, Groups, UpstreamGroups, VERSION},
 };
 use rss_transactional_messaging_postgres::PgError;
 use serde::{Deserialize, Serialize};
@@ -21,12 +20,13 @@ pub(crate) struct AuthenticationFacts {
     email_verified: bool,
     pub assurance: Assurance,
     groups: Snapshot,
+    pub(crate) department: Box<DepartmentSnapshot>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum Snapshot {
     Unavailable {
-        reason: UnavailableReason,
+        reason: FactUnavailableReason,
     },
     Available {
         snapshot_id: Uuid,
@@ -35,11 +35,82 @@ enum Snapshot {
         values: Vec<String>,
     },
 }
+/// Mandatory tagged assignment keeps missing fields distinct from signed null.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum DepartmentAssignment {
+    Assigned { id: DepartmentId },
+    NoDepartment {},
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum DepartmentSnapshot {
+    Unavailable {
+        reason: FactUnavailableReason,
+    },
+    Available {
+        snapshot_id: Uuid,
+        observed_at: i64,
+        expires_at: i64,
+        assignment: DepartmentAssignment,
+    },
+}
+impl DepartmentSnapshot {
+    fn collect(
+        claims: &UpstreamClaims,
+        mapping: Option<&DepartmentClaim>,
+        now: i64,
+    ) -> Result<Self, FederationError> {
+        let (mapping, assignment) = match (&claims.department, mapping) {
+            (UpstreamDepartment::NotConfigured, None) => {
+                return Ok(Self::Unavailable {
+                    reason: FactUnavailableReason::NotConfigured,
+                });
+            }
+            (UpstreamDepartment::Missing, Some(_)) => {
+                return Ok(Self::Unavailable {
+                    reason: FactUnavailableReason::ClaimMissing,
+                });
+            }
+            (UpstreamDepartment::NoDepartment, Some(mapping)) => {
+                (mapping, DepartmentAssignment::NoDepartment {})
+            }
+            (UpstreamDepartment::Present(id), Some(mapping)) => {
+                (mapping, DepartmentAssignment::Assigned { id: id.clone() })
+            }
+            _ => return Err(FederationError::Claims),
+        };
+        Ok(Self::Available {
+            snapshot_id: Uuid::new_v4(),
+            observed_at: claims.issued_at,
+            expires_at: mapping.expires_at(claims.issued_at, claims.expires_at, now)?,
+            assignment,
+        })
+    }
+    fn validate(&self) -> Result<(), PgError> {
+        match self {
+            Self::Unavailable {
+                reason: FactUnavailableReason::NotConfigured | FactUnavailableReason::ClaimMissing,
+            } => Ok(()),
+            Self::Available {
+                snapshot_id,
+                observed_at,
+                expires_at,
+                ..
+            } if !snapshot_id.is_nil() && valid_snapshot_window(*observed_at, *expires_at) => {
+                Ok(())
+            }
+            _ => Err(corrupt()),
+        }
+    }
+}
+
 impl AuthenticationFacts {
     pub fn collect(
         claims: &UpstreamClaims,
         version: i64,
         policy: GroupFactsMaxAge,
+        department: Option<&DepartmentClaim>,
         now: i64,
     ) -> Result<Self, FederationError> {
         claims.validate()?;
@@ -49,10 +120,10 @@ impl AuthenticationFacts {
         }
         let groups = match &claims.groups {
             UpstreamGroups::NotConfigured => Snapshot::Unavailable {
-                reason: UnavailableReason::NotConfigured,
+                reason: FactUnavailableReason::NotConfigured,
             },
             UpstreamGroups::Missing => Snapshot::Unavailable {
-                reason: UnavailableReason::ClaimMissing,
+                reason: FactUnavailableReason::ClaimMissing,
             },
             UpstreamGroups::Present(values) => Snapshot::Available {
                 snapshot_id: Uuid::new_v4(),
@@ -62,7 +133,8 @@ impl AuthenticationFacts {
             },
         };
         Ok(Self {
-            format_version: 1,
+            format_version: 2,
+            department: Box::new(DepartmentSnapshot::collect(claims, department, now)?),
             provider_config_version: version,
             email: claims.email.clone(),
             email_verified: claims.email_verified,
@@ -72,7 +144,7 @@ impl AuthenticationFacts {
     }
     pub fn decode(value: serde_json::Value) -> Result<Self, PgError> {
         let facts: Self = serde_json::from_value(value).map_err(|_| corrupt())?;
-        if facts.format_version != 1
+        if facts.format_version != 2
             || facts.provider_config_version < 1
             || facts
                 .email
@@ -81,9 +153,10 @@ impl AuthenticationFacts {
         {
             return Err(corrupt());
         }
+        facts.department.validate()?;
         match &facts.groups {
             Snapshot::Unavailable {
-                reason: UnavailableReason::LocalIdentity | UnavailableReason::NotYetValid,
+                reason: FactUnavailableReason::LocalIdentity | FactUnavailableReason::NotYetValid,
             } => return Err(corrupt()),
             Snapshot::Available {
                 snapshot_id,
@@ -115,7 +188,7 @@ impl AuthenticationFacts {
         }
         Ok(value)
     }
-    pub fn project(&self, source: GroupSource, now: i64) -> Result<Groups, PgError> {
+    pub fn project(&self, source: FactSource, now: i64) -> Result<Groups, PgError> {
         match &self.groups {
             Snapshot::Unavailable { reason } => Ok(Groups::unavailable(*reason)),
             Snapshot::Available {
@@ -128,7 +201,7 @@ impl AuthenticationFacts {
                     return Err(reject());
                 }
                 if now < *observed_at {
-                    return Ok(Groups::unavailable(UnavailableReason::NotYetValid));
+                    return Ok(Groups::unavailable(FactUnavailableReason::NotYetValid));
                 }
                 if now >= *expires_at {
                     return Ok(Groups::Expired { version: VERSION });
@@ -152,6 +225,7 @@ mod tests {
     use super::*;
     fn claims(groups: UpstreamGroups) -> UpstreamClaims {
         UpstreamClaims {
+            department: rss_identity_core::department::UpstreamDepartment::NotConfigured,
             issuer: "https://idp.test".into(),
             subject: "subject".into(),
             email: None,
@@ -162,18 +236,113 @@ mod tests {
             assurance: Assurance::password(1000).unwrap(),
         }
     }
-    fn source() -> GroupSource {
-        GroupSource {
-            provider_id: Uuid::new_v4(),
-            issuer: "https://idp.test".into(),
-        }
+    fn source() -> FactSource {
+        FactSource::new(Uuid::new_v4(), "https://idp.test".into()).unwrap()
     }
+    #[test]
+    fn department_format_is_explicit_and_legacy_is_rejected() {
+        let facts = AuthenticationFacts::collect(
+            &claims(UpstreamGroups::NotConfigured),
+            1,
+            GroupFactsMaxAge::new(300).unwrap(),
+            None,
+            1000,
+        )
+        .unwrap();
+        let value = serde_json::to_value(facts).unwrap();
+        assert_eq!(value["format_version"], 2);
+        assert_eq!(
+            value["department"],
+            serde_json::json!({"status":"unavailable","reason":"not_configured"})
+        );
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove("department");
+        assert!(AuthenticationFacts::decode(missing).is_err());
+        let mut legacy = value;
+        legacy["format_version"] = serde_json::json!(1);
+        assert!(AuthenticationFacts::decode(legacy).is_err());
+    }
+
+    #[test]
+    fn department_snapshot_is_closed_fixed_and_independent_of_groups() {
+        let mapping = DepartmentClaim::new("department_id".into(), 60).unwrap();
+        for department in [
+            UpstreamDepartment::NoDepartment,
+            UpstreamDepartment::Present(DepartmentId::new("dept".into()).unwrap()),
+            UpstreamDepartment::Missing,
+        ] {
+            let mut claims = claims(UpstreamGroups::present(vec!["staff".into()]).unwrap());
+            claims.department = department;
+            let facts = AuthenticationFacts::collect(
+                &claims,
+                1,
+                GroupFactsMaxAge::new(300).unwrap(),
+                Some(&mapping),
+                1000,
+            )
+            .unwrap();
+            let value = serde_json::to_value(&facts).unwrap();
+            assert_eq!(value["groups"]["expires_at"], 1300);
+            if matches!(claims.department, UpstreamDepartment::Missing) {
+                assert_eq!(
+                    value["department"],
+                    serde_json::json!({"status":"unavailable","reason":"claim_missing"})
+                );
+            } else {
+                assert_eq!(value["department"]["expires_at"], 1060);
+                assert_eq!(value["department"]["observed_at"], 1000);
+                for (key, bad) in [
+                    ("assignment", serde_json::json!(null)),
+                    ("assignment", serde_json::json!({"status":"assigned"})),
+                    (
+                        "assignment",
+                        serde_json::json!({"status":"assigned","id":""}),
+                    ),
+                    (
+                        "assignment",
+                        serde_json::json!({"status":"no_department","id":"dept"}),
+                    ),
+                    ("expires_at", serde_json::json!(1301)),
+                    ("snapshot_id", serde_json::json!(Uuid::nil())),
+                ] {
+                    let mut corrupted = value.clone();
+                    corrupted["department"][key] = bad;
+                    assert!(AuthenticationFacts::decode(corrupted).is_err());
+                }
+            }
+            let restored = AuthenticationFacts::decode(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(restored).unwrap(), value);
+            assert!(
+                AuthenticationFacts::collect(
+                    &claims,
+                    1,
+                    GroupFactsMaxAge::new(300).unwrap(),
+                    None,
+                    1000
+                )
+                .is_err()
+            );
+        }
+        let claims = claims(UpstreamGroups::NotConfigured);
+        assert!(
+            AuthenticationFacts::collect(
+                &claims,
+                1,
+                GroupFactsMaxAge::new(300).unwrap(),
+                Some(&mapping),
+                1000
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn snapshot_is_fixed_and_only_available_contains_values() {
         let facts = AuthenticationFacts::collect(
             &claims(UpstreamGroups::present(vec![]).unwrap()),
             2,
             GroupFactsMaxAge::new(300).unwrap(),
+            None,
             1200,
         )
         .unwrap();
@@ -198,14 +367,15 @@ mod tests {
         for (groups, reason) in [
             (
                 UpstreamGroups::NotConfigured,
-                UnavailableReason::NotConfigured,
+                FactUnavailableReason::NotConfigured,
             ),
-            (UpstreamGroups::Missing, UnavailableReason::ClaimMissing),
+            (UpstreamGroups::Missing, FactUnavailableReason::ClaimMissing),
         ] {
             let facts = AuthenticationFacts::collect(
                 &claims(groups),
                 2,
                 GroupFactsMaxAge::new(1).unwrap(),
+                None,
                 1200,
             )
             .unwrap();
@@ -221,12 +391,13 @@ mod tests {
             &claims(UpstreamGroups::present(vec![]).unwrap()),
             2,
             GroupFactsMaxAge::new(300).unwrap(),
+            None,
             1000,
         )
         .unwrap();
         let base = serde_json::to_value(facts).unwrap();
         for (key, value) in [
-            ("format_version", serde_json::json!(2)),
+            ("format_version", serde_json::json!(1)),
             ("provider_config_version", serde_json::json!(0)),
             ("mapping_version", serde_json::json!(2)),
         ] {
@@ -265,9 +436,14 @@ mod tests {
             let mut claims = claims(groups);
             claims.issued_at = 1030;
             claims.assurance = Assurance::password(1030).unwrap();
-            let facts =
-                AuthenticationFacts::collect(&claims, 1, GroupFactsMaxAge::new(1).unwrap(), 1000)
-                    .unwrap();
+            let facts = AuthenticationFacts::collect(
+                &claims,
+                1,
+                GroupFactsMaxAge::new(1).unwrap(),
+                None,
+                1000,
+            )
+            .unwrap();
             let encoded = serde_json::to_value(&facts).unwrap();
             let restored = AuthenticationFacts::decode(encoded.clone()).unwrap();
             let before = serde_json::to_value(restored.project(source(), 1029).unwrap()).unwrap();
@@ -289,8 +465,14 @@ mod tests {
             }
             assert_eq!(serde_json::to_value(&restored).unwrap(), encoded);
             assert!(
-                AuthenticationFacts::collect(&claims, 1, GroupFactsMaxAge::new(1).unwrap(), 999)
-                    .is_err()
+                AuthenticationFacts::collect(
+                    &claims,
+                    1,
+                    GroupFactsMaxAge::new(1).unwrap(),
+                    None,
+                    999
+                )
+                .is_err()
             );
         }
     }

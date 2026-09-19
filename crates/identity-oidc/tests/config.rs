@@ -11,6 +11,7 @@ fn input() -> ProviderSettingsInput {
         redirect_uri: "https://identity.example.test/api/v2/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
+            department: None,
             email: None,
             groups: None,
         },

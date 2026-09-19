@@ -6,7 +6,7 @@
 
 彻底：账户、会话、联合身份与原子安全事件只有一套实现；删除 contracts/client/Hydra、下游 grant、中央平台租户注册与 CLI SSO 源码及当前构建入口。管理角色、防锁死策略和资源授权由宿主持有，组件没有 administrator、emergency、platform_administrator 或替代角色标记。
 
-不向后兼容：仅提供 HTTP `/api/v2` 和 `/api/v2/oidc/callback`，没有 v1 别名或 legacy feature。schema v9 是全新安装基线；拒绝旧库，不提供 v8 升级、双读或旧配置回退。保留旧候选、数据和密钥的历史证据，不操作既有部署。
+不向后兼容：仅提供 HTTP `/api/v2` 和 `/api/v2/oidc/callback`，没有 v1 别名或 legacy feature。安装基线经 #2447 更新为 fresh schema v10；拒绝旧库，不提供升级、双读或旧配置回退。保留旧候选、数据和密钥的历史证据，不操作既有部署。
 
 优雅简洁：保留 core、postgres、oidc、http-axum 四个能力 crate；应用层只有参考宿主。宿主注入现有 PgRuntime、显式实例与租户列表、KDF、事件预算、SessionPolicy 和必选 ManagementPolicy。Authority 不创建、替换或关闭宿主连接池，不发现中央租户。OIDC 的密钥、状态签名、callback、return target、group policy 单独配置，本地模式不要求这些字段。
 
@@ -14,7 +14,7 @@
 
 `login_local` 完成限流、密码验证、最新账户/成员状态复核和会话/事件原子提交。密码候选和底层会话签发仅组件内部可见。`reauthenticate_local` 从当前会话确定账户并轮换该账户的会话。刷新只更换凭据及更新 idle，保留原 auth_time、absolute deadline 和 group snapshot 的过期时间。
 
-宿主每次管理操作提供窄 `ManagementPolicy`。组件在 PG 事务中锁定并加载当前账户、成员、会话、epoch、provider 状态后调用策略；实例、租户、主体绑定与再认证期限由组件检查。序列化 JSON 不能构造 AuthenticatedSession、ManagementContext 或 TrustedGroups。组只表达来源明确、有期限的认证事实，不成为产品权限结论。
+宿主每次管理操作提供窄 `ManagementPolicy`。组件在 PG 事务中锁定并加载当前账户、成员、会话、epoch、provider 状态后调用策略；实例、租户、主体绑定与再认证期限由组件检查。序列化 JSON 不能构造 AuthenticatedSession、ManagementContext 或 TrustedGroups。组和 #2447 的可选部门只表达来源明确、有期限的认证事实，不成为产品权限结论。
 
 参考宿主用每租户唯一、完整覆盖的 bootstrapAccounts 决定管理权限，并拒绝停用该账户或其成员关系。独立 Maintenance 权限仅执行每租户一次初始化和指定本地账户密码恢复；恢复推进 epoch，保留 enabled/member_active。没有在线角色提权票据。
 
