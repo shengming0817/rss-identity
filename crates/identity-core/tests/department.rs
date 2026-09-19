@@ -42,6 +42,7 @@ fn department_mapping_is_complete_validated_and_has_no_default_age() {
         "department.name",
         "email",
         "sub",
+        "sid",
         "iat",
         "name",
         "preferred_username",
@@ -54,6 +55,7 @@ fn department_mapping_is_complete_validated_and_has_no_default_age() {
         json!({"max_age_seconds":60}),
         json!({"claim":"department_id","max_age_seconds":0}),
         json!({"claim":"email","max_age_seconds":60}),
+        json!({"claim":"sid","max_age_seconds":60}),
         json!({"claim":"department_id","max_age_seconds":60,"other":true}),
     ] {
         assert!(serde_json::from_value::<DepartmentClaim>(value).is_err());

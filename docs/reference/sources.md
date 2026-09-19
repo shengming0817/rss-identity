@@ -137,3 +137,5 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 
 - [openidconnect-rs 4.0.1 AdditionalClaims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/claims.rs#L19-L26) 与 [verified_claims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/verification/mod.rs#L680-L804)：实际读取扩展 claim 与签名/issuer/audience/expiry/nonce 验证顺序，之后才解释部门；iat 上界仍由组件显式检查。
 - [Keycloak 26.7.3 OIDCAttributeMapperHelper](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/OIDCAttributeMapperHelper.java#L315-L352)：实际读取空值省略逻辑；不将缺失当作显式 null，无 sentinel 或目录推断。
+
+- [OpenID Connect Back-Channel Logout 1.0](https://openid.net/specs/openid-connect-backchannel-1_0.html#BCSupport)：sid 是 ID Token 中的会话标识，部门映射明确拒绝该协议字段。

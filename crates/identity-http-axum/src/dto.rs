@@ -394,6 +394,7 @@ mod tests {
             json!({"claim":"department_id","maxAgeSeconds":0}),
             json!({"claim":"department_id","max_age_seconds":60}),
             json!({"claim":"email","maxAgeSeconds":60}),
+            json!({"claim":"sid","maxAgeSeconds":60}),
         ] {
             let mut input = base.clone();
             input["claims"]["department"] = department;

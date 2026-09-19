@@ -63,6 +63,7 @@ impl DepartmentClaim {
         const RESERVED: &[&str] = &[
             "iss",
             "sub",
+            "sid",
             "aud",
             "exp",
             "nbf",
