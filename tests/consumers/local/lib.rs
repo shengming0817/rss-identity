@@ -16,24 +16,45 @@ mod tests {
         let first = host.login().await?;
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let http = rss_identity_http_axum::HttpConfig::new(
-            "https://local.example.test", std::time::Duration::from_secs(10),
+            "https://local.example.test",
+            std::time::Duration::from_secs(10),
         )?;
         let headers = Request::builder()
-            .header("cookie", format!("__Host-identity-session={}", secret(&first).expose()))
+            .header(
+                "cookie",
+                format!("__Host-identity-session={}", secret(&first).expose()),
+            )
             .header("origin", "https://local.example.test")
             .header("x-identity-request", "1")
             .header("x-csrf-token", secret(&first).csrf())
-            .body(())?.headers().clone();
+            .body(())?
+            .headers()
+            .clone();
         let (inspected, credential) = rss_identity_http_axum::authenticate_request(
-            &host.authority, &http, host.key.tenant, &headers,
-            rss_identity_http_axum::SessionActivity::Passive, deadline(),
-        ).await.unwrap();
+            &host.authority,
+            &http,
+            host.key.tenant,
+            &headers,
+            rss_identity_http_axum::SessionActivity::Passive,
+            deadline(),
+        )
+        .await
+        .unwrap();
         assert_eq!(credential.expose(), secret(&first).expose());
-        assert_eq!(inspected.view().idle_expires_at, first.view().idle_expires_at);
+        assert_eq!(
+            inspected.view().idle_expires_at,
+            first.view().idle_expires_at
+        );
         let (actor, _) = rss_identity_http_axum::authenticate_request(
-            &host.authority, &http, host.key.tenant, &headers,
-            rss_identity_http_axum::SessionActivity::Active, deadline(),
-        ).await.unwrap();
+            &host.authority,
+            &http,
+            host.key.tenant,
+            &headers,
+            rss_identity_http_axum::SessionActivity::Active,
+            deadline(),
+        )
+        .await
+        .unwrap();
         assert!(actor.view().idle_expires_at > first.view().idle_expires_at);
         assert_eq!(
             actor.view().absolute_expires_at,
