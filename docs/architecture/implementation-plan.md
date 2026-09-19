@@ -150,6 +150,8 @@ I01/I02 的依赖顺序为协议→core→PG→OIDC→CI。该历史阶段使用
 
 登记不表示已实施或运行通过；避免把实现项的完整验收条件反向变为 T3 的执行阻塞。
 
-## #2427 / #2428 平台开通与 CLI
+## 历史中央模式：#2427 / #2428 平台开通与 CLI
 
-系统域、显式平台角色、动态租户开通/新增管理员、自助加密 OIDC、持久会话与 SSO CLI 按 [当前 ADR](adr/202609130900-2427-platform-onboarding.md) 交付。当前安装版本由 [SCHEMA_VERSION](../../crates/identity-postgres/src/lib.rs) 及其安装探测持有，上述阶段的版本说明只用于历史追溯。#2368 消费替换后的网页协议；#2342 绑定新的 CLI/API 候选做 T3。
+系统域、平台角色、动态租户开通与 SSO CLI 属于已退出的中央模式，设计见[历史 ADR](adr/202609130900-2427-platform-onboarding.md)，不作为当前交付或 T3 指引。
+
+当前采用 [#2435 嵌入式架构](adr/202609170001-2435-embedded-authentication.md)；安装版本由 [SCHEMA_VERSION](../../crates/identity-postgres/src/lib.rs) 及其安装探测持有。#2436 持有[参考宿主部署与运维](../deployment/README.md)，实际浏览器、部署恢复和容量 T3 由独立 #2366 持有。
