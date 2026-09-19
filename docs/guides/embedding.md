@@ -6,6 +6,7 @@
 
 1. 宿主提供已有、绑定 StorageIdentity/ExecutionBinding 的 `Arc<PgRuntime>`，共享有界 `Arc<PasswordKdf>`，以及显式 `InstanceId`、租户列表、`SessionPolicy` 和事件预算。Identity 不创建、更换、关闭宿主连接池，不自动发现租户。
 2. 宿主预建数据库角色，数据库 owner 先安装 RSS 消息 schema，再调用 `install(connection, instance)` 和 `grant_profile(connection, role, profile)`。Identity 只接受全新 v9 schema；v8/旧配置失败关闭，不升级、不双读。结构签名和有效权限检查独立于角色名称。提交安装事务前以实际目标角色调用 `verify_profile(connection, profile, instance)`；参考安装器用 `SET LOCAL ROLE` 对 runtime/maintenance 都执行同一检查，失败整体回滚。
+   RSS 安装必须使用 pin 对应的完整 `MIGRATION_SQL`。runtime/maintenance 仅持有 Outbox SELECT 和公开 `prepare_outbox_partitions(jsonb)` / `append_outbox(bytea,jsonb)` EXECUTE，无直接 INSERT、分区表或 sequence 权限。安全事件保持 unordered，不声明分区；RSS 的运行准入拒绝旧权限或不匹配 schema。
 3. Maintenance authority 仅用于一次性 `initialize` 与 `recover_local_password`。恢复只更换本地密码并推进 epoch，不自动启用账户或成员、不授予宿主权限。
 4. `Authority::connect_runtime` 必须提供 `ManagementPolicy`。调用 `login_local` 完成密码验证及原子签发；外部不能构造 AuthenticationCandidate 或调用底层签发函数。
 5. 每个宿主认定为用户活动的业务请求调用 `authenticate_session` 获得不可反序列化、不可克隆的 `AuthenticatedSession`。不要将前端 JSON 当作认证证明，也不要跨请求缓存该值。

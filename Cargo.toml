@@ -10,12 +10,12 @@ publish = false
 
 [workspace.dependencies]
 rss-identity-core = { path = "crates/identity-core" }
-rss-runtime = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838", default-features = false }
-rss-axum = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838", default-features = false }
-rss-contract = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838" }
-rss-request-context = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838" }
-rss-transactional-messaging = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838", default-features = false, features = ["producer"] }
-rss-transactional-messaging-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "93ce6848b7c78753df9947bd08abfb37e5799838", default-features = false }
+rss-runtime = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "ec67bd142d70cb8f0d56feae636ac9471e7471fc", default-features = false }
+rss-axum = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "ec67bd142d70cb8f0d56feae636ac9471e7471fc", default-features = false }
+rss-contract = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "ec67bd142d70cb8f0d56feae636ac9471e7471fc" }
+rss-request-context = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "ec67bd142d70cb8f0d56feae636ac9471e7471fc" }
+rss-transactional-messaging = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "ec67bd142d70cb8f0d56feae636ac9471e7471fc", default-features = false, features = ["producer"] }
+rss-transactional-messaging-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "ec67bd142d70cb8f0d56feae636ac9471e7471fc", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

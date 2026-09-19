@@ -58,6 +58,10 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     assert_eq!(successes, 1);
     assert_eq!(f.account_events().await?, 1);
     assert_eq!(f.events().await?, 1);
+    let unordered: bool = sqlx::query_scalar(
+        "SELECT bool_and(partition_key IS NULL AND partition_seq IS NULL) FROM rss_transactional_messaging.outbox",
+    ).fetch_one(&f.owner).await?;
+    assert!(unordered, "security events retain unordered delivery");
     f.provision_a().await?;
     let instance: uuid::Uuid =
         sqlx::query_scalar("SELECT authority_id FROM identity_authority.deployment")
@@ -529,7 +533,7 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
         .execute(&f.owner)
         .await?;
     // Force a real duplicate outbox identity; the new companion account must roll back.
-    sqlx::raw_sql("CREATE OR REPLACE FUNCTION public.reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.message_id := (SELECT message_id FROM rss_transactional_messaging.outbox LIMIT 1); RETURN NEW; END $$; CREATE TRIGGER reject_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE OR REPLACE FUNCTION public.reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.message_id := (SELECT message_id FROM rss_transactional_messaging.outbox WHERE tenant_id=NEW.tenant_id LIMIT 1); RETURN NEW; END $$; CREATE TRIGGER reject_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_event();").execute(&f.owner).await?;
     f.reset_attempts().await?;
     assert!(
         f.store
@@ -1260,6 +1264,16 @@ async fn wait_for_writer_lock(
 #[ignore = "requires make test-pg"]
 async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
+    for role in ["identity_runtime", "identity_maintenance"] {
+        let valid: bool = sqlx::query_scalar(
+            "SELECT has_table_privilege($1,'rss_transactional_messaging.outbox','SELECT')
+              AND NOT has_table_privilege($1,'rss_transactional_messaging.outbox','INSERT')
+              AND NOT has_sequence_privilege($1,'rss_transactional_messaging.outbox_seq_seq','USAGE,SELECT,UPDATE')
+              AND has_function_privilege($1,'rss_transactional_messaging.prepare_outbox_partitions(jsonb)','EXECUTE')
+              AND has_function_privilege($1,'rss_transactional_messaging.append_outbox(bytea,jsonb)','EXECUTE')",
+        ).bind(role).fetch_one(&f.owner).await?;
+        assert!(valid, "profile must use the public Outbox write contract");
+    }
     for query in [
         "UPDATE identity_authority.accounts SET enabled=true",
         "UPDATE identity_authority.accounts SET principal_id=gen_random_uuid()",
