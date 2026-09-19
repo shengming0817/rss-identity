@@ -144,6 +144,7 @@ pub async fn serve(
     let per = config.budgets.resource();
     let mut scope = LifecycleScope::<(), AppError, std::io::Error>::try_new(
         TotalDrainBudget::new(total).map_err(|_| AppError::Budget)?,
+        Arc::new(assembly::Timer),
     )
     .map_err(|_| AppError::Shutdown)?;
     let outcome = scope
@@ -216,8 +217,26 @@ pub async fn serve(
                         .map_err(|_| AppError::Connection)?;
                     let mut launch = startup.commit();
                     launch.stage_task_with_token(
-                        rss_axum::serve_http1_registration(listener, app, "identity-http", per)
-                            .critical(),
+                        rss_axum::serve_http1_registration(
+                            listener,
+                            app,
+                            rss_axum::PlainTransport,
+                            "identity-http",
+                            rss_axum::Http1ServePolicy::new(
+                                rss_axum::ServePolicy::new(
+                                    256,
+                                    config.budgets.request(),
+                                    config.budgets.request(),
+                                    per,
+                                )
+                                .map_err(|_| AppError::Budget)?,
+                                config.budgets.request(),
+                                64,
+                                32768,
+                            )
+                            .map_err(|_| AppError::Budget)?,
+                        )
+                        .critical(),
                     );
                     let (control, admission) = launch.finish_with_admission("requests", per);
                     gate.set(admission).map_err(|_| AppError::Shutdown)?;
@@ -283,6 +302,7 @@ mod tests {
     async fn response_body_retains_admission_until_consumed_or_dropped() {
         let mut stack = rss_runtime::ShutdownStack::try_new(
             TotalDrainBudget::new(Duration::from_secs(1)).unwrap(),
+            Arc::new(assembly::Timer),
         )
         .unwrap();
         let launch = stack.startup().unwrap().commit();

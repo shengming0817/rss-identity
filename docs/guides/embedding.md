@@ -73,6 +73,8 @@ async fn client_address(
 let routes = routes.layer(axum::middleware::from_fn(client_address));
 ```
 
+使用 RSS listener 的参考宿主从 `AcceptedConnectionInfo<()>` 读取 RSS 绑定的 TCP peer；生命周期显式注入 `ExecutionTimer`，listener 显式给出 256 连接、64 请求头与 32 KiB 缓冲限额，准备/建连/请求头等待沿用宿主 request 预算，关闭沿用 resource 预算。
+
 该中间件忽略请求中的 forwarded headers。反向代理部署须由宿主先验证真实 peer 是否为配置的可信网关，再读取其覆盖的来源头；参考宿主的 transport 模块实现该边界。[独立本地消费者](../../tests/consumers/local/lib.rs) 实际发送登录请求，验证缺少扩展的失败、正确注入后的 cookie 和 camelCase JSON。
 
 宿主诊断以 `AuthorityError::Configuration` 区分无效配置，以 `InvalidInput` 表示操作输入错误，以 `DeadlineElapsed` 表示事务开始前截止期耗尽。已经进入数据库事务的错误仍保留 `NotStarted` / `RolledBack` / `RollbackFailed` / `CommitUnknown` 及其原因，禁止据 503 推断是否可重试。HTTP 对输入错误返回 400，对配置/截止期错误返回脱敏的 503；完整分类仅通过响应扩展 `HttpFailure` 提供给宿主。
