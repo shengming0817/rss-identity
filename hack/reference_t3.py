@@ -492,6 +492,28 @@ class Run:
     def op(self, command, *args, project=None, directory=None, reject=False):
         project = project or self.source
         directory = directory or self.directories[project]
+        if command == "open" and not reject:
+            operate.require_closed(project)
+            self.compose(
+                "create", "--no-deps", "identity", project=project, directory=directory
+            )
+            container = (
+                self.compose(
+                    "ps",
+                    "--all",
+                    "--quiet",
+                    "identity",
+                    project=project,
+                    directory=directory,
+                )
+                .decode()
+                .strip()
+            )
+            attached = json.loads(docker("inspect", container))[0]["NetworkSettings"][
+                "Networks"
+            ]
+            if self.provider_network not in attached:
+                docker("network", "connect", self.provider_network, container)
         result = bounded_run(
             [
                 sys.executable,
@@ -514,18 +536,12 @@ class Run:
         if reject:
             require(status["status"] != "passed", "expected-operation-rejection")
         if command == "open" and not reject:
-            container = (
-                self.compose(
-                    "ps", "--quiet", "identity", project=project, directory=directory
-                )
-                .decode()
-                .strip()
-            )
             attached = json.loads(docker("inspect", container))[0]["NetworkSettings"][
                 "Networks"
             ]
-            if self.provider_network not in attached:
-                docker("network", "connect", self.provider_network, container)
+            require(
+                self.provider_network in attached, "provider-network-lost-during-open"
+            )
         return status
 
     def sql(self, query, project=None):
@@ -1015,6 +1031,12 @@ class Run:
 
     def events(self):
         self.browser("pg-ready")
+        budget_query = (
+            "SELECT coalesce(max(count),0) FROM identity_authority.attempts WHERE tenant_id='"
+            + TENANTS[0]
+            + "' AND key='p:linked' AND expires_at>clock_timestamp();"
+        )
+        budget_before = int(self.sql(budget_query))
         before = self.snapshot()
         require(
             len(before["accounts"]) >= 6
@@ -1045,8 +1067,7 @@ class Run:
             "rollback-state-and-events",
         )
         require(
-            sum(row["count"] for row in after["attempts"])
-            > sum(row["count"] for row in before["attempts"]),
+            int(self.sql(budget_query)) == budget_before + 1,
             "failed-attempt-budget-committed",
         )
         self.browser("response-loss")

@@ -220,3 +220,42 @@ class EvidenceTests(unittest.TestCase):
         )
         self.assertNotIn("git archive HEAD", result)
         self.assertIn("git rev-parse HEAD", result)
+
+    def test_private_provider_is_connected_before_formal_open(self):
+        import json, subprocess
+        from unittest.mock import patch
+
+        run = t3.Run.__new__(t3.Run)
+        run.source = "fixture-source"
+        run.directories = {run.source: t3.ROOT}
+        run.provider_network = "fixture-provider"
+        connected = False
+
+        def docker(*words, **kwargs):
+            nonlocal connected
+            if words[:2] == ("network", "connect"):
+                connected = True
+                return b""
+            return json.dumps(
+                [
+                    {
+                        "NetworkSettings": {
+                            "Networks": {"fixture-provider": {}} if connected else {}
+                        }
+                    }
+                ]
+            ).encode()
+
+        def operation(*args, **kwargs):
+            self.assertTrue(
+                connected, "formal open must not expose gateway before provider wiring"
+            )
+            return subprocess.CompletedProcess([], 0, b'{"status":"passed"}', b"")
+
+        with (
+            patch.object(t3.operate, "require_closed"),
+            patch.object(run, "compose", return_value=b"container"),
+            patch.object(t3, "docker", side_effect=docker),
+            patch.object(t3, "bounded_run", side_effect=operation),
+        ):
+            run.op("open")
