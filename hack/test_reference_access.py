@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 import deploy
-from test_deployment import fixture
+from deployment_fixture import fixture
 
 class ReferenceAccessTests(unittest.TestCase):
     def test_v4_reaches_all_binaries_and_mfa_resource_reaches_gateway(self):

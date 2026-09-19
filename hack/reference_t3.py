@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 from pathlib import Path
 import deploy, operate
 from bounded_process import run as bounded_run
+from docker_network import create_network
+from reference_approval import verify_approval, validate_receipt
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = (
@@ -270,11 +272,16 @@ def failure_fact(error, stage):
     value = {
         "stage": stage,
         "kind": kind,
-        "reason": "interrupted"
-        if isinstance(error, (KeyboardInterrupt, SystemExit))
-        else str(error)
-        if isinstance(error, ValueError) and re.fullmatch("[a-z-]{1,80}", str(error))
-        else "execution-or-assertion",
+        "reason": (
+            "interrupted"
+            if isinstance(error, (KeyboardInterrupt, SystemExit))
+            else (
+                str(error)
+                if isinstance(error, ValueError)
+                and re.fullmatch("[a-z-]{1,80}", str(error))
+                else "execution-or-assertion"
+            )
+        ),
     }
     if isinstance(error, ProcessFailure):
         value.update(
@@ -348,6 +355,7 @@ def new_record(subject, targets):
         "steps": [],
         "measurements": {},
         "targets": targets,
+        "approval": None,
         "result": "running",
         "failure": None,
         "cleanup": {"status": "pending", "remaining": []},
@@ -647,6 +655,11 @@ def validate_targets(value, subject, baseline=None):
 
 
 def verify_record(record, subject, baseline=None):
+    profile = validate_binary_profile(subject.get("binaryProfile"))
+    require(
+        subject.get("schema", {}).get("version") == profile["schemaVersion"],
+        "binary-schema-mismatch",
+    )
     require(
         subject.get("runtimeProfile") == runtime_profile(runtime_template())
         and subject.get("policy") == POLICY
@@ -695,14 +708,18 @@ def verify_record(record, subject, baseline=None):
     for step in record["steps"]:
         verify_observations(step["name"], step["observations"], subject, measurements)
     if record["targets"] is None:
+        require(record["approval"] is None, "unexpected-approval")
         require(record["result"] == "measured", "baseline-is-not-acceptance")
     else:
         target = validate_targets(record["targets"], subject, baseline)
+        validate_receipt(record["approval"], target)
         for name, direction in LIMITS.items():
             require(
-                measurements[name] <= target["limits"][name]
-                if direction == "max"
-                else measurements[name] >= target["limits"][name],
+                (
+                    measurements[name] <= target["limits"][name]
+                    if direction == "max"
+                    else measurements[name] >= target["limits"][name]
+                ),
                 "target-not-met",
             )
         require(record["result"] == "passed", "record-verdict")
@@ -770,6 +787,42 @@ def verify_browser_lock(lock, browser):
     )
 
 
+def validate_binary_profile(profile):
+    require(
+        isinstance(profile, dict)
+        and set(profile)
+        == {"formatVersion", "schemaVersion", "session", "attempts", "kdfConcurrency"}
+        and type(profile["formatVersion"]) is int
+        and profile["formatVersion"] == 1
+        and type(profile["schemaVersion"]) is int
+        and profile["schemaVersion"] > 0
+        and all(
+            json.dumps(profile[key], sort_keys=True)
+            == json.dumps(POLICY[key], sort_keys=True)
+            for key in ["session", "attempts", "kdfConcurrency"]
+        ),
+        "binary-policy-mismatch",
+    )
+    return profile
+
+
+def binary_profile(image):
+    return validate_binary_profile(
+        json.loads(
+            docker(
+                "run",
+                "--rm",
+                "--pull=never",
+                "--network=none",
+                "--entrypoint",
+                "identity-server",
+                image,
+                "--acceptance-profile",
+            )
+        )
+    )
+
+
 def candidate(args):
     require(git(ROOT, "status", "--porcelain") == "", "committed-runner-required")
     require(
@@ -785,6 +838,7 @@ def candidate(args):
     )
     identity = image_identity(details["identity"])
     web = image_identity(details["web"])
+    profile = binary_profile(identity["id"])
     lock = process(
         ["/usr/bin/git", "-C", str(ROOT), "show", identity["revision"] + ":Cargo.lock"]
     )
@@ -844,7 +898,11 @@ def candidate(args):
         "identity": {**identity, "cargoLockSha256": digest(lock)},
         "web": {**web, "lockSha256": digest(web_lock)},
         "rssRevision": rss,
-        "schema": {"version": 9, "signature": schema.decode().strip()},
+        "schema": {
+            "version": profile["schemaVersion"],
+            "signature": schema.decode().strip(),
+        },
+        "binaryProfile": profile,
         "providers": {
             k: image_identity(v)
             for k, v in details.items()
@@ -911,6 +969,7 @@ class Run:
         self.work = Path(config["work"])
         self.work.mkdir(mode=0o700)
         self.record = new_record(config["subject"], config["targets"])
+        self.record["approval"] = config.get("approval")
         self.output = Path(config["output"])
         self.prefix = config["prefix"]
         self.source = self.prefix + "-source"
@@ -1175,9 +1234,11 @@ class Run:
         reason = result.get("diagnostic", "scenario")
         require(
             result.get("status") == "passed",
-            "browser-" + reason
-            if re.fullmatch("[a-z-]{1,60}", reason)
-            else "browser-scenario",
+            (
+                "browser-" + reason
+                if re.fullmatch("[a-z-]{1,60}", reason)
+                else "browser-scenario"
+            ),
         )
         assert_redacted(result, self.secrets)
         if self.browser_private.exists():
@@ -1227,42 +1288,44 @@ class Run:
             for name, sql in queries.items()
         }
 
+    def reserve_networks(self):
+        candidates = iter(ipaddress.ip_network("10.243.0.0/16").subnets(new_prefix=24))
+
+        def allocate(*args):
+            return bounded_run(
+                ["docker", *args], check=True, capture_output=True, timeout=180
+            )
+
+        self.subnets = []
+        for project in [self.source, self.stale, self.restored, None]:
+            labels = ["rss.identity.t3=" + self.prefix]
+            if project:
+                labels += [
+                    "com.docker.compose.project=" + project,
+                    "com.docker.compose.network=backend",
+                ]
+            self.subnets.append(
+                create_network(
+                    allocate,
+                    project + "_backend" if project else self.provider_network,
+                    candidates,
+                    labels=labels,
+                    internal=True,
+                )
+            )
+
     def install(self):
         network = json.loads(docker("network", "inspect", "bridge"))[0]
         gateway = network["IPAM"]["Config"][0]["Gateway"]
         require(ipaddress.ip_address(gateway).is_private, "daemon-private-gateway")
         self.gateway = gateway
-        occupied = set()
-        for row in json.loads(
-            docker(
-                "network", "inspect", *docker("network", "ls", "-q").decode().split()
-            )
-        ):
-            for subnet in row.get("IPAM", {}).get("Config") or []:
-                if subnet.get("Subnet"):
-                    occupied.add(ipaddress.ip_network(subnet["Subnet"]))
-        networks = [
-            str(n)
-            for n in ipaddress.ip_network("10.243.0.0/16").subnets(new_prefix=24)
-            if not any(n.overlaps(v) for v in occupied)
-        ][:4]
-        require(len(networks) == 4, "isolated-networks")
-        self.subnets = networks
+        self.reserve_networks()
+        networks = self.subnets
         public_ca, public_cert, public_key = self.cert(
             "public", ["DNS:identity.example.test"]
         )
         pg_ca, pg_cert, pg_key = self.cert("postgres", ["DNS:postgres"])
         provider_address = str(ipaddress.ip_network(networks[3]).network_address + 3)
-        docker(
-            "network",
-            "create",
-            "--internal",
-            "--subnet",
-            networks[3],
-            "--label",
-            "rss.identity.t3=" + self.prefix,
-            self.provider_network,
-        )
         docker("network", "connect", self.provider_network, self.prefix + "-operator")
         kc_ca, kc_cert, kc_key = self.cert("keycloak", ["IP:" + provider_address])
         self.admin_password, admin_file = self.secret("admin-password")
@@ -1661,18 +1724,16 @@ class Run:
 
         context = ssl.create_default_context(cafile=str(self.work / "keycloak-ca.pem"))
         headers = {
-            "Content-Type": "application/x-www-form-urlencoded"
-            if form
-            else "application/json"
+            "Content-Type": (
+                "application/x-www-form-urlencoded" if form else "application/json"
+            )
         }
         if token:
             headers["Authorization"] = "Bearer " + token
         body = (
             urllib.parse.urlencode(data).encode()
             if form
-            else json.dumps(data).encode()
-            if data is not None
-            else None
+            else json.dumps(data).encode() if data is not None else None
         )
         request = urllib.request.Request(
             self.issuer.split("/realms")[0] + path,
@@ -1794,17 +1855,23 @@ class Run:
             kind = (
                 "unexpected-acceptance"
                 if result.returncode == 0
-                else "certificate"
-                if b"certificate" in error
-                else "resolve"
-                if b"resolve" in error or b"translate host" in error
-                else "authentication"
-                if b"authentication failed" in error
-                else "container"
-                if result.returncode == 125
-                else "connection"
-                if b"connect" in error
-                else "unknown"
+                else (
+                    "certificate"
+                    if b"certificate" in error
+                    else (
+                        "resolve"
+                        if b"resolve" in error or b"translate host" in error
+                        else (
+                            "authentication"
+                            if b"authentication failed" in error
+                            else (
+                                "container"
+                                if result.returncode == 125
+                                else "connection" if b"connect" in error else "unknown"
+                            )
+                        )
+                    )
+                )
             )
             raise ValueError(
                 "database-"
@@ -2093,9 +2160,11 @@ class Run:
         except BaseException as error:
             self.record["failure"] = failure_fact(
                 error,
-                self.record["steps"][-1]["name"]
-                if self.record["steps"]
-                else "preflight",
+                (
+                    self.record["steps"][-1]["name"]
+                    if self.record["steps"]
+                    else "preflight"
+                ),
             )
             # Diagnostic detail remains private, and must never contain a request/response dump.
             self.write("failure-type", type(error).__name__ + ": " + str(error)[:300])
@@ -2111,9 +2180,11 @@ class Run:
                     verify_record(
                         self.record,
                         self.config["subject"],
-                        self.config["baseline"].encode()
-                        if self.config.get("baseline")
-                        else None,
+                        (
+                            self.config["baseline"].encode()
+                            if self.config.get("baseline")
+                            else None
+                        ),
                     )
                 except ValueError:
                     self.record["failure"] = {
@@ -2183,9 +2254,11 @@ def outside(args):
         "fresh-absolute-record-required",
     )
     details, tool, subject, targets, baseline = candidate(args)
+    approval = verify_approval(targets, subject["pullRequest"]) if targets else None
     prefix = "identity-t3-" + secrets.token_hex(5)
     volume, operator = prefix + "-private", prefix + "-operator"
     report = new_record(subject, targets)
+    report["approval"] = approval
     save(args.record, report)
     try:
         docker("volume", "create", "--label", "rss.identity.t3=" + prefix, volume)
@@ -2241,6 +2314,7 @@ def outside(args):
             "prefix": prefix,
             "subject": subject,
             "targets": targets,
+            "approval": approval,
             "baseline": baseline.decode() if baseline else None,
             "images": {k: v["Id"] for k, v in details.items()},
         }
@@ -2285,7 +2359,8 @@ def outside(args):
         try:
             remaining = cleanup_operator(prefix, operator, volume)
         except BaseException as error:
-            report["failure"] = failure_fact(error, "cleanup")
+            if report["failure"] is None:
+                report["failure"] = failure_fact(error, "cleanup")
             remaining = ["operator-workspace"]
         report["cleanup"] = {
             "status": "failed" if remaining else "passed",
@@ -2296,6 +2371,12 @@ def outside(args):
         else:
             try:
                 verify_record(report, subject, baseline)
+                require(report["approval"] == approval, "returned-approval-mismatch")
+                if targets:
+                    require(
+                        verify_approval(targets, subject["pullRequest"]) == approval,
+                        "approval-changed",
+                    )
             except BaseException as error:
                 report["failure"] = failure_fact(error, "finalize")
                 report["result"] = "failed"

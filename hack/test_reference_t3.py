@@ -4,6 +4,78 @@ import reference_t3 as t3
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_networks_are_reserved_before_deployment_and_retry_only_overlap(self):
+        import subprocess
+        from unittest.mock import patch
+
+        run = object.__new__(t3.Run)
+        run.prefix = "identity-t3-test"
+        run.source, run.stale, run.restored = [
+            run.prefix + "-" + name for name in ["source", "stale", "restored"]
+        ]
+        run.provider_network = run.prefix + "-provider"
+        overlap = subprocess.CalledProcessError(
+            1,
+            "docker",
+            stderr=b"Error response from daemon: invalid pool request: Pool overlaps with other one on this address space\n",
+        )
+        with patch.object(
+            t3, "bounded_run", side_effect=[overlap, None, None, None, None]
+        ) as create:
+            run.reserve_networks()
+        self.assertEqual(run.subnets, [f"10.243.{n}.0/24" for n in range(1, 5)])
+        calls = [call.args[0] for call in create.call_args_list]
+        self.assertEqual(
+            [args[-1] for args in calls],
+            [run.source + "_backend"] * 2
+            + [run.stale + "_backend", run.restored + "_backend", run.provider_network],
+        )
+        for args in calls:
+            self.assertIn("--internal", args)
+            self.assertIn("rss.identity.t3=" + run.prefix, args)
+        for args, project in zip(calls[1:4], [run.source, run.stale, run.restored]):
+            self.assertIn("com.docker.compose.project=" + project, args)
+            self.assertIn("com.docker.compose.network=backend", args)
+
+    def test_binary_profile_is_read_from_the_fixed_image_and_rejects_drift(self):
+        import json
+        from unittest.mock import patch
+
+        profile = {
+            "formatVersion": 1,
+            "schemaVersion": 10,
+            **{
+                key: t3.POLICY[key] for key in ["session", "attempts", "kdfConcurrency"]
+            },
+        }
+        with patch.object(
+            t3, "docker", return_value=json.dumps(profile).encode()
+        ) as docker:
+            self.assertEqual(t3.binary_profile("sha256:fixed"), profile)
+        self.assertEqual(
+            docker.call_args.args,
+            (
+                "run",
+                "--rm",
+                "--pull=never",
+                "--network=none",
+                "--entrypoint",
+                "identity-server",
+                "sha256:fixed",
+                "--acceptance-profile",
+            ),
+        )
+        for key, value in [
+            ("session", {}),
+            ("kdfConcurrency", 8),
+            ("schemaVersion", True),
+            ("formatVersion", 2),
+        ]:
+            changed = {**profile, key: value}
+            with patch.object(t3, "docker", return_value=json.dumps(changed).encode()):
+                with self.assertRaises(ValueError):
+                    t3.binary_profile("sha256:fixed")
+
     def test_each_step_requires_nonempty_facts(self):
         original, subject = self.complete()
         for index in range(len(t3.STEPS)):
@@ -70,22 +142,6 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(cases), len(set(cases)))
         self.assertEqual(set(t3.STEPS), set(t3.TRUE_FACTS))
         self.assertTrue(all(hasattr(t3.Run, method) for _, method, _ in t3.SCENARIOS))
-        assembly = (t3.ROOT / "app/identity/src/assembly.rs").read_text()
-        self.assertIn(
-            f"SessionPolicy::new({t3.POLICY['session']['idleSeconds']}, {t3.POLICY['session']['absoluteSeconds']})",
-            assembly,
-        )
-        attempts = (t3.ROOT / "crates/identity-postgres/src/attempts.rs").read_text()
-        policy = t3.POLICY["attempts"]
-        self.assertIn(
-            f"{policy['sourceLimit']}_i32, {policy['sourceSeconds']}_i32", attempts
-        )
-        self.assertIn(
-            f"keys.push((scope, {policy['scopeLimit']}, {policy['scopeSeconds']}))",
-            attempts,
-        )
-        kdf = (t3.ROOT / "crates/identity-core/src/account.rs").read_text()
-        self.assertIn(f"Semaphore::new({t3.POLICY['kdfConcurrency']})", kdf)
 
     def test_approval_must_belong_to_bound_pull_request(self):
         targets, subject, raw = self.approved()
@@ -127,6 +183,15 @@ class EvidenceTests(unittest.TestCase):
         subject = {
             "identity": {"revision": "a" * 40, "id": "sha256:" + "1" * 64},
             "pullRequest": 1057,
+            "schema": {"version": 10},
+            "binaryProfile": {
+                "formatVersion": 1,
+                "schemaVersion": 10,
+                **{
+                    key: copy.deepcopy(t3.POLICY[key])
+                    for key in ["session", "attempts", "kdfConcurrency"]
+                },
+            },
             "runtimeProfile": t3.runtime_profile(t3.runtime_template()),
             "policy": copy.deepcopy(t3.POLICY),
             "workload": copy.deepcopy(t3.WORKLOAD),
@@ -405,11 +470,26 @@ class EvidenceTests(unittest.TestCase):
             "report-copy",
             "cleanup",
             "cleanup-failed",
+            "executing-cleanup",
             "success",
+            "approved",
+            "approval-revoked",
         ]:
             with self.subTest(when=when), tempfile.TemporaryDirectory() as temp:
                 report, subject = self.complete()
                 args = argparse.Namespace(record=Path(temp) / "result.json")
+                formal = when in ["approved", "approval-revoked"]
+                targets, baseline, receipt = None, None, None
+                if formal:
+                    targets, subject, baseline = self.approved()
+                    receipt = self.receipt()
+                    report.update(targets=targets, result="passed", approval=receipt)
+                cleaned = False
+
+                def approval(*_):
+                    if cleaned and when == "approval-revoked":
+                        raise ValueError("approval-invalid")
+                    return receipt
 
                 def docker(*words, **kwargs):
                     if words[:2] == ("volume", "inspect"):
@@ -423,10 +503,12 @@ class EvidenceTests(unittest.TestCase):
                     return b""
 
                 def cleanup(*_):
+                    nonlocal cleaned
+                    cleaned = True
                     self.assertEqual(
                         json.loads(args.record.read_text())["result"], "running"
                     )
-                    if when == "cleanup":
+                    if when in ["cleanup", "executing-cleanup"]:
                         raise SystemExit(143)
                     return ["owned-resource"] if when == "cleanup-failed" else []
 
@@ -438,8 +520,8 @@ class EvidenceTests(unittest.TestCase):
                             {"identity": {"Id": "image"}},
                             {"Id": "tools"},
                             subject,
-                            None,
-                            None,
+                            targets,
+                            baseline,
                         ),
                     ),
                     patch.object(t3, "docker", side_effect=docker),
@@ -447,15 +529,29 @@ class EvidenceTests(unittest.TestCase):
                     patch.object(
                         t3,
                         "bounded_run",
-                        side_effect=SystemExit(143) if when == "executing" else None,
+                        side_effect=(
+                            SystemExit(143)
+                            if when in ["executing", "executing-cleanup"]
+                            else None
+                        ),
                         return_value=argparse.Namespace(returncode=0),
                     ),
                     patch.object(t3, "cleanup_operator", side_effect=cleanup),
+                    patch.object(t3, "verify_approval", side_effect=approval) as verify,
                 ):
-                    self.assertEqual(t3.outside(args), when == "success")
+                    self.assertEqual(t3.outside(args), when in ["success", "approved"])
+                    self.assertEqual(verify.call_count, 2 if formal else 0)
                 final = json.loads(args.record.read_text())
+                if when == "executing-cleanup":
+                    self.assertEqual(final["failure"]["stage"], "operator")
+                    self.assertEqual(final["cleanup"]["status"], "failed")
                 self.assertEqual(
-                    final["result"], "measured" if when == "success" else "failed"
+                    final["result"],
+                    (
+                        "passed"
+                        if when == "approved"
+                        else "measured" if when == "success" else "failed"
+                    ),
                 )
 
     def test_process_diagnostics_keep_closed_action_and_exit_code_only(self):
@@ -556,12 +652,22 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(sanitized["failure"]["reason"], "secret-in-evidence")
             self.assertEqual(sanitized["steps"], [])
 
+    def receipt(self):
+        return {
+            "pullRequest": 1057,
+            "threadId": 123,
+            "commentId": 1,
+            "authorId": "owner",
+            "contentSha256": "a" * 64,
+            "humanApproval": {"requestId": "fixture-request", "source": "codex"},
+        }
+
     def test_high_concurrency_regression_cannot_be_averaged_away(self):
         import json
 
         targets, subject, raw = self.approved()
         record = json.loads(raw)
-        record.update(targets=targets, result="passed")
+        record.update(targets=targets, result="passed", approval=self.receipt())
         t3.verify_record(record, subject, raw)
         record["measurements"]["session16P95Ms"] = 2
         record["steps"][-1]["observations"]["profiles"][-1].update(p95Ms=2, maxMs=2)

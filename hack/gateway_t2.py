@@ -15,7 +15,8 @@ from unittest.mock import patch
 
 import deploy
 from providers import IMAGES, container, docker, wait
-from test_deployment import fixture
+from deployment_fixture import fixture
+from docker_network import create_network
 
 
 def verify_rows(rows, source):
@@ -45,23 +46,11 @@ def verify_rows(rows, source):
 
 
 def gateway():
-    # Select an unused private /24 without relying on daemon allocation order.
-    names = docker("network", "ls", "-q").splitlines()
-    networks = json.loads(docker("network", "inspect", *names)) if names else []
-    used = [
-        ipaddress.ip_network(item["Subnet"])
-        for network in networks
-        for item in network.get("IPAM", {}).get("Config") or []
-        if item.get("Subnet")
-    ]
-    subnet = next(
-        n
-        for n in (ipaddress.ip_network(f"10.242.{i}.0/24") for i in range(256))
-        if not any(n.overlaps(u) for u in used)
-    )
     name = "identity-gateway-t2-" + uuid.uuid4().hex
     try:
-        docker("network", "create", "--subnet", str(subnet), name)
+        subnet = ipaddress.ip_network(
+            create_network(docker, name, (f"10.242.{i}.0/24" for i in range(256)))
+        )
         with fixture() as (root, data, images), contextlib.ExitStack() as stack:
             source, backend = str(subnet[2]), str(subnet[3])
             data["backendSubnet"] = str(subnet)
