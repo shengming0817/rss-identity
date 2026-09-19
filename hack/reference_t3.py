@@ -5,7 +5,7 @@ import argparse, copy, hashlib, io, ipaddress, json, math, os, re, secrets, sign
 import subprocess, sys, tarfile, tempfile, time, tomllib
 from urllib.parse import urlsplit
 from pathlib import Path
-import deploy, operate, providers
+import deploy, operate
 from bounded_process import run as bounded_run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -380,7 +380,6 @@ def candidate(args):
         "tools": image_identity(tool),
         "resources": {
             "daemonId": info["ID"],
-            "providerBindAddress": providers.private_host(),
             "serverVersion": info["ServerVersion"],
             "os": info["OSType"],
             "architecture": info["Architecture"],
@@ -443,6 +442,7 @@ class Run:
         self.browser_private = self.work / "browser-private.json"
         self.images = config["images"]
         self.keycloak = self.prefix + "-keycloak"
+        self.provider_network = self.prefix + "-provider"
         self.ca_files = []
 
     def write(self, name, value):
@@ -513,6 +513,19 @@ class Run:
         )
         if reject:
             require(status["status"] != "passed", "expected-operation-rejection")
+        if command == "open" and not reject:
+            container = (
+                self.compose(
+                    "ps", "--quiet", "identity", project=project, directory=directory
+                )
+                .decode()
+                .strip()
+            )
+            attached = json.loads(docker("inspect", container))[0]["NetworkSettings"][
+                "Networks"
+            ]
+            if self.provider_network not in attached:
+                docker("network", "connect", self.provider_network, container)
         return status
 
     def sql(self, query, project=None):
@@ -726,14 +739,25 @@ class Run:
             str(n)
             for n in ipaddress.ip_network("10.243.0.0/16").subnets(new_prefix=24)
             if not any(n.overlaps(v) for v in occupied)
-        ][:3]
-        require(len(networks) == 3, "isolated-networks")
+        ][:4]
+        require(len(networks) == 4, "isolated-networks")
         self.subnets = networks
         public_ca, public_cert, public_key = self.cert(
             "public", ["DNS:identity.example.test"]
         )
         pg_ca, pg_cert, pg_key = self.cert("postgres", ["DNS:postgres"])
-        provider_address = self.config["subject"]["resources"]["providerBindAddress"]
+        provider_address = str(ipaddress.ip_network(networks[3]).network_address + 3)
+        docker(
+            "network",
+            "create",
+            "--internal",
+            "--subnet",
+            networks[3],
+            "--label",
+            "rss.identity.t3=" + self.prefix,
+            self.provider_network,
+        )
+        docker("network", "connect", self.provider_network, self.prefix + "-operator")
         kc_ca, kc_cert, kc_key = self.cert("keycloak", ["IP:" + provider_address])
         self.admin_password, admin_file = self.secret("admin-password")
         self.user_password, _ = self.secret("user-password")
@@ -742,7 +766,7 @@ class Run:
         self.idp_password, _ = self.secret("idp-password")
         self.otp_secret, _ = self.secret("otp-secret", 20)
         self.kc_admin, self.kc_admin_file = self.secret("keycloak-admin-password")
-        port = secrets.randbelow(20000) + 24000
+        port = 8443
         self.issuer = f"https://{provider_address}:{port}/realms/identity"
         realm = {
             "realm": "identity",
@@ -817,8 +841,10 @@ class Run:
             "1000:1000",
             "--env-file",
             kc_env,
-            "-p",
-            f"{provider_address}:{port}:8443",
+            "--network",
+            self.provider_network,
+            "--ip",
+            provider_address,
             "--mount",
             f"type=bind,source={realm_file},target=/opt/keycloak/data/import/realm.json,readonly",
             "--mount",
