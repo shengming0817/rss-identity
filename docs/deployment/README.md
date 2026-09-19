@@ -11,4 +11,4 @@
 
 网关通过具名 upstream 复用 Identity HTTP/1.1 连接，每个 worker 最多缓存 32 条空闲连接（不是活动连接或请求数上限）。固定 ingress 源地址、逐请求来源头清理和禁止自动重试仍生效；连接缓存不缓存身份或会话结果。修改渲染器后重新渲染并部署网关。`make test-gateway` 用 providers.lock 固定的真实 Nginx 验证连接复用与请求头隔离，属于正常 `make ci` 的组件 T2。
 
-机制参考：[NGINX keepalive 源码](https://github.com/nginx/nginx/blob/release-1.30.1/src/http/modules/ngx_http_upstream_keepalive_module.c)；隐式 upstream 不建立连接缓存。未复制上游代码。
+机制参考：[NGINX keepalive 源码](https://github.com/nginx/nginx/blob/release-1.30.4/src/http/modules/ngx_http_upstream_keepalive_module.c)；隐式 upstream 不建立连接缓存。未复制上游代码。
