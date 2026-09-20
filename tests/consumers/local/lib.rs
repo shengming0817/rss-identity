@@ -63,7 +63,9 @@ mod tests {
         assert_eq!(actor.account(), host.key);
         assert!(matches!(
             actor.department_snapshot()?,
-            VerifiedDepartmentSnapshot::Unavailable(rss_identity_core::department::DepartmentUnavailableReason::LocalIdentity)
+            VerifiedDepartmentSnapshot::Unavailable(
+                rss_identity_core::department::DepartmentUnavailableReason::LocalIdentity
+            )
         ));
         assert!(matches!(
             actor.groups()?,

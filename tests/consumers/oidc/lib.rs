@@ -44,10 +44,12 @@ mod tests {
             redirect_uri: callback.into(),
             scopes: vec!["openid".into(), "profile".into(), "email".into()],
             claims: ClaimMapping {
-                department_snapshot: Some(rss_identity_core::department::DepartmentSnapshotClaim::new(
-                    "organization_snapshot".into(),
-                    5,
-                )?),
+                department_snapshot: Some(
+                    rss_identity_core::department::DepartmentSnapshotClaim::new(
+                        "organization_snapshot".into(),
+                        5,
+                    )?,
+                ),
                 email: Some("email".into()),
                 groups: Some("groups".into()),
             },
@@ -181,7 +183,10 @@ mod tests {
             department.snapshot(),
             Err(DepartmentAccessError::SnapshotExpired)
         );
-        assert!(matches!(actor.department_snapshot()?, VerifiedDepartmentSnapshot::Expired));
+        assert!(matches!(
+            actor.department_snapshot()?,
+            VerifiedDepartmentSnapshot::Expired
+        ));
         assert!(actor.assurance().is_ok());
         federation
             .enable_provider(
