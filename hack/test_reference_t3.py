@@ -105,7 +105,7 @@ class EvidenceTests(unittest.TestCase):
 
         profile = {
             "formatVersion": 1,
-            "schemaVersion": 10,
+            "schemaVersion": 11,
             **{
                 key: t3.POLICY[key]
                 for key in ["session", "attempts", "kdfConcurrency", "mfaMaxAgeSeconds"]
@@ -150,7 +150,7 @@ class EvidenceTests(unittest.TestCase):
         from unittest.mock import patch
 
         value = {
-            "schema_version": 10,
+            "schema_version": 11,
             "schema_contract": "a" * 64,
             "identity_sql_sha256": "b" * 64,
             "rss_sql_sha256": "c" * 64,
@@ -160,7 +160,7 @@ class EvidenceTests(unittest.TestCase):
         ) as docker:
             actual = t3.migration_profile(
                 "sha256:fixed",
-                {"schemaVersion": 10},
+                {"schemaVersion": 11},
                 "a" * 64,
                 "b" * 64,
                 "owned-prefix",
@@ -184,7 +184,7 @@ class EvidenceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     t3.migration_profile(
                         "sha256:fixed",
-                        {"schemaVersion": 10},
+                        {"schemaVersion": 11},
                         "a" * 64,
                         "b" * 64,
                         "owned-prefix",
@@ -297,16 +297,16 @@ class EvidenceTests(unittest.TestCase):
         subject = {
             "identity": {"revision": "a" * 40, "id": "sha256:" + "1" * 64},
             "pullRequest": 1057,
-            "schema": {"version": 10, "signature": "a" * 64},
+            "schema": {"version": 11, "signature": "a" * 64},
             "migrationProfile": {
-                "schema_version": 10,
+                "schema_version": 11,
                 "schema_contract": "a" * 64,
                 "identity_sql_sha256": "b" * 64,
                 "rss_sql_sha256": "c" * 64,
             },
             "binaryProfile": {
                 "formatVersion": 1,
-                "schemaVersion": 10,
+                "schemaVersion": 11,
                 **{
                     key: copy.deepcopy(t3.POLICY[key])
                     for key in [

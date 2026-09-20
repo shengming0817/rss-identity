@@ -349,7 +349,7 @@ impl Federation {
                             Some(db::Origin {
                                 identity: identity_id,
                                 epoch: view.revocation_epoch,
-                                facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, view.settings.claims().department.as_ref(), now)?,
+                                facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, view.settings.claims().department_snapshot.as_ref(), now)?,
                             }),
                             attempt.replacement,
                         )

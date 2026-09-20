@@ -19,7 +19,7 @@ fn profile_is_available_offline_from_the_actual_binary() {
     assert_eq!(
         value,
         serde_json::json!({
-            "formatVersion": 1, "schemaVersion": 10,
+            "formatVersion": 1, "schemaVersion": 11,
             "session": {"idleSeconds": 900, "absoluteSeconds": 14400},
             "attempts": {"sourceLimit": 30, "sourceSeconds": 300, "scopeLimit": 5, "scopeSeconds": 900},
             "kdfConcurrency": 4, "mfaMaxAgeSeconds": 300

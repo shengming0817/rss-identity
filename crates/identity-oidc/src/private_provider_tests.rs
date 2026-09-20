@@ -48,7 +48,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
         claims: ClaimMapping {
             email: None,
             groups: None,
-            department: None,
+            department_snapshot: None,
         },
         jit: false,
     }

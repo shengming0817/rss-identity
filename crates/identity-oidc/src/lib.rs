@@ -576,10 +576,10 @@ impl UpstreamOidc for HttpOidc {
                 email_verified: c.claims().email.as_deref() == Some("email")
                     && claims.email_verified() == Some(true),
                 groups,
-                department: mapped_department(
-                    c.claims().department.as_ref().map(|d| d.claim()),
+                department_snapshot: mapped_department(
+                    c.claims().department_snapshot.as_ref().map(|d| d.claim()),
                     &all,
-                )?,
+                ),
                 issued_at: claims.issue_time().timestamp(),
                 expires_at: claims.expiration().timestamp(),
                 assurance: assurance::normalize(
@@ -652,17 +652,16 @@ fn mapped_groups(
 fn mapped_department(
     claim: Option<&str>,
     claims: &serde_json::Value,
-) -> Result<rss_identity_core::department::UpstreamDepartment, FederationError> {
-    use rss_identity_core::department::{DepartmentId, UpstreamDepartment};
+) -> rss_identity_core::department::UpstreamDepartmentSnapshot {
+    use rss_identity_core::department::{DepartmentSnapshot, UpstreamDepartmentSnapshot};
     match claim {
-        None => Ok(UpstreamDepartment::NotConfigured),
+        None => UpstreamDepartmentSnapshot::NotConfigured,
         Some(key) => match claims.get(key) {
-            None => Ok(UpstreamDepartment::Missing),
-            Some(serde_json::Value::Null) => Ok(UpstreamDepartment::NoDepartment),
-            Some(serde_json::Value::String(value)) => Ok(UpstreamDepartment::Present(
-                DepartmentId::new(value.clone())?,
-            )),
-            _ => Err(FederationError::Claims),
+            None => UpstreamDepartmentSnapshot::Missing,
+            Some(value) => match serde_json::from_value::<DepartmentSnapshot>(value.clone()) {
+                Ok(snapshot) => UpstreamDepartmentSnapshot::Present(snapshot),
+                Err(_) => UpstreamDepartmentSnapshot::Invalid,
+            },
         },
     }
 }

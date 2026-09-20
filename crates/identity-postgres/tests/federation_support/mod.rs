@@ -23,7 +23,7 @@ pub struct ScriptedOidc {
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
     pub groups: Mutex<Vec<String>>,
-    pub department: Mutex<rss_identity_core::department::UpstreamDepartment>,
+    pub department_snapshot: Mutex<rss_identity_core::department::UpstreamDepartmentSnapshot>,
     pub issued_at_offset: AtomicI64,
     pub gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     pub arrivals: AtomicUsize,
@@ -39,9 +39,11 @@ impl ScriptedOidc {
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
             groups: Mutex::new(vec!["staff".into()]),
-            department: Mutex::new(rss_identity_core::department::UpstreamDepartment::Present(
-                rss_identity_core::department::DepartmentId::new("dept-01".into()).unwrap(),
-            )),
+            department_snapshot: Mutex::new(
+                rss_identity_core::department::UpstreamDepartmentSnapshot::Present(
+                    department_snapshot(Some("dept-01")),
+                ),
+            ),
             issued_at_offset: AtomicI64::new(0),
             gate: Mutex::new(None),
             arrivals: AtomicUsize::new(0),
@@ -103,10 +105,10 @@ impl UpstreamOidc for ScriptedOidc {
                 return Err(FederationError::Unavailable);
             }
             Ok(UpstreamClaims {
-                department: if c.claims().department.is_some() {
-                    self.department.lock().unwrap().clone()
+                department_snapshot: if c.claims().department_snapshot.is_some() {
+                    self.department_snapshot.lock().unwrap().clone()
                 } else {
-                    rss_identity_core::department::UpstreamDepartment::NotConfigured
+                    rss_identity_core::department::UpstreamDepartmentSnapshot::NotConfigured
                 },
                 issuer: c.issuer().as_str().to_owned(),
                 subject: code.to_string(),
@@ -193,7 +195,7 @@ pub fn settings() -> ProviderSettings {
         redirect_uri: "https://identity.example.test/api/v2/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
-            department: None,
+            department_snapshot: None,
             email: Some("email".into()),
             groups: Some("groups".into()),
         },
@@ -215,10 +217,11 @@ pub async fn enabled_department(
     max_age: i64,
 ) -> anyhow::Result<ProviderView> {
     let mut input = settings().input();
-    input.claims.department = Some(rss_identity_core::department::DepartmentClaim::new(
-        "department_id".into(),
-        max_age,
-    )?);
+    input.claims.department_snapshot =
+        Some(rss_identity_core::department::DepartmentSnapshotClaim::new(
+            "organization_snapshot".into(),
+            max_age,
+        )?);
     enabled_settings(f, s, input.try_into()?).await
 }
 async fn enabled_settings(
@@ -297,4 +300,22 @@ pub async fn session(f: &Fixture) -> anyhow::Result<IssuedSession> {
 }
 pub fn secret(s: &IssuedSession) -> rss_identity_core::session::SessionSecret {
     rss_identity_core::session::SessionSecret::parse(s.secret().expose().into()).unwrap()
+}
+
+/// Small complete organization assertion used by the trusted scripted adapter.
+pub fn department_snapshot(
+    member: Option<&str>,
+) -> rss_identity_core::department::DepartmentSnapshot {
+    use rss_identity_core::department::{DepartmentId, DepartmentNode, DepartmentSnapshot};
+    let root = DepartmentId::new("root".into()).unwrap();
+    let id = DepartmentId::new(member.unwrap_or("dept-01").into()).unwrap();
+    DepartmentSnapshot::new(
+        "fixture-r1".into(),
+        vec![
+            DepartmentNode::new(root.clone(), "Company".into(), None).unwrap(),
+            DepartmentNode::new(id.clone(), "Department".into(), Some(root)).unwrap(),
+        ],
+        member.map(|_| id).into_iter().collect(),
+    )
+    .unwrap()
 }

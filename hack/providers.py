@@ -112,7 +112,7 @@ def report_tests(package, test, expected, result):
             print(f'{package}/{test}: {name}: {status}')
     print(f'{package}/{test}: cargo exit={result.returncode}; raw output withheld')
 
-SUITES = {('rss-identity-oidc', 'private_provider_tests'): {'real_private_provider_transport'}, ('rss-identity-app', 'ui_host'): {'ui_host_public_components'}, ('rss-identity-http-axum', 'management_http'): {'management_rejects_password_for_federated_only_account', 'callback_cancellation_consumes_only_bound_attempts', 'management_rechecks_inflight_provider_authority', 'provider_capacity_is_atomic_and_keeps_management_available', 'management_accounts_sessions_and_boundaries', 'management_provider_operations_safe_and_scoped'}, ('rss-identity-http-axum', 'federated_http'): {'real_department_claim_rejection_preserves_host_diagnostic', 'group_lifecycle::real_group_snapshot_lifecycle', 'federated_http_rejects_mismatch_and_uncertain_commit', 'real_provider_management_and_encrypted_credentials', 'real_federated_login_and_linking', 'real_upstream_client_secret_rotation', 'real_step_up_rotates_only_the_bound_session', 'federated_tls_and_self_service_policy'}, ('rss-identity-postgres', 'federated_atomic'): {'tenant_reencryption_is_atomic_scoped_and_authenticates_every_value', 'session_security_is_subject_bound_and_revocable', 'federation_jit_isolated_subjects_and_membership', 'federation_atomic_events_and_unknown_commit', 'federation_link_conflict_logout_and_wrong_reauthentication', 'federation_assurance_change_revokes_attempts_and_sessions', 'federation_signed_time_skew_preserves_identity', 'federation_state_restart_expiry_and_replay', 'federation_config_races_and_provider_revocation', 'federation_group_snapshot_storage_bounds', 'federation_concurrent_linking_keeps_one_owner', 'federation_concurrent_jit_rls_and_schema_drift', 'federation_configuration_authorization_and_versions', 'federation_step_up_binding_and_settlement', 'federation_local_and_federated_linking', 'federation_step_up_unknown_commit_and_event_rollback'}, ('rss-identity-postgres', 'atomic'): {'maintenance_races_preserve_current_state', 'maintenance_permissions_and_schema_are_exact', 'attempts_are_shared_and_bounded', 'account_transition_matrix_and_events', 'maintenance_runbook_respects_forced_rls', 'storage_contract_is_checked', 'settlement_never_releases_uncertain_success', 'initialization_and_recovery', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_races_and_isolation', 'source_budgets_are_shared'}, ('rss-identity-postgres', 'session_atomic'): {'session_isolation_replacement_and_restart', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations', 'session_settlement_and_event_failure_are_atomic', 'session_rotation_and_revocation', 'session_account_changes_fence_racing_credentials'}, ('rss-identity-http-axum', 'session_http'): {'public_host_requests_enforce_activity_and_revocation', 'session_http_login_cookie_csrf_and_replacement', 'session_http_recovery_current_logout_and_deadline', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_pending_commit_preserves_settlement', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_v2_reauthentication_is_bound_and_has_no_legacy_role_surface'}, ('rss-identity-app', 'operator'): {'maintenance_file_and_settlement'}, ('rss-identity-oidc', 'provider'): {'real_provider_flows'}, ('rss-identity-postgres', 'embedded'): {'department_lifecycle::department_values_absence_expiry_refresh_and_management', 'department_lifecycle::department_configuration_revokes_sessions_and_pending_attempts', 'department_lifecycle::department_source_is_instance_tenant_principal_and_provider_bound', 'department_lifecycle::department_subject_and_provider_revocations_are_current', 'refresh_rejects_expiry_during_writes_without_rotating_or_emitting', 'group_deadline_includes_session_touch_latency', 'own_password_change_requires_current_host_policy', 'construction_verifies_every_declared_tenant_fence', 'trusted_groups_expire_without_extending_identity_or_snapshot', 'host_role_names_and_session_policy_survive_composition', 'local_facade_reauthenticates_and_host_policy_is_current', 'instances_tenants_and_borrowed_pool_are_separate'}, ('rss-identity-app', 'installation'): {'installation_and_reference_host_seams_are_verified'}}
+SUITES = {('rss-identity-oidc', 'private_provider_tests'): {'real_private_provider_transport'}, ('rss-identity-app', 'ui_host'): {'ui_host_public_components'}, ('rss-identity-http-axum', 'management_http'): {'management_rejects_password_for_federated_only_account', 'callback_cancellation_consumes_only_bound_attempts', 'management_rechecks_inflight_provider_authority', 'provider_capacity_is_atomic_and_keeps_management_available', 'management_accounts_sessions_and_boundaries', 'management_provider_operations_safe_and_scoped'}, ('rss-identity-http-axum', 'federated_http'): {'real_invalid_department_preserves_authenticated_identity', 'department_lifecycle::administrator_snapshot_moves_members_and_keeps_old_observations', 'group_lifecycle::real_group_snapshot_lifecycle', 'federated_http_rejects_mismatch_and_uncertain_commit', 'real_provider_management_and_encrypted_credentials', 'real_federated_login_and_linking', 'real_upstream_client_secret_rotation', 'real_step_up_rotates_only_the_bound_session', 'federated_tls_and_self_service_policy'}, ('rss-identity-postgres', 'federated_atomic'): {'tenant_reencryption_is_atomic_scoped_and_authenticates_every_value', 'session_security_is_subject_bound_and_revocable', 'federation_jit_isolated_subjects_and_membership', 'federation_atomic_events_and_unknown_commit', 'federation_link_conflict_logout_and_wrong_reauthentication', 'federation_assurance_change_revokes_attempts_and_sessions', 'federation_signed_time_skew_preserves_identity', 'federation_state_restart_expiry_and_replay', 'federation_config_races_and_provider_revocation', 'federation_group_snapshot_storage_bounds', 'federation_concurrent_linking_keeps_one_owner', 'federation_concurrent_jit_rls_and_schema_drift', 'federation_configuration_authorization_and_versions', 'federation_step_up_binding_and_settlement', 'federation_local_and_federated_linking', 'federation_step_up_unknown_commit_and_event_rollback'}, ('rss-identity-postgres', 'atomic'): {'maintenance_races_preserve_current_state', 'maintenance_permissions_and_schema_are_exact', 'attempts_are_shared_and_bounded', 'account_transition_matrix_and_events', 'maintenance_runbook_respects_forced_rls', 'storage_contract_is_checked', 'settlement_never_releases_uncertain_success', 'initialization_and_recovery', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_races_and_isolation', 'source_budgets_are_shared'}, ('rss-identity-postgres', 'session_atomic'): {'session_isolation_replacement_and_restart', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations', 'session_settlement_and_event_failure_are_atomic', 'session_rotation_and_revocation', 'session_account_changes_fence_racing_credentials'}, ('rss-identity-http-axum', 'session_http'): {'public_host_requests_enforce_activity_and_revocation', 'session_http_login_cookie_csrf_and_replacement', 'session_http_recovery_current_logout_and_deadline', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_pending_commit_preserves_settlement', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_v2_reauthentication_is_bound_and_has_no_legacy_role_surface'}, ('rss-identity-app', 'operator'): {'maintenance_file_and_settlement'}, ('rss-identity-oidc', 'provider'): {'real_provider_flows'}, ('rss-identity-postgres', 'embedded'): {'department_lifecycle::department_values_absence_expiry_refresh_and_management', 'department_lifecycle::oversized_assertions_withhold_departments_but_corrupt_storage_rejects_identity', 'department_lifecycle::department_configuration_revokes_sessions_and_pending_attempts', 'department_lifecycle::department_source_is_instance_tenant_principal_and_provider_bound', 'department_lifecycle::department_subject_and_provider_revocations_are_current', 'refresh_rejects_expiry_during_writes_without_rotating_or_emitting', 'group_deadline_includes_session_touch_latency', 'own_password_change_requires_current_host_policy', 'construction_verifies_every_declared_tenant_fence', 'trusted_groups_expire_without_extending_identity_or_snapshot', 'host_role_names_and_session_policy_survive_composition', 'local_facade_reauthenticates_and_host_policy_is_current', 'instances_tenants_and_borrowed_pool_are_separate'}, ('rss-identity-app', 'installation'): {'installation_and_reference_host_seams_are_verified'}}
 
 def cargo(package, test, env, features=()):
     expected = SUITES[(package,test)]
@@ -166,8 +166,52 @@ def free_port(host="127.0.0.1"):
         sock.bind((host, 0))
         return sock.getsockname()[1]
 
-DEPARTMENT_MAPPER = {"name":"department", "protocol":"openid-connect", "protocolMapper":"oidc-usermodel-attribute-mapper",
-    "config":{"user.attribute":"department_id", "claim.name":"department_id", "jsonType.label":"String", "multivalued":"false", "id.token.claim":"true", "access.token.claim":"false", "userinfo.token.claim":"false"}}
+DEPARTMENT_ASSERTION = {"version":1,"sourceRevision":"fixture-r1","nodes":[
+    {"id":"root","displayName":"Company","parentId":None},
+    {"id":"dept-01","displayName":"Engineering","parentId":"root"},
+    {"id":"dept-02","displayName":"Sales","parentId":"root"}],"memberships":["dept-01"]}
+DEPARTMENT_MAPPER = {"name":"organization-snapshot", "protocol":"openid-connect", "protocolMapper":"oidc-usermodel-attribute-mapper",
+    "config":{"user.attribute":"organization_snapshot", "claim.name":"organization_snapshot", "jsonType.label":"JSON", "multivalued":"false", "aggregate.attrs":"false", "id.token.claim":"true", "access.token.claim":"false", "userinfo.token.claim":"false"}}
+
+def configure_department_profile(issuer, context=None):
+    """Only realm administrators can edit the single JSON assertion; built-in mapper only.
+    ref: Keycloak 26.7.3 UserAttributeMapper.java / DeclarativeUserProfileProvider.java.
+    """
+    origin = issuer.removesuffix('/realms/identity')
+    credentials = urllib.parse.urlencode({'client_id':'admin-cli','grant_type':'password',
+        'username':'fixture-operator','password':'fixture-operator-password'}).encode()
+    request=urllib.request.Request(origin+'/realms/master/protocol/openid-connect/token',data=credentials)
+    with urllib.request.urlopen(request,context=context,timeout=10) as response: token=json.load(response)['access_token']
+    def admin(method, path, value=None):
+        request=urllib.request.Request(origin+'/admin/realms/identity'+path,method=method,
+            data=json.dumps(value).encode() if value is not None else None,
+            headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+        with urllib.request.urlopen(request,context=context,timeout=10) as response:
+            raw=response.read(); return json.loads(raw) if raw else None
+    profile=admin('GET','/users/profile')
+    profile['attributes']=[a for a in profile['attributes'] if a['name']!='organization_snapshot']
+    profile['attributes'].append({'name':'organization_snapshot','displayName':'Organization snapshot',
+        'multivalued':False,'permissions':{'view':['admin'],'edit':['admin']},
+        'validations':{'length':{'max':32768}}})
+    admin('PUT','/users/profile',profile)
+    installed=admin('GET','/users/profile')
+    attribute=next(a for a in installed['attributes'] if a['name']=='organization_snapshot')
+    if attribute['permissions']!={'view':['admin'],'edit':['admin']}: raise RuntimeError('department attribute is not administrator-only')
+    user=admin('GET','/users?username=alice&exact=true')[0]
+    user.setdefault('attributes',{})['organization_snapshot']=[json.dumps(DEPARTMENT_ASSERTION)]
+    admin('PUT','/users/'+user['id'],user)
+    if admin('GET','/users/'+user['id'])['attributes']['organization_snapshot']!=[json.dumps(DEPARTMENT_ASSERTION)]:
+        raise RuntimeError('department assertion read-back failed')
+    # Disposable ordinary-user Account API probe, separate from the product OIDC client.
+    admin('POST','/clients',{'clientId':'department-profile-test','publicClient':True,
+        'standardFlowEnabled':False,'directAccessGrantsEnabled':True,'fullScopeAllowed':True,
+        'defaultClientScopes':['roles','profile','email'],
+        'protocolMappers':[{'name':'account-audience','protocol':'openid-connect','protocolMapper':'oidc-audience-mapper',
+            'config':{'included.client.audience':'account','id.token.claim':'false','access.token.claim':'true'}}]})
+    account=admin('GET','/clients?clientId=account')[0]
+    roles=admin('GET','/clients/'+account['id']+'/roles')
+    admin('POST','/users/'+user['id']+'/role-mappings/clients/'+account['id'],
+        [role for role in roles if role['name'] in {'manage-account','view-profile'}])
 
 def oidc():
     realm = {"realm": "identity", "enabled": True, "sslRequired": "none",
@@ -176,14 +220,15 @@ def oidc():
                           "redirectUris": ["http://127.0.0.1:19999/auth/callback"],
                           "attributes": {"pkce.code.challenge.method": "S256"}, "protocolMappers":[DEPARTMENT_MAPPER]}],
              "users": [{"username": "alice", "enabled": True, "email": "alice@example.test", "emailVerified": True,
-                        "firstName": "Alice", "lastName": "Fixture", "attributes":{"department_id":["dept-01"]},
+                        "firstName": "Alice", "lastName": "Fixture", "attributes":{},
                         "credentials": [{"type": "password", "value": "fixture-password", "temporary": False}]}]}
     with tempfile.TemporaryDirectory(prefix="identity-oidc-") as tmp, contextlib.ExitStack() as stack:
         realm_file = Path(tmp) / "identity-realm.json"
         realm_file.write_text(json.dumps(realm))
-        _, kc_ports = stack.enter_context(container(KEYCLOAK, [8080], args=["start-dev", "--import-realm"], mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro"]))
+        _, kc_ports = stack.enter_context(container(KEYCLOAK, [8080], env=[("KC_BOOTSTRAP_ADMIN_USERNAME","fixture-operator"),("KC_BOOTSTRAP_ADMIN_PASSWORD","fixture-operator-password")], args=["start-dev", "--import-realm"], mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro"]))
         kc = f"http://127.0.0.1:{kc_ports[8080]}/realms/identity"
         wait(kc + "/.well-known/openid-configuration")
+        configure_department_profile(kc)
         cargo("rss-identity-oidc", "provider", {"IDENTITY_TEST_KEYCLOAK_ISSUER": kc}, ["--features", "test-support"])
 
     private_oidc()
@@ -209,7 +254,7 @@ def keycloak(redirect_uri="https://identity.example.test/api/v2/oidc/callback", 
                          "config":{"claim.name":"groups","full.path":"true","id.token.claim":"true","access.token.claim":"false"}}, DEPARTMENT_MAPPER]}],
              "users":[{"username":name,"enabled":True,"email":"same@example.test","emailVerified":True,
                        "firstName":name,"lastName":"Fixture","groups":["staff"],
-                       "attributes":{"department_id":["dept-01"]} if name == "alice" else {},
+                       "attributes":{} if name == "alice" else {},
                        "credentials":[{"type":"password","value":"fixture-password","temporary":False}]} for name in ["alice","bob"]]}
     configure_totp(realm)
     with tempfile.TemporaryDirectory(prefix="identity-federated-") as tmp, contextlib.ExitStack() as stack:
@@ -229,6 +274,9 @@ def keycloak(redirect_uri="https://identity.example.test/api/v2/oidc/callback", 
                     if response.status==200:break
             except (OSError,urllib.error.URLError):time.sleep(.5)
         else:raise RuntimeError("Keycloak TLS readiness timed out")
+        # The private-provider fixture advertises an intentionally unresolvable issuer.
+        # Provision through the owned, certificate-verified listener used for readiness.
+        configure_department_profile(f"https://{host}:{port}/realms/identity", context)
         yield {"IDENTITY_TEST_FEDERATED_ISSUER":issuer,"IDENTITY_TEST_FEDERATED_CA":str(cert),"IDENTITY_TEST_KEYCLOAK_CONTAINER":kc_id}
 
 def private_host():

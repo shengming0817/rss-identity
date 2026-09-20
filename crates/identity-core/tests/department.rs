@@ -1,4 +1,4 @@
-use rss_identity_core::department::{DepartmentClaim, DepartmentId};
+use rss_identity_core::department::{DepartmentId, DepartmentSnapshotClaim};
 use rss_identity_core::federation::{ClaimMapping, ProviderSettings, ProviderSettingsInput};
 use serde_json::json;
 
@@ -26,8 +26,9 @@ fn department_ids_are_exact_bounded_and_never_display_name_normalized() {
 #[test]
 fn department_mapping_is_complete_validated_and_has_no_default_age() {
     for seconds in [1, 300] {
-        let mapping = DepartmentClaim::new("department_id".into(), seconds).unwrap();
-        assert_eq!(mapping.claim(), "department_id");
+        let mapping =
+            DepartmentSnapshotClaim::new("organization_snapshot".into(), seconds).unwrap();
+        assert_eq!(mapping.claim(), "organization_snapshot");
         assert_eq!(mapping.max_age_seconds(), seconds);
         assert_eq!(
             mapping.expires_at(1000, 2000, 1000).unwrap(),
@@ -35,7 +36,7 @@ fn department_mapping_is_complete_validated_and_has_no_default_age() {
         );
     }
     for seconds in [0, 301, i64::MAX] {
-        assert!(DepartmentClaim::new("department_id".into(), seconds).is_err());
+        assert!(DepartmentSnapshotClaim::new("organization_snapshot".into(), seconds).is_err());
     }
     for claim in [
         "",
@@ -48,19 +49,19 @@ fn department_mapping_is_complete_validated_and_has_no_default_age() {
         "preferred_username",
         "phone_number",
     ] {
-        assert!(DepartmentClaim::new(claim.into(), 60).is_err());
+        assert!(DepartmentSnapshotClaim::new(claim.into(), 60).is_err());
     }
     for value in [
-        json!({"claim":"department_id"}),
+        json!({"claim":"organization_snapshot"}),
         json!({"max_age_seconds":60}),
-        json!({"claim":"department_id","max_age_seconds":0}),
+        json!({"claim":"organization_snapshot","max_age_seconds":0}),
         json!({"claim":"email","max_age_seconds":60}),
         json!({"claim":"sid","max_age_seconds":60}),
-        json!({"claim":"department_id","max_age_seconds":60,"other":true}),
+        json!({"claim":"organization_snapshot","max_age_seconds":60,"other":true}),
     ] {
-        assert!(serde_json::from_value::<DepartmentClaim>(value).is_err());
+        assert!(serde_json::from_value::<DepartmentSnapshotClaim>(value).is_err());
     }
-    let mapping = DepartmentClaim::new("department_id".into(), 60).unwrap();
+    let mapping = DepartmentSnapshotClaim::new("organization_snapshot".into(), 60).unwrap();
     assert_eq!(mapping.expires_at(1000, 1020, 1000).unwrap(), 1020);
     assert_eq!(mapping.expires_at(1000, 2000, 1500).unwrap(), 1060);
     assert_eq!(mapping.expires_at(1030, 2000, 1000).unwrap(), 1090);
@@ -85,10 +86,61 @@ fn department_mapping_cannot_reuse_email_or_group_claims() {
                 claims: ClaimMapping {
                     email,
                     groups,
-                    department: Some(DepartmentClaim::new("custom".into(), 60).unwrap())
+                    department_snapshot: Some(
+                        DepartmentSnapshotClaim::new("custom".into(), 60).unwrap()
+                    )
                 },
             })
             .is_err()
         );
+    }
+}
+
+#[test]
+fn typed_adapters_construct_validated_snapshots_without_json() {
+    use rss_identity_core::department::{DepartmentNode, DepartmentSnapshot};
+    let id = DepartmentId::new("root".into()).unwrap();
+    assert!(DepartmentNode::new(id.clone(), " bad".into(), None).is_err());
+    let root = DepartmentNode::new(id.clone(), "Company".into(), None).unwrap();
+    assert!(DepartmentSnapshot::new("revision".into(), vec![], vec![]).is_err());
+    assert!(
+        DepartmentSnapshot::new(
+            "revision".into(),
+            vec![root.clone()],
+            vec![DepartmentId::new("unknown".into()).unwrap()]
+        )
+        .is_err()
+    );
+    let snapshot = DepartmentSnapshot::new("revision".into(), vec![root], vec![id]).unwrap();
+    assert_eq!(snapshot.nodes().len(), 1);
+    let encoded = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(encoded["version"], 1);
+    assert_eq!(
+        serde_json::from_value::<DepartmentSnapshot>(encoded).unwrap(),
+        snapshot
+    );
+}
+
+#[test]
+fn department_debug_redacts_assertion_payloads() {
+    use rss_identity_core::department::{
+        DepartmentNode, DepartmentSnapshot, UpstreamDepartmentSnapshot,
+    };
+    let node = DepartmentNode::new(
+        DepartmentId::new("secret-code".into()).unwrap(),
+        "Secret Department".into(),
+        None,
+    )
+    .unwrap();
+    let snapshot =
+        DepartmentSnapshot::new("secret-revision".into(), vec![node.clone()], vec![]).unwrap();
+    for output in [
+        format!("{node:?}"),
+        format!("{snapshot:?}"),
+        format!("{:?}", UpstreamDepartmentSnapshot::Present(snapshot)),
+    ] {
+        for secret in ["secret-code", "Secret Department", "secret-revision"] {
+            assert!(!output.contains(secret), "Debug leaked assertion payload");
+        }
     }
 }

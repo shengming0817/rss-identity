@@ -183,4 +183,115 @@ impl StaffMembership {
     pub async fn restore(&self) -> anyhow::Result<()> {
         self.set(self.original).await
     }
+
+    pub async fn organization(&self) -> anyhow::Result<serde_json::Value> {
+        let user: serde_json::Value = self
+            .client
+            .get(self.groups_url.trim_end_matches("/groups"))
+            .bearer_auth(self.token.as_str())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(serde_json::from_str(
+            user["attributes"]["organization_snapshot"][0]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("organization assertion absent"))?,
+        )?)
+    }
+
+    pub async fn set_organization(&self, assertion: &serde_json::Value) -> anyhow::Result<()> {
+        let url = self.groups_url.trim_end_matches("/groups");
+        let mut user: serde_json::Value = self
+            .client
+            .get(url)
+            .bearer_auth(self.token.as_str())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        user["attributes"]["organization_snapshot"] =
+            serde_json::json!([serde_json::to_string(assertion)?]);
+        self.client
+            .put(url)
+            .bearer_auth(self.token.as_str())
+            .json(&user)
+            .send()
+            .await?
+            .error_for_status()?;
+        anyhow::ensure!(
+            self.organization().await? == *assertion,
+            "organization assertion read-back failed"
+        );
+        Ok(())
+    }
+
+    /// A normal user credential cannot mutate the fact producer through Account REST.
+    pub async fn reject_user_organization_edit(&self) -> anyhow::Result<()> {
+        let original = self.organization().await?;
+        let issuer = std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?;
+        let credential: serde_json::Value = self
+            .client
+            .post(format!("{issuer}/protocol/openid-connect/token"))
+            .form(&[
+                ("client_id", "department-profile-test".to_owned()),
+                ("grant_type", "password".into()),
+                ("username", "alice".into()),
+                ("password", "fixture-password".into()),
+                ("totp", totp()?),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let token = zeroize::Zeroizing::new(
+            credential["access_token"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("fixture user token absent"))?
+                .to_owned(),
+        );
+        let url = format!("{issuer}/account/");
+        let mut profile: serde_json::Value = self
+            .client
+            .get(&url)
+            .header("accept", "application/json")
+            .bearer_auth(token.as_str())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let mut forged = original.clone();
+        // Prove this ordinary credential can use the same profile update endpoint.
+        self.client
+            .post(&url)
+            .bearer_auth(token.as_str())
+            .json(&profile)
+            .send()
+            .await?
+            .error_for_status()?;
+        forged["sourceRevision"] = serde_json::json!("self-asserted");
+        profile["attributes"]["organization_snapshot"] =
+            serde_json::json!([serde_json::to_string(&forged)?]);
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(token.as_str())
+            .json(&profile)
+            .send()
+            .await?;
+        anyhow::ensure!(
+            response.status().is_success() || response.status().is_client_error(),
+            "unexpected account service failure"
+        );
+        // Some Keycloak versions ignore uneditable fields. Both behaviors must leave authority unchanged.
+        anyhow::ensure!(
+            self.organization().await? == original,
+            "ordinary user changed the department assertion"
+        );
+        Ok(())
+    }
 }

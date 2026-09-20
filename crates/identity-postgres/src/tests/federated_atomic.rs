@@ -319,17 +319,19 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
     let token = step_begin(&f, &s, &p, &old).await?;
     let before_groups = stored_facts(&f, &old).await?;
     *upstream.groups.lock().unwrap() = vec!["/step-up".into()];
-    *upstream.department.lock().unwrap() =
-        rss_identity_core::department::UpstreamDepartment::NoDepartment;
+    *upstream.department_snapshot.lock().unwrap() =
+        rss_identity_core::department::UpstreamDepartmentSnapshot::Present(department_snapshot(
+            None,
+        ));
     let upgraded = issued(step_finish(&s, token.clone(), &old, "alice").await?);
     let after_groups = stored_facts(&f, &upgraded).await?;
     assert_eq!(
-        after_groups["department"]["assignment"]["status"],
-        "no_department"
+        after_groups["department_snapshot"]["snapshot"]["memberships"],
+        serde_json::json!([])
     );
     assert_ne!(
-        before_groups["department"]["snapshot_id"],
-        after_groups["department"]["snapshot_id"]
+        before_groups["department_snapshot"]["snapshot_id"],
+        after_groups["department_snapshot"]["snapshot_id"]
     );
     assert_ne!(
         before_groups["groups"]["snapshot_id"],
@@ -941,10 +943,10 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         "refresh preserves the entire snapshot"
     );
     *upstream.groups.lock().unwrap() = vec!["/source/new".into()];
-    *upstream.department.lock().unwrap() =
-        rss_identity_core::department::UpstreamDepartment::Present(
-            rss_identity_core::department::DepartmentId::new("source-new".into())?,
-        );
+    *upstream.department_snapshot.lock().unwrap() =
+        rss_identity_core::department::UpstreamDepartmentSnapshot::Present(department_snapshot(
+            Some("source-new"),
+        ));
     let proof = f
         .store
         .inspect_session(f.key.tenant, secret(&fed), deadline())
@@ -988,15 +990,18 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         source_facts["groups"]["values"],
         serde_json::json!(["/source/new"])
     );
-    assert_eq!(source_facts["department"]["assignment"]["id"], "source-new");
-    assert_ne!(
-        source_facts["department"]["snapshot_id"],
-        original["department"]["snapshot_id"]
+    assert_eq!(
+        source_facts["department_snapshot"]["snapshot"]["memberships"][0],
+        "source-new"
     );
-    *upstream.department.lock().unwrap() =
-        rss_identity_core::department::UpstreamDepartment::Present(
-            rss_identity_core::department::DepartmentId::new("target-forbidden".into())?,
-        );
+    assert_ne!(
+        source_facts["department_snapshot"]["snapshot_id"],
+        original["department_snapshot"]["snapshot_id"]
+    );
+    *upstream.department_snapshot.lock().unwrap() =
+        rss_identity_core::department::UpstreamDepartmentSnapshot::Present(department_snapshot(
+            Some("target-forbidden"),
+        ));
     *upstream.groups.lock().unwrap() = vec!["/target/forbidden".into()];
     let linked = issued(
         s.complete(
@@ -1643,7 +1648,7 @@ async fn federation_group_snapshot_storage_bounds() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let upstream = ScriptedOidc::new();
     let s = service(&f, upstream.clone());
-    let p = enabled_department(&f, &s, 60).await?;
+    let p = enabled(&f, &s).await?;
     *upstream.groups.lock().unwrap() = (0..100)
         .map(|i| format!("{i:03}{}", "x".repeat(253)))
         .collect();
@@ -1744,14 +1749,18 @@ async fn federation_signed_time_skew_preserves_identity() -> anyhow::Result<()> 
         .inspect_session(f.key.tenant, secret(&session), deadline())
         .await?;
     assert!(matches!(
-        future.department()?,
-        VerifiedDepartment::Unavailable(
-            rss_identity_core::facts::FactUnavailableReason::NotYetValid
+        future.department_snapshot()?,
+        VerifiedDepartmentSnapshot::Unavailable(
+            rss_identity_core::department::DepartmentUnavailableReason::NotYetValid
         )
     ));
     assert_eq!(
-        snapshot["department"]["expires_at"].as_i64().unwrap()
-            - snapshot["department"]["observed_at"].as_i64().unwrap(),
+        snapshot["department_snapshot"]["expires_at"]
+            .as_i64()
+            .unwrap()
+            - snapshot["department_snapshot"]["observed_at"]
+                .as_i64()
+                .unwrap(),
         60
     );
     upstream.issued_at_offset.store(60, Ordering::SeqCst);

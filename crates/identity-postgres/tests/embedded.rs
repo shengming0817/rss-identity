@@ -505,7 +505,10 @@ async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
         matches!(actor.groups()?, VerifiedGroups::Expired),
         "group facts must expire before returning a delayed authentication result (DB now={database_now})"
     );
-    assert!(matches!(actor.department()?, VerifiedDepartment::Expired));
+    assert!(matches!(
+        actor.department_snapshot()?,
+        VerifiedDepartmentSnapshot::Expired
+    ));
     assert!(actor.assurance().is_ok());
     f.close().await;
     Ok(())

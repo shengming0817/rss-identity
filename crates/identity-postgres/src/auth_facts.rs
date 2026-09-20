@@ -2,7 +2,10 @@
 use crate::transaction::{corrupt, reject};
 use rss_identity_core::{
     assurance::Assurance,
-    department::{DepartmentClaim, DepartmentId, UpstreamDepartment},
+    department::{
+        DepartmentSnapshot, DepartmentSnapshotClaim, DepartmentUnavailableReason,
+        UpstreamDepartmentSnapshot,
+    },
     facts::{FactSource, FactUnavailableReason, acceptable_observation, valid_snapshot_window},
     federation::{FederationError, UpstreamClaims},
     groups::{GroupFactsMaxAge, Groups, UpstreamGroups, VERSION},
@@ -20,7 +23,7 @@ pub(crate) struct AuthenticationFacts {
     email_verified: bool,
     pub assurance: Assurance,
     groups: Snapshot,
-    pub(crate) department: Box<DepartmentSnapshot>,
+    pub(crate) department_snapshot: Box<DepartmentObservation>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -35,48 +38,43 @@ enum Snapshot {
         values: Vec<String>,
     },
 }
-/// Mandatory tagged assignment keeps missing fields distinct from signed null.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum DepartmentAssignment {
-    Assigned { id: DepartmentId },
-    NoDepartment {},
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum DepartmentSnapshot {
+pub(crate) enum DepartmentObservation {
     Unavailable {
-        reason: FactUnavailableReason,
+        reason: DepartmentUnavailableReason,
     },
     Available {
         snapshot_id: Uuid,
         observed_at: i64,
         expires_at: i64,
-        assignment: DepartmentAssignment,
+        snapshot: DepartmentSnapshot,
     },
 }
-impl DepartmentSnapshot {
+impl DepartmentObservation {
     fn collect(
         claims: &UpstreamClaims,
-        mapping: Option<&DepartmentClaim>,
+        mapping: Option<&DepartmentSnapshotClaim>,
         now: i64,
     ) -> Result<Self, FederationError> {
-        let (mapping, assignment) = match (&claims.department, mapping) {
-            (UpstreamDepartment::NotConfigured, None) => {
+        let (mapping, snapshot) = match (&claims.department_snapshot, mapping) {
+            (UpstreamDepartmentSnapshot::NotConfigured, None) => {
                 return Ok(Self::Unavailable {
-                    reason: FactUnavailableReason::NotConfigured,
+                    reason: DepartmentUnavailableReason::NotConfigured,
                 });
             }
-            (UpstreamDepartment::Missing, Some(_)) => {
+            (UpstreamDepartmentSnapshot::Missing, Some(_)) => {
                 return Ok(Self::Unavailable {
-                    reason: FactUnavailableReason::ClaimMissing,
+                    reason: DepartmentUnavailableReason::ClaimMissing,
                 });
             }
-            (UpstreamDepartment::NoDepartment, Some(mapping)) => {
-                (mapping, DepartmentAssignment::NoDepartment {})
+            (UpstreamDepartmentSnapshot::Invalid, Some(_)) => {
+                return Ok(Self::Unavailable {
+                    reason: DepartmentUnavailableReason::InvalidClaim,
+                });
             }
-            (UpstreamDepartment::Present(id), Some(mapping)) => {
-                (mapping, DepartmentAssignment::Assigned { id: id.clone() })
+            (UpstreamDepartmentSnapshot::Present(snapshot), Some(mapping)) => {
+                (mapping, snapshot.clone())
             }
             _ => return Err(FederationError::Claims),
         };
@@ -84,13 +82,16 @@ impl DepartmentSnapshot {
             snapshot_id: Uuid::new_v4(),
             observed_at: claims.issued_at,
             expires_at: mapping.expires_at(claims.issued_at, claims.expires_at, now)?,
-            assignment,
+            snapshot,
         })
     }
     fn validate(&self) -> Result<(), PgError> {
         match self {
             Self::Unavailable {
-                reason: FactUnavailableReason::NotConfigured | FactUnavailableReason::ClaimMissing,
+                reason:
+                    DepartmentUnavailableReason::NotConfigured
+                    | DepartmentUnavailableReason::ClaimMissing
+                    | DepartmentUnavailableReason::InvalidClaim,
             } => Ok(()),
             Self::Available {
                 snapshot_id,
@@ -110,7 +111,7 @@ impl AuthenticationFacts {
         claims: &UpstreamClaims,
         version: i64,
         policy: GroupFactsMaxAge,
-        department: Option<&DepartmentClaim>,
+        department_snapshot: Option<&DepartmentSnapshotClaim>,
         now: i64,
     ) -> Result<Self, FederationError> {
         claims.validate()?;
@@ -133,8 +134,12 @@ impl AuthenticationFacts {
             },
         };
         Ok(Self {
-            format_version: 2,
-            department: Box::new(DepartmentSnapshot::collect(claims, department, now)?),
+            format_version: 3,
+            department_snapshot: Box::new(DepartmentObservation::collect(
+                claims,
+                department_snapshot,
+                now,
+            )?),
             provider_config_version: version,
             email: claims.email.clone(),
             email_verified: claims.email_verified,
@@ -144,7 +149,7 @@ impl AuthenticationFacts {
     }
     pub fn decode(value: serde_json::Value) -> Result<Self, PgError> {
         let facts: Self = serde_json::from_value(value).map_err(|_| corrupt())?;
-        if facts.format_version != 2
+        if facts.format_version != 3
             || facts.provider_config_version < 1
             || facts
                 .email
@@ -153,7 +158,7 @@ impl AuthenticationFacts {
         {
             return Err(corrupt());
         }
-        facts.department.validate()?;
+        facts.department_snapshot.validate()?;
         match &facts.groups {
             Snapshot::Unavailable {
                 reason: FactUnavailableReason::LocalIdentity | FactUnavailableReason::NotYetValid,
@@ -178,13 +183,32 @@ impl AuthenticationFacts {
     /// PostgreSQL jsonb::text is the storage constraint's exact representation,
     /// including JSON escaping and whitespace. Apply it to sessions, intents and grants.
     pub async fn encode(&self, c: &mut sqlx::PgConnection) -> Result<serde_json::Value, PgError> {
-        let value = serde_json::to_value(self).map_err(|_| corrupt())?;
+        let mut value = serde_json::to_value(self).map_err(|_| corrupt())?;
         let size: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
             .bind(&value)
-            .fetch_one(c)
+            .fetch_one(&mut *c)
             .await?;
         if size > 32768 {
-            return Err(reject());
+            if !matches!(
+                &*self.department_snapshot,
+                DepartmentObservation::Available { .. }
+            ) {
+                return Err(reject());
+            }
+            // An oversized optional assertion cannot suppress independent identity/groups.
+            // Recheck the exact total budget after withholding the entire department fact.
+            value["department_snapshot"] =
+                serde_json::to_value(DepartmentObservation::Unavailable {
+                    reason: DepartmentUnavailableReason::InvalidClaim,
+                })
+                .map_err(|_| corrupt())?;
+            let remaining: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
+                .bind(&value)
+                .fetch_one(&mut *c)
+                .await?;
+            if remaining > 32768 {
+                return Err(reject());
+            }
         }
         Ok(value)
     }
@@ -225,7 +249,8 @@ mod tests {
     use super::*;
     fn claims(groups: UpstreamGroups) -> UpstreamClaims {
         UpstreamClaims {
-            department: rss_identity_core::department::UpstreamDepartment::NotConfigured,
+            department_snapshot:
+                rss_identity_core::department::UpstreamDepartmentSnapshot::NotConfigured,
             issuer: "https://idp.test".into(),
             subject: "subject".into(),
             email: None,
@@ -250,29 +275,35 @@ mod tests {
         )
         .unwrap();
         let value = serde_json::to_value(facts).unwrap();
-        assert_eq!(value["format_version"], 2);
+        assert_eq!(value["format_version"], 3);
         assert_eq!(
-            value["department"],
+            value["department_snapshot"],
             serde_json::json!({"status":"unavailable","reason":"not_configured"})
         );
         let mut missing = value.clone();
-        missing.as_object_mut().unwrap().remove("department");
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("department_snapshot");
         assert!(AuthenticationFacts::decode(missing).is_err());
-        let mut legacy = value;
-        legacy["format_version"] = serde_json::json!(1);
-        assert!(AuthenticationFacts::decode(legacy).is_err());
+        for version in [1, 2, 4] {
+            let mut legacy = value.clone();
+            legacy["format_version"] = serde_json::json!(version);
+            assert!(AuthenticationFacts::decode(legacy).is_err());
+        }
     }
 
     #[test]
     fn department_snapshot_is_closed_fixed_and_independent_of_groups() {
-        let mapping = DepartmentClaim::new("department_id".into(), 60).unwrap();
+        let mapping = DepartmentSnapshotClaim::new("organization_snapshot".into(), 60).unwrap();
+        let snapshot: DepartmentSnapshot = serde_json::from_value(serde_json::json!({"version":1,"sourceRevision":"r1","nodes":[{"id":"dept","displayName":"Department","parentId":null}],"memberships":["dept"]})).unwrap();
         for department in [
-            UpstreamDepartment::NoDepartment,
-            UpstreamDepartment::Present(DepartmentId::new("dept".into()).unwrap()),
-            UpstreamDepartment::Missing,
+            UpstreamDepartmentSnapshot::Present(snapshot),
+            UpstreamDepartmentSnapshot::Missing,
+            UpstreamDepartmentSnapshot::Invalid,
         ] {
             let mut claims = claims(UpstreamGroups::present(vec!["staff".into()]).unwrap());
-            claims.department = department;
+            claims.department_snapshot = department;
             let facts = AuthenticationFacts::collect(
                 &claims,
                 1,
@@ -283,30 +314,29 @@ mod tests {
             .unwrap();
             let value = serde_json::to_value(&facts).unwrap();
             assert_eq!(value["groups"]["expires_at"], 1300);
-            if matches!(claims.department, UpstreamDepartment::Missing) {
+            if !matches!(
+                claims.department_snapshot,
+                UpstreamDepartmentSnapshot::Present(_)
+            ) {
                 assert_eq!(
-                    value["department"],
-                    serde_json::json!({"status":"unavailable","reason":"claim_missing"})
+                    value["department_snapshot"],
+                    serde_json::json!({"status":"unavailable","reason":if matches!(claims.department_snapshot, UpstreamDepartmentSnapshot::Missing) {"claim_missing"} else {"invalid_claim"}})
                 );
             } else {
-                assert_eq!(value["department"]["expires_at"], 1060);
-                assert_eq!(value["department"]["observed_at"], 1000);
+                assert_eq!(value["department_snapshot"]["expires_at"], 1060);
+                assert_eq!(value["department_snapshot"]["observed_at"], 1000);
                 for (key, bad) in [
-                    ("assignment", serde_json::json!(null)),
-                    ("assignment", serde_json::json!({"status":"assigned"})),
+                    ("snapshot", serde_json::json!(null)),
                     (
-                        "assignment",
-                        serde_json::json!({"status":"assigned","id":""}),
+                        "snapshot",
+                        serde_json::json!({"version":1,"sourceRevision":"r1","nodes":[],"memberships":[]}),
                     ),
-                    (
-                        "assignment",
-                        serde_json::json!({"status":"no_department","id":"dept"}),
-                    ),
+                    ("assignment", serde_json::json!({"status":"no_department"})),
                     ("expires_at", serde_json::json!(1301)),
                     ("snapshot_id", serde_json::json!(Uuid::nil())),
                 ] {
                     let mut corrupted = value.clone();
-                    corrupted["department"][key] = bad;
+                    corrupted["department_snapshot"][key] = bad;
                     assert!(AuthenticationFacts::decode(corrupted).is_err());
                 }
             }

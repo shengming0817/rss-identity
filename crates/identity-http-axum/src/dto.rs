@@ -133,11 +133,11 @@ impl From<rss_identity_postgres::SessionPage> for SessionPage {
 pub struct ClaimMapping {
     email: Option<String>,
     groups: Option<String>,
-    department: Option<DepartmentClaim>,
+    department_snapshot: Option<DepartmentSnapshotClaim>,
 }
 #[derive(serde::Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct DepartmentClaim {
+struct DepartmentSnapshotClaim {
     claim: String,
     max_age_seconds: i64,
 }
@@ -166,11 +166,11 @@ impl ProviderSettings {
             claims: rss_identity_core::federation::ClaimMapping {
                 email: self.claims.email,
                 groups: self.claims.groups,
-                department: self
+                department_snapshot: self
                     .claims
-                    .department
+                    .department_snapshot
                     .map(|d| {
-                        rss_identity_core::department::DepartmentClaim::new(
+                        rss_identity_core::department::DepartmentSnapshotClaim::new(
                             d.claim,
                             d.max_age_seconds,
                         )
@@ -192,9 +192,11 @@ impl From<&rss_identity_core::federation::ProviderSettings> for ProviderSettings
             claims: ClaimMapping {
                 email: v.claims().email.clone(),
                 groups: v.claims().groups.clone(),
-                department: v.claims().department.as_ref().map(|d| DepartmentClaim {
-                    claim: d.claim().into(),
-                    max_age_seconds: d.max_age_seconds(),
+                department_snapshot: v.claims().department_snapshot.as_ref().map(|d| {
+                    DepartmentSnapshotClaim {
+                        claim: d.claim().into(),
+                        max_age_seconds: d.max_age_seconds(),
+                    }
                 }),
             },
             jit: v.jit(),
@@ -372,13 +374,18 @@ mod tests {
             .into_domain()
             .unwrap();
         let wire = serde_json::to_value(ProviderSettings::from(&settings)).unwrap();
-        assert!(wire["claims"].get("department").unwrap().is_null());
+        assert!(wire["claims"].get("departmentSnapshot").unwrap().is_null());
+        for field in ["department", "department_snapshot"] {
+            let mut legacy = base.clone();
+            legacy["claims"][field] = json!(null);
+            assert!(serde_json::from_value::<ProviderSettings>(legacy).is_err());
+        }
         for department in [
-            json!({"claim":"department_id","maxAgeSeconds":60}),
+            json!({"claim":"organization_snapshot","maxAgeSeconds":60}),
             json!(null),
         ] {
             let mut input = base.clone();
-            input["claims"]["department"] = department;
+            input["claims"]["departmentSnapshot"] = department;
             let settings = serde_json::from_value::<ProviderSettings>(input.clone())
                 .unwrap()
                 .into_domain()
@@ -389,15 +396,15 @@ mod tests {
             );
         }
         for department in [
-            json!("department_id"),
-            json!({"claim":"department_id"}),
-            json!({"claim":"department_id","maxAgeSeconds":0}),
-            json!({"claim":"department_id","max_age_seconds":60}),
+            json!("organization_snapshot"),
+            json!({"claim":"organization_snapshot"}),
+            json!({"claim":"organization_snapshot","maxAgeSeconds":0}),
+            json!({"claim":"organization_snapshot","max_age_seconds":60}),
             json!({"claim":"email","maxAgeSeconds":60}),
             json!({"claim":"sid","maxAgeSeconds":60}),
         ] {
             let mut input = base.clone();
-            input["claims"]["department"] = department;
+            input["claims"]["departmentSnapshot"] = department;
             assert!(
                 serde_json::from_value::<ProviderSettings>(input)
                     .ok()
@@ -409,7 +416,7 @@ mod tests {
 
     #[test]
     fn provider_wire_owns_fields_and_excludes_internal_assurance() {
-        let input = json!({"issuer":"https://idp.example.test","clientId":"host","redirectUri":"https://host.example.test/api/v2/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":"groups","department":null},"jit":true});
+        let input = json!({"issuer":"https://idp.example.test","clientId":"host","redirectUri":"https://host.example.test/api/v2/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":"groups","departmentSnapshot":null},"jit":true});
         let settings = serde_json::from_value::<ProviderSettings>(input.clone())
             .unwrap()
             .into_domain()
