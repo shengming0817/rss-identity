@@ -306,12 +306,16 @@ pub fn secret(s: &IssuedSession) -> rss_identity_core::session::SessionSecret {
 pub fn department_snapshot(
     member: Option<&str>,
 ) -> rss_identity_core::department::DepartmentSnapshot {
-    let id = member.unwrap_or("dept-01");
-    serde_json::from_value(
-        serde_json::json!({"version":1,"sourceRevision":"fixture-r1",
-        "nodes":[{"id":"root","displayName":"Company","parentId":null},
-                 {"id":id,"displayName":"Department","parentId":"root"}],
-        "memberships":member.into_iter().collect::<Vec<_>>()}),
+    use rss_identity_core::department::{DepartmentId, DepartmentNode, DepartmentSnapshot};
+    let root = DepartmentId::new("root".into()).unwrap();
+    let id = DepartmentId::new(member.unwrap_or("dept-01").into()).unwrap();
+    DepartmentSnapshot::new(
+        "fixture-r1".into(),
+        vec![
+            DepartmentNode::new(root.clone(), "Company".into(), None).unwrap(),
+            DepartmentNode::new(id.clone(), "Department".into(), Some(root)).unwrap(),
+        ],
+        member.map(|_| id).into_iter().collect(),
     )
     .unwrap()
 }

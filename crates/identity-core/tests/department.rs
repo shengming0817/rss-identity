@@ -95,3 +95,52 @@ fn department_mapping_cannot_reuse_email_or_group_claims() {
         );
     }
 }
+
+#[test]
+fn typed_adapters_construct_validated_snapshots_without_json() {
+    use rss_identity_core::department::{DepartmentNode, DepartmentSnapshot};
+    let id = DepartmentId::new("root".into()).unwrap();
+    assert!(DepartmentNode::new(id.clone(), " bad".into(), None).is_err());
+    let root = DepartmentNode::new(id.clone(), "Company".into(), None).unwrap();
+    assert!(DepartmentSnapshot::new("revision".into(), vec![], vec![]).is_err());
+    assert!(
+        DepartmentSnapshot::new(
+            "revision".into(),
+            vec![root.clone()],
+            vec![DepartmentId::new("unknown".into()).unwrap()]
+        )
+        .is_err()
+    );
+    let snapshot = DepartmentSnapshot::new("revision".into(), vec![root], vec![id]).unwrap();
+    assert_eq!(snapshot.nodes().len(), 1);
+    let encoded = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(encoded["version"], 1);
+    assert_eq!(
+        serde_json::from_value::<DepartmentSnapshot>(encoded).unwrap(),
+        snapshot
+    );
+}
+
+#[test]
+fn department_debug_redacts_assertion_payloads() {
+    use rss_identity_core::department::{
+        DepartmentNode, DepartmentSnapshot, UpstreamDepartmentSnapshot,
+    };
+    let node = DepartmentNode::new(
+        DepartmentId::new("secret-code".into()).unwrap(),
+        "Secret Department".into(),
+        None,
+    )
+    .unwrap();
+    let snapshot =
+        DepartmentSnapshot::new("secret-revision".into(), vec![node.clone()], vec![]).unwrap();
+    for output in [
+        format!("{node:?}"),
+        format!("{snapshot:?}"),
+        format!("{:?}", UpstreamDepartmentSnapshot::Present(snapshot)),
+    ] {
+        for secret in ["secret-code", "Secret Department", "secret-revision"] {
+            assert!(!output.contains(secret), "Debug leaked assertion payload");
+        }
+    }
+}

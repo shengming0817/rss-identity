@@ -130,15 +130,51 @@ impl DepartmentSnapshotClaim {
 }
 
 /// An exact node in one assertion. Names never establish membership or ancestry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", try_from = "DepartmentNodeInput")]
 pub struct DepartmentNode {
+    id: DepartmentId,
+    display_name: String,
+    parent_id: Option<DepartmentId>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DepartmentNodeInput {
     id: DepartmentId,
     display_name: String,
     #[serde(deserialize_with = "Option::deserialize")]
     parent_id: Option<DepartmentId>,
 }
+impl TryFrom<DepartmentNodeInput> for DepartmentNode {
+    type Error = FederationError;
+    fn try_from(value: DepartmentNodeInput) -> Result<Self, Self::Error> {
+        Self::new(value.id, value.display_name, value.parent_id)
+    }
+}
+impl std::fmt::Debug for DepartmentNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DepartmentNode(<redacted>)")
+    }
+}
 impl DepartmentNode {
+    pub fn new(
+        id: DepartmentId,
+        display_name: String,
+        parent_id: Option<DepartmentId>,
+    ) -> Result<Self, FederationError> {
+        if display_name.is_empty()
+            || display_name.len() > 256
+            || display_name.trim() != display_name
+            || display_name.chars().any(char::is_control)
+        {
+            return Err(FederationError::Claims);
+        }
+        Ok(Self {
+            id,
+            display_name,
+            parent_id,
+        })
+    }
     pub fn id(&self) -> &DepartmentId {
         &self.id
     }
@@ -153,7 +189,7 @@ impl DepartmentNode {
 /// One full tree and this subject's memberships at an opaque source revision.
 /// Validation is shared by verified-token input and the strict persisted codec.
 /// No payload field can declare an issuer, provider, tenant, or principal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", try_from = "DepartmentSnapshotInput")]
 pub struct DepartmentSnapshot {
     version: u32,
@@ -172,9 +208,34 @@ struct DepartmentSnapshotInput {
 impl TryFrom<DepartmentSnapshotInput> for DepartmentSnapshot {
     type Error = FederationError;
     fn try_from(input: DepartmentSnapshotInput) -> Result<Self, Self::Error> {
+        if input.version != 1 {
+            return Err(FederationError::Claims);
+        }
+        Self::new(input.source_revision, input.nodes, input.memberships)
+    }
+}
+impl std::fmt::Debug for DepartmentSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DepartmentSnapshot")
+            .field("nodes", &self.nodes.len())
+            .field("memberships", &self.memberships.len())
+            .finish_non_exhaustive()
+    }
+}
+impl DepartmentSnapshot {
+    pub fn new(
+        source_revision: String,
+        nodes: Vec<DepartmentNode>,
+        memberships: Vec<DepartmentId>,
+    ) -> Result<Self, FederationError> {
         use std::collections::{BTreeMap, BTreeSet};
-        if input.version != 1
-            || input.nodes.is_empty()
+        let input = DepartmentSnapshotInput {
+            version: 1,
+            source_revision,
+            nodes,
+            memberships,
+        };
+        if input.nodes.is_empty()
             || input.nodes.len() > 256
             || input.memberships.len() > 16
             || DepartmentId::new(input.source_revision.clone()).is_err()
@@ -183,16 +244,12 @@ impl TryFrom<DepartmentSnapshotInput> for DepartmentSnapshot {
         }
         let mut nodes = BTreeMap::new();
         for node in &input.nodes {
-            if node.display_name.is_empty()
-                || node.display_name.len() > 256
-                || node.display_name.trim() != node.display_name
-                || node.display_name.chars().any(char::is_control)
-                || nodes
-                    .insert(
-                        node.id.as_str(),
-                        node.parent_id.as_ref().map(DepartmentId::as_str),
-                    )
-                    .is_some()
+            if nodes
+                .insert(
+                    node.id.as_str(),
+                    node.parent_id.as_ref().map(DepartmentId::as_str),
+                )
+                .is_some()
             {
                 return Err(FederationError::Claims);
             }

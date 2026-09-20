@@ -63,6 +63,8 @@ match actor.groups()? {
 
 节点为完整单根树，1–256 个节点、最多 16 层、最多 16 个不同成员。重复 ID、多根、环、缺父节点、未知成员、未知字段/版本均无效；每个节点的 parentId 必填。memberships 必填，空数组明确表示未分配。稳定 ID 和 sourceRevision 为精确区分大小写的 1–256 UTF-8 字节字符串，无首尾空白/控制字符；displayName 仅用于显示。总 auth_facts 限制 32 KiB（PG jsonb::text 精确字节数），超限时先完整关闭部门事实；其余身份/组仍超限则拒绝认证，不截断树或成员。
 
+自有可信 `UpstreamOidc` adapter 可用 `DepartmentNode::new` 和 `DepartmentSnapshot::new` 构造已校验的结构，再返回 `UpstreamDepartmentSnapshot::Present`，无需通过 JSON 往返。构造与反序列化共享校验；这些结构本身不等于可信会话事实。Debug 仅输出类型与数量，不输出目录名称、编码或来源 revision。
+
 `AuthenticatedSession::department_snapshot()` 与 `ManagementContext::department_snapshot()` 返回 `Available(TrustedDepartmentSnapshot)`、`Unavailable(reason)` 或 `Expired`。只有 `snapshot()?` 检查证明和事实截止后才返回树、memberships 和 source_revision。未配置、缺失、非法断言、本地身份、未来观察分别为 NotConfigured/ClaimMissing/InvalidClaim/LocalIdentity/NotYetValid。null 不是未分配声明。签名、会话验证、PG 或已持久化数据格式/内容损坏导致整次身份失败，不能降级成部门不可用。
 
 来源的 instance/account/provider_id/issuer/provider_config_version 全部由同一权威认证会话派生，claim 无权提供这些字段。不得按名称、路径或安全组推断层级，不得拼接不同来源、会话或 sourceRevision 的节点。snapshot_id 仅标识一次认证观察，sourceRevision 是上游不透明版本，不存在 Identity 全局“最新目录”。
