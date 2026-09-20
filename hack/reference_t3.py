@@ -840,7 +840,7 @@ def validate_binary_profile(profile):
         and type(profile["formatVersion"]) is int
         and profile["formatVersion"] == 1
         and type(profile["schemaVersion"]) is int
-        and profile["schemaVersion"] == 10
+        and profile["schemaVersion"] == 11
         and all(
             json.dumps(profile[key], sort_keys=True)
             == json.dumps(POLICY[key], sort_keys=True)
@@ -894,7 +894,7 @@ def validate_migration_profile(value, profile, signature, identity_sql_sha=None)
             "rss_sql_sha256",
         }
         and type(value["schema_version"]) is int
-        and value["schema_version"] == profile["schemaVersion"] == 10
+        and value["schema_version"] == profile["schemaVersion"] == 11
         and value["schema_contract"] == signature
         and all(
             isinstance(value[key], str) and re.fullmatch("[0-9a-f]{64}", value[key])

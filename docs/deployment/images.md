@@ -34,7 +34,7 @@ make test-reference IDENTITY_IMAGE=rss-identity:revision WEB_IMAGE=rss-identity-
 
 对标源码：[Moby ImageInspect](https://github.com/moby/moby/blob/v28.3.3/daemon/images/image_inspect.go)、[Playwright browser context](https://github.com/microsoft/playwright/blob/v1.60.0/packages/playwright-core/src/server/browserContext.ts)。
 
-`identity-server --acceptance-profile` 无需配置、数据库或网络，输出实际二进制使用的会话时限、失败预算、KDF 并发、MFA 最大年龄及 schema 版本。T3 在固定 identity image ID 内运行该命令，以及 `identity-migrate --describe`，将实际策略、schema v10 契约与迁移 SQL 摘要绑定至 subject，并核对候选源码的 Identity 迁移契约和 SQL；不通过匹配 Rust 源码字符串证明策略。
+`identity-server --acceptance-profile` 无需配置、数据库或网络，输出实际二进制使用的会话时限、失败预算、KDF 并发、MFA 最大年龄及 schema 版本。T3 在固定 identity image ID 内运行该命令，以及 `identity-migrate --describe`，将实际策略、schema v11 契约与迁移 SQL 摘要绑定至 subject，并核对候选源码的 Identity 迁移契约和 SQL；不通过匹配 Rust 源码字符串证明策略。
 
 批准评论的完整正文格式为 `rss-identity-reference-approval/v1`，换行后仅包含一个 JSON 代码块。对象字段为 `approved: true`、基线的 `subject`、`baselineSha256`、批准的 `limits` 和 `humanApproval: {"requestId": "实际人类决定请求ID", "source": "feishu或codex或dingTalk"}`。必须先取得明确的人类批准，再发布该记录；超时不构成批准。运行环境提供 `AZURE_DEVOPS_EXT_PAT` 或已登录的 Azure CLI，只读调用固定组织/项目/仓库的 API，拒绝 HTTP 重定向。
 

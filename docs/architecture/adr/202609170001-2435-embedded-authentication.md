@@ -6,7 +6,7 @@
 
 彻底：账户、会话、联合身份与原子安全事件只有一套实现；删除 contracts/client/Hydra、下游 grant、中央平台租户注册与 CLI SSO 源码及当前构建入口。管理角色、防锁死策略和资源授权由宿主持有，组件没有 administrator、emergency、platform_administrator 或替代角色标记。
 
-不向后兼容：仅提供 HTTP `/api/v2` 和 `/api/v2/oidc/callback`，没有 v1 别名或 legacy feature。安装基线经 #2447 更新为 fresh schema v10；拒绝旧库，不提供升级、双读或旧配置回退。保留旧候选、数据和密钥的历史证据，不操作既有部署。
+不向后兼容：仅提供 HTTP `/api/v2` 和 `/api/v2/oidc/callback`，没有 v1 别名或 legacy feature。安装基线经 #2447 更新为 fresh schema v11；拒绝旧库，不提供升级、双读或旧配置回退。保留旧候选、数据和密钥的历史证据，不操作既有部署。
 
 优雅简洁：保留 core、postgres、oidc、http-axum 四个能力 crate；应用层只有参考宿主。宿主注入现有 PgRuntime、显式实例与租户列表、KDF、事件预算、SessionPolicy 和必选 ManagementPolicy。Authority 不创建、替换或关闭宿主连接池，不发现中央租户。OIDC 的密钥、状态签名、callback、return target、group policy 单独配置，本地模式不要求这些字段。
 
@@ -32,7 +32,7 @@ schema owner 导出 fresh install 与有效权限 profile 授权函数；宿主�
 
 [#2448](https://dev.azure.com/shengming0923/rss/_workitems/edit/2448) 扩展正式 OIDC 的显式私网网络授权，并将部署配置原子升级为 v4。网络授权由宿主持有，按 tenant/完整 issuer/client 精确匹配；只开放配置的 RFC1918/ULA，TLS、DNS 全答案校验及精确协议目的地继续生效。该策略不进入 provider 业务版本或 assurance 指纹，不能隐式授予 MFA 或撤销已有会话。
 
-参考宿主提供固定 300 秒 MFA 示范资源，直接消费当前权威 session 的可信 assurance，并在网关挂载。它不改变普通管理、本地应急或核心认证策略。Rust 构造器直接替换，旧 v3 配置拒绝；当前安装基线为 schema v10，HTTP 仍为 v2。真实浏览器、恢复及容量证据归 #2366。
+参考宿主提供固定 300 秒 MFA 示范资源，直接消费当前权威 session 的可信 assurance，并在网关挂载。它不改变普通管理、本地应急或核心认证策略。Rust 构造器直接替换，旧 v3 配置拒绝；当前安装基线为 schema v11，HTTP 仍为 v2。真实浏览器、恢复及容量证据归 #2366。
 
 ## 验证边界
 

@@ -68,7 +68,7 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 pub(crate) struct Loaded {
     pub assurance: Assurance,
     pub groups: GroupFacts,
-    pub department: Box<crate::department::DepartmentFacts>,
+    pub department_snapshot: Box<crate::department::DepartmentFacts>,
     sample: TimeSample,
     pub expires: Instant,
     pub state: AccountState,
@@ -150,13 +150,13 @@ pub(crate) async fn by_id(
     }
     let department = match (&origin, &source) {
         (Some(origin), Some(source)) => crate::department::DepartmentFacts::new(
-            *origin.facts.department.clone(),
+            *origin.facts.department_snapshot.clone(),
             source.clone(),
             origin.facts.provider_config_version,
             &sample,
         )?,
         (None, None) => crate::department::DepartmentFacts::Unavailable(
-            rss_identity_core::facts::FactUnavailableReason::LocalIdentity,
+            rss_identity_core::department::DepartmentUnavailableReason::LocalIdentity,
         ),
         _ => return Err(corrupt()),
     };
@@ -179,7 +179,7 @@ pub(crate) async fn by_id(
     Ok(Loaded {
         assurance,
         groups: GroupFacts::new(groups, &sample)?,
-        department: Box::new(department),
+        department_snapshot: Box::new(department),
         expires: sample.deadline(lifetime.idle_expires_at())?,
         sample,
         state,

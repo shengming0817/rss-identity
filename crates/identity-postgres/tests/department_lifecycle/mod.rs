@@ -2,7 +2,9 @@ use super::*;
 use federation_support::{
     ScriptedOidc, begin, enabled, enabled_department, finish, issued, service,
 };
-use rss_identity_core::department::{DepartmentClaim, DepartmentId, UpstreamDepartment};
+use rss_identity_core::department::{
+    DepartmentId, DepartmentSnapshotClaim, DepartmentUnavailableReason, UpstreamDepartmentSnapshot,
+};
 use rss_identity_core::federation::ProviderCredentials;
 
 async fn facts(f: &Fixture, session: &IssuedSession) -> anyhow::Result<serde_json::Value> {
@@ -23,13 +25,17 @@ impl ManagementPolicy for DepartmentPolicy {
         &self,
         c: &ManagementContext<'_>,
     ) -> Result<ReauthenticationRequirement, ManagementDenied> {
-        let VerifiedDepartment::Available(d) = c.department().map_err(|_| ManagementDenied)? else {
+        let VerifiedDepartmentSnapshot::Available(d) =
+            c.department_snapshot().map_err(|_| ManagementDenied)?
+        else {
             return Err(ManagementDenied);
         };
         if d.account() != c.actor()
             || d.instance() != c.instance()
-            || d.value()
+            || d.snapshot()
                 .map_err(|_| ManagementDenied)?
+                .memberships()
+                .first()
                 .map(DepartmentId::as_str)
                 != self.expected.as_deref()
         {
@@ -48,10 +54,8 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
     let federation = service(&f, upstream.clone());
     let provider = enabled_department(&f, &federation, 2).await?;
     for expected in [Some("dept-01"), None] {
-        *upstream.department.lock().unwrap() = match expected {
-            Some(id) => UpstreamDepartment::Present(DepartmentId::new(id.into())?),
-            None => UpstreamDepartment::NoDepartment,
-        };
+        *upstream.department_snapshot.lock().unwrap() =
+            UpstreamDepartmentSnapshot::Present(federation_support::department_snapshot(expected));
         let session = issued(
             finish(
                 &federation,
@@ -64,10 +68,17 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
             .store
             .inspect_session(f.key.tenant, secret(&session), deadline())
             .await?;
-        let VerifiedDepartment::Available(department) = actor.department()? else {
+        let VerifiedDepartmentSnapshot::Available(department) = actor.department_snapshot()? else {
             anyhow::bail!("department unavailable");
         };
-        assert_eq!(department.value()?.map(DepartmentId::as_str), expected);
+        assert_eq!(
+            department
+                .snapshot()?
+                .memberships()
+                .first()
+                .map(DepartmentId::as_str),
+            expected
+        );
         assert_eq!(department.instance(), f.instance);
         assert_eq!(department.account(), actor.account());
         assert_eq!(
@@ -106,16 +117,21 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
         let reloaded = managed
             .inspect_session(f.key.tenant, secret(&refreshed), deadline())
             .await?;
-        let VerifiedDepartment::Available(reloaded_department) = reloaded.department()? else {
+        let VerifiedDepartmentSnapshot::Available(reloaded_department) =
+            reloaded.department_snapshot()?
+        else {
             anyhow::bail!("reloaded department unavailable");
         };
         assert_eq!(reloaded_department.snapshot_id(), department.snapshot_id());
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert_eq!(
-            department.value(),
+            department.snapshot(),
             Err(DepartmentAccessError::SnapshotExpired)
         );
-        assert!(matches!(actor.department()?, VerifiedDepartment::Expired));
+        assert!(matches!(
+            actor.department_snapshot()?,
+            VerifiedDepartmentSnapshot::Expired
+        ));
         assert!(actor.assurance().is_ok());
         assert!(matches!(actor.groups()?, VerifiedGroups::Available(_)));
         assert!(
@@ -139,12 +155,12 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
             f.store
                 .inspect_session(f.key.tenant, secret(&again), deadline())
                 .await?
-                .department()?,
-            VerifiedDepartment::Expired
+                .department_snapshot()?,
+            VerifiedDepartmentSnapshot::Expired
         ));
         assert_eq!(facts(&f, &again).await?, before);
     }
-    *upstream.department.lock().unwrap() = UpstreamDepartment::Missing;
+    *upstream.department_snapshot.lock().unwrap() = UpstreamDepartmentSnapshot::Missing;
     let missing = issued(
         finish(
             &federation,
@@ -157,8 +173,8 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
         f.store
             .inspect_session(f.key.tenant, secret(&missing), deadline())
             .await?
-            .department()?,
-        VerifiedDepartment::Unavailable(FactUnavailableReason::ClaimMissing)
+            .department_snapshot()?,
+        VerifiedDepartmentSnapshot::Unavailable(DepartmentUnavailableReason::ClaimMissing)
     ));
     let groups_only = enabled(&f, &federation).await?;
     let session = issued(
@@ -174,13 +190,13 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
         .inspect_session(f.key.tenant, secret(&session), deadline())
         .await?;
     assert!(matches!(
-        actor.department()?,
-        VerifiedDepartment::Unavailable(FactUnavailableReason::NotConfigured)
+        actor.department_snapshot()?,
+        VerifiedDepartmentSnapshot::Unavailable(DepartmentUnavailableReason::NotConfigured)
     ));
     assert!(matches!(actor.groups()?, VerifiedGroups::Available(_)));
     assert!(matches!(
-        f.actor().await?.department()?,
-        VerifiedDepartment::Unavailable(FactUnavailableReason::LocalIdentity)
+        f.actor().await?.department_snapshot()?,
+        VerifiedDepartmentSnapshot::Unavailable(DepartmentUnavailableReason::LocalIdentity)
     ));
     f.close().await;
     Ok(())
@@ -206,7 +222,10 @@ async fn department_configuration_revokes_sessions_and_pending_attempts() -> any
     let old = login_department(&f, &federation, &provider).await?;
     let pending = begin(&f, &federation, &provider).await?;
     let mut settings = provider.settings.input();
-    settings.claims.department = Some(DepartmentClaim::new("department_id".into(), 30)?);
+    settings.claims.department_snapshot = Some(DepartmentSnapshotClaim::new(
+        "organization_snapshot".into(),
+        30,
+    )?);
     let next = federation
         .update_provider(
             f.actor().await?,
@@ -234,7 +253,7 @@ async fn department_configuration_revokes_sessions_and_pending_attempts() -> any
         .store
         .inspect_session(f.key.tenant, secret(&session), deadline())
         .await?;
-    let VerifiedDepartment::Available(d) = actor.department()? else {
+    let VerifiedDepartmentSnapshot::Available(d) = actor.department_snapshot()? else {
         anyhow::bail!("department missing");
     };
     assert_eq!(d.expires_at() - d.observed_at(), 30);
@@ -283,7 +302,7 @@ async fn department_source_is_instance_tenant_principal_and_provider_bound() -> 
         .inspect_session(f.key.tenant, secret(&other_session), deadline())
         .await?;
     assert_ne!(other_actor.account(), key);
-    let VerifiedDepartment::Available(d) = other_actor.department()? else {
+    let VerifiedDepartmentSnapshot::Available(d) = other_actor.department_snapshot()? else {
         anyhow::bail!("department missing");
     };
     assert_eq!(d.account(), other_actor.account());
@@ -353,5 +372,65 @@ async fn department_subject_and_provider_revocations_are_current() -> anyhow::Re
     for kind in 0..4 {
         revoke_case(kind).await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_identity()
+-> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let federation = service(&f, upstream.clone());
+    let provider = enabled_department(&f, &federation, 60).await?;
+    let nodes: Vec<_> = (0..256)
+        .map(|i| {
+            serde_json::json!({"id":format!("n{i}"),
+        "displayName":"x".repeat(256),"parentId":if i == 0 {None} else {Some("n0")}})
+        })
+        .collect();
+    let large = serde_json::from_value(serde_json::json!({"version":1,"sourceRevision":"large",
+        "nodes":nodes,"memberships":["n0"]}))?;
+    *upstream.department_snapshot.lock().unwrap() = UpstreamDepartmentSnapshot::Present(large);
+    let session = login_department(&f, &federation, &provider).await?;
+    let actor = f
+        .store
+        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .await?;
+    assert!(actor.assurance().is_ok());
+    assert!(matches!(actor.groups()?, VerifiedGroups::Available(_)));
+    assert!(matches!(
+        actor.department_snapshot()?,
+        VerifiedDepartmentSnapshot::Unavailable(DepartmentUnavailableReason::InvalidClaim)
+    ));
+    let size: i32 = sqlx::query_scalar("SELECT octet_length(auth_facts::text) FROM identity_authority.sessions WHERE session_id=$1")
+        .bind(session.view().id.as_uuid()).fetch_one(&f.owner).await?;
+    assert!(size <= 32768);
+    *upstream.department_snapshot.lock().unwrap() = UpstreamDepartmentSnapshot::Present(
+        federation_support::department_snapshot(Some("dept-01")),
+    );
+    let session = login_department(&f, &federation, &provider).await?;
+    let original = facts(&f, &session).await?;
+    for bad in [
+        serde_json::json!({"version":1,"sourceRevision":"r1","nodes":[{"id":"dept","displayName":"Department","parentId":"missing"}],"memberships":["dept"]}),
+        serde_json::json!({"version":2,"sourceRevision":"r1","nodes":[],"memberships":[]}),
+        serde_json::json!("dept-01"),
+    ] {
+        let mut corrupted = original.clone();
+        corrupted["department_snapshot"]["snapshot"] = bad;
+        sqlx::query("UPDATE identity_authority.sessions SET auth_facts=$2 WHERE session_id=$1")
+            .bind(session.view().id.as_uuid())
+            .bind(corrupted)
+            .execute(&f.owner)
+            .await?;
+        assert!(
+            f.store
+                .inspect_session(f.key.tenant, secret(&session), deadline())
+                .await
+                .is_err()
+        );
+    }
+    f.close().await;
     Ok(())
 }

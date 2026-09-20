@@ -2,6 +2,8 @@
 
 当前架构：[#2435 内嵌认证组件](adr/202609170001-2435-embedded-authentication.md)。以下中央架构任务索引保留为历史来源，不代表当前组件运行模式。
 
+[#2451](https://dev.azure.com/shengming0923/rss/_workitems/edit/2451) 持有[部门树快照契约](adr/202609200001-2451-department-snapshot.md)，是 MDM #2363 的硬前置；与必要的 rss-web Identity 配置客户端修复分别交付、按完整 revision 消费。
+
 #2438 的组访问与验证恢复按[实施决定](adr/202609180001-2438-trusted-group-expiry.md)执行，统一 checked API 与微秒截止点，不保留旧 getter。
 
 状态：2026-09-07 已登记 1 个 Epic 和 13 个子项，并回读验证正文、类型、标签、父子关系与 Predecessor 依赖。INIT/I01 等保留为需求映射编号；实施状态以 Azure Boards 为准，本文不复制看板状态。

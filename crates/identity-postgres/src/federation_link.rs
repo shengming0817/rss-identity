@@ -331,7 +331,11 @@ impl Federation {
                             &claims,
                             source.version,
                             group_policy,
-                            current_source.settings.claims().department.as_ref(),
+                            current_source
+                                .settings
+                                .claims()
+                                .department_snapshot
+                                .as_ref(),
                             now,
                         )?
                         .encode(c)

@@ -5,7 +5,7 @@
 ## 本地认证
 
 1. 宿主提供已有、绑定 StorageIdentity/ExecutionBinding 的 `Arc<PgRuntime>`，共享有界 `Arc<PasswordKdf>`，以及显式 `InstanceId`、租户列表、`SessionPolicy` 和事件预算。Identity 不创建、更换、关闭宿主连接池，不自动发现租户。
-2. 宿主预建数据库角色，数据库 owner 先安装 RSS 消息 schema，再调用 `install(connection, instance)` 和 `grant_profile(connection, role, profile)`。Identity 只接受全新 v10 schema；v9/旧配置失败关闭，不升级、不双读。结构签名和有效权限检查独立于角色名称。提交安装事务前以实际目标角色调用 `verify_profile(connection, profile, instance)`；参考安装器用 `SET LOCAL ROLE` 对 runtime/maintenance 都执行同一检查，失败整体回滚。
+2. 宿主预建数据库角色，数据库 owner 先安装 RSS 消息 schema，再调用 `install(connection, instance)` 和 `grant_profile(connection, role, profile)`。Identity 只接受全新 v11 schema；v10/旧配置失败关闭，不升级、不双读。结构签名和有效权限检查独立于角色名称。提交安装事务前以实际目标角色调用 `verify_profile(connection, profile, instance)`；参考安装器用 `SET LOCAL ROLE` 对 runtime/maintenance 都执行同一检查，失败整体回滚。
    RSS 安装必须使用 pin 对应的完整 `MIGRATION_SQL`。runtime/maintenance 仅持有 Outbox SELECT 和公开 `prepare_outbox_partitions(jsonb)` / `append_outbox(bytea,jsonb)` EXECUTE，无直接 INSERT、分区表或 sequence 权限。安全事件保持 unordered，不声明分区；RSS 的运行准入拒绝旧权限或不匹配 schema。
 3. Maintenance authority 仅用于一次性 `initialize` 与 `recover_local_password`。恢复只更换本地密码并推进 epoch，不自动启用账户或成员、不授予宿主权限。
 4. `Authority::connect_runtime` 必须提供 `ManagementPolicy`。调用 `login_local` 完成密码验证及原子签发；外部不能构造 AuthenticationCandidate 或调用底层签发函数。
@@ -44,21 +44,34 @@ match actor.groups()? {
 }
 ```
 
-期限从锁与 provider 复核后的数据库微秒采样推导，单调时钟锚点在查询发送前；查询、续期和事务返回耗时均消耗预算。管理策略还受传入证明的原期限约束。`NotYetValid` 在本次证明内保持不可用，需要下次权威读取重新投影。公开 API 直接替换旧 unchecked getter，无兼容别名，当前安装基线由 #2447 更新为 schema v10，HTTP 仍为 v2。
+期限从锁与 provider 复核后的数据库微秒采样推导，单调时钟锚点在查询发送前；查询、续期和事务返回耗时均消耗预算。管理策略还受传入证明的原期限约束。`NotYetValid` 在本次证明内保持不可用，需要下次权威读取重新投影。公开 API 直接替换旧 unchecked getter，无兼容别名，当前安装基线由 #2451 更新为 schema v11，HTTP 仍为 v2。
 
-组与部门的共享事实类型统一从 `rss_identity_core::facts::{FactSource, FactUnavailableReason}` 导入。FactSource 通过校验构造器和 `provider_id()` / `issuer()` 读取元数据；`TrustedGroups::source()` 返回它。旧 groups 来源/原因路径已删除，没有兼容 re-export。此 Rust API 迁移不改变有效 JSON 形状、schema v10 或 auth_facts v2；消费者更新同一完整 Git SHA 和自己的 lock。
+来源结构由 `rss_identity_core::facts::FactSource` 唯一拥有。组不可用原因使用 `facts::FactUnavailableReason`，部门使用闭集 `department::DepartmentUnavailableReason`，包括非法部门断言的 `InvalidClaim`。两者不得混用持久状态。消费者更新同一完整 Git SHA 和自己的 lock。
 
-## 可选可信部门
+## 可选可信部门树快照
 
-在 provider settings 配置 `claims.department: {"claim":"department_id","maxAgeSeconds":120}`；省略/null 为禁用，输出统一为 null 或完整对象。只有管理配置使用这个对象，上游 ID Token 对应 claim 的值必须是字符串或显式 null。无需新增宿主全局配置；部门 TTL 独立于组，范围 1–300 秒且无默认。
+在 provider HTTP settings 配置 `claims.departmentSnapshot: {"claim":"organization_snapshot","maxAgeSeconds":120}`；省略/null 为禁用，输出统一包含 null 或完整对象。Rust 领域配置为 `department_snapshot: Option<DepartmentSnapshotClaim>`。期限独立于组，范围 1–300 秒且无默认。旧 `claims.department`、标量输入、旧 Rust getter 和存储格式直接拒绝。
 
-`AuthenticatedSession::department()` 与 `ManagementContext::department()` 返回 `Available(TrustedDepartment)`、`Unavailable(reason)` 或 `Expired`。Available 的 `value()?` 为 `Some(&DepartmentId)` 或明确无部门的 `None`；两者均有固定过期时间。未配置、缺失、本地账户、未来观察分别为 NotConfigured/ClaimMissing/LocalIdentity/NotYetValid，不得当作无部门。
+已验证 ID Token 中的 claim 是一个 JSON 对象：
 
-编码为企业维护的精确、区分大小写的 1–256 UTF-8 字节稳定标识，不含首尾空白/控制字符；没有名称映射或同名隔离补救。宿主应同时使用 wrapper 的 instance/account/provider_id/issuer/provider_config_version 解释来源，不把不同来源的同字符串自动合并。读取值时检查证明和快照期限，保留 wrapper 不能绕过期限；复制出的值和授权效果由宿主负责。
+```json
+{"version":1,"sourceRevision":"directory-revision-42","nodes":[
+  {"id":"root","displayName":"Company","parentId":null},
+  {"id":"engineering","displayName":"Engineering","parentId":"root"}
+],"memberships":["engineering"]}
+```
 
-期限固定为 `min(signed iat + maxAgeSeconds, signed exp)`；refresh 和活动请求不更新快照，过期保留基础身份。更新 provider 的映射或 TTL 沿用完整配置更新与凭据提交，撤销旧会话/在途流程。link target 不覆盖当前 source 部门；仅新的来源认证重新采集。
+节点为完整单根树，1–256 个节点、最多 16 层、最多 16 个不同成员。重复 ID、多根、环、缺父节点、未知成员、未知字段/版本均无效；每个节点的 parentId 必填。memberships 必填，空数组明确表示未分配。稳定 ID 和 sourceRevision 为精确区分大小写的 1–256 UTF-8 字节字符串，无首尾空白/控制字符；displayName 仅用于显示。总 auth_facts 限制 32 KiB（PG jsonb::text 精确字节数），超限时先完整关闭部门事实；其余身份/组仍超限则拒绝认证，不截断树或成员。
 
-浏览器 DTO 不能构造可信 wrapper，也不通过 session JSON 提供授权证明。普通 Keycloak 属性 mapper 对空值省略字段，结果为 ClaimMissing；只有签名的 JSON null 才证明无部门。部门事实不定义 MDM 角色、设备范围或审批流程。
+`AuthenticatedSession::department_snapshot()` 与 `ManagementContext::department_snapshot()` 返回 `Available(TrustedDepartmentSnapshot)`、`Unavailable(reason)` 或 `Expired`。只有 `snapshot()?` 检查证明和事实截止后才返回树、memberships 和 source_revision。未配置、缺失、非法断言、本地身份、未来观察分别为 NotConfigured/ClaimMissing/InvalidClaim/LocalIdentity/NotYetValid。null 不是未分配声明。签名、会话验证、PG 或已持久化数据格式/内容损坏导致整次身份失败，不能降级成部门不可用。
+
+来源的 instance/account/provider_id/issuer/provider_config_version 全部由同一权威认证会话派生，claim 无权提供这些字段。不得按名称、路径或安全组推断层级，不得拼接不同来源、会话或 sourceRevision 的节点。snapshot_id 仅标识一次认证观察，sourceRevision 是上游不透明版本，不存在 Identity 全局“最新目录”。
+
+期限固定为 `min(signed iat + maxAgeSeconds, signed exp)`；refresh、活动请求和组件重建不更新快照。新认证观察新树，旧会话只在各自原截止前使用旧树。上游不可用不延寿。更新 provider 映射/TTL 会推进配置版本和撤销 epoch，撤销旧会话及在途流程。link target 不覆盖当前 source 快照。
+
+真实来源夹具见 [Keycloak 配置](../../hack/providers.py) 的 `configure_department_profile`：管理员维护单个 JSON 用户属性，UserAttributeMapper 的 jsonType.label=JSON、multivalued=false、aggregate.attrs=false，仅加入 ID Token；属性 permissions.view/edit 均为 admin。管理员负责完整性、稳定 ID、原子更新与同步所有相关用户的断言。不要开启可由普通用户修改的属性映射。此方案适合预算内的小型组织树，不是 Keycloak 原生组织 API 或目录同步。AAD 与通用 OIDC 可提供登录/组；只有具备同等可信完整快照的来源才能开启部门配置。
+
+部门事实不生成资源权限。浏览器 DTO 无法构造可信 wrapper，session JSON 不携带授权证明；宿主不得跨请求缓存事实，已复制的值/引用及已发生的业务效果仍由宿主负责。MDM 的显式子树匹配、资源范围和撤权属于 #2363。
 
 ## 可选 OIDC
 

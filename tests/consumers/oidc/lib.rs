@@ -44,8 +44,8 @@ mod tests {
             redirect_uri: callback.into(),
             scopes: vec!["openid".into(), "profile".into(), "email".into()],
             claims: ClaimMapping {
-                department: Some(rss_identity_core::department::DepartmentClaim::new(
-                    "department_id".into(),
+                department_snapshot: Some(rss_identity_core::department::DepartmentSnapshotClaim::new(
+                    "organization_snapshot".into(),
                     5,
                 )?),
                 email: Some("email".into()),
@@ -162,10 +162,10 @@ mod tests {
         };
         assert_eq!(groups.values()?, ["/staff"]);
         assert_eq!(groups.source().issuer(), issuer);
-        let VerifiedDepartment::Available(department) = actor.department()? else {
+        let VerifiedDepartmentSnapshot::Available(department) = actor.department_snapshot()? else {
             anyhow::bail!("department unavailable");
         };
-        assert_eq!(department.value()?.unwrap().as_str(), "dept-01");
+        assert_eq!(department.snapshot()?.memberships()[0].as_str(), "dept-01");
         assert_eq!(department.account(), actor.account());
         assert_eq!(department.instance(), actor.instance());
         assert_eq!(department.issuer(), issuer);
@@ -178,10 +178,10 @@ mod tests {
         assert_eq!(groups.values(), Err(GroupAccessError::SnapshotExpired));
         assert!(matches!(actor.groups()?, VerifiedGroups::Expired));
         assert_eq!(
-            department.value(),
+            department.snapshot(),
             Err(DepartmentAccessError::SnapshotExpired)
         );
-        assert!(matches!(actor.department()?, VerifiedDepartment::Expired));
+        assert!(matches!(actor.department_snapshot()?, VerifiedDepartmentSnapshot::Expired));
         assert!(actor.assurance().is_ok());
         federation
             .enable_provider(

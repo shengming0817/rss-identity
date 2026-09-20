@@ -1,14 +1,10 @@
 //! Borrowed department facts; source comes only from the checked session origin.
-use crate::{
-    auth_facts::{DepartmentAssignment, DepartmentSnapshot},
-    session_storage::TimeSample,
-    transaction::reject,
-};
+use crate::{auth_facts::DepartmentObservation, session_storage::TimeSample, transaction::reject};
 use rss_identity_core::{
     InstanceId,
     account::AccountKey,
-    department::DepartmentId,
-    facts::{FactSource, FactUnavailableReason, acceptable_observation},
+    department::{DepartmentSnapshot, DepartmentUnavailableReason},
+    facts::{FactSource, acceptable_observation},
 };
 use rss_transactional_messaging_postgres::PgError;
 use std::time::Instant;
@@ -23,7 +19,7 @@ pub enum DepartmentAccessError {
 }
 
 pub(crate) enum DepartmentFacts {
-    Unavailable(FactUnavailableReason),
+    Unavailable(DepartmentUnavailableReason),
     Expired,
     Available {
         source: FactSource,
@@ -31,30 +27,30 @@ pub(crate) enum DepartmentFacts {
         snapshot_id: Uuid,
         observed_at: i64,
         expires_at: i64,
-        assignment: DepartmentAssignment,
+        snapshot: DepartmentSnapshot,
         expires: Instant,
     },
 }
 impl DepartmentFacts {
     pub(crate) fn new(
-        snapshot: DepartmentSnapshot,
+        snapshot: DepartmentObservation,
         source: FactSource,
         version: i64,
         sample: &TimeSample,
     ) -> Result<Self, PgError> {
         Ok(match snapshot {
-            DepartmentSnapshot::Unavailable { reason } => Self::Unavailable(reason),
-            DepartmentSnapshot::Available {
+            DepartmentObservation::Unavailable { reason } => Self::Unavailable(reason),
+            DepartmentObservation::Available {
                 snapshot_id,
                 observed_at,
                 expires_at,
-                assignment,
+                snapshot,
             } => {
                 if !acceptable_observation(observed_at, sample.seconds()) {
                     return Err(reject());
                 }
                 if sample.seconds() < observed_at {
-                    return Ok(Self::Unavailable(FactUnavailableReason::NotYetValid));
+                    return Ok(Self::Unavailable(DepartmentUnavailableReason::NotYetValid));
                 }
                 if sample.seconds() >= expires_at {
                     return Ok(Self::Expired);
@@ -65,7 +61,7 @@ impl DepartmentFacts {
                     snapshot_id,
                     observed_at,
                     expires_at,
-                    assignment,
+                    snapshot,
                     expires: sample.deadline(expires_at)?,
                 }
             }
@@ -76,7 +72,7 @@ impl DepartmentFacts {
         instance: InstanceId,
         account: AccountKey,
         proof: Instant,
-    ) -> Result<VerifiedDepartment<'_>, DepartmentAccessError> {
+    ) -> Result<VerifiedDepartmentSnapshot<'_>, DepartmentAccessError> {
         self.view_at(instance, account, proof, Instant::now())
     }
     fn view_at(
@@ -85,23 +81,25 @@ impl DepartmentFacts {
         account: AccountKey,
         proof: Instant,
         now: Instant,
-    ) -> Result<VerifiedDepartment<'_>, DepartmentAccessError> {
+    ) -> Result<VerifiedDepartmentSnapshot<'_>, DepartmentAccessError> {
         if now >= proof {
             return Err(DepartmentAccessError::ProofExpired);
         }
         Ok(match self {
-            Self::Unavailable(reason) => VerifiedDepartment::Unavailable(*reason),
-            Self::Expired => VerifiedDepartment::Expired,
-            Self::Available { expires, .. } if now >= *expires => VerifiedDepartment::Expired,
+            Self::Unavailable(reason) => VerifiedDepartmentSnapshot::Unavailable(*reason),
+            Self::Expired => VerifiedDepartmentSnapshot::Expired,
+            Self::Available { expires, .. } if now >= *expires => {
+                VerifiedDepartmentSnapshot::Expired
+            }
             Self::Available {
                 source,
                 provider_config_version,
                 snapshot_id,
                 observed_at,
                 expires_at,
-                assignment,
+                snapshot,
                 expires,
-            } => VerifiedDepartment::Available(TrustedDepartment {
+            } => VerifiedDepartmentSnapshot::Available(TrustedDepartmentSnapshot {
                 instance,
                 account,
                 source,
@@ -109,10 +107,7 @@ impl DepartmentFacts {
                 snapshot_id: *snapshot_id,
                 observed_at: *observed_at,
                 expires_at: *expires_at,
-                value: match assignment {
-                    DepartmentAssignment::Assigned { id } => Some(id),
-                    DepartmentAssignment::NoDepartment {} => None,
-                },
+                snapshot,
                 proof,
                 expires: *expires,
             }),
@@ -121,17 +116,17 @@ impl DepartmentFacts {
 }
 
 /// Only Available contains a component-issued snapshot, including explicit no-department.
-pub enum VerifiedDepartment<'a> {
-    Available(TrustedDepartment<'a>),
-    Unavailable(FactUnavailableReason),
+pub enum VerifiedDepartmentSnapshot<'a> {
+    Available(TrustedDepartmentSnapshot<'a>),
+    Unavailable(DepartmentUnavailableReason),
     Expired,
 }
 /// Metadata identifies an observation; value access checks both fixed deadlines.
 /// A copied value or completed authorization remains the host's responsibility.
 /// ```compile_fail
-/// let fact: rss_identity_postgres::TrustedDepartment<'_> = serde_json::from_str("{}").unwrap();
+/// let fact: rss_identity_postgres::TrustedDepartmentSnapshot<'_> = serde_json::from_str("{}").unwrap();
 /// ```
-pub struct TrustedDepartment<'a> {
+pub struct TrustedDepartmentSnapshot<'a> {
     instance: InstanceId,
     account: AccountKey,
     source: &'a FactSource,
@@ -139,11 +134,11 @@ pub struct TrustedDepartment<'a> {
     snapshot_id: Uuid,
     observed_at: i64,
     expires_at: i64,
-    value: Option<&'a DepartmentId>,
+    snapshot: &'a DepartmentSnapshot,
     proof: Instant,
     expires: Instant,
 }
-impl TrustedDepartment<'_> {
+impl TrustedDepartmentSnapshot<'_> {
     pub fn instance(&self) -> InstanceId {
         self.instance
     }
@@ -168,18 +163,18 @@ impl TrustedDepartment<'_> {
     pub fn expires_at(&self) -> i64 {
         self.expires_at
     }
-    /// None is a current signed assertion of no department, never missing input.
-    pub fn value(&self) -> Result<Option<&DepartmentId>, DepartmentAccessError> {
-        self.value_at(Instant::now())
+    /// Access always rechecks both deadlines. Empty memberships explicitly mean unassigned.
+    pub fn snapshot(&self) -> Result<&DepartmentSnapshot, DepartmentAccessError> {
+        self.snapshot_at(Instant::now())
     }
-    fn value_at(&self, now: Instant) -> Result<Option<&DepartmentId>, DepartmentAccessError> {
+    fn snapshot_at(&self, now: Instant) -> Result<&DepartmentSnapshot, DepartmentAccessError> {
         if now >= self.proof {
             return Err(DepartmentAccessError::ProofExpired);
         }
         if now >= self.expires {
             return Err(DepartmentAccessError::SnapshotExpired);
         }
-        Ok(self.value)
+        Ok(self.snapshot)
     }
 }
 
@@ -201,64 +196,64 @@ mod tests {
         let proof = expiry + Duration::from_secs(1);
         let instance = InstanceId::generate();
         let account = account();
-        for assignment in [
-            DepartmentAssignment::Assigned {
-                id: DepartmentId::new("dept".into()).unwrap(),
-            },
-            DepartmentAssignment::NoDepartment {},
-        ] {
-            let absent = matches!(assignment, DepartmentAssignment::NoDepartment {});
+        for members in [serde_json::json!(["dept"]), serde_json::json!([])] {
+            let snapshot = serde_json::from_value(serde_json::json!({"version":1,"sourceRevision":"r1",
+                "nodes":[{"id":"dept","displayName":"Department","parentId":null}],"memberships":members})).unwrap();
+            let absent = members.as_array().unwrap().is_empty();
             let facts = DepartmentFacts::Available {
                 source: FactSource::new(Uuid::new_v4(), "https://idp.test".into()).unwrap(),
                 provider_config_version: 1,
                 snapshot_id: Uuid::new_v4(),
                 observed_at: 100,
                 expires_at: 101,
-                assignment,
+                snapshot,
                 expires: expiry,
             };
-            let VerifiedDepartment::Available(view) =
+            let VerifiedDepartmentSnapshot::Available(view) =
                 facts.view_at(instance, account, proof, start).unwrap()
             else {
                 panic!("available");
             };
-            assert_eq!(view.value_at(start).unwrap().is_none(), absent);
+            assert_eq!(
+                view.snapshot_at(start).unwrap().memberships().is_empty(),
+                absent
+            );
             assert_eq!(view.instance(), instance);
             assert_eq!(view.account(), account);
-            assert!(view.value_at(expiry - Duration::from_nanos(1)).is_ok());
+            assert!(view.snapshot_at(expiry - Duration::from_nanos(1)).is_ok());
             assert_eq!(
-                view.value_at(expiry),
+                view.snapshot_at(expiry),
                 Err(DepartmentAccessError::SnapshotExpired)
             );
             assert_eq!(
-                view.value_at(proof),
+                view.snapshot_at(proof),
                 Err(DepartmentAccessError::ProofExpired)
             );
             assert!(matches!(
                 facts.view_at(instance, account, proof, expiry),
-                Ok(VerifiedDepartment::Expired)
+                Ok(VerifiedDepartmentSnapshot::Expired)
             ));
             for earlier in [start + Duration::from_millis(500), expiry] {
-                let VerifiedDepartment::Available(view) =
+                let VerifiedDepartmentSnapshot::Available(view) =
                     facts.view_at(instance, account, earlier, start).unwrap()
                 else {
                     panic!("available");
                 };
                 assert_eq!(
-                    view.value_at(earlier),
+                    view.snapshot_at(earlier),
                     Err(DepartmentAccessError::ProofExpired)
                 );
             }
         }
         for reason in [
-            FactUnavailableReason::LocalIdentity,
-            FactUnavailableReason::NotConfigured,
-            FactUnavailableReason::ClaimMissing,
-            FactUnavailableReason::NotYetValid,
+            DepartmentUnavailableReason::LocalIdentity,
+            DepartmentUnavailableReason::NotConfigured,
+            DepartmentUnavailableReason::ClaimMissing,
+            DepartmentUnavailableReason::NotYetValid,
         ] {
             let facts = DepartmentFacts::Unavailable(reason);
             assert!(
-                matches!(facts.view_at(instance, account, proof, start), Ok(VerifiedDepartment::Unavailable(r)) if r == reason)
+                matches!(facts.view_at(instance, account, proof, start), Ok(VerifiedDepartmentSnapshot::Unavailable(r)) if r == reason)
             );
             assert!(matches!(
                 facts.view_at(instance, account, proof, proof),

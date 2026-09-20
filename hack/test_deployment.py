@@ -15,7 +15,7 @@ from deployment_fixture import fixture
 
 def receipt(path,data,images):
     path.write_bytes(b'fixture')
-    value={'schema':10,'instanceId':data['runtime']['instanceId'],'storage':data['runtime']['storage'],'backendVersion':images['identity'],'project':'identity-source','sha256':operate.sha(path)}
+    value={'schema':11,'instanceId':data['runtime']['instanceId'],'storage':data['runtime']['storage'],'backendVersion':images['identity'],'project':'identity-source','sha256':operate.sha(path)}
     path.with_suffix('.dump.json').write_text(json.dumps(value))
     return value
 
@@ -87,7 +87,7 @@ class OperationTests(unittest.TestCase):
         with fixture() as (root,data,images):
             path=root/'cut.dump';valid=receipt(path,data,images)
             self.assertEqual(operate.check_backup(path,images['identity'],data['runtime']),valid)
-            invalid=[{'schema':10,'sha256':valid['sha256']},{**valid,'backendVersion':'b'*40}, {**{k:v for k,v in valid.items() if k!='backendVersion'},'candidate':'a'*40},{**valid,'project':'../bad'},{**valid,'instanceId':'bad'},{**valid,'unknown':True},{**valid,'storage':{**valid['storage'],'generation':True}},{**valid,'storage':{**valid['storage'],'target':[True]*16}}]
+            invalid=[{'schema':11,'sha256':valid['sha256']},{**valid,'backendVersion':'b'*40}, {**{k:v for k,v in valid.items() if k!='backendVersion'},'candidate':'a'*40},{**valid,'project':'../bad'},{**valid,'instanceId':'bad'},{**valid,'unknown':True},{**valid,'storage':{**valid['storage'],'generation':True}},{**valid,'storage':{**valid['storage'],'target':[True]*16}}]
             for value in invalid:
                 path.with_suffix('.dump.json').write_text(json.dumps(value))
                 with self.assertRaises(ValueError):operate.check_backup(path,images['identity'],data['runtime'])

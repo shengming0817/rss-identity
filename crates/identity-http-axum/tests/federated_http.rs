@@ -1,4 +1,5 @@
 //! Real PG + HTTPS Keycloak adapter with explicit loopback fixture transport + in-process Axum. No product binary/T3 claim.
+mod department_lifecycle;
 #[path = "../../identity-postgres/tests/federation_support/mod.rs"]
 mod federation_support;
 #[path = "group_lifecycle/mod.rs"]
@@ -57,8 +58,8 @@ fn config() -> anyhow::Result<ProviderSettings> {
         redirect_uri: CALLBACK.into(),
         scopes: vec!["openid".into(), "profile".into(), "email".into()],
         claims: ClaimMapping {
-            department: Some(rss_identity_core::department::DepartmentClaim::new(
-                "department_id".into(),
+            department_snapshot: Some(rss_identity_core::department::DepartmentSnapshotClaim::new(
+                "organization_snapshot".into(),
                 60,
             )?),
             email: Some("email".into()),
@@ -467,16 +468,16 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
         .inspect_session(f.key.tenant, secret(&bob), deadline())
         .await?;
     assert_ne!(a.account(), b.account());
-    let VerifiedDepartment::Available(department) = a.department()? else {
+    let VerifiedDepartmentSnapshot::Available(department) = a.department_snapshot()? else {
         anyhow::bail!("signed department missing");
     };
-    assert_eq!(department.value()?.unwrap().as_str(), "dept-01");
+    assert_eq!(department.snapshot()?.memberships()[0].as_str(), "dept-01");
     assert_eq!(department.account(), a.account());
     assert_eq!(department.provider_id().to_string(), p.id.to_string());
     assert!(matches!(
-        b.department()?,
-        VerifiedDepartment::Unavailable(
-            rss_identity_core::facts::FactUnavailableReason::ClaimMissing
+        b.department_snapshot()?,
+        VerifiedDepartmentSnapshot::Unavailable(
+            rss_identity_core::department::DepartmentUnavailableReason::ClaimMissing
         )
     ));
 
@@ -724,18 +725,17 @@ fn tenant() -> rss_request_context::TenantId {
 
 #[tokio::test]
 #[ignore = "requires make test-federated"]
-async fn real_department_claim_rejection_preserves_host_diagnostic() -> anyhow::Result<()> {
+async fn real_invalid_department_preserves_authenticated_identity() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let federation = service(&f, Arc::new(fixture_transport(true)?));
     let mut input = config()?.input();
-    // Keycloak signs groups as an array. Selecting it as the single department
-    // claim exercises a real verified-token shape rejection, not a browser error.
+    // Keycloak signs groups as an array. A valid token with the wrong department
+    // shape withholds that fact without invalidating the authenticated subject.
     input.claims.groups = None;
-    input.claims.department = Some(rss_identity_core::department::DepartmentClaim::new(
-        "groups".into(),
-        60,
-    )?);
+    input.claims.department_snapshot = Some(
+        rss_identity_core::department::DepartmentSnapshotClaim::new("groups".into(), 60)?,
+    );
     let provider = federation
         .create_provider(
             f.actor().await?,
@@ -758,22 +758,23 @@ async fn real_department_claim_rejection_preserves_host_diagnostic() -> anyhow::
     let callback_url = authorize(&url, "alice").await?;
     let response = callback(&app, &callback_url, BROWSER).await?;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(response.headers()["location"], "/auth/error?reason=failed");
-    assert!(!response.headers().contains_key("set-cookie"));
-    assert_eq!(response.headers()["cache-control"], "no-store");
-    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
-    assert_eq!(
+    let session = cookie(&response);
+    let actor = f
+        .store
+        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .await?;
+    assert!(actor.assurance().is_ok());
+    assert!(matches!(
+        actor.department_snapshot()?,
+        VerifiedDepartmentSnapshot::Unavailable(
+            rss_identity_core::department::DepartmentUnavailableReason::InvalidClaim
+        )
+    ));
+    assert!(
         response
             .extensions()
-            .get::<rss_identity_http_axum::HttpFailure>(),
-        Some(&rss_identity_http_axum::HttpFailure::Authority(
-            AuthorityError::Federation(FederationError::Claims),
-        )),
-    );
-    let body = to_bytes(response.into_body(), 1024).await?;
-    assert!(
-        body.is_empty(),
-        "internal failure must not reach the browser body"
+            .get::<rss_identity_http_axum::HttpFailure>()
+            .is_none()
     );
     f.close().await;
     Ok(())
