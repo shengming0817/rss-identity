@@ -6,7 +6,7 @@
 
 彻底：账户、会话、联合身份与原子安全事件只有一套实现；删除 contracts/client/Hydra、下游 grant、中央平台租户注册与 CLI SSO 源码及当前构建入口。管理角色、防锁死策略和资源授权由宿主持有，组件没有 administrator、emergency、platform_administrator 或替代角色标记。
 
-不向后兼容：仅提供 HTTP `/api/v2` 和 `/api/v2/oidc/callback`，没有 v1 别名或 legacy feature。安装基线经 #2447 更新为 fresh schema v11；拒绝旧库，不提供升级、双读或旧配置回退。保留旧候选、数据和密钥的历史证据，不操作既有部署。
+不向后兼容：仅提供 HTTP `/api/v2` 和 `/api/v2/oidc/callback`，没有 v1 别名或 legacy feature。安装基线经 #2451 更新为 fresh schema v11；拒绝旧库，不提供升级、双读或旧配置回退。保留旧候选、数据和密钥的历史证据，不操作既有部署。
 
 优雅简洁：保留 core、postgres、oidc、http-axum 四个能力 crate；应用层只有参考宿主。宿主注入现有 PgRuntime、显式实例与租户列表、KDF、事件预算、SessionPolicy 和必选 ManagementPolicy。Authority 不创建、替换或关闭宿主连接池，不发现中央租户。OIDC 的密钥、状态签名、callback、return target、group policy 单独配置，本地模式不要求这些字段。
 
