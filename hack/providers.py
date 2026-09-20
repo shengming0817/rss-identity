@@ -274,7 +274,9 @@ def keycloak(redirect_uri="https://identity.example.test/api/v2/oidc/callback", 
                     if response.status==200:break
             except (OSError,urllib.error.URLError):time.sleep(.5)
         else:raise RuntimeError("Keycloak TLS readiness timed out")
-        configure_department_profile(issuer, context)
+        # The private-provider fixture advertises an intentionally unresolvable issuer.
+        # Provision through the owned, certificate-verified listener used for readiness.
+        configure_department_profile(f"https://{host}:{port}/realms/identity", context)
         yield {"IDENTITY_TEST_FEDERATED_ISSUER":issuer,"IDENTITY_TEST_FEDERATED_CA":str(cert),"IDENTITY_TEST_KEYCLOAK_CONTAINER":kc_id}
 
 def private_host():
