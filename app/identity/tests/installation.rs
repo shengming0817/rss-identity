@@ -467,6 +467,14 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     // Enabled worker rejects inherited credential access and missing Audit permissions.
     for (corrupt, restore) in [
         (
+            "GRANT MAINTAIN ON identity_authority.sessions TO host_audit",
+            "REVOKE MAINTAIN ON identity_authority.sessions FROM host_audit",
+        ),
+        (
+            "GRANT MAINTAIN ON rss_audit.records TO host_audit",
+            "REVOKE MAINTAIN ON rss_audit.records FROM host_audit",
+        ),
+        (
             "GRANT host_runtime TO host_audit WITH INHERIT FALSE, SET TRUE",
             "REVOKE host_runtime FROM host_audit",
         ),
