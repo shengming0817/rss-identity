@@ -159,3 +159,18 @@ fn group_facts_policy_is_required_only_when_oidc_is_configured() {
         .remove("groupFactsMaxAgeSeconds");
     assert!(serde_json::from_value::<RuntimeConfig>(example).is_err());
 }
+
+#[test]
+fn migration_descriptor_includes_all_installed_schema_owners() {
+    use sha2::{Digest, Sha256};
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_identity-migrate"))
+        .arg("--describe")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["audit_sql_sha256"],
+        hex::encode(Sha256::digest(rss_audit_postgres::MIGRATION_SQL))
+    );
+}

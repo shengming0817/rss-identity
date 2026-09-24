@@ -33,3 +33,11 @@ backendVersion 与 Compose 的 identity image ID 精确相等；源码 revision 
 
 
 备份摘要、schema 和镜像一致不证明备份包含后续撤销。恢复点必须由 owner 核对；不能把旧安全状态开放成新的密码权威。
+
+## 异步审计恢复
+
+先区分 Outbox 的 pending/publishing、published 和 dead_letter。published 只在 Inbox/Audit 已可靠提交后写入；源确认丢失时，重投仍携带原事件 ID 和内容，经 Inbox receipt 的 identity/fingerprint 校验跳过已提交 effect。未提交尝试不会留下孤立 Audit 记录。保留 Inbox receipt 的期限必须覆盖消息重投窗口；不得单独清空 Inbox 来重放。
+
+暂时存储故障修复后恢复 worker，未终结消息自动重试；lease 未到期时等待租约恢复，不能强制确认。日志 `component=identity-audit` 只提供封闭结算分类，不输出秘密和原始事件内容。使用受授权的租户内 Audit 公共查询确认最终可见结果。
+
+未知 contract/version/schema、非法租户/时间、同 ID 异内容进入隔离，原 Outbox 消息保留，可能同时存在 rejected Inbox receipt。隔离不是交付成功，当前批次返回 `RejectedEvent` 并终止关键 worker/参考宿主；启动时通过公共 Outbox 接口在有界预算内检查已有隔离记录；存在未解决 dead-letter 时拒绝启动，重启本身不能绕过。恢复宿主前必须核查和处置隔离证据。操作人员应核对原事件契约与拒绝分类，按消息组件既有受控恢复能力处理；本任务不提供改 ID、改原事件、删除 receipt 或强制覆盖 Audit 冲突的重放工具。不把 dead-letter 状态改回 pending 当作修复。

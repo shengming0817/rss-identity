@@ -9,10 +9,10 @@ COPY . .
 # Git authentication is only available to fetch, never build scripts or runtime layers.
 RUN --mount=type=secret,id=azure_token,required=false --mount=type=secret,id=azure_header,required=false \
     if [ -s /run/secrets/azure_header ]; then \
-      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://dev.azure.com/shengming0923/rss/_git/rss.extraheader \
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://dev.azure.com/shengming0923/rss/_git/.extraheader \
       GIT_CONFIG_VALUE_0="$(cat /run/secrets/azure_header)" cargo fetch --locked; \
     elif [ -s /run/secrets/azure_token ]; then \
-      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://dev.azure.com/shengming0923/rss/_git/rss.extraheader \
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://dev.azure.com/shengming0923/rss/_git/.extraheader \
       GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer $(cat /run/secrets/azure_token)" cargo fetch --locked; \
     else cargo fetch --locked; fi
 RUN --network=none cargo build --offline --locked --release -p rss-identity-app --bins --message-format=json > /build/artifacts.json

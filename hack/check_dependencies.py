@@ -9,11 +9,14 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 
 RSS_FEATURES = {
+    'rss-audit-core': set(), 'rss-audit-postgres': {'default','messaging'},
+    'rss-ledger': {'default'}, 'rss-ledger-postgres': {'messaging'},
+    'rss-transactional-messaging-runtime': {'consumer','producer'},
     'rss-runtime': {'default'}, 'rss-axum': {'http1','managed-server'},
     'rss-contract': {'default'}, 'rss-request-context': {'default'},
     'rss-redact': {'default'}, 'rss-diag-context': {'default'},
     'rss-transactional-messaging': {'consumer', 'default', 'producer'},
-    'rss-transactional-messaging-postgres': {'integration', 'test-support'},
+    'rss-transactional-messaging-postgres': {'default', 'integration', 'test-support'},
 }
 
 def require(condition, message):
@@ -24,6 +27,8 @@ def check_features(actual, profile):
     expected = {name: set(features) for name, features in RSS_FEATURES.items()}
     if profile == 'production':
         expected['rss-transactional-messaging-postgres'] = set()
+        expected['rss-ledger'] = set()
+        del expected['rss-ledger-postgres']
     require(actual == expected, f'{profile} RSS feature closure drift: {actual}')
 
 def check_advisory_path(metadata):
@@ -49,21 +54,24 @@ def check(metadata, manifest):
     declarations = manifest["workspace"]["dependencies"]
     members = set(metadata["workspace_members"])
     local_names = {p["name"] for p in metadata["packages"] if p["id"] in members}
-    roots = [v for k, v in declarations.items() if k.startswith("rss-") and k not in local_names]
+    roots = {k:v for k,v in declarations.items() if k.startswith("rss-") and k not in local_names}
     require(roots, 'RSS dependency roots missing')
-    urls = {d.get("git") for d in roots}
-    revs = {d.get("rev") for d in roots}
-    require(len(urls) == 1 and len(revs) == 1, 'mixed RSS source declarations')
-    url, rev = next(iter(urls)), next(iter(revs))
-    require(url == 'https://dev.azure.com/shengming0923/rss/_git/rss', 'unknown RSS source')
-    require(isinstance(rev, str) and len(rev) == 40 and all((c in '0123456789abcdef' for c in rev)), 'full SHA required')
-    require(all((not any((k in d for k in ('branch', 'tag', 'path', 'registry'))) for d in roots)), 'ambiguous RSS source')
-    require(not manifest.get('patch') and (not manifest.get('replace')), 'source overrides forbidden')
-    expected = f"git+{url}?rev={rev}#{rev}"
+    source_pins = {}
+    for name, declaration in roots.items():
+        url = 'https://dev.azure.com/shengming0923/rss/_git/' + ('rss-audit' if name in {'rss-audit-core','rss-audit-postgres'} else 'rss')
+        rev = declaration.get('rev')
+        require(declaration.get('git') == url, 'unknown RSS source')
+        require(isinstance(rev,str) and len(rev)==40 and all(c in '0123456789abcdef' for c in rev), 'full SHA required')
+        require(not any(k in declaration for k in ('branch','tag','path','registry')), 'ambiguous RSS source')
+        require(url not in source_pins or source_pins[url] == rev, 'mixed RSS source declarations')
+        source_pins[url] = rev
+    require(not manifest.get('patch') and not manifest.get('replace'), 'source overrides forbidden')
     found = {}
     for p in metadata["packages"]:
         if p["name"].startswith("rss-") and p["id"] not in members:
-            require(p['source'] == expected, f"wrong source for {p['name']}")
+            url = 'https://dev.azure.com/shengming0923/rss/_git/' + ('rss-audit' if p['name'] in {'rss-audit-core','rss-audit-postgres'} else 'rss')
+            rev = source_pins.get(url)
+            require(rev is not None and p['source'] == f'git+{url}?rev={rev}#{rev}', f"wrong source for {p['name']}")
             require(p['name'] not in found, f"duplicate RSS package {p['name']}")
             found[p["name"]] = p["version"]
         if p["source"] is None:
@@ -74,7 +82,7 @@ def check(metadata, manifest):
     actual = {packages[n['id']]['name']: set(n['features']) for n in metadata['resolve']['nodes'] if packages[n['id']]['name'].startswith('rss-') and n['id'] not in members}
     check_features(actual, 'test')
     check_advisory_path(metadata)
-    return {"git":url,"revision":rev,"packages":found}
+    return {"sources":source_pins,"packages":found}
 
 def check_artifacts(data, output):
     # Use the actual release/check compiler artifacts, including cached artifacts.

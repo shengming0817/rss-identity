@@ -182,6 +182,35 @@ pub async fn serve(
                                 .await?;
                         }
                     }
+                    let audit_task = if let Some(db) = config.audit.database(&config.database) {
+                        let runtime = Arc::new(
+                            PgRuntime::connect_consumer(
+                                db.pg()?,
+                                assembly::Timer,
+                                config.storage.binding()?,
+                            )
+                            .await
+                            .map_err(|_| AppError::Provider)?,
+                        );
+                        startup.stage_resource(DynManagedResource::new_box(PoolResource {
+                            pool: runtime.clone(),
+                            timeout: per,
+                        }));
+                        let audit_pool = sqlx::postgres::PgPoolOptions::new()
+                            .max_connections(2)
+                            .acquire_timeout(Duration::from_secs(10))
+                            .connect_with(db.sqlx()?)
+                            .await
+                            .map_err(|_| AppError::Connection)?;
+                        startup.stage_resource(DynManagedResource::new_box(AuditPoolResource(
+                            audit_pool.clone(),
+                            per,
+                        )));
+                        let delivery = crate::audit::delivery(&config, runtime, audit_pool).await?;
+                        Some(crate::audit::registration(&config.audit, delivery, per)?)
+                    } else {
+                        None
+                    };
                     let http = HttpConfig::new(&config.public_origin, config.budgets.request())
                         .map_err(|_| AppError::Configuration)?;
                     let gate = Arc::new(OnceLock::new());
@@ -216,6 +245,9 @@ pub async fn serve(
                         .await
                         .map_err(|_| AppError::Connection)?;
                     let mut launch = startup.commit();
+                    if let Some(task) = audit_task {
+                        launch.stage_task_with_token(task);
+                    }
                     launch.stage_task_with_token(
                         rss_axum::serve_http1_registration(
                             listener,
@@ -253,6 +285,10 @@ pub async fn serve(
     match outcome.exit() {
         ScopeExit::StopRequested(Ok(())) if clean => Ok(()),
         ScopeExit::Completed(Err(error)) if clean => Err(*error),
+        ScopeExit::CriticalTaskExited(exit) => {
+            record_critical_exit(exit.name(), exit.reason(), clean, std::io::stderr().lock());
+            Err(AppError::Shutdown)
+        }
         _ => Err(AppError::Shutdown),
     }
 }
@@ -261,9 +297,60 @@ pub async fn signal() -> Result<(), std::io::Error> {
     tokio::select! {r=tokio::signal::ctrl_c()=>r,_=terminate.recv()=>Ok(())}
 }
 
+struct AuditPoolResource(sqlx::PgPool, Duration);
+impl ManagedResource for AuditPoolResource {
+    fn name(&self) -> &str {
+        "audit-postgres"
+    }
+    fn shutdown_timeout(&self) -> Duration {
+        self.1
+    }
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.0.close().await;
+        Ok(())
+    }
+}
+
+fn record_critical_exit(
+    task: &str,
+    reason: rss_runtime::TaskExit,
+    clean: bool,
+    mut output: impl std::io::Write,
+) {
+    let task = match task {
+        "identity-audit" => "identity-audit",
+        "identity-http" => "identity-http",
+        _ => "other",
+    };
+    let reason = match reason {
+        rss_runtime::TaskExit::Cancelled => "cancelled",
+        rss_runtime::TaskExit::Completed => "completed",
+        rss_runtime::TaskExit::Failed(kind) => kind.as_str(),
+    };
+    let _ = writeln!(
+        output,
+        "component=identity-lifecycle event=critical_task_exit task={task} reason={reason} shutdown={}",
+        if clean { "clean" } else { "failed" }
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn critical_exit_retains_only_closed_diagnostics() {
+        let mut output = Vec::new();
+        record_critical_exit(
+            "identity-audit",
+            rss_runtime::TaskExit::Failed(rss_runtime::ShutdownErrorKind::Operation),
+            true,
+            &mut output,
+        );
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "component=identity-lifecycle event=critical_task_exit task=identity-audit reason=operation shutdown=clean\n"
+        );
+    }
     #[tokio::test]
     async fn diagnostics_keep_settlement_classification_out_of_the_http_body() {
         use rss_identity_postgres::{AuthorityError, StorageFailure};

@@ -41,6 +41,16 @@ class Gates(unittest.TestCase):
         with self.assertRaises(ValueError):
             deps.check(data, self.manifest)
 
+    def test_audit_source_and_revision_drift_are_rejected(self):
+        for name in ['rss-audit-core','rss-audit-postgres']:
+            data=copy.deepcopy(self.metadata)
+            next(p for p in data['packages'] if p['name']==name)['source']='git+https://invalid.test/audit#'+'a'*40
+            with self.subTest(name=name),self.assertRaises(ValueError): deps.check(data,self.manifest)
+        for field,value in [('git','https://invalid.test/audit'),('rev','a'*40)]:
+            manifest=copy.deepcopy(self.manifest)
+            manifest['workspace']['dependencies']['rss-audit-postgres'][field]=value
+            with self.subTest(field=field),self.assertRaises(ValueError): deps.check(self.metadata,manifest)
+
     def test_optimized_interpreter_rejects_source(self):
         script = "import check_dependencies as d,json,tomllib; m=json.load(open('/dev/stdin')); c=tomllib.load(open('Cargo.toml','rb')); c['workspace']['dependencies']['rss-contract']['git']='https://invalid.test'; d.check(m,c)"
         result = subprocess.run([sys.executable,'-O','-c',script], input=json.dumps(self.metadata),text=True,capture_output=True,env={**os.environ,'PYTHONPATH':'hack'})
@@ -77,6 +87,8 @@ class Gates(unittest.TestCase):
         actual = {k:set(v) for k,v in deps.RSS_FEATURES.items()}
         with self.assertRaises(ValueError): deps.check_features(actual,'production')
         actual['rss-transactional-messaging-postgres']=set()
+        actual['rss-ledger']=set()
+        del actual['rss-ledger-postgres']
         deps.check_features(actual,'production')
 
     def test_advisory_acceptance_revoked_on_version_or_path_drift(self):

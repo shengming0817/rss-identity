@@ -31,16 +31,28 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     let owner_db: rss_identity_app::config::DatabaseConfig =
         serde_json::from_value(value["database"].clone())?;
     let mut owner = sqlx::PgConnection::connect_with(&owner_db.sqlx()?).await?;
-    sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE host_runtime LOGIN PASSWORD 'fixture-runtime'; CREATE ROLE host_maintenance LOGIN PASSWORD 'fixture-maintenance'; CREATE ROLE unsafe_parent NOLOGIN BYPASSRLS").execute(&mut owner).await?;
+    sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE host_runtime LOGIN PASSWORD 'fixture-runtime'; CREATE ROLE host_maintenance LOGIN PASSWORD 'fixture-maintenance'; CREATE ROLE host_audit_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; GRANT CREATE ON DATABASE postgres TO host_audit_owner; CREATE ROLE host_audit LOGIN PASSWORD 'fixture-runtime'; CREATE ROLE unsafe_parent NOLOGIN BYPASSRLS").execute(&mut owner).await?;
     value["storage"]["tenants"]
         .as_array_mut()
         .unwrap()
         .push(json!("33333333-3333-4333-8333-333333333333"));
     value["bootstrapAccounts"].as_array_mut().unwrap().push(json!({"tenantId":"33333333-3333-4333-8333-333333333333","principalId":"44444444-4444-4444-8444-444444444444"}));
-    let install_value = json!({"formatVersion":4,"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
+    let install_value = json!({"formatVersion":5,"audit":{"mode":"enabled","ownerRole":"host_audit_owner","workerRole":"host_audit"},"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
     let install_config =
         || serde_json::from_value::<MigrationConfig>(install_value.clone()).unwrap();
     for (corrupt, restore) in [
+        (
+            "ALTER ROLE host_audit_owner BYPASSRLS",
+            "ALTER ROLE host_audit_owner NOBYPASSRLS",
+        ),
+        (
+            "ALTER ROLE host_audit REPLICATION",
+            "ALTER ROLE host_audit NOREPLICATION",
+        ),
+        (
+            "GRANT host_runtime TO host_audit WITH INHERIT FALSE, SET TRUE",
+            "REVOKE host_runtime FROM host_audit",
+        ),
         (
             "ALTER ROLE host_runtime BYPASSRLS",
             "ALTER ROLE host_runtime NOBYPASSRLS",
@@ -71,7 +83,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             migration::install(install_config()).await.is_err(),
             "unsafe role must fail before installation commits: {corrupt}"
         );
-        let absent: bool = sqlx::query_scalar("SELECT to_regnamespace('identity_authority') IS NULL AND to_regnamespace('rss_transactional_messaging') IS NULL").fetch_one(&mut owner).await?;
+        let absent: bool = sqlx::query_scalar("SELECT to_regnamespace('identity_authority') IS NULL AND to_regnamespace('rss_transactional_messaging') IS NULL AND to_regnamespace('rss_audit') IS NULL").fetch_one(&mut owner).await?;
         assert!(
             absent,
             "failed installation must roll back both schema owners"
@@ -81,6 +93,18 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     migration::install(install_config()).await?;
     migration::verify(install_config()).await?;
     for (corrupt, restore) in [
+        (
+            "ALTER ROLE host_audit_owner CREATEDB",
+            "ALTER ROLE host_audit_owner NOCREATEDB",
+        ),
+        (
+            "ALTER ROLE host_audit_owner REPLICATION",
+            "ALTER ROLE host_audit_owner NOREPLICATION",
+        ),
+        (
+            "REVOKE EXECUTE ON FUNCTION rss_audit.reserve(uuid) FROM host_audit",
+            "GRANT EXECUTE ON FUNCTION rss_audit.reserve(uuid) TO host_audit",
+        ),
         (
             "DELETE FROM identity_authority.schema_version",
             "INSERT INTO identity_authority.schema_version VALUES(11)",
@@ -144,7 +168,8 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     }
     value["database"]["user"] = json!("host_runtime");
     value["database"]["passwordFile"] = json!(root.join("runtime"));
-    value["budgets"] = json!({"requestSeconds":1,"drainSeconds":4,"resourceSeconds":2});
+    value["audit"] = json!({"mode":"enabled","user":"host_audit","passwordFile":root.join("runtime"),"pollMillis":100,"batch":8});
+    value["budgets"] = json!({"requestSeconds":1,"drainSeconds":60,"resourceSeconds":30});
     value["publicGateway"] = json!("127.0.0.1");
     let runtime_config = || serde_json::from_value::<RuntimeConfig>(value.clone()).unwrap();
     let config = runtime_config();
@@ -447,6 +472,45 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     kdf.wait_closed().await;
     assert!(kdf.hash(password()).await.is_err());
 
+    // Enabled worker rejects inherited credential access and missing Audit permissions.
+    for (corrupt, restore) in [
+        (
+            "GRANT MAINTAIN ON identity_authority.sessions TO host_audit",
+            "REVOKE MAINTAIN ON identity_authority.sessions FROM host_audit",
+        ),
+        (
+            "GRANT MAINTAIN ON rss_audit.records TO host_audit",
+            "REVOKE MAINTAIN ON rss_audit.records FROM host_audit",
+        ),
+        (
+            "GRANT host_runtime TO host_audit WITH INHERIT FALSE, SET TRUE",
+            "REVOKE host_runtime FROM host_audit",
+        ),
+        (
+            "ALTER ROLE host_audit REPLICATION",
+            "ALTER ROLE host_audit NOREPLICATION",
+        ),
+        (
+            "GRANT USAGE ON SCHEMA identity_authority TO host_audit; GRANT SELECT ON identity_authority.local_credentials TO host_audit",
+            "REVOKE SELECT ON identity_authority.local_credentials FROM host_audit; REVOKE USAGE ON SCHEMA identity_authority FROM host_audit",
+        ),
+        (
+            "REVOKE EXECUTE ON FUNCTION rss_audit.reserve(uuid) FROM host_audit",
+            "GRANT EXECUTE ON FUNCTION rss_audit.reserve(uuid) TO host_audit",
+        ),
+    ] {
+        sqlx::raw_sql(corrupt).execute(&mut owner).await?;
+        let failure = tokio::time::timeout(
+            Duration::from_secs(15),
+            lifecycle::serve(
+                serde_json::from_value(value.clone())?,
+                std::future::pending(),
+            ),
+        )
+        .await?;
+        assert!(failure.is_err());
+        sqlx::raw_sql(restore).execute(&mut owner).await?;
+    }
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     value["listen"] = json!(occupied.local_addr()?.to_string());
     let failed = tokio::time::timeout(
@@ -463,7 +527,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM pg_stat_activity WHERE usename='host_runtime'"
+            "SELECT count(*) FROM pg_stat_activity WHERE usename IN ('host_runtime','host_audit')"
         )
         .fetch_one(&mut owner)
         .await?,
@@ -571,11 +635,41 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             .status(),
         reqwest::StatusCode::UNAUTHORIZED
     );
+    // Block a real append, request shutdown, then release it: active batch drains before pools.
+    let mut blocker = sqlx::PgConnection::connect_with(&owner_db.sqlx()?).await?;
+    let mut barrier = blocker.begin().await?;
+    sqlx::raw_sql("LOCK TABLE rss_audit.heads IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *barrier)
+        .await?;
+    let fresh = client
+        .post(format!("{url}/api/v2/tenants/{}/login", keys[1].tenant))
+        .header("origin", value["publicOrigin"].as_str().unwrap())
+        .header("x-identity-request", "1")
+        .header("x-forwarded-for", "203.0.113.9")
+        .json(&json!({"login":"operator","password":PASSWORD}))
+        .send()
+        .await?;
+    assert_eq!(fresh.status(), reqwest::StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_transactional_messaging.outbox WHERE status='publishing')").fetch_one(&mut owner).await?;
+            if active { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_,sqlx::Error>(())
+    }).await??;
     stop.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !server.is_finished(),
+        "active append must drain rather than being abandoned"
+    );
+    barrier.rollback().await?;
+    blocker.close().await?;
     tokio::time::timeout(Duration::from_secs(10), server).await???;
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM pg_stat_activity WHERE usename='host_runtime'"
+            "SELECT count(*) FROM pg_stat_activity WHERE usename IN ('host_runtime','host_audit')"
         )
         .fetch_one(&mut owner)
         .await?,
