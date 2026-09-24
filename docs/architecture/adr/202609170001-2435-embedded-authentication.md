@@ -6,7 +6,7 @@
 
 彻底：账户、会话、联合身份与原子安全事件只有一套实现；删除 contracts/client/Hydra、下游 grant、中央平台租户注册与 CLI SSO 源码及当前构建入口。管理角色、防锁死策略和资源授权由宿主持有，组件没有 administrator、emergency、platform_administrator 或替代角色标记。
 
-不向后兼容：仅提供 HTTP `/api/v2` 和 `/api/v2/oidc/callback`，没有 v1 别名或 legacy feature。安装基线经 #2451 更新为 fresh schema v11；拒绝旧库，不提供升级、双读或旧配置回退。保留旧候选、数据和密钥的历史证据，不操作既有部署。
+不向后兼容：仅提供 HTTP `/api/v2` 和 `/api/v2/oidc/callback`，没有 v1 别名或 legacy feature。仅支持当前全新安装；拒绝旧库，不提供升级、双读或旧配置回退。保留旧候选、数据和密钥的历史证据，不操作既有部署。
 
 优雅简洁：保留 core、postgres、oidc、http-axum 四个能力 crate；应用层只有参考宿主。宿主注入现有 PgRuntime、显式实例与租户列表、KDF、事件预算、SessionPolicy 和必选 ManagementPolicy。Authority 不创建、替换或关闭宿主连接池，不发现中央租户。OIDC 的密钥、状态签名、callback、return target、group policy 单独配置，本地模式不要求这些字段。
 
@@ -20,29 +20,23 @@
 
 HTTP DTO 由适配层私有持有。`router` 装配本地登录、会话及账户管理；`federated_router` 独立装配可选 OIDC/IdP 管理，宿主明确 merge。HTTP body 不接受服务端授权凭证。
 
-会话保存签发时的 idle/absolute 策略，后续宿主配置变更影响新会话；旧会话继续受原期限约束。参考配置为 900/14400 秒。组保持 #2433 的 version、provider/issuer、snapshot、观察时间和硬过期语义；available、unavailable、expired 不混淆。
+会话保存签发时的 idle/absolute 策略，后续宿主配置变更影响新会话；旧会话继续受原期限约束。实际参考策略由宿主代码与查询命令持有。组保持 #2433 的 version、provider/issuer、snapshot、观察时间和硬过期语义；available、unavailable、expired 不混淆。
 
 ## 持久化与事件
 
-schema owner 导出 fresh install 与有效权限 profile 授权函数；宿主决定数据库角色名和 RSS migration 顺序，独立配置 tenant fence。结构摘要校验、FORCE RLS、列级维护权限、PUBLIC/继承权限/GRANT OPTION 探测仍由组件执行。账户事件变更为 v3，移除角色字段；联合事件变更为 v2，移除 CLI 授权动作。session v1 形状不变。
+schema owner 导出 fresh install 与有效权限 profile 授权函数；宿主决定数据库角色名和 RSS migration 顺序，独立配置 tenant fence。结构摘要校验、FORCE RLS、列级维护权限、PUBLIC/继承权限/GRANT OPTION 探测仍由组件执行。事件结构由 postgres 的事件 schema 持有，不在 ADR 复制版本清单。
 
 所有成功凭据及远端测试报告只在本地事务提交确认后释放。NotStarted、RolledBack、RollbackFailed、CommitUnknown、Fenced 保持不同内部错误，未知提交不返回 cookie。OIDC 使用原有 openidconnect 校验及持久 state/nonce/PKCE、JIT、link、step-up 流程，远程请求不伪装为 PG 原子操作。
 
 ## 参考宿主内网接入与 MFA 资源
 
-[#2448](https://dev.azure.com/shengming0923/rss/_workitems/edit/2448) 扩展正式 OIDC 的显式私网网络授权，并将部署配置原子升级为 v4。网络授权由宿主持有，按 tenant/完整 issuer/client 精确匹配；只开放配置的 RFC1918/ULA，TLS、DNS 全答案校验及精确协议目的地继续生效。该策略不进入 provider 业务版本或 assurance 指纹，不能隐式授予 MFA 或撤销已有会话。
+[#2448](https://dev.azure.com/shengming0923/rss/_workitems/edit/2448) 扩展正式 OIDC 的显式私网网络授权，并扩展正式部署配置。网络授权由宿主持有，按 tenant/完整 issuer/client 精确匹配；只开放配置的 RFC1918/ULA，TLS、DNS 全答案校验及精确协议目的地继续生效。该策略不进入 provider 业务版本或 assurance 指纹，不能隐式授予 MFA 或撤销已有会话。
 
-参考宿主提供固定 300 秒 MFA 示范资源，直接消费当前权威 session 的可信 assurance，并在网关挂载。它不改变普通管理、本地应急或核心认证策略。Rust 构造器直接替换，旧 v3 配置拒绝；当前安装基线为 schema v11，HTTP 仍为 v2。真实浏览器、恢复及容量证据归 #2366。
+参考宿主提供有明确有效期的 MFA 示范资源，直接消费当前权威 session 的可信 assurance，并在网关挂载。它不改变普通管理、本地应急或核心认证策略。接口直接替换，旧配置拒绝；当前接入见嵌入与部署指南。
 
-## 验证边界
+## 范围与验证
 
-组件 T1/T2 覆盖 PG 故障、并发锁序、OIDC 和组快照；密码及签发竞态由 postgres 私有测试覆盖，HTTP 与独立消费者只消费公开 facade。
-
-独立消费者分本地、可选 OIDC 两种，各有 workspace/lock/target/PG，在仓库祖先配置之外执行；从产品 Git URL 和完整 revision 获取公开能力包，验证前后有效源码与配置必须一致。OIDC 消费者使用真实 Keycloak，不能用 reference app 或 Hydra 充当组件依赖。
-
-## 范围与交接
-
-[#2436](https://dev.azure.com/shengming0923/rss/_workitems/edit/2436) 承接完整 reference app 部署、UI candidate、运维迁移及独立 T3；本次只保证参考宿主最小装配。MDM 迁移归 [#2437](https://dev.azure.com/shengming0923/rss/_workitems/edit/2437)，Web UI 归 [#2368](https://dev.azure.com/shengming0923/rss/_workitems/edit/2368)。不修改 MDM/Web，不引入新 MFA/passkey、多存储或 OAuth 授权服务器。
+组件只提供认证、联合身份、实例会话及事务事件；宿主与 MDM/Web 分别持有其装配和资源授权。组件测试与必要真实接缝按[验证规则](../../rules/verification-scope.md)运行，不因内部拆包要求独立 consumer 或制品来源证明。历史运行记录不能替代当前产品验收。
 
 ## ASP.NET Core Identity 能力对照
 

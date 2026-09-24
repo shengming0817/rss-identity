@@ -37,8 +37,6 @@ def inspect_image(reference, product=False):
     require(isinstance(image.get('Architecture'),str) and image['Architecture'],'image architecture required')
     if product:
         require(image['Config']['User']=='10001:10001','image user must be 10001:10001')
-        revision=(image['Config'].get('Labels') or {}).get('org.opencontainers.image.revision','')
-        require(re.fullmatch('[a-f0-9]{40}',revision),'image revision required')
     return image
 
 def resolve_image_details(identity_image,web_image):

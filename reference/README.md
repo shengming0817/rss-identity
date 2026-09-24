@@ -15,7 +15,7 @@ ln -s ../../rss-mdm/reference/winmdm20260220-develop reference/winmdm20260220-de
 /usr/bin/git check-ignore -v reference/winmdm20260220-develop
 ```
 
-链接已存在时无需重复创建。也可自行恢复原 ZIP 到该路径。MDM 来源说明记录 ZIP SHA-256 为 `bb08749e671080dd96a3d61dd31c662730604cd288303fa67e7917aaf9778e67`；本次没有取得 ZIP 重新验证该摘要，不能当作本次完整性证明。具体已读文件另见证据索引及 SHA-256。
+链接已存在时无需重复创建。也可自行恢复原 ZIP 到该路径。MDM 来源说明记录 ZIP SHA-256 为 `bb08749e671080dd96a3d61dd31c662730604cd288303fa67e7917aaf9778e67`；该摘要来自历史来源记录，不表示当前已重新校验。具体已读文件另见证据索引及 SHA-256。
 
 ## RSS
 
@@ -26,7 +26,7 @@ ln -s ../../rss-mdm/reference/winmdm20260220-develop reference/winmdm20260220-de
 /usr/bin/git -C /path/to/rss show 5b63e10a1b396b0ff70b7d1e6e55db296cd7a891:crates/identity/src/application/mod.rs
 ```
 
-RSS 与 WinMDM 内部规则和历史运行配置不成为 Identity 规则。历史源码未在本次运行，缺陷分析不等于生产事故结论。
+RSS 与 WinMDM 内部规则和历史运行配置不成为 Identity 规则；来源分析不等于当前运行结果或生产事故结论。
 
 ## 本地 Git 排除
 

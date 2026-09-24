@@ -1,58 +1,31 @@
 # 嵌入认证组件
 
-宿主以同一仓库 URL、同一完整 Git SHA 消费四个公开能力包，提交自己的 Cargo.lock；不引用本机跨仓 path，不依赖参考应用。可执行样例在 [独立消费者](../../tests/consumers/)；[验证入口](../../hack/check_consumer.py) 将两种宿主放在仓库祖先之外，各自解析依赖、编译和运行真实 provider 测试。
+宿主通过公开能力包装配本地认证和可选 OIDC，不依赖参考应用。依赖使用同一仓库 URL 与完整 Git revision，由宿主 manifest/lock 持有；不使用本机跨仓 path。实际装配示例见 [参考宿主](../../app/identity/src/assembly.rs)，接口以各能力的 Rust API 为准。
 
-## 本地认证
+## 本地认证与安装
 
-1. 宿主提供已有、绑定 StorageIdentity/ExecutionBinding 的 `Arc<PgRuntime>`，共享有界 `Arc<PasswordKdf>`，以及显式 `InstanceId`、租户列表、`SessionPolicy` 和事件预算。Identity 不创建、更换、关闭宿主连接池，不自动发现租户。
-2. 宿主预建数据库角色，数据库 owner 先安装 RSS 消息 schema，再调用 `install(connection, instance)` 和 `grant_profile(connection, role, profile)`。Identity 只接受全新 v11 schema；v10/旧配置失败关闭，不升级、不双读。结构签名和有效权限检查独立于角色名称。提交安装事务前以实际目标角色调用 `verify_profile(connection, profile, instance)`；参考安装器用 `SET LOCAL ROLE` 对 runtime/maintenance 都执行同一检查，失败整体回滚。
-   RSS 安装必须使用 pin 对应的完整 `MIGRATION_SQL`。runtime/maintenance 仅持有 Outbox SELECT 和公开 `prepare_outbox_partitions(jsonb)` / `append_outbox(bytea,jsonb)` EXECUTE，无直接 INSERT、分区表或 sequence 权限。安全事件保持 unordered，不声明分区；RSS 的运行准入拒绝旧权限或不匹配 schema。
-3. Maintenance authority 仅用于一次性 `initialize` 与 `recover_local_password`。恢复只更换本地密码并推进 epoch，不自动启用账户或成员、不授予宿主权限。
-4. `Authority::connect_runtime` 必须提供 `ManagementPolicy`。调用 `login_local` 完成密码验证及原子签发；外部不能构造 AuthenticationCandidate 或调用底层签发函数。
-5. HTTP 宿主资源请求统一调用下文的 `rss_identity_http_axum::authenticate_request`，显式选择 Active/Passive，由组件完成 cookie、同源和 CSRF 边界；获得不可反序列化、不可克隆的 `AuthenticatedSession` 后再执行资源授权。以下直接调用 Authority 的示例用于已建立请求保护的可信服务端 adapter。不要将前端 JSON 当作认证证明，也不要跨请求缓存该值。
+1. 宿主提供已绑定 storage/fence 的 `Arc<PgRuntime>`、共享有界 KDF、显式实例与租户、会话策略、事件预算和管理策略。Identity 不创建、更换或关闭宿主池，不自动发现租户。
+2. 数据库 owner 先安装所选 RSS 版本的完整消息 migration，再安装 Identity schema 并授予 runtime/maintenance profile。仅接受当前全新安装；在提交安装事务前，以实际目标角色验证有效权限和结构。入口见 [schema owner](../../crates/identity-postgres/src/schema.rs)；生产迁移执行属于宿主。
+3. 维护身份只用于初始化和本地密码恢复，凭据不注入日常服务。恢复推进失效代际，保留账户/成员启停状态，不授予宿主角色。
+4. runtime Authority 必须接收宿主 ManagementPolicy。密码校验和凭据签发经单一登录入口完成；浏览器 JSON、普通账户快照或上游结构值不能构造可信会话。
 
-```rust,ignore
-let authority = Authority::connect_runtime(
-    runtime.clone(), kdf, config, host_policy, deadline,
-).await?;
-let issued = authority.login_local(
-    tenant, login, password, source, None, request_deadline,
-).await?;
-let actor = authority.authenticate_session(tenant, session_secret, request_deadline).await?;
-let account = actor.account();
-let groups = actor.groups()?;
-```
+业务变更与安全事件使用同一 PG 事务。角色有效权限包含继承/PUBLIC/列权限检查；角色名不能替代权限证明。RSS migration 与授权接缝以实际 pin 对应源码为准，不能只复制部分 SQL。
 
-`SessionPolicy` 显式指定 idle/absolute 秒数，须为正且 idle ≤ absolute。参考宿主为 900/14400。会话持久化原始策略，refresh 旋转凭据并保留 auth_time、absolute deadline 和组快照期限；`reauthenticate_local` 绑定当前账户并重新认证，不能切换为请求指定的其他账户。撤销、密码变化、账户或成员禁用在下一次权威读取时生效。数据库不可用时拒绝认证；提交不确定不释放成功凭据。
+## 请求与管理授权
 
-## 宿主管理策略
+HTTP 宿主统一通过 `authenticate_request` 取得当前请求的 AuthenticatedSession，再执行产品资源授权。Active 请求检查 cookie、同源、请求标记和 CSRF 后续期；Passive 只读验证，不延长 idle。会话保留签发时的绝对期限，refresh 旋转凭据，重新认证只能绑定当前主体。不要跨请求缓存成功身份、组或部门事实。
 
-每次管理操作均在事务内重新检查当前会话、实例、租户、账户、成员和 epoch，再调用宿主 `ManagementPolicy::authorize`。Context 只能由组件生成，包含 actor、target、操作、当前 assurance 和当前组投影；策略是有界同步回调，不能阻塞 I/O。宿主返回拒绝或 `None` / `Recent(Duration)` / `RecentMfa(Duration)`，组件落实重新认证要求。
+每次管理事务重新核对实例、租户、账户、成员、会话和失效代际后调用宿主 ManagementPolicy。策略是有界同步回调，不执行阻塞 I/O；组件落实策略要求的重新认证/MFA。宿主持有管理角色、防锁死和并发一致性，Identity 不保存 administrator/emergency/platform 角色。
 
-Identity 不存储 administrator、emergency 或平台角色。宿主维护管理角色、防锁死和授权映射，并负责其并发一致性。参考宿主的 `bootstrapAccounts` 必须恰好覆盖配置中的每个租户，各有一个 AccountKey，禁止重复、遗漏和跨租户配置。每个管理员只能管理本租户，禁止其自我禁用/移除成员，并要求 300 秒内重新认证。普通账户可调用 `ChangeOwnPassword`，也必须经过同一管理策略并满足其重新认证要求；当前密码证明不替代宿主授权。
+参考宿主为每个配置租户指定唯一 bootstrap 账户，并阻止其自我禁用；这是示范宿主策略，不成为其它产品的默认授权。密码恢复与 IdP 故障都不能自动提升权限或复活禁用状态。
 
-`actor.groups()?` 和 `ManagementContext::groups()?` 共用检查路径，返回 `VerifiedGroups::Available`、`Unavailable` 或 `Expired`。Available 包装器只能借自本次认证结果；`groups.values()?` 每次读取重新检查请求证明与快照期限，不能由请求 JSON 构造。空组、缺失组、过期组语义不同。组是有来源和期限的认证事实，资源授权由宿主决定。观察时间取已验签 ID token 的 iat，期限为 min(iat + 1–300 秒策略, exp)；普通刷新不延长。provider/账户/session 撤销使整次验证失败，组独立过期只移除组事实。
+## 组与可选可信部门树快照
 
-`GroupAccessError::ProofExpired` 表示请求证明到期；已借出的组对象也不能继续读取值。快照独立到期时，新的 `groups()` 返回 `Expired`，保留对象的 `values()` 返回 `GroupAccessError::SnapshotExpired`；两者同时到期优先返回 `ProofExpired`。元数据仅描述来源，不能替代本次 `values()` 检查。宿主已复制的值、引用和已作出的授权决定不会被自动撤回；不要跨请求缓存。
+组与部门是带来源和固定期限的认证事实，不是资源权限。缺失、空值、非法断言与过期不同；宿主应显式处理不可用状态。当前模型、受控构造和边界分别见 [组](../../crates/identity-core/src/groups.rs)、[部门](../../crates/identity-core/src/department.rs) 与 [期限决定](../architecture/adr/202609180001-2438-trusted-group-expiry.md)。
 
-```rust,ignore
-match actor.groups()? {
-    VerifiedGroups::Available(groups) => {
-        product_mapping.check(actor.account(), groups.source(), groups.values()?)?;
-    }
-    VerifiedGroups::Unavailable(_) | VerifiedGroups::Expired => return Err(GroupsRequired),
-}
-```
+组 Available 视图只能借自本次可信认证结果，每次读取 `values()` 都检查请求证明和快照截止；部门通过 `snapshot()` 做同样检查。请求证明到期使读取失败，事实独立到期不自动否定基础身份。未来观察在下次权威请求前保持不可用。已经复制的值、借出的引用和已经产生的业务效果由宿主负责。
 
-期限从锁与 provider 复核后的数据库微秒采样推导，单调时钟锚点在查询发送前；查询、续期和事务返回耗时均消耗预算。管理策略还受传入证明的原期限约束。`NotYetValid` 在本次证明内保持不可用，需要下次权威读取重新投影。公开 API 直接替换旧 unchecked getter，无兼容别名，当前安装基线由 #2451 更新为 schema v11，HTTP 仍为 v2。
-
-来源结构由 `rss_identity_core::facts::FactSource` 唯一拥有。组不可用原因使用 `facts::FactUnavailableReason`，部门使用闭集 `department::DepartmentUnavailableReason`，包括非法部门断言的 `InvalidClaim`。两者不得混用持久状态。消费者更新同一完整 Git SHA 和自己的 lock。
-
-## 可选可信部门树快照
-
-在 provider HTTP settings 配置 `claims.departmentSnapshot: {"claim":"organization_snapshot","maxAgeSeconds":120}`；省略/null 为禁用，输出统一包含 null 或完整对象。Rust 领域配置为 `department_snapshot: Option<DepartmentSnapshotClaim>`。期限独立于组，范围 1–300 秒且无默认。旧 `claims.department`、标量输入、旧 Rust getter 和存储格式直接拒绝。
-
-已验证 ID Token 中的 claim 是一个 JSON 对象：
+部门由 provider 显式启用签名 ID Token 内的完整树快照，不能从安全组、名称、路径或浏览器补齐。示例输入：
 
 ```json
 {"version":1,"sourceRevision":"directory-revision-42","nodes":[
@@ -61,36 +34,26 @@ match actor.groups()? {
 ],"memberships":["engineering"]}
 ```
 
-节点为完整单根树，1–256 个节点、最多 16 层、最多 16 个不同成员。重复 ID、多根、环、缺父节点、未知成员、未知字段/版本均无效；每个节点的 parentId 必填。memberships 必填，空数组明确表示未分配。稳定 ID 和 sourceRevision 为精确区分大小写的 1–256 UTF-8 字节字符串，无首尾空白/控制字符；displayName 仅用于显示。总 auth_facts 限制 32 KiB（PG jsonb::text 精确字节数），超限时先完整关闭部门事实；其余身份/组仍超限则拒绝认证，不截断树或成员。
+树必须完整、单根、有界；稳定标识精确匹配，显示名不提供身份。空成员表示未分配，缺失不是未分配声明。配置与输入结构由 [OIDC 适配器](../../crates/identity-oidc/src/lib.rs) 和 core 模型持有，完整设计见 [部门快照 ADR](../architecture/adr/202609200001-2451-department-snapshot.md)。
 
-自有可信 `UpstreamOidc` adapter 可用 `DepartmentNode::new` 和 `DepartmentSnapshot::new` 构造已校验的结构，再返回 `UpstreamDepartmentSnapshot::Present`，无需通过 JSON 往返。构造与反序列化共享校验；这些结构本身不等于可信会话事实。Debug 仅输出类型与数量，不输出目录名称、编码或来源 revision。
+instance、tenant、principal、provider 和配置版本由权威会话绑定；观察来自 signed iat，期限不超过 token exp。refresh、活动请求和组件重建不延长快照。provider 更新/禁用及主体/session 撤销作用于旧会话和在途流程；link target 不覆盖当前 source 快照。sourceRevision 是上游不透明版本，不表示 Identity 全局最新目录。
 
-`AuthenticatedSession::department_snapshot()` 与 `ManagementContext::department_snapshot()` 返回 `Available(TrustedDepartmentSnapshot)`、`Unavailable(reason)` 或 `Expired`。只有 `snapshot()?` 检查证明和事实截止后才返回树、memberships 和 source_revision。未配置、缺失、非法断言、本地身份、未来观察分别为 NotConfigured/ClaimMissing/InvalidClaim/LocalIdentity/NotYetValid。null 不是未分配声明。签名、会话验证、PG 或已持久化数据格式/内容损坏导致整次身份失败，不能降级成部门不可用。
+已验签但非法或超限的部门断言关闭整个部门事实，不截断树；其余认证事实仍超限则拒绝认证。签名、会话、存储格式/内容损坏或数据库故障拒绝身份，不降级为普通缺失。
 
-来源的 instance/account/provider_id/issuer/provider_config_version 全部由同一权威认证会话派生，claim 无权提供这些字段。不得按名称、路径或安全组推断层级，不得拼接不同来源、会话或 sourceRevision 的节点。snapshot_id 仅标识一次认证观察，sourceRevision 是上游不透明版本，不存在 Identity 全局“最新目录”。
+Keycloak 使用内置 JSON UserAttributeMapper，把管理员维护的单个完整对象仅投影到 ID Token；属性只能由管理员查看/修改，关闭多值与聚合。来源 owner 负责完整树、稳定标识及各用户断言的同步。配置示例见现有 [provider fixture](../../hack/providers.py) 的 `configure_department_profile`。此机制适用于预算内的小型组织树，不代表目录同步、AAD 部门集成或 Keycloak 原生组织 API。资源子树授权归 MDM。
 
-期限固定为 `min(signed iat + maxAgeSeconds, signed exp)`；refresh、活动请求和组件重建不更新快照。新认证观察新树，旧会话只在各自原截止前使用旧树。上游不可用不延寿。更新 provider 映射/TTL 会推进配置版本和撤销 epoch，撤销旧会话及在途流程。link target 不覆盖当前 source 快照。
+## 可选 OIDC 与 HTTP 装配
 
-真实来源夹具见 [Keycloak 配置](../../hack/providers.py) 的 `configure_department_profile`：管理员维护单个 JSON 用户属性，UserAttributeMapper 的 jsonType.label=JSON、multivalued=false、aggregate.attrs=false，仅加入 ID Token；属性 permissions.view/edit 均为 admin。管理员负责完整性、稳定 ID、原子更新与同步所有相关用户的断言。不要开启可由普通用户修改的属性映射。此方案适合预算内的小型组织树，不是 Keycloak 原生组织 API 或目录同步。AAD 与通用 OIDC 可提供登录/组；只有具备同等可信完整快照的来源才能开启部门配置。
-
-部门事实不生成资源权限。浏览器 DTO 无法构造可信 wrapper，session JSON 不携带授权证明；宿主不得跨请求缓存事实，已复制的值/引用及已发生的业务效果仍由宿主负责。MDM 的显式子树匹配、资源范围和撤权属于 #2363。
-
-## 可选 OIDC
-
-`Federation` 单独接收 Authority、UpstreamOidc、StateSigner、CredentialKeys、GroupFactsMaxAge、固定 HTTPS callback 和 return-target 白名单。`rss-identity-oidc::HttpOidc` 是具体上游适配器；本地消费者闭包中没有它、openidconnect 或 reqwest。上游 client_id 是 IdP 协议配置，不是中央服务客户端注册。
-
-生产 adapter 唯一构造方式为 `HttpOidc::new(profiles, private_access)`；调用方必须显式传入网络授权列表（仅公网为 `vec![]`），不保留旧单参数签名。`PrivateProviderAccess` 仅包含 tenant、完整 issuer、client_id 和 CIDRs，构造时统一验证范围、数量和重复项；其授权与 `TrustedAssuranceProfile` 的 MFA 解释互相独立。详细部署字段与地址规则见[运维](../deployment/operations.md)。
-
-callback 必须为 `<宿主 origin>/api/v2/oidc/callback`。begin/complete 持久化并原子消费 state、nonce、PKCE 和浏览器绑定；JIT、显式关联、step-up、凭据加密和组来源验证保持单一入口。禁用 provider 推进撤销 epoch，重新启用不复活旧会话。
+Federation 接收 Authority、上游适配器、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
 
 ```rust,ignore
 let routes = rss_identity_http_axum::router(authority, http.clone())?
     .merge(rss_identity_http_axum::federated_router(federation, http)?);
 ```
 
-本地 Router 和联邦 Router 分别挂载；宿主拥有 TLS listener、可信代理边界、连接来源、日志脱敏和 graceful drain。HTTP DTO 是适配器私有实现。不要用通用同截止点 timeout 丢弃数据库写 future；让组件/RSS 返回精确 settlement 分类。
+OIDC 使用 Code/PKCE、state/nonce 和浏览器绑定，登录事务原子单次消费；邮箱不是自动关联依据。显式关联与 step-up 绑定当前主体，provider 配置变化使旧流程失效。唯一 callback 是宿主 origin 下的 `/api/v2/oidc/callback`，回跳只接受宿主白名单键。
 
-宿主必须在进入路由前注入 `ClientAddress`。仅有 Axum `ConnectInfo` 不会自动转换，缺少此扩展的登录请求返回 503。直接终止 TLS 的宿主可使用下面的中间件，并让 accepted listener 通过 `into_make_service_with_connect_info::<SocketAddr>()` 提供真实 peer：
+宿主持有 TLS、listener、可信代理、日志脱敏和有界关闭，必须注入 `ClientAddress`；仅有 ConnectInfo 不会自动转换，缺失来源时登录拒绝。直连中间件可从真实 peer 注入：
 
 ```rust,ignore
 async fn client_address(
@@ -101,22 +64,10 @@ async fn client_address(
     request.extensions_mut().insert(rss_identity_http_axum::ClientAddress(peer.ip()));
     next.run(request).await
 }
-let routes = routes.layer(axum::middleware::from_fn(client_address));
 ```
 
-使用 RSS listener 的参考宿主从 `AcceptedConnectionInfo<()>` 读取 RSS 绑定的 TCP peer；生命周期显式注入 `ExecutionTimer`，listener 显式给出 256 连接、64 请求头与 32 KiB 缓冲限额，准备/建连/请求头等待沿用宿主 request 预算，关闭沿用 resource 预算。
+直连 listener 还须通过 `into_make_service_with_connect_info::<SocketAddr>()` 提供 peer。RSS listener 的参考宿主使用 AcceptedConnectionInfo；反代须先验证真实 peer 是可信网关，再读取它覆盖的来源头。不能直接信任浏览器 forwarded headers。
 
-该中间件忽略请求中的 forwarded headers。反向代理部署须由宿主先验证真实 peer 是否为配置的可信网关，再读取其覆盖的来源头；参考宿主的 transport 模块实现该边界。[独立本地消费者](../../tests/consumers/local/lib.rs) 实际发送登录请求，验证缺少扩展的失败、正确注入后的 cookie 和 camelCase JSON。
+不要用通用 timeout 丢弃数据库写 future。组件/RSS 持有有界事务结算；CommitUnknown、RollbackFailed 等内部结果保留在 HttpFailure 中，不能据 503 推断可安全重试。对外错误、cookie 与 CSRF 规则见 [HTTP 接入](../architecture/identity-wire-v2.md)。安全事件 schema 由 postgres 持有，不含凭据或上游 token。
 
-宿主诊断以 `AuthorityError::Configuration` 区分无效配置，以 `InvalidInput` 表示操作输入错误，以 `DeadlineElapsed` 表示事务开始前截止期耗尽。已经进入数据库事务的错误仍保留 `NotStarted` / `RolledBack` / `RollbackFailed` / `CommitUnknown` 及其原因，禁止据 503 推断是否可重试。HTTP 对输入错误返回 400，对配置/截止期错误返回脱敏的 503；完整分类仅通过响应扩展 `HttpFailure` 提供给宿主。OIDC callback 的失败重定向同样保留该扩展，浏览器仍只收到闭集失败原因；内部错误 body、凭据 headers 不会被转发。
-
-安全事件版本为 account v3、federation v2、session v1。事件不含密码、cookie、code、verifier、上游 token；消费者须按新事件 schema 更新，旧事件定义不再作为活动协议。
-
-底层 `Authority::authenticate_session` 验证并延长 idle，不改变原 absolute deadline；仅供已建立请求保护的可信服务端 adapter 使用。HTTP 宿主通过下面的统一入口选择活动策略，不能让后台心跳无限续期。`inspect_session` 只读验证，用于登录替换前检查、浏览器 GET session 和不应续期的被动查询。HTTP POST refresh 显式续期并旋转凭据；两种验证入口都重新检查权威状态。认证与 refresh 在最后一次会话查询/写入后共用单调期限复核，取会话期限与调用预算的较早值；数据库等待已耗尽期限时拒绝并回滚续期、凭据轮换与安全事件，不签发成功 cookie。
-
-HTTP 宿主资源统一调用 `rss_identity_http_axum::authenticate_request(&authority, &http, tenant, headers, activity, deadline)`。`SessionActivity::Passive` 严格解析 cookie 并只读验证；`Active` 额外要求唯一且匹配配置的 Origin、`X-Identity-Request: 1` 和凭据绑定的 CSRF，再权威验证并延长 idle。格式错误、重复或超限 cookie 均拒绝。返回请求级 `AuthenticatedSession` 与可零化的 `SessionSecret`；凭据仅用于必要的服务端协议续接，不写日志或返回浏览器，后续请求必须再次权威验证，不能缓存成功证明。宿主仍持有活动分类、资源授权和成功响应 no-store。操作使用宿主剩余预算与 HTTP timeout 的较小值，由组件完成有界事务收尾；失败保留 `HttpFailure`，不签发 cookie。
-
-部署 owner 轮换凭据时调用 `CredentialKeys::reencrypt_tenant(&mut tx, instance, tenant)`；组件持有 guard、AAD、密文和 SQL，宿主先绑定 storage fence 与 SQL 预算，最后提交或回滚。逐值重加密不是公开接口，runtime/maintenance 角色不会因轮换扩权。
-
-
-固定 Git 消费验证：`make test-consumers IDENTITY_CONSUMER_REVISION=<完整 SHA> IDENTITY_CONSUMER_OUTPUT=<仓库祖先之外的新目录>`。OIDC 独立 workspace 默认构建不启用 `test-support`，执行生产 `HttpOidc::new` 拒绝 loopback 的用例；显式 `loopback-fixture` 仅映射依赖的 `rss-identity-oidc/test-support`，通过 `for_loopback_test` 跑真实 PG＋Keycloak。报告分别保存两种模式的解析闭包与实际 compiler features。fixture 成功不表示生产出口已连通，生产私网接线须以显式授权和真实候选另行验证。
+密钥重加密复用组件的租户事务接口与既有 storage fence，宿主最终提交或回滚；维护角色不因此扩权。参考部署的操作顺序见[恢复与轮换](../deployment/recovery.md)。

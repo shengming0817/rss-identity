@@ -1,35 +1,13 @@
-> 历史决策记录；中央模式相关决策由 [#2435 ADR](202609170001-2435-embedded-authentication.md) 替换。仍适用的安全机制以当前源码与验证为准。
+# #2336：Hydra 下游交接（历史决定）
 
-# #2336 下游身份交接与在线验证
+适用时期：#2435 嵌入架构之前的中央模式。由 [#2435](202609170001-2435-embedded-authentication.md) 替代，不作为当前操作说明。
 
-状态：I06 实现决定；实际 SHA、lock、provider digest 和验证结果随实现 PR。UI、生产装配、真实 MDM 接入分别属于 #2337/#2338/#2343。
+## 当时的决定与取舍
 
-## 唯一 owner
+中央模式通过 Hydra 提供标准授权协议，Identity 保持本地身份与协议 grant 的精确关联。远端挑战接受不能与 PG 原子提交，因此不确定结果不得当成功或盲目重试，并用受控撤销处理迟到凭据。
 
-Identity 持有账户、成员、中央 session 和 grant 关联；Hydra 只持有标准 OIDC 协议状态。`identity-contracts` 持有 wire 数据与共享规范化词表，`identity-client` 是不含账户/KDF/PG/OIDC 的在线验证客户端，`identity-hydra` 是受控 admin transport。core 定义窄 port，Postgres coordinator 唯一持有结算并返回私有构造的 ValidatedIdentity，HTTP 组装最终响应。I09 已将 ACR/AMR 闭集收敛到 contracts；#2433 的 groups 投影沿用该共享类型模式，PG 持有独立私有快照及其 codec，不以 wire DTO 持久化认证来源或到期状态。此处校正 I06 初稿的“PG 不依赖 contracts”，不改变已有结算与信任 owner。I02 的 SessionSnapshot 检查骨架和假 Hydra bridge 已被删除，不保留兼容别名或第二条认证入口。
+## 替代关系
 
-新增 product_subjects 按 tenant/client/principal 稳定保存随机 subject，直接作为 Hydra login subject，不能用 force_subject_identifier 替代（它不改变 introspection sub）。downstream_grants 引用中央 session 和 subject，不复制 epoch 或认证事实。注册版本及完整配置指纹共同约束在途和已发授权，避免仅改 redirect 却复用版本导致旧授权存活。I06 历史初始版本为 schema v5，仅显式重建开发库；当前安装以 [#2427 ADR](202609130900-2427-platform-onboarding.md) 为准；所有新表 FORCE tenant RLS，runtime 精确权限，maintenance 无新表权限。新事件 identity.downstream.security V1 与状态同事务，不包含挑战、cookie、code、token 或 secret。
+嵌入认证取消中央下游交接、Hydra bridge 和在线验证 client；这份记录只解释当时的分布式失败边界，不要求恢复这些机制。
 
-## 交接
-
-首期每个静态 client 绑定一个 tenant/audience；多个租户使用分别注册的 client。只接纳 confidential Code、openid、PKCE S256、精确 HTTPS callback，无 refresh、offline access 或自动 consent。RegistrationInput/LifetimeLimits 使用具名字段；组合时核对 adapter 声明 issuer 与所有注册完全一致，远程 challenge 还检查授权 URL 的 issuer origin/path。Hydra 必须固定 opaque token 和 PKCE enforcement；部署注入匹配实际 Hydra 的有限 request/code/token 期限。request 最大 300 秒、code 最大 600 秒、token 最大 86400 秒、时钟余量最大 60 秒；无缺省无限窗口。这是配置验证边界，不是生产 SLO。
-
-浏览器通过 login challenge 准备最长 request 期限的流程，PG 保存独立 BrowserBindingSecret 的域分离摘要和 browser cookie 绑定，公开类型不可与中央 SessionSecret 互换；登录界面由 I07 持有。接受操作必须有当前中央 cookie、Origin 和 CSRF。顺序为 AwaitingLogin → LoginAccepting → AwaitingConsent → ConsentAccepting → Active；每次 accept 前先确认提交唯一领取。失败、结果未知和撤销进入 Revoking，不重放 accept。
-
-Hydra v26.2 consent 的 login_challenge 是内部 flow ID，与加密浏览器 challenge 不同；login accept 的 context 注入本地 grant ID，consent 通过该 context 定位，再精确复核 tenant/client/subject/Hydra sid/browser/session/config。consent accept 的 access_token extension 仅含 identity_grant_id 和 identity_version；它不携带内部 PrincipalId。confirmed accept + 最终 PG 状态复核/提交后才向浏览器释放 redirect_to。没有首次验证激活或成功验证写事件。未认证 prepare 在 Hydra/DNS/TLS 之前强制取得由 composition 共享注入的 PrepareAdmission（有界并发和固定窗口预算），无效 challenge 也计数；单进程实例在同一 Hydra 服务的 coordinator 之间共享，多副本入口配置由 I08 持有。远程解析后继续使用 tenant/client 独立60秒窗口（最多60次）和每 client 1000条容量；这些是实现保护上限，不是生产容量证据。从未接受的 AwaitingLogin 只保留 request 窗口，领取 LoginAccepting 时才扩展完整安全窗口。
-
-## 验证和恢复
-
-产品每个请求以独立 Basic 凭据调用单一 internal validate；不接受 cookie 代替服务凭据，验证 secret 与 Hydra client secret 分开。先 introspect，再校验 token_use、issuer/client/audience/sub/scope/expiry/ext，最后在租户 guard 下复用中央 session 的账户/member/session/source epoch 判定。validate 只读，不 touch idle、不缓存成功；cookie 旋转保持 session ID，因此不切断既有 grant。失效提交后开始的验证拒绝；已通过的在途业务不追溯取消。
-
-本地来源 amr 为 pwd；联合 assurance 按 [I09](202609091607-2339-assurance-recovery.md) 从已验签事实及显式 profile 解释，缺证据不推断 MFA。#2433 在线响应必填 groups v1，组缺失或过期保留基础身份；SDK 只通过借用当前身份的访问方法暴露未过期组，详见[在线协议](../identity-wire-v1.md)。expires_at 取 token、grant 安全窗口、中央 idle/absolute 的最小值，过期严格拒绝；iat/nbf 的未来时间允许显式 clock_skew。client 不用本机时钟重新裁定服务端 auth_time，只检查正值及其早于 expires_at，通过必填 Clock 位置参数读取消费方墙钟，严格拒绝已过期及请求期间时钟回拨的结果；生产显式注入 SystemClock，无默认时钟或成功缓存。
-
-cleanup_once 按显式 tenant、limit（1–128）和 deadline 运行，由 I08 调度。扫描、租约领取及结算各自有界，远程调用不占 PG 事务；Accepting 租约到期后视作未知，不恢复为可重发。先保持本地拒绝，再按 consent_request_id 清理 token，按 sid 清理协议登录会话。204 可能发生在迟到 verifier 尚未消费前，故重复清理到 request+code+token+skew+60秒执行余量的窗口末端；最后确认清理并同事务写事件后删除流程行，subject 映射保留。revoking 只在首次转换时发一次，后续重试只更新调度元数据，最终发一次 cleaned；仍复用同一事务结算 owner。没有独立持久队列、永久 cleaned 状态或全局租户 SQL 旁路。
-
-## 证据与限制
-
-`make test-downstream` 使用真实 PG、固定 Hydra、一次性 TLS/admin gateway 和可挂载 Axum，另运行独立 workspace/lock/target 的标准 OIDC consumer。旧 test-oidc 只保留真实 Keycloak 上游测试。容器与秘密均为可丢弃 fixture；Hydra DSN=memory 不证明生产持久化/重启恢复，生产调度/密钥/域名仍归 I08。I06 重启证明针对 Identity 的持久记录及 coordinator 重建。
-
-来源：Hydra 0b84568fffccf151dc5e6c7955fdfb738555bf4b 的 flow/flow.go:401–425、flow/consent_types.go、oauth2/handler.go、consent/handler.go；固定 RSS 的 local_tx/Outbox；reqwest 0.12.28 的 resolver、redirect 和 request timeout。均通过现有接口组合，不复制上游实现。
-
-错误响应与宿主 DownstreamDiagnostic 扩展共享同一个 correlation ID，保留安全 HttpFailure 分类；contracts 的 ValidationFailureCode 唯一持有闭集 wire code 与 HTTP 状态；HTTP 和 client 直接消费，未知 code/状态错配拒绝；client 只解析该枚举和合法 UUID，不携带 SQL/provider 原文。fixture 子进程有独立执行/退出边界，超时回收整个进程组；不设置 make ci 总时限。
+历史实现与当时的验证记录通过 [#2336 工作项](https://dev.azure.com/shengming0923/rss/_workitems/edit/2336) 和本文件 Git 历史追溯。历史结果不表示当前版本已验证；来源与许可证见[来源索引](../../reference/sources.md)。

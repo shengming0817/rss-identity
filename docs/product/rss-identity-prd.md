@@ -15,17 +15,17 @@ Identity 为宿主 Rust 产品提供本地认证、租户 OIDC 联合身份、JI
 | ACC-05 租户 IdP | provider/config/epoch 隔离，加密凭据、专用 CA、受控配置和连接测试。 |
 | ACC-06 OIDC | Code + PKCE、state/nonce/浏览器绑定、一次消费、固定 callback 和回跳白名单。 |
 | ACC-07 关联与组 | 不按邮箱自动合并；显式关联须重新认证；组携带来源、配置版本、快照和短有效期，授权映射归宿主。 |
-| ACC-08 嵌入消费 | 本地与真实 OIDC 两个独立宿主从固定完整 Git SHA 使用公开 API，分别提交 lock/closure/实际验证证据。中央下游在线验证协议已退出。 |
+| ACC-08 嵌入消费 | 宿主通过公开 API 装配本地与可选 OIDC 能力，以真实产品接入验证认证行为；依赖由标准 manifest/lock 持有。中央下游在线验证协议已退出。 |
 | ACC-09 事务事件 | 账户/会话/联邦操作与事件同事务；提交不确定不释放成功 cookie。 |
 | ACC-10 HTTP 交互 | 可分别挂载本地/OIDC Router，仅 v2；角色字段和中央管理/CLI 协议退出，浏览器与 UI 消费由宿主维护。 |
-| ACC-11 装配 | 最小参考宿主保持构建；完整部署/UI/运维候选与 T3 为 #2436。 |
+| ACC-11 装配 | 最小参考宿主保持构建；保留可操作的安装、初始化、启停、恢复和轮换路径；实际装配按独立风险验收。 |
 | ACC-12 产品接入 | MDM 接入与其业务授权为 #2437；前端调整为 #2368，各自提交产品证据。 |
-| ACC-13 可选部门树事实 | provider 显式配置签名 JSON 快照 claim 和 1–300 秒期限；验证有界完整单根树、多部门成员及 sourceRevision，空成员表示未分配，缺失/非法断言独立关闭部门事实。可信读取绑定实例/tenant/principal/provider/config，refresh 不延期，配置/账户/session 撤销须生效；不建设目录同步、审批或资源授权，MDM 接入由 #2363 持有。 |
+| ACC-13 可选部门树事实 | provider 显式配置签名 JSON 快照 claim 和显式有界期限；验证有界完整单根树、多部门成员及 sourceRevision，空成员表示未分配，缺失/非法断言独立关闭部门事实。可信读取绑定实例/tenant/principal/provider/config，refresh 不延期，配置/账户/session 撤销须生效；不建设目录同步、审批或资源授权，MDM 接入由 #2363 持有。 |
 
 ## 不兼容策略
 
-未部署产品直接替换：schema v11 只支持全新安装，联合认证事实仅接受 format v3，旧 schema/config/API 不提供升级、别名、dual-read 或 feature 回退。旧数据库、凭据和已存验收记录不被自动修改或重标为成功。OIDC 为可选能力，本地认证不要求联邦密钥或中央控制面。
+未部署产品直接替换：只支持全新安装和当前认证事实格式，旧 schema/config/API 不提供升级、别名、dual-read 或 feature 回退。旧数据库、凭据和已存验收记录不被自动修改或重标为成功。OIDC 为可选能力，本地认证不要求联邦密钥或中央控制面。
 
 ## 验证责任
 
-本次使用 T1 状态机、真实 PG/OIDC T2、独立固定 Git 消费者验证核心边界。实际命令与结果由实施 PR 持有。[实施计划](../architecture/implementation-plan.md) 管理依赖顺序；[ADR](../architecture/adr/202609170001-2435-embedded-authentication.md) 管理已批准设计；生产部署能力必须由单独的 T3 证明。
+组件状态机与真实 PG/OIDC 接缝由 T1/T2 验证，实际产品接入与必要 T3 由对应产品持有。采用[验证规则](../rules/verification-scope.md)，实际命令、结果和未覆盖项记录在 PR。设计理由见[当前 ADR](../architecture/adr/202609170001-2435-embedded-authentication.md)，任务依赖及状态以工作项为准。
