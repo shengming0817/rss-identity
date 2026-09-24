@@ -1,27 +1,15 @@
 # 开发与验证
 
-需要 Rust 1.96.0（rustfmt/clippy）、Python 3.11+、Docker、cargo-deny 0.19.9 和 RSS Git 读取权限。使用系统 `/usr/bin/git`。
+使用系统 `/usr/bin/git`。Rust 工具链以 [rust-toolchain.toml](../../rust-toolchain.toml) 为准；需要 Python 3.11+、Docker，以及 CI 配置选定的 cargo-deny。依赖由 manifest/lock 持有，provider 镜像由 [providers.lock.json](../../deployment/providers.lock.json) 持有。私有 RSS Git 依赖需要读取权限。
 
-```sh
-make ci
-```
+从 [Makefile](../../Makefile) 选择受影响入口：`make check`、`make test`、`make test-pg`、`make test-oidc`、`make test-federated`、`make test-assembly`、`make test-gateway`。`make ci` 是完整工程入口，不是每次文档整理或阶段切换的必跑项；完整政策见[验证范围](../rules/verification-scope.md)。
 
-`make ci` 执行 fmt、locked clippy/编译、Rust/Python 测试、固定依赖与 feature 闭包检查、许可证/公告检查及真实 PostgreSQL、OIDC、Keycloak HTTPS + Axum 测试。普通 cargo test 中 ignored 的 provider 用例必须由 runner 实际执行；runner 验证测试名称和全部计数，零测试/部分执行失败。容器是临时 loopback fixture，故障时只输出安全诊断并清理。
+真实 provider 的 ignored 测试通过已有 runner 执行；runner 校验实际用例和执行结果，缺少 Docker/provider 失败，不把零测试或部分执行当通过。工作树可直接测试，无需预先提交。Make 共用 Identity 主 checkout 的 Cargo target；显式 CARGO_TARGET_DIR 可覆盖，保留可用缓存。
 
-PostgreSQL 17.6、Keycloak 26.7.3 的镜像摘要由 [providers.lock.json](../../deployment/providers.lock.json) 固定。没有 Hydra 测试或中央客户端。数据库单元层的竞态测试可访问 crate 私有接口，公开消费者只能使用完整 facade。
+`make dependencies` 检查 RSS 来源和实际生产/测试 feature；`make licenses` 检查许可证与公告。Azure job 凭据只用于 fetch，随后移除凭据并离线构建。配置流水线不等于已运行通过。
 
-固定 Git 消费单独运行：
+修改组件 schema 时，用 `python3 hack/schema_signature.py` 在临时 PG 中计算签名；不得用业务库漂移充当声明。配置、迁移及实际安装查询见[操作指南](../deployment/operations.md)。
 
-```sh
-make test-consumers IDENTITY_CONSUMER_REVISION=<完整已提交并推送的SHA> IDENTITY_CONSUMER_OUTPUT=/tmp/identity-proof-<唯一编号>
-```
+私网 OIDC 接缝需要本机拥有的 RFC1918 接口。可用 `IDENTITY_TEST_PRIVATE_HOST` 显式选择已有接口；不能用 loopback、保留或非本机地址放宽生产策略。单独运行 `python3 hack/providers.py private-oidc` 时设置与本仓一致的 CARGO_TARGET_DIR。
 
-每个消费者拥有独立 workspace/Cargo.lock/target，无仓库祖先 Cargo 配置；组件与 RSS 均为固定 Git 来源，不能用路径样例代替此证明。先固定生产提交，再运行消费者，验证前后有效源码与配置必须一致。report 记录生产文件摘要、精确依赖版本/features、Cargo.lock 摘要和实际运行计数，生成文件保留在仓外输出目录；结果记录与持久归档遵循[文档规则](../rules/documentation.md)。可执行消费者源码见 [embedding](embedding.md)。
-
-本仓 worktree 常规检查共用 Identity 主 checkout 的 target；外部消费者使用自己的 target，不能套用该缓存配置。`make dependencies` 对测试 metadata 和实际生产 compiler artifacts 分别检查 RSS features、统一来源、无 patch/跨仓 path。schema 变更通过 `python3 hack/schema_signature.py` 从全新临时 PG 计算签名，不接受现有业务库漂移。
-
-Azure CI 的 job token 只供 fetch，随后移除凭据并离线运行相同门禁。配置文件不等于托管流水线已执行。唯一公告例外 [#2357](https://dev.azure.com/shengming0923/rss/_workitems/edit/2357) 仅为 identity-oidc → openidconnect 4.0.1 → rsa 0.9.10 公钥验证路径，版本或调用路径变化即撤销例外；不用于 RSA 私钥操作。
-
-参考宿主配置见 [deployment/example.json](../../deployment/example.json)。完整 binary/image/UI 装配与操作入口见 [参考部署](../deployment/README.md)。联合 T2 从固定 Web checkout 运行 `IDENTITY_BACKEND_FIXTURE=/absolute/fixed-identity IDENTITY_JOINT_RECORD=/absolute/new-record.json pnpm test:identity:joint`；使用 Vitest/jsdom 的生产 transport，经 TLS 消费真实组件宿主。实际候选浏览器、恢复和容量 T3 属于 #2366；MDM 接入属于 #2437。
-
-`make test-oidc` 同时运行原 loopback 协议夹具与生产 `HttpOidc::new` 的私网 HTTPS Keycloak 接缝：实际 discovery/JWKS、证书信任、授权码交换和错误绑定拒绝。生产接缝使用本机拥有的 RFC1918 接口发布临时 Keycloak；优先从主机解析和默认路由选择，可通过 `IDENTITY_TEST_PRIVATE_HOST` 明确指定已有接口，不能指定 loopback、保留或不属于本机的地址。缺少合适接口时失败，不放宽生产策略或静默跳过。单独复现为 `CARGO_TARGET_DIR=<本仓 target> python3 hack/providers.py private-oidc`。
+Web 接入由 rss-web 的现有联合测试持有；MDM 接入归其产品。需要真实浏览器、部署和恢复闭环时，独立评估并使用[参考运行入口](../deployment/images.md#功能验收)，不重复模拟 consumer 或容量验证。

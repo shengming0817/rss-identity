@@ -16,11 +16,7 @@
 | POST `/sessions/logout-all` | 撤销账户全部会话，清 cookie。 |
 | GET `/sessions` | 有界分页；`cursor`/`limit`。 |
 
-成功登录/查询/refresh/重新认证响应：
-
-```json
-{"identity":{"principalId":"22222222-2222-4222-8222-222222222222","hasLocalPassword":true},"session":{"id":"33333333-3333-4333-8333-333333333333","authTime":1800000000,"idleExpiresAt":1800000900,"absoluteExpiresAt":1800014400},"csrfToken":"opaque"}
-```
+请求/响应 DTO 以 [HTTP adapter](../../crates/identity-http-axum/src/lib.rs) 的类型与路由为准；[会话接入测试](../../crates/identity-http-axum/tests/session_http.rs) 提供实际请求示例。
 
 bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=...` 传递。响应 no-store。写请求检查精确 Origin；登录、重新认证和管理写入要求 `x-identity-request: 1`，已认证修改须 `x-csrf-token`。拒绝重复/畸形凭据头。日志不得记录 Cookie、Set-Cookie、密码、CSRF 或回调参数。
 
@@ -34,9 +30,8 @@ bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpO
 
 唯一回调 GET `/api/v2/oidc/callback`：state/code/iss 与独立 HttpOnly browser cookie 绑定；拒绝重放、过期、不匹配和不确定结算，不释放 cookie。returnTarget 是宿主白名单键，不接受任意 URL；不再接受中央 clientId。
 
-IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/providers/{provider}/enabled`、`/test`。写入使用 expectedVersion 乐观并发；创建初始配置不需要该字段。凭据只写，加密存储，不返回明文。provider 设置为 `{issuer,clientId,redirectUri,scopes,claims:{email,groups,departmentSnapshot},jit}`；只写凭据字段为 `clientSecret` / `caPem`，与领域持久化形状分别由各自 owner 持有；资源授权仍归宿主。
+IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/providers/{provider}/enabled`、`/test`。写入使用 expectedVersion 乐观并发；创建初始配置不需要该字段。凭据只写，加密存储，不返回明文。provider 管理字段由 [provider 管理适配器](../../crates/identity-http-axum/src/provider_management.rs) 持有。部门映射须显式启用并给出有界期限，省略/null 表示禁用；旧标量字段拒绝。更新映射和期限经过同一并发版本与凭据更新流程，撤销旧会话及在途认证。完整快照只来自签名 ID Token，浏览器响应不成为部门授权证明。
 
-部门配置 `departmentSnapshot` 为省略/null（禁用）或 `{claim,maxAgeSeconds}`，对象两字段均必填，期限为 1–300 秒；输出统一包含 `departmentSnapshot`。JSON 使用 `maxAgeSeconds`，拒绝旧 department 字段、snake_case、字符串简写及缺失期限。修改映射或期限使用同一完整 update/expectedVersion/credentials 流程，推进版本并撤销旧会话及在途认证。完整部门树快照只来自已验证 ID Token，不能通过登录/回调/会话 DTO 提交；浏览器会话响应不增加部门授权证明。
 
 ## 失败与可信边界
 
@@ -50,7 +45,6 @@ HTTP 宿主资源请求统一调用 `authenticate_request`：用户活动选择 
 
 ## 参考宿主资源
 
-`GET /api/identity-host/v1/tenants/{tenant}/context` 由 app/identity 持有，通过 HTTP adapter 的公开 `authenticate_request` 选择 `SessionActivity::Passive`，严格读取同一 cookie 并权威验证，不续期。响应为 `{tenantId,principalId,sessionId,navigation:{manageAccounts,manageProviders}}`，no-store；导航由 BootstrapPolicy 派生，仅作展示。组件管理事务始终重新验证会话与宿主策略。UI 静态配置使用网关固定同源 `/api/identity-host/v1/config.json`，严格 `{canonicalOrigin,oidcEnabled}`；并非动态能力发现。
+参考宿主提供同源 UI 配置、当前上下文及 MFA 示范资源，由 [宿主 HTTP 模块](../../app/identity/src/context.rs) 持有。导航只是展示，管理事务仍重新授权。MFA 资源以当前请求的可信 assurance 判定，缺失/未来/过期事实要求重新认证，不接受浏览器提供的 MFA 结论。
 
-
-`GET /api/identity-host/v1/tenants/{tenant}/mfa-example` 复用同一被动请求认证，检查本次 `AuthenticatedSession::assurance()`。只接受 `acr=mfa`、非空认证时间及 `0 <= now-authTime < 300` 秒；未来时间、缺失或过期事实返回 403 `reauthentication_required`，无效会话为 401，权威存储不可用为 503。成功返回 `{tenantId,principalId,sessionId,authentication:{acr,authTime}}`；全部响应 no-store，无 Set-Cookie，不延长 idle。宿主服务端时钟必须正确。此固定示范策略不改变账户/IdP 管理授权，也不由浏览器提供 MFA 事实。
+这些只读资源不续期、不签发 cookie，并使用 no-store；实际策略通过宿主查询命令读取。前端接口与业务权限由对应产品维护，不能将示范资源扩展成通用授权协议。

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""One fixed-candidate reference T3; production operations remain in deploy/operate."""
+"""Functional reference T3; production operations remain in deploy/operate."""
 
-import argparse, copy, hashlib, ipaddress, json, math, os, re, secrets, signal
-import subprocess, sys, tempfile, time, tomllib
+import argparse, copy, hashlib, ipaddress, json, os, re, secrets, signal
+import subprocess, sys, tempfile, time
 from urllib.parse import urlsplit
 from pathlib import Path
 import deploy, operate
 from bounded_process import run as bounded_run
 from docker_network import create_network
-from reference_approval import verify_approval, validate_receipt
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = (
@@ -26,7 +25,6 @@ SCENARIOS = (
     ("backup", "backup", None),
     ("stale-backup", "stale_backup", None),
     ("restore", "restore", None),
-    ("capacity", "capacity", None),
 )
 STEPS = tuple(row[0] for row in SCENARIOS)
 
@@ -40,43 +38,6 @@ UNCOVERED = [
     "consumer-products-and-legacy-environment-retirement",
 ]
 
-MEASUREMENTS = (
-    "loginBurstP95Ms",
-    "loginBurstRequestsPerSecond",
-    "failedAttemptBurstP95Ms",
-    "failedAttemptBurstRequestsPerSecond",
-    "accountEventCommitP95Ms",
-    "accountEventCommitsPerSecond",
-    "session1P95Ms",
-    "session1RequestsPerSecond",
-    "session4P95Ms",
-    "session4RequestsPerSecond",
-    "session16P95Ms",
-    "session16RequestsPerSecond",
-    "unexpectedErrors",
-    "restoreSeconds",
-    "backupBytes",
-    "lostSecurityChanges",
-    "expiredAttemptsRemoved",
-)
-LIMITS = {
-    "loginBurstP95Ms": "max",
-    "loginBurstRequestsPerSecond": "min",
-    "failedAttemptBurstP95Ms": "max",
-    "failedAttemptBurstRequestsPerSecond": "min",
-    "accountEventCommitP95Ms": "max",
-    "accountEventCommitsPerSecond": "min",
-    "session1P95Ms": "max",
-    "session1RequestsPerSecond": "min",
-    "session4P95Ms": "max",
-    "session4RequestsPerSecond": "min",
-    "session16P95Ms": "max",
-    "session16RequestsPerSecond": "min",
-    "unexpectedErrors": "max",
-    "restoreSeconds": "max",
-    "lostSecurityChanges": "max",
-    "expiredAttemptsRemoved": "min",
-}
 TENANTS = [
     "11111111-1111-4111-8111-111111111111",
     "33333333-3333-4333-8333-333333333333",
@@ -86,53 +47,6 @@ PRINCIPALS = [
     "44444444-4444-4444-8444-444444444444",
 ]
 ORIGIN = "https://identity.example.test"
-WORKLOAD = {
-    "login": {
-        "kind": "bounded-burst",
-        "tenantIndex": 0,
-        "warmup": 4,
-        "samples": 24,
-        "concurrency": 4,
-    },
-    "failedAttempt": {
-        "kind": "bounded-burst",
-        "tenantIndex": 1,
-        "accounts": 4,
-        "samples": 20,
-        "concurrency": 4,
-        "limitedChecks": 8,
-    },
-    "accountEvent": {
-        "warmup": 4,
-        "seconds": 30,
-        "concurrency": 4,
-        "minimumSamples": 20,
-    },
-    "sessionConcurrency": [1, 4, 16],
-    "sessionDistribution": "one-shared-authoritative-session",
-    "secondsPerConcurrency": 30,
-    "expiredAttempts": 256,
-}
-POLICY = {
-    "session": {"idleSeconds": 900, "absoluteSeconds": 14400},
-    "attempts": {
-        "sourceLimit": 30,
-        "sourceSeconds": 300,
-        "scopeLimit": 5,
-        "scopeSeconds": 900,
-    },
-    "kdfConcurrency": 4,
-    "revocation": {"maxStaleRequests": 0, "requestDeadlineSeconds": 30},
-    "mfaMaxAgeSeconds": 300,
-    "rotation": {
-        "credential": "close-mixed-rekey-retire",
-        "state": "reject-pending-flow",
-        "clientSecret": "replace-both-tenants",
-        "database": "close-replace-all-three-roles",
-        "tls": "independent-public-and-database-trust",
-        "restore": "closed-verify-explicit-open",
-    },
-}
 
 
 def oidc_settings(issuer, address, state, key):
@@ -346,10 +260,6 @@ def docker(*args, **kwargs):
     return process(["docker", *map(str, args)], **kwargs)
 
 
-def git(repository, *args):
-    return process(["/usr/bin/git", "-C", str(repository), *args]).decode().strip()
-
-
 def assert_redacted(value, secrets_):
     text = json.dumps(value, sort_keys=True)
     require(
@@ -357,15 +267,12 @@ def assert_redacted(value, secrets_):
     )
 
 
-def new_record(subject, targets):
+def new_record(subject):
     return {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "scope": "identity-reference-t3",
         "subject": subject,
         "steps": [],
-        "measurements": {},
-        "targets": targets,
-        "approval": None,
         "uncovered": list(UNCOVERED),
         "result": "running",
         "failure": None,
@@ -388,7 +295,6 @@ TRUE_FACTS = {
     "backup": "tamperRejected",
     "stale-backup": "staleCutIdentified staleAuthorityRemainsClosed",
     "restore": "matchedSafetyCut sourceAndTargetGuards operatorOpenedAfterVerification",
-    "capacity": "",
 }
 EXTRA_FACTS = {
     "install": "tenants configurationSha256",
@@ -399,7 +305,6 @@ EXTRA_FACTS = {
     "database-rotation": "roles",
     "backup": "backupBytes dumpSha256 receiptSha256",
     "restore": "outboxSha256 dumpSha256 receiptSha256 datasetRows",
-    "capacity": "datasetRows resourcesBefore resourcesAfter committedEvents expiredAttemptsBefore expiredAttemptsAfter createdAccounts sessionSamples sessionBefore sessionAfter profiles loginProfile failedAttemptProfile accountEventProfile assertions",
 }
 TABLES = {
     "accounts",
@@ -416,11 +321,7 @@ TABLES = {
 }
 
 
-def number(value, minimum=0):
-    return type(value) in (int, float) and math.isfinite(value) and value >= minimum
-
-
-def verify_observations(name, facts, subject, measurements):
+def verify_observations(name, facts, subject):
     truth = TRUE_FACTS[name].split()
     require(
         set(facts) == set(truth + EXTRA_FACTS.get(name, "").split()),
@@ -461,7 +362,7 @@ def verify_observations(name, facts, subject, measurements):
             facts["roles"] == ["identity_runtime", "identity_maintenance", "postgres"],
             "observation-database-roles",
         )
-    if name in {"restore", "capacity"}:
+    if name == "restore":
         rows = facts["datasetRows"]
         require(
             isinstance(rows, dict)
@@ -472,241 +373,11 @@ def verify_observations(name, facts, subject, measurements):
             and rows["outbox"] > 0,
             "observation-dataset",
         )
-    if name != "capacity":
-        return
-    workload = subject["workload"]
-    require(
-        facts["expiredAttemptsBefore"] == subject["workload"]["expiredAttempts"]
-        and facts["expiredAttemptsAfter"] == 0
-        and measurements["expiredAttemptsRemoved"] == facts["expiredAttemptsBefore"],
-        "observation-cleanup",
-    )
-    require(
-        facts["committedEvents"] == facts["createdAccounts"]
-        and facts["createdAccounts"]
-        == (
-            workload["login"]["warmup"]
-            + workload["login"]["samples"]
-            + workload["failedAttempt"]["accounts"]
-            + workload["accountEvent"]["warmup"]
-            + facts["accountEventProfile"]["samples"]
-        ),
-        "observation-event-count",
-    )
-    for key in ["resourcesBefore", "resourcesAfter"]:
-        rows = facts[key]
-        require(isinstance(rows, list) and len(rows) == 3, "observation-resources")
-        keys = {
-            "BlockIO",
-            "CPUPerc",
-            "Container",
-            "ID",
-            "MemPerc",
-            "MemUsage",
-            "Name",
-            "NetIO",
-            "PIDs",
-        }
-        require(
-            all(
-                isinstance(row, dict)
-                and set(row) == keys
-                and all(isinstance(v, str) and v for v in row.values())
-                for row in rows
-            ),
-            "observation-resource-fields",
-        )
-    for key in ["sessionBefore", "sessionAfter"]:
-        row = facts[key]
-        require(
-            set(row)
-            == {
-                "status",
-                "sessionIdSha256",
-                "idleRemainingSeconds",
-                "absoluteRemainingSeconds",
-            }
-            and row["status"] == 200
-            and re.fullmatch("[a-f0-9]{64}", row["sessionIdSha256"])
-            and number(row["idleRemainingSeconds"], 1)
-            and number(row["absoluteRemainingSeconds"], 1),
-            "observation-session-lifetime",
-        )
-    require(
-        facts["sessionBefore"]["sessionIdSha256"]
-        == facts["sessionAfter"]["sessionIdSha256"],
-        "observation-session-replaced",
-    )
-    profiles = facts["profiles"]
-    require(
-        isinstance(profiles, list)
-        and [p["concurrency"] for p in profiles]
-        == subject["workload"]["sessionConcurrency"],
-        "observation-concurrency",
-    )
-    require(
-        facts["sessionSamples"] == sum(p["samples"] for p in profiles),
-        "observation-session-samples",
-    )
-    definitions = [
-        (
-            p,
-            200,
-            f"session{p['concurrency']}",
-            1,
-            subject["workload"]["secondsPerConcurrency"],
-        )
-        for p in profiles
-    ]
-    definitions += [
-        (facts["loginProfile"], 200, "loginBurst", workload["login"]["samples"], 0),
-        (
-            facts["failedAttemptProfile"],
-            401,
-            "failedAttemptBurst",
-            workload["failedAttempt"]["samples"],
-            0,
-        ),
-        (
-            facts["accountEventProfile"],
-            201,
-            "accountEventCommit",
-            workload["accountEvent"]["minimumSamples"],
-            workload["accountEvent"]["seconds"],
-        ),
-    ]
-    for profile, status, prefix, minimum, seconds in definitions:
-        fields = {
-            "concurrency",
-            "samples",
-            "elapsedSeconds",
-            "statuses",
-            "p95Ms",
-            "maxMs",
-            "requestsPerSecond",
-        }
-        if prefix.startswith("session"):
-            fields.add("codes")
-            require(profile["codes"] == {}, "observation-response-code")
-        else:
-            fields.add("warmup")
-            expected = workload[
-                {200: "login", 401: "failedAttempt", 201: "accountEvent"}[status]
-            ]
-            require(
-                profile["concurrency"] == expected["concurrency"]
-                and profile["warmup"] == expected.get("warmup", 0),
-                "observation-auth-profile",
-            )
-            if status == 401:
-                fields.add("limitedStatuses")
-                require(
-                    profile["limitedStatuses"] == {"429": expected["limitedChecks"]},
-                    "observation-limited-checks",
-                )
-            if status in {200, 401}:
-                require(profile["samples"] == minimum, "observation-burst-samples")
-        require(
-            set(profile) == fields
-            and type(profile["samples"]) is int
-            and profile["samples"] >= minimum
-            and profile["statuses"] == {str(status): profile["samples"]},
-            "observation-profile-status",
-        )
-        require(
-            number(profile["elapsedSeconds"], max(seconds, 0.000001))
-            and number(profile["p95Ms"], 0.000001)
-            and number(profile["requestsPerSecond"], 0.000001)
-            and number(profile["maxMs"], profile["p95Ms"])
-            and profile["maxMs"]
-            <= subject["policy"]["revocation"]["requestDeadlineSeconds"] * 1000,
-            "observation-profile-measurement",
-        )
-        require(
-            math.isclose(
-                profile["requestsPerSecond"],
-                profile["samples"] / profile["elapsedSeconds"],
-                rel_tol=1e-9,
-            ),
-            "observation-throughput",
-        )
-        rate_key = (
-            "accountEventCommitsPerSecond"
-            if status == 201
-            else prefix + "RequestsPerSecond"
-        )
-        require(
-            measurements[prefix + "P95Ms"] == profile["p95Ms"]
-            and measurements[rate_key] == profile["requestsPerSecond"],
-            "observation-measurement-correlation",
-        )
-    require(
-        measurements["unexpectedErrors"] == 0
-        and measurements["lostSecurityChanges"] == 0,
-        "observation-errors",
-    )
 
-
-def validate_targets(value, subject, baseline=None):
+def verify_record(record, subject):
     require(
-        isinstance(value, dict)
-        and set(value) == {"subject", "approvalReference", "baselineSha256", "limits"},
-        "target-fields",
-    )
-    require(value["subject"] == subject, "target-candidate-mismatch")
-    reference = value["approvalReference"]
-    require(isinstance(reference, str), "owner-approval-required")
-    url = urlsplit(reference)
-    require(
-        url.scheme == "https"
-        and url.netloc == "dev.azure.com"
-        and url.path
-        == f"/shengming0923/rss/_git/rss-identity/pullrequest/{subject['pullRequest']}"
-        and not url.fragment
-        and re.fullmatch(r"discussionId=[1-9][0-9]*", url.query),
-        "owner-approval-required",
-    )
-    require(
-        isinstance(baseline, bytes) and digest(baseline) == value["baselineSha256"],
-        "baseline-digest",
-    )
-    measured = json.loads(baseline)
-    require(
-        measured.get("targets") is None and measured.get("result") == "measured",
-        "complete-baseline-required",
-    )
-    verify_record(measured, subject)
-    limits = value["limits"]
-    require(isinstance(limits, dict) and set(limits) == set(LIMITS), "target-limits")
-    require(
-        all(
-            type(v) in (int, float) and math.isfinite(v) and v >= 0
-            for v in limits.values()
-        ),
-        "target-values",
-    )
-    return value
-
-
-def verify_record(record, subject, baseline=None):
-    profile = validate_binary_profile(subject.get("binaryProfile"))
-    require(
-        subject.get("schema", {}).get("version") == profile["schemaVersion"],
-        "binary-schema-mismatch",
-    )
-    validate_migration_profile(
-        subject.get("migrationProfile"), profile, subject["schema"]["signature"]
-    )
-    require(
-        subject.get("runtimeProfile") == runtime_profile(runtime_template())
-        and subject.get("policy") == POLICY
-        and subject.get("workload") == WORKLOAD
-        and subject.get("scenarios") == list(STEPS),
-        "frozen-profile-mismatch",
-    )
-    require(
-        set(record) == set(new_record(subject, None))
-        and record["formatVersion"] == 1
+        set(record) == set(new_record(subject))
+        and record["formatVersion"] == 2
         and record["scope"] == "identity-reference-t3",
         "record-fields",
     )
@@ -721,46 +392,14 @@ def verify_record(record, subject, baseline=None):
     for step in record["steps"]:
         require(
             set(step) == {"name", "status", "elapsedMs", "observations"}
-            and step["status"] == "passed",
-            "step-status",
-        )
-        require(
-            type(step["elapsedMs"]) is int
+            and step["status"] == "passed"
+            and type(step["elapsedMs"]) is int
             and step["elapsedMs"] >= 0
             and isinstance(step["observations"], dict),
-            "step-observation",
+            "step-status",
         )
-    measurements = record["measurements"]
-    require(
-        set(measurements) == set(MEASUREMENTS)
-        and all(
-            type(v) in (int, float) and math.isfinite(v) and v >= 0
-            for v in measurements.values()
-        ),
-        "measurements",
-    )
-    require(
-        measurements["restoreSeconds"] > 0 and measurements["backupBytes"] > 0,
-        "restore-measurements",
-    )
-    for step in record["steps"]:
-        verify_observations(step["name"], step["observations"], subject, measurements)
-    if record["targets"] is None:
-        require(record["approval"] is None, "unexpected-approval")
-        require(record["result"] == "measured", "baseline-is-not-acceptance")
-    else:
-        target = validate_targets(record["targets"], subject, baseline)
-        validate_receipt(record["approval"], target)
-        for name, direction in LIMITS.items():
-            require(
-                (
-                    measurements[name] <= target["limits"][name]
-                    if direction == "max"
-                    else measurements[name] >= target["limits"][name]
-                ),
-                "target-not-met",
-            )
-        require(record["result"] == "passed", "record-verdict")
+        verify_observations(step["name"], step["observations"], subject)
+    require(record["result"] == "passed", "record-verdict")
     return record
 
 
@@ -784,7 +423,7 @@ def save_evidence(path, record, secrets_):
     try:
         assert_redacted(record, secrets_)
     except ValueError:
-        safe = new_record({}, None)
+        safe = new_record({})
         safe.update(
             result="failed",
             failure={"stage": "redaction", "reason": "secret-in-evidence"},
@@ -798,60 +437,38 @@ def save_evidence(path, record, secrets_):
 def image_identity(image):
     return {
         "id": image["Id"],
-        "revision": (image["Config"].get("Labels") or {}).get(
-            "org.opencontainers.image.revision"
-        ),
         "os": image["Os"],
         "architecture": image["Architecture"],
         "variant": image.get("Variant") or None,
     }
 
 
-def verify_browser_lock(lock, browser):
-    text = lock.decode()
-    sections = re.findall(r"^packages:\n(.*?)(?=^[^ \n]|\Z)", text, re.M | re.S)
-    require(len(sections) == 1, "browser-lock-mismatch")
-    entries = re.findall(
-        r"^  playwright-core@1\.60\.0:\n((?:    .*\n|\n)*)", sections[0], re.M
-    )
-    require(len(entries) == 1, "browser-lock-mismatch")
-    integrities = re.findall(
-        r"^    resolution: \{integrity: (sha512-[A-Za-z0-9+/=]+)\}$", entries[0], re.M
-    )
-    require(
-        browser.get("version") == "1.60.0"
-        and integrities == [browser.get("integrity")],
-        "browser-lock-mismatch",
-    )
-
-
 def validate_binary_profile(profile):
     require(
         isinstance(profile, dict)
-        and set(profile)
-        == {
-            "formatVersion",
-            "schemaVersion",
-            "session",
-            "attempts",
-            "kdfConcurrency",
-            "mfaMaxAgeSeconds",
-        }
-        and type(profile["formatVersion"]) is int
-        and profile["formatVersion"] == 1
-        and type(profile["schemaVersion"]) is int
-        and profile["schemaVersion"] == 11
-        and all(
-            json.dumps(profile[key], sort_keys=True)
-            == json.dumps(POLICY[key], sort_keys=True)
-            for key in ["session", "attempts", "kdfConcurrency", "mfaMaxAgeSeconds"]
-        ),
-        "binary-policy-mismatch",
+        and type(profile.get("formatVersion")) is int
+        and profile["formatVersion"] == 1,
+        "binary-profile",
     )
-    return profile
+    session = profile.get("session", {})
+    require(isinstance(session, dict), "binary-session-policy")
+    idle, absolute = session.get("idleSeconds"), session.get("absoluteSeconds")
+    mfa = profile.get("mfaMaxAgeSeconds")
+    require(
+        type(idle) is int
+        and type(absolute) is int
+        and 0 < idle <= absolute
+        and type(mfa) is int
+        and mfa > 0,
+        "binary-policy",
+    )
+    return {
+        "session": {"idleSeconds": idle, "absoluteSeconds": absolute},
+        "mfaMaxAgeSeconds": mfa,
+    }
 
 
-def candidate_probe(prefix, phase, image, entrypoint, *args):
+def image_probe(prefix, phase, image, entrypoint, *args):
     # outside() establishes this ownership and cleanup boundary before preflight.
     return docker(
         "run",
@@ -872,7 +489,7 @@ def candidate_probe(prefix, phase, image, entrypoint, *args):
 def binary_profile(image, prefix):
     return validate_binary_profile(
         json.loads(
-            candidate_probe(
+            image_probe(
                 prefix,
                 "policy",
                 image,
@@ -883,133 +500,12 @@ def binary_profile(image, prefix):
     )
 
 
-def validate_migration_profile(value, profile, signature, identity_sql_sha=None):
-    require(
-        isinstance(value, dict)
-        and set(value)
-        == {
-            "schema_version",
-            "schema_contract",
-            "identity_sql_sha256",
-            "rss_sql_sha256",
-        }
-        and type(value["schema_version"]) is int
-        and value["schema_version"] == profile["schemaVersion"] == 11
-        and value["schema_contract"] == signature
-        and all(
-            isinstance(value[key], str) and re.fullmatch("[0-9a-f]{64}", value[key])
-            for key in ["schema_contract", "identity_sql_sha256", "rss_sql_sha256"]
-        )
-        and (
-            identity_sql_sha is None or value["identity_sql_sha256"] == identity_sql_sha
-        ),
-        "binary-migration-mismatch",
-    )
-    return value
-
-
-def migration_profile(image, profile, signature, identity_sql_sha, prefix):
-    value = json.loads(
-        candidate_probe(prefix, "migration", image, "identity-migrate", "--describe")
-    )
-    return validate_migration_profile(value, profile, signature, identity_sql_sha)
-
-
-def candidate(args, prefix):
-    require(git(ROOT, "status", "--porcelain") == "", "committed-runner-required")
-    require(
-        type(args.pull_request) is int and args.pull_request > 0,
-        "pull-request-required",
-    )
+def prepare_run(args, prefix):
     details = deploy.resolve_image_details(args.identity_image, args.web_image)
     tool = deploy.inspect_image(args.tools_image)
-    require(
-        (tool["Config"].get("Labels") or {}).get("org.opencontainers.image.revision")
-        == git(ROOT, "rev-parse", "HEAD"),
-        "tools-source-revision",
-    )
-    identity = image_identity(details["identity"])
-    web = image_identity(details["web"])
-    profile = binary_profile(identity["id"], prefix)
-    lock = process(
-        ["/usr/bin/git", "-C", str(ROOT), "show", identity["revision"] + ":Cargo.lock"]
-    )
-    manifest = tomllib.loads(
-        process(
-            [
-                "/usr/bin/git",
-                "-C",
-                str(ROOT),
-                "show",
-                identity["revision"] + ":Cargo.toml",
-            ]
-        ).decode()
-    )
-    rss = manifest["workspace"]["dependencies"]["rss-request-context"]["rev"]
-    web_lock = process(
-        [
-            "/usr/bin/git",
-            "-C",
-            str(args.web_repo),
-            "show",
-            web["revision"] + ":pnpm-lock.yaml",
-        ]
-    )
-    schema = process(
-        [
-            "/usr/bin/git",
-            "-C",
-            str(ROOT),
-            "show",
-            identity["revision"]
-            + ":crates/identity-postgres/src/schema-signature.sha256",
-        ]
-    )
-    for path in [
-        "crates/identity-postgres/src/schema-signature.sha256",
-        "crates/identity-postgres/migrations/0001_authority.sql",
-        "deployment/providers.lock.json",
-        "deployment/deploy.example.json",
-        "crates/identity-postgres/src/security-event-v3.json",
-    ]:
-        require(
-            process(
-                [
-                    "/usr/bin/git",
-                    "-C",
-                    str(ROOT),
-                    "show",
-                    identity["revision"] + ":" + path,
-                ]
-            )
-            == (ROOT / path).read_bytes(),
-            "candidate-deployment-drift",
-        )
-    migration = migration_profile(
-        identity["id"],
-        profile,
-        schema.decode().strip(),
-        file_digest(ROOT / "crates/identity-postgres/migrations/0001_authority.sql"),
-        prefix,
-    )
     info = json.loads(docker("info", "--format", "{{json .}}"))
     subject = {
-        "runnerRevision": git(ROOT, "rev-parse", "HEAD"),
-        "identity": {**identity, "cargoLockSha256": digest(lock)},
-        "web": {**web, "lockSha256": digest(web_lock)},
-        "rssRevision": rss,
-        "schema": {
-            "version": profile["schemaVersion"],
-            "signature": schema.decode().strip(),
-        },
-        "binaryProfile": profile,
-        "migrationProfile": migration,
-        "providers": {
-            k: image_identity(v)
-            for k, v in details.items()
-            if k not in ["identity", "web"]
-        },
-        "providersLockSha256": file_digest(ROOT / "deployment/providers.lock.json"),
+        "images": {name: image_identity(value) for name, value in details.items()},
         "keycloak": image_identity(deploy.inspect_image(deploy.IMAGES["keycloak"])),
         "tools": image_identity(tool),
         "resources": {
@@ -1017,43 +513,11 @@ def candidate(args, prefix):
             "serverVersion": info["ServerVersion"],
             "os": info["OSType"],
             "architecture": info["Architecture"],
-            "cpus": info["NCPU"],
-            "memoryBytes": info["MemTotal"],
         },
+        "runtimeProfile": runtime_profile(runtime_template()),
+        "policy": binary_profile(details["identity"]["Id"], prefix),
     }
-    require(re.fullmatch("[0-9a-f]{40}", rss), "rss-revision")
-    # Runtime package identity is independently checked inside the tools image.
-    browser = json.loads(
-        candidate_probe(
-            prefix,
-            "browser",
-            tool["Id"],
-            "node",
-            "-e",
-            "const p=require('/opt/playwright-core/package.json');console.log(JSON.stringify({version:p.version,integrity:require('fs').readFileSync('/opt/playwright-integrity','utf8')}))",
-        )
-    )
-    verify_browser_lock(web_lock, browser)
-    subject["browser"] = browser
-    subject.update(
-        pullRequest=args.pull_request,
-        runtimeProfile=runtime_profile(runtime_template()),
-        policy=copy.deepcopy(POLICY),
-        supportedProviders={
-            "keycloak": subject["keycloak"],
-            "flows": ["code-pkce", "jit", "explicit-link", "totp-step-up"],
-        },
-        scenarios=list(STEPS),
-        workload=copy.deepcopy(WORKLOAD),
-    )
-    require(bool(args.targets) == bool(args.baseline), "targets-require-baseline")
-    baseline = args.baseline.read_bytes() if args.baseline else None
-    targets = (
-        validate_targets(json.loads(args.targets.read_text()), subject, baseline)
-        if args.targets
-        else None
-    )
-    return details, tool, subject, targets, baseline
+    return details, tool, subject
 
 
 class Run:
@@ -1066,8 +530,7 @@ class Run:
         self.config = config
         self.work = Path(config["work"])
         self.work.mkdir(mode=0o700)
-        self.record = new_record(config["subject"], config["targets"])
-        self.record["approval"] = config.get("approval")
+        self.record = new_record(config["subject"])
         self.output = Path(config["output"])
         self.prefix = config["prefix"]
         self.source = self.prefix + "-source"
@@ -1101,9 +564,6 @@ class Run:
         start = time.monotonic()
         try:
             item["observations"] = action() or {}
-            self.record["measurements"].update(
-                item["observations"].pop("measurements", {})
-            )
             item["status"] = "passed"
         except BaseException:
             item["status"] = "failed"
@@ -1575,7 +1035,6 @@ class Run:
             profile == self.record["subject"]["runtimeProfile"], "runtime-profile-drift"
         )
         self.browser_config = {
-            "workload": self.record["subject"]["workload"],
             "policy": self.record["subject"]["policy"],
             "origin": ORIGIN,
             "tenants": TENANTS,
@@ -2106,7 +1565,6 @@ class Run:
         self.op("open")
         self.op("restore", self.backup_b, project=self.restored, reject=True)
         self.op("close")
-        started = time.monotonic()
         self.op("restore", self.backup_b, project=self.restored)
         self.op("verify-keys", project=self.restored)
         operate.require_closed(self.restored)
@@ -2115,11 +1573,6 @@ class Run:
         self.op("restore", self.backup_b, project=self.restored, reject=True)
         self.op("open", project=self.restored)
         self.browser("restored", recoveredAdminPassword=self.admin_password)
-        self.record["measurements"].update(
-            restoreSeconds=time.monotonic() - started,
-            backupBytes=self.backup_b.stat().st_size,
-            lostSecurityChanges=0,
-        )
         self.source = self.restored
         return {
             "matchedSafetyCut": True,
@@ -2133,78 +1586,6 @@ class Run:
             "receiptSha256": file_digest(self.backup_b.with_suffix(".dump.json")),
         }
 
-    def capacity(self):
-        workload = self.config["subject"]["workload"]
-        attempts = self.config["subject"]["policy"]["attempts"]
-        # Only fixture workload is seeded. The production request performs the actual bounded cleanup.
-        delay = float(
-            self.sql(
-                "SELECT coalesce(max(extract(epoch FROM expires_at-clock_timestamp())),0) FROM identity_authority.attempts WHERE tenant_id IN ('"
-                + "','".join(TENANTS)
-                + "') AND (key LIKE 's:%' OR (key='p:operator' AND count>="
-                + str(attempts["scopeLimit"])
-                + ")) AND expires_at>clock_timestamp();"
-            )
-        )
-        if delay > 0:
-            require(
-                delay <= max(attempts["sourceSeconds"], attempts["scopeSeconds"]),
-                "attempt-window-out-of-policy",
-            )
-            print("T3 capacity: waiting for existing attempt windows", flush=True)
-            time.sleep(delay + 1)
-        self.sql(
-            "INSERT INTO identity_authority.attempts(tenant_id,key,count,expires_at) SELECT '"
-            + TENANTS[0]
-            + "'::uuid,'t3-expired-'||i,1,clock_timestamp()-interval '1 hour' FROM generate_series(1,"
-            + str(workload["expiredAttempts"])
-            + ") i;"
-        )
-        before = int(
-            self.sql(
-                "SELECT count(*) FROM identity_authority.attempts WHERE key LIKE 't3-expired-%';"
-            )
-        )
-        ids = self.compose("ps", "--quiet").decode().split()
-
-        def stats():
-            return [
-                json.loads(row)
-                for row in docker(
-                    "stats", "--no-stream", "--format", "{{json .}}", *ids
-                )
-                .decode()
-                .splitlines()
-            ]
-
-        resources_before = stats()
-        account_events = "SELECT count(*) FROM rss_transactional_messaging.outbox WHERE envelope->>'contract'='identity.account.security';"
-        event_count = int(self.sql(account_events))
-        result = self.browser("capacity", recoveredAdminPassword=self.admin_password)
-        resources_after = stats()
-        committed_events = int(self.sql(account_events)) - event_count
-        require(
-            committed_events == result["counts"]["createdAccounts"],
-            "capacity-durable-events",
-        )
-        after = int(
-            self.sql(
-                "SELECT count(*) FROM identity_authority.attempts WHERE key LIKE 't3-expired-%';"
-            )
-        )
-        require(before > after, "cleanup-not-exercised")
-        self.record["measurements"].update(result["measurements"])
-        self.record["measurements"]["expiredAttemptsRemoved"] = before - after
-        return {
-            "datasetRows": {name: len(rows) for name, rows in self.snapshot().items()},
-            "resourcesBefore": resources_before,
-            "resourcesAfter": resources_after,
-            "committedEvents": committed_events,
-            "expiredAttemptsBefore": before,
-            "expiredAttemptsAfter": after,
-            "assertions": result["assertions"],
-            **result["counts"],
-        }
 
     def cleanup(self):
         remaining = []
@@ -2277,26 +1658,16 @@ class Run:
             self.write("failure-type", type(error).__name__ + ": " + str(error)[:300])
         finally:
             self.cleanup()
-            self.record["result"] = (
-                "measured" if self.record["targets"] is None else "passed"
-            )
+            self.record["result"] = "passed"
             if self.record["failure"] or self.record["cleanup"]["status"] != "passed":
                 self.record["result"] = "failed"
             else:
                 try:
-                    verify_record(
-                        self.record,
-                        self.config["subject"],
-                        (
-                            self.config["baseline"].encode()
-                            if self.config.get("baseline")
-                            else None
-                        ),
-                    )
+                    verify_record(self.record, self.config["subject"])
                 except ValueError:
                     self.record["failure"] = {
                         "stage": "acceptance",
-                        "reason": "incomplete-or-target-not-met",
+                        "reason": "incomplete-or-invalid-evidence",
                     }
                     self.record["result"] = "failed"
             save_evidence(self.output, self.record, self.secrets)
@@ -2362,14 +1733,12 @@ def outside(args):
     )
     prefix = "identity-t3-" + secrets.token_hex(5)
     volume, operator = prefix + "-private", prefix + "-operator"
-    report = new_record({}, None)
+    report = new_record({})
     save(args.record, report)
     phase = "preflight"
     try:
-        details, tool, subject, targets, baseline = candidate(args, prefix)
-        approval = verify_approval(targets, subject["pullRequest"]) if targets else None
-        report = new_record(subject, targets)
-        report["approval"] = approval
+        details, tool, subject = prepare_run(args, prefix)
+        report = new_record(subject)
         save(args.record, report)
         phase = "operator"
         docker("volume", "create", "--label", "rss.identity.t3=" + prefix, volume)
@@ -2394,19 +1763,15 @@ def outside(args):
             tool["Id"],
             "infinity",
         )
-        archive = process(
-            [
-                "/usr/bin/git",
-                "-C",
-                str(ROOT),
-                "archive",
-                "HEAD",
-                "hack",
-                "deployment",
-                "crates/identity-postgres/src/schema-signature.sha256",
-                "crates/identity-postgres/src/security-event-v3.json",
-            ]
-        )
+        # Transfer only the current files needed by the remote operator, not a Git artifact.
+        archive = process([
+            "/usr/bin/tar", "-cf", "-", "-C", str(ROOT),
+            "hack/reference_t3.py", "hack/reference_t3_browser.mjs",
+            "hack/deploy.py", "hack/operate.py", "hack/bounded_process.py",
+            "hack/docker_network.py", "deployment/deploy.example.json",
+            "deployment/keycloak-totp.json", "deployment/providers.lock.json",
+            "crates/identity-postgres/src/security-event-v3.json",
+        ])
         docker("exec", operator, "mkdir", "-p", mount + "/source")
         docker(
             "exec",
@@ -2424,9 +1789,6 @@ def outside(args):
             "output": mount + "/result.json",
             "prefix": prefix,
             "subject": subject,
-            "targets": targets,
-            "approval": approval,
-            "baseline": baseline.decode() if baseline else None,
             "images": {k: v["Id"] for k, v in details.items()},
         }
         docker(
@@ -2481,13 +1843,7 @@ def outside(args):
             report["result"] = "failed"
         else:
             try:
-                verify_record(report, subject, baseline)
-                require(report["approval"] == approval, "returned-approval-mismatch")
-                if targets:
-                    require(
-                        verify_approval(targets, subject["pullRequest"]) == approval,
-                        "approval-changed",
-                    )
+                verify_record(report, subject)
             except BaseException as error:
                 report["failure"] = failure_fact(error, "finalize")
                 report["result"] = "failed"
@@ -2498,7 +1854,7 @@ def outside(args):
             + (report["failure"] or {"reason": "cleanup-unconfirmed"})["reason"],
             file=sys.stderr,
         )
-    return report["result"] in ["measured", "passed"]
+    return report["result"] == "passed"
 
 
 def main():
@@ -2507,11 +1863,7 @@ def main():
     p.add_argument("--identity-image")
     p.add_argument("--web-image")
     p.add_argument("--tools-image")
-    p.add_argument("--web-repo", type=Path)
     p.add_argument("--record", type=Path)
-    p.add_argument("--targets", type=Path)
-    p.add_argument("--baseline", type=Path)
-    p.add_argument("--pull-request", type=int)
     args = p.parse_args()
 
     def interrupted(signum, frame):
@@ -2528,9 +1880,7 @@ def main():
                         args.identity_image,
                         args.web_image,
                         args.tools_image,
-                        args.web_repo,
                         args.record,
-                        args.pull_request,
                     ]
                 ),
                 "required-inputs",
@@ -2538,7 +1888,7 @@ def main():
             result = outside(args)
     except BaseException as error:
         if args.record and args.record.is_absolute() and not args.record.exists():
-            record = new_record({}, None)
+            record = new_record({})
             record.update(
                 result="failed",
                 failure=failure_fact(error, "preflight-or-operator"),

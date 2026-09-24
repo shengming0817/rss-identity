@@ -152,12 +152,12 @@ class ImageContractTests(unittest.TestCase):
                 mounts=[v['target'] for v in services[name]['volumes']]
                 for secret in forbidden:self.assertNotIn('/run/input/'+secret,mounts)
 
-    def test_inspection_uses_daemon_platform_and_rejects_invalid_identity_user_or_version(self):
-        good={'Id':'sha256:'+'1'*64,'Os':'linux','Architecture':'arm64','Variant':'v8','Config':{'User':'10001:10001','Labels':{'org.opencontainers.image.revision':'a'*40}}}
+    def test_inspection_uses_daemon_platform_and_rejects_invalid_identity_user(self):
+        good={'Id':'sha256:'+'1'*64,'Os':'linux','Architecture':'arm64','Variant':'v8','Config':{'User':'10001:10001','Labels':{}}}
         with patch('subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout=json.dumps([good]))) as run:
             self.assertEqual(deploy.inspect_image('backend:ready',True),good)
             run.assert_called_once_with(['docker','image','inspect','backend:ready'],check=True,capture_output=True,timeout=30)
-        for image in [[],[{**good,'Os':'windows'}],[{**good,'Id':'mutable:tag'}],[{**good,'Config':{'User':'0'}}],[{**good,'Config':{'User':'10001:10001','Labels':{}}}]]:
+        for image in [[],[{**good,'Os':'windows'}],[{**good,'Id':'mutable:tag'}],[{**good,'Config':{'User':'0'}}]]:
             with patch('subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout=json.dumps(image))):
                 with self.assertRaises(ValueError):deploy.inspect_image('fixture',True)
         with patch('subprocess.run',side_effect=subprocess.CalledProcessError(1,['docker'])):
@@ -178,7 +178,7 @@ class ImageContractTests(unittest.TestCase):
         arguments={
             'deploy.py':['--input','input','--output','output','--identity-image','backend','--web-image','web'],
             'operate.py':['--deployment','deployment','--project','identity-fixture','verify'],
-            'reference_t3.py':['--identity-image','backend','--web-image','web','--tools-image','tools','--web-repo','web-repo','--record','record'],
+            'reference_t3.py':['--identity-image','backend','--web-image','web','--tools-image','tools','--record','record'],
         }
         for script,args in arguments.items():
             result=subprocess.run([sys.executable,str(deploy.ROOT/'hack'/script),*args,'--candidate','old'],capture_output=True,timeout=10)
@@ -187,23 +187,22 @@ class ImageContractTests(unittest.TestCase):
         result=subprocess.run(['make','candidate'],cwd=deploy.ROOT,capture_output=True,timeout=10)
         self.assertNotEqual(result.returncode,0)
 
-    def test_image_entry_uses_clean_archive_and_derives_build_identity(self):
+    def test_image_entry_builds_current_worktree_with_pinned_base_images(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);(root/'deployment').mkdir();(root/'bin').mkdir()
             (root/'Makefile').write_bytes((deploy.ROOT/'Makefile').read_bytes())
             (root/'deployment/providers.lock.json').write_bytes((deploy.ROOT/'deployment/providers.lock.json').read_bytes())
-            docker=root/'bin/docker';docker.write_text('#!/bin/sh\ncat >/dev/null\nprintf "%s\\n" "$@" > "$IMAGE_CALL_LOG"\n');docker.chmod(0o755)
+            docker=root/'bin/docker';docker.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$IMAGE_CALL_LOG"\n');docker.chmod(0o755)
             env={**os.environ,'PATH':str(root/'bin')+':'+os.environ['PATH'],'IMAGE_CALL_LOG':str(root/'called')}
             subprocess.run(['/usr/bin/git','init','-q',str(root)],check=True)
             subprocess.run(['/usr/bin/git','-C',str(root),'add','Makefile','deployment'],check=True)
             subprocess.run(['/usr/bin/git','-C',str(root),'-c','user.name=fixture','-c','user.email=fixture@example.test','commit','-qm','fixture'],check=True)
             # Ignore the fake Docker and its result, just as local build products are ignored.
             (root/'.git/info/exclude').write_text('bin/\ncalled\n')
-            head=subprocess.check_output(['/usr/bin/git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
-            result=subprocess.run(['make','image','IDENTITY_REVISION='+'f'*40,'RUST_IMAGE=untrusted:latest','RUNTIME_IMAGE=untrusted:latest'],cwd=root,env=env,capture_output=True,timeout=10)
+            result=subprocess.run(['make','image','RUST_IMAGE=untrusted:latest','RUNTIME_IMAGE=untrusted:latest'],cwd=root,env=env,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr.decode())
             arguments=(root/'called').read_text()
-            self.assertIn('IDENTITY_REVISION='+head,arguments);self.assertNotIn('untrusted',arguments);self.assertTrue(arguments.endswith('-\n'))
+            self.assertNotIn('IDENTITY_REVISION=',arguments);self.assertNotIn('untrusted',arguments);self.assertTrue(arguments.endswith('.\n'))
             (root/'called').unlink();(root/'Makefile').write_text((root/'Makefile').read_text()+'\n# dirty\n')
             result=subprocess.run(['make','image'],cwd=root,env=env,capture_output=True,timeout=10)
-            self.assertNotEqual(result.returncode,0);self.assertFalse((root/'called').exists())
+            self.assertEqual(result.returncode,0,result.stderr.decode());self.assertTrue((root/'called').exists())

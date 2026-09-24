@@ -478,6 +478,13 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
     .execute(&f.owner)
     .await?;
     assert!(f.actor().await.is_ok());
+    // A request reclaims expired entries, but never drains an unbounded backlog.
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.attempts WHERE key LIKE 'full:%'",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(remaining, 9_872);
     f.close().await;
     Ok(())
 }

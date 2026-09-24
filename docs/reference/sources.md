@@ -1,16 +1,10 @@
 # 需求证据索引
 
-读取日期：2026-09-07。仅做源码和文档分析，未运行 WinMDM、历史 RSS 或 Plane。此段记录历史需求分析；当前 I01/I02 实现与测试见开发指南。引用上游行为用于补全需求，不证明本产品支持同一能力。
+本文保存历史来源与设计引用，不保存逐次验证结果。引用上游不表示本产品具备同等能力；历史源码分析也不等于当前实现已验收。依赖版本以 Cargo.lock 为准。
 
-## 消费者与 RSS 当前状态
+## 消费来源
 
-| 来源 | 固定基线 / 文件 | 结论与需求影响 |
-| --- | --- | --- |
-| rss-mdm | `e64d760`，`docs/product/rss-mdm-prd.md` §06.13 | WMD-A01/02 为一级真实需求入口，A03 业务授权归 MDM；A04 二级、A05 三级。Identity 租户身份模型不提高 MDM 的 MSP 优先级 |
-| rss 当前 | `1b650c166`，`Cargo.toml`、`docs/rules/project-scope.md`、`docs/rules/api-versioning.md` | runtime/messaging/PG/AMQP 已提取；实验性 release surface 不证明已发布。Identity 不重复提取；I02 核实实际版本消费 |
-| rss 历史退出 | `3cd2b5573`（PR 902） | Identity/OIDC 产品面已退出主仓；退出不等于迁移到 Identity 或旧缺陷已修复 |
-
-MDM 当前 PRD 的一级 AuthN 与本仓目标存在 owner 对齐工作，见实施计划 M01。本文读取该固定基线，不替代 MDM 后续变更。
+MDM 的认证与资源授权需求来自其产品 PRD，历史基线 `e64d760` 的 WMD-A01/02/03 用于责任划分。Identity 身份隔离不提高 MDM MSP 的承诺；当前任务和进度由消费产品工作项持有。
 
 ## RSS 历史
 
@@ -26,7 +20,7 @@ MDM 当前 PRD 的一级 AuthN 与本仓目标存在 owner 对齐工作，见实
 
 ## WinMDM 历史
 
-本地入口 [winmdm20260220-develop](../../reference/winmdm20260220-develop)，非 Git 内容；完整来源与恢复步骤见 [reference](../../reference/README.md)。下面路径相对于该目录的 `src/`。
+本地入口 `reference/winmdm20260220-develop`，非 Git 内容；完整来源与恢复步骤见 [reference](../../reference/README.md)。下面路径相对于该目录的 `src/`。
 
 | ID | 已读文件 | 行为与补全要求 |
 | --- | --- | --- |
@@ -66,28 +60,27 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 
 安全需求并非由单个参考项目自动批准；PRD 的目标、I01 的协议决定、实现与测试证据各自保有 owner。
 
-## I01/I02 当前引用（2026-09-08）
+## 历史中央架构来源
 
 - RSS Git `bf5dd1350997d01aa834094a3347fce30247814e`：`crates/transactional-messaging-postgres/src/transaction.rs`、`tests/postgres-integration/tests/lifecycle/mod.rs`；公共 local_tx/with_connection/Outbox 事务组合。历史 `5b63e10...` 仍只作历史语义参考。
 - [openidconnect 4.0.1 src/lib.rs](https://github.com/ramosbugs/openidconnect-rs/blob/4.0.1/src/lib.rs)：客户端 discovery、PKCE、nonce 和 token 校验。
 - [Hydra v26.2.0 oauth2/handler.go](https://github.com/ory/hydra/blob/v26.2.0/oauth2/handler.go)：标准授权/token 端点，Apache-2.0；只通过协议组合，不复制 Go 实现。
-- 2026-09-08 crates.io 复核：contract/request-context/redact/transactional-messaging/transactional-messaging-postgres 索引 404；diag-context 0.1.0 artifact SHA-256 `31262d0e465e713c8d86b1f0907f03866ce66069d5ddbb4dac6de0c9e00c7d48` 与索引相符。该历史事实不再是 Git 消费的阻塞，也不证明完整闭包已发布。
 
 ## I04 会话来源
 
-- [RSS 历史 refresh.rs](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity/src/domain/refresh.rs&version=GC5b63e10a1b396b0ff70b7d1e6e55db296cd7a891)：实际读取其摘要、grant 绑定和 absolute lifetime；本项不采用其 family/history/compromise 模型，不复制源码。
+- [RSS 历史 refresh.rs](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity/src/domain/refresh.rs&version=GC5b63e10a1b396b0ff70b7d1e6e55db296cd7a891)：参考其摘要、grant 绑定和 absolute lifetime；本项不采用其 family/history/compromise 模型，不复制源码。
 - [RSS 历史 auth_grant_lifecycle.rs](https://dev.azure.com/shengming0923/rss/_git/rss?path=/adapters/postgres/src/auth_grant_lifecycle.rs&version=GC5b63e10a1b396b0ff70b7d1e6e55db296cd7a891)：账户锁、代际复核、凭据提交后释放；实际执行仍复用固定 RSS bf5dd1350997d01aa834094a3347fce30247814e 的 PG transaction。
-- [Axum state extractor](https://github.com/tokio-rs/axum/blob/c59208c86fded335cd85e388030ad59347b0e5ae/axum/src/extract/state.rs#L296-L324)、[Router](https://github.com/tokio-rs/axum/blob/c59208c86fded335cd85e388030ad59347b0e5ae/axum/src/routing/mod.rs)：实际读取本机 registry 的 axum 0.8.9 发布源码与 .cargo_vcs_info.json，MIT；复用 Router/state/JSON/ConnectInfo，不复制其源码，不引入第二个 session store。
+- [Axum state extractor](https://github.com/tokio-rs/axum/blob/c59208c86fded335cd85e388030ad59347b0e5ae/axum/src/extract/state.rs#L296-L324)、[Router](https://github.com/tokio-rs/axum/blob/c59208c86fded335cd85e388030ad59347b0e5ae/axum/src/routing/mod.rs)：参考本机 registry 的 axum 0.8.9 发布源码与 .cargo_vcs_info.json，MIT；复用 Router/state/JSON/ConnectInfo，不复制其源码，不引入第二个 session store。
 
 ## 查询、策略与结算边界
 
-- 实际读取固定 RSS `bf5dd1350997d01aa834094a3347fce30247814e` 的 `crates/transactional-messaging-postgres/src/transaction.rs:402–525,731–801`：local_tx 是单一截止点与结算 owner，drop 不证明回滚，未确认连接隔离；本项复用其 CommitUnknown/RollbackFailed，不额外发明 HTTP 结算窗口。
-- [Tower 0.5.3 timeout future](https://github.com/tower-rs/tower/blob/4b0a6b0e688bd177eb2c9c97f5268dd9703c66fc/tower/src/timeout/future.rs#L35-L53)：超时可结束 response future，所以将 HTTP 取消限定在 JSON body 读取，事务阶段交给其 owner。读取了 registry 源码和 .cargo_vcs_info.json；未复制源码。
-- [RustCrypto Argon2 0.5.3 Params](https://github.com/RustCrypto/password-hashes/blob/argon2-v0.5.3/argon2/src/params.rs)：实际读取构造时验证和私有参数字段；仅借鉴“校验后持有策略”的封装方式，SessionClass 仍为 Identity 自己的业务规则，无公开策略框架。
+- 参考固定 RSS `bf5dd1350997d01aa834094a3347fce30247814e` 的 `crates/transactional-messaging-postgres/src/transaction.rs:402–525,731–801`：local_tx 是单一截止点与结算 owner，drop 不证明回滚，未确认连接隔离；本项复用其 CommitUnknown/RollbackFailed，不额外发明 HTTP 结算窗口。
+- [Tower 0.5.3 timeout future](https://github.com/tower-rs/tower/blob/4b0a6b0e688bd177eb2c9c97f5268dd9703c66fc/tower/src/timeout/future.rs#L35-L53)：超时可结束 response future，所以将 HTTP 取消限定在 JSON body 读取，事务阶段交给其 owner。未复制源码。
+- [RustCrypto Argon2 0.5.3 Params](https://github.com/RustCrypto/password-hashes/blob/argon2-v0.5.3/argon2/src/params.rs)：参考构造时验证和私有参数字段；仅借鉴“校验后持有策略”的封装方式，SessionClass 仍为 Identity 自己的业务规则，无公开策略框架。
 
 ## I05 联合身份来源
 
-- [openidconnect verifier](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/verification/mod.rs)：4.0.1 发布源码的固定 Git 身份，实际读取 issuer/audience/signature/nonce/expiry 校验；额外产品事务由本仓持有。
+- [openidconnect verifier](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/verification/mod.rs)：4.0.1 发布源码的固定 Git 身份，参考 issuer/audience/signature/nonce/expiry 校验；额外产品事务由本仓持有。
 - [RustCrypto HMAC](https://github.com/RustCrypto/MACs/blob/hmac-v0.12.1/hmac/src/lib.rs)：HMAC-SHA256 与常量时间验证；复用算法，state 编码/租户/浏览器/单次事务由 Identity 持有。
 - 固定 RSS bf5dd1350997d01aa834094a3347fce30247814e `crates/transactional-messaging-postgres/src/transaction.rs`：读取私有 pool 与 tenant-bound local_tx/with_connection；使用同一个有界结算 owner，不新增无租户 SQL 旁路。
 - reqwest 0.12.28 发布源码的 `src/dns/resolve.rs`、`src/async_impl/client.rs`：复用 resolver/HTTPS/no_proxy/redirect policy，不复制网络栈。
@@ -95,7 +88,7 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 ## I06 下游来源
 
 - [Hydra flow 映射](https://github.com/ory/hydra/blob/0b84568fffccf151dc5e6c7955fdfb738555bf4b/flow/flow.go#L401-L425)：consent login_challenge 为内部 flow ID；采用受信 context 传递本地 grant 定位符。
-- [Hydra introspection](https://github.com/ory/hydra/blob/0b84568fffccf151dc5e6c7955fdfb738555bf4b/oauth2/handler.go#L1031-L1081)：ext 仅作关联定位，当前身份由 PG 复核。
+- [Hydra introspection](https://github.com/ory/hydra/blob/0b84568fffccf151dc5e6c7955fdfb738555bf4b/oauth2/handler.go#L1031-L1081)：ext 仅作关联定位，当时的身份由 PG 复核。
 - [Hydra 精确撤销](https://github.com/ory/hydra/blob/0b84568fffccf151dc5e6c7955fdfb738555bf4b/consent/handler.go#L64-L141)：按 consent_request_id 清理；204 不替代迟到 verifier 的窗口证明。
 
 ## 下游凭据、并发与时钟
@@ -103,16 +96,16 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - [oauth2-rs secret types](https://github.com/ramosbugs/oauth2-rs/blob/main/oauth2/src/types.rs)：读取独立 CSRF/PKCE secret 类型及脱敏实现；BrowserBindingSecret 由 Identity 自己持有，未复制宏或引入通用 credential 层。
 - [Tokio Semaphore](https://github.com/tokio-rs/tokio/blob/master/tokio/src/sync/semaphore.rs)：读取 try_acquire/RAII permit 与请求并发限制示例；直接复用现有 Tokio，PrepareAdmission 使用无队列拒绝及共享窗口预算。
 - [AWS Smithy time source](https://github.com/awslabs/smithy-rs/blob/main/rust-runtime/aws-smithy-async/src/time.rs)：读取显式时间依赖与系统实现；client 只需要 Unix 秒窄 port，不依赖服务器账户/runtime crate。
-- Hydra 固定 revision 的 consent/handler.go（见 I06 来源）：复核精确撤销和幂等204；补 PG 领取、远程失败、结算未知与最终事件恢复验证，不以204推断迟到窗口结束。
+- Hydra 固定 revision 的 consent/handler.go（见 I06 来源）：复核精确撤销和幂等204；远端成功状态不证明迟到窗口结束。
 
-前三项为本次读取的上游分支快照参考，只用于设计模式，不复制源码或新增依赖；构建身份仍由本仓 lock 持有。
+前三项为历史读取的上游分支快照参考，只用于设计模式，不复制源码或新增依赖；构建身份仍由本仓 lock 持有。
 
 
 ## #2433 组事实
 
-- [openidconnect-rs verifier，4.0.1 固定源码](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/verification/mod.rs)：实际读取 registry 发布源码，复用验签/issuer/audience/nonce/exp；默认 iat verifier 不额外检查时间，Identity 在 PG 采集时显式验证 signed iat/exp 与当前时间，并冻结有界期限。
-- [Keycloak 26.7.3 GroupMembershipMapper.java](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/GroupMembershipMapper.java)：实际读取 `useFullPath` 和 `setClaim`，启用 `full.path=true` 保持父子路径；不复制源码，不自动展开祖先。
-- [Keycloak 26.7.3 OIDCAttributeMapperHelper.java](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/OIDCAttributeMapperHelper.java)：真实撤组 T2 后实际读取 `mapAttributeValue`/`mapClaim`，空集合转 null 并省略 claim；consumer 必须保留 missing 与真实空数组区别。
+- [openidconnect-rs verifier，4.0.1 固定源码](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/verification/mod.rs)：参考 registry 发布源码，复用验签/issuer/audience/nonce/exp；默认 iat verifier 不额外检查时间，Identity 在 PG 采集时显式验证 signed iat/exp 与当前时间，并冻结有界期限。
+- [Keycloak 26.7.3 GroupMembershipMapper.java](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/GroupMembershipMapper.java)：参考 `useFullPath` 和 `setClaim`，启用 `full.path=true` 保持父子路径；不复制源码，不自动展开祖先。
+- [Keycloak 26.7.3 OIDCAttributeMapperHelper.java](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/OIDCAttributeMapperHelper.java)：真实撤组 T2 后参考 `mapAttributeValue`/`mapClaim`，空集合转 null 并省略 claim；consumer 必须保留 missing 与真实空数组区别。
 
 ## #2435 可嵌入认证
 
@@ -123,27 +116,27 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 ## #2438 截止点与嵌入式验证
 
 - [PostgreSQL 17 日期时间函数](https://www.postgresql.org/docs/17/functions-datetime.html)：`clock_timestamp()` 取实际时刻，区别于事务起点；用于锁后权威采样。
-- [Rust std/time.rs](https://doc.rust-lang.org/src/std/time.rs.html)：实际读取 Instant 的单调语义与 `checked_add`；只复用标准库，不复制源码或增加公开时钟注入。
+- [Rust std/time.rs](https://doc.rust-lang.org/src/std/time.rs.html)：参考 Instant 的单调语义与 `checked_add`；只复用标准库，不复制源码或增加公开时钟注入。
 - 本仓 `fa7019922162158704cc47c6ac7ad36a67c8ae5a` 的 `crates/identity-http-axum/tests/group_facts_support/mod.rs`：历史真实 Keycloak 撤组与断网语义；按嵌入式 API 重建 producer T2，删除旧中央 client/Hydra 假设。
-- ASP.NET Core v10.0.0 [UserClaimsPrincipalFactory](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Extensions.Core/src/UserClaimsPrincipalFactory.cs) 与 [SecurityStampValidatorOptions](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Core/src/SecurityStampValidatorOptions.cs)：实际读取 Manager 生成 claims/roles 与默认 30 分钟 stamp 间隔；不将其等同 RSS 的 IdP 组时效。
+- ASP.NET Core v10.0.0 [UserClaimsPrincipalFactory](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Extensions.Core/src/UserClaimsPrincipalFactory.cs) 与 [SecurityStampValidatorOptions](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Identity/Core/src/SecurityStampValidatorOptions.cs)：参考 Manager 生成 claims/roles 与默认 30 分钟 stamp 间隔；不将其等同 RSS 的 IdP 组时效。
 
 ### 会话截止与测试清理
 
-- [ASP.NET Core v10.0.0 CookieAuthenticationHandler](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Security/Authentication/Cookies/src/CookieAuthenticationHandler.cs)：实际读取异步 session store 返回后的时钟复核；本仓另在最后一次会话写之后复核自身单调期限，不复制其 cookie 续期策略。
-- [Rust 1.90.0 std/panic.rs](https://github.com/rust-lang/rust/blob/1.90.0/library/std/src/panic.rs)：实际读取 catch_unwind/resume_unwind，用于测试清理后传播断言失败，不吞掉 panic。
-- [futures-util 0.3.32 catch_unwind](https://github.com/rust-lang/futures-rs/blob/d9bba94c239daa1175a5bb2958f37a5c72db3f6a/futures-util/src/future/future/catch_unwind.rs)：实际读取本地 registry 发布源码及 cargo_vcs_info，poll 内捕获 unwind。沿用现有 futures 开发依赖，实际构建版本仍由 Cargo.lock 固定。
+- [ASP.NET Core v10.0.0 CookieAuthenticationHandler](https://github.com/dotnet/aspnetcore/blob/v10.0.0/src/Security/Authentication/Cookies/src/CookieAuthenticationHandler.cs)：参考异步 session store 返回后的时钟复核；本仓另在最后一次会话写之后复核自身单调期限，不复制其 cookie 续期策略。
+- [Rust 1.90.0 std/panic.rs](https://github.com/rust-lang/rust/blob/1.90.0/library/std/src/panic.rs)：参考 catch_unwind/resume_unwind，用于测试清理后传播断言失败，不吞掉 panic。
+- [futures-util 0.3.32 catch_unwind](https://github.com/rust-lang/futures-rs/blob/d9bba94c239daa1175a5bb2958f37a5c72db3f6a/futures-util/src/future/future/catch_unwind.rs)：参考本地 registry 发布源码及 cargo_vcs_info，poll 内捕获 unwind。沿用现有 futures 开发依赖，实际构建版本仍由 Cargo.lock 固定。
 
 ## #2447 部门事实
 
-- [openidconnect-rs 4.0.1 AdditionalClaims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/claims.rs#L19-L26) 与 [verified_claims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/verification/mod.rs#L680-L804)：实际读取扩展 claim 与签名/issuer/audience/expiry/nonce 验证顺序，之后才解释部门；iat 上界仍由组件显式检查。
-- [Keycloak 26.7.3 OIDCAttributeMapperHelper](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/OIDCAttributeMapperHelper.java#L315-L352)：实际读取空值省略逻辑；不将缺失当作显式 null，无 sentinel 或目录推断。
+- [openidconnect-rs 4.0.1 AdditionalClaims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/claims.rs#L19-L26) 与 [verified_claims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/verification/mod.rs#L680-L804)：参考扩展 claim 与签名/issuer/audience/expiry/nonce 验证顺序，之后才解释部门；iat 上界仍由组件显式检查。
+- [Keycloak 26.7.3 OIDCAttributeMapperHelper](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/OIDCAttributeMapperHelper.java#L315-L352)：参考空值省略逻辑；不将缺失当作显式 null，无 sentinel 或目录推断。
 
 - [OpenID Connect Back-Channel Logout 1.0](https://openid.net/specs/openid-connect-backchannel-1_0.html#BCSupport)：sid 是 ID Token 中的会话标识，部门映射明确拒绝该协议字段。
 
-### #1055 再审修复：共享事实与 callback 诊断
+### 共享事实与 callback 诊断
 
-- [openidconnect-rs 4.0.1 claims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/claims.rs#L19-L63)：实际读取固定 registry 源码及 cargo_vcs_info，区分标准与扩展 claim 的独立职责；本仓只提升共同事实原语，不建立泛型 claims 框架。
-- [Axum core 0.5.6 Extensions 响应组合](https://github.com/tokio-rs/axum/blob/e710a97a5a8e1e2f629f78e0377d7ab17e597eaf/axum-core/src/response/into_response_parts.rs#L257-L263)：实际读取固定 registry 源码，直接使用 `(Extensions, Response).into_response()` 保留宿主诊断，替换浏览器错误投影。
+- [openidconnect-rs 4.0.1 claims](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/claims.rs#L19-L63)：参考固定 registry 源码及 cargo_vcs_info，区分标准与扩展 claim 的独立职责；本仓只提升共同事实原语，不建立泛型 claims 框架。
+- [Axum core 0.5.6 Extensions 响应组合](https://github.com/tokio-rs/axum/blob/e710a97a5a8e1e2f629f78e0377d7ab17e597eaf/axum-core/src/response/into_response_parts.rs#L257-L263)：参考固定 registry 源码，直接使用 `(Extensions, Response).into_response()` 保留宿主诊断，替换浏览器错误投影。
 
 ## #2451 部门树快照
 

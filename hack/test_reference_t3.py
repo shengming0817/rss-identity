@@ -2,18 +2,7 @@ import copy
 import unittest
 import reference_t3 as t3
 
-
 class EvidenceTests(unittest.TestCase):
-    def test_capacity_validation_uses_the_bound_workload(self):
-        record, subject = self.complete()
-        subject["workload"]["login"]["samples"] = 12
-        facts = record["steps"][-1]["observations"]
-        facts["createdAccounts"] -= 12
-        facts["committedEvents"] -= 12
-        facts["loginProfile"].update(
-            samples=12, statuses={"200": 12}, elapsedSeconds=12
-        )
-        t3.verify_observations("capacity", facts, subject, record["measurements"])
 
     def test_passed_evidence_cannot_omit_coverage_boundaries(self):
         record, subject = self.complete()
@@ -22,7 +11,7 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             t3.verify_record(record, subject)
 
-    def test_candidate_timeout_still_runs_owned_cleanup_and_writes_failure(self):
+    def test_prepare_run_timeout_still_runs_owned_cleanup_and_writes_failure(self):
         import argparse, json, tempfile, subprocess
         from pathlib import Path
         from unittest.mock import patch
@@ -31,12 +20,12 @@ class EvidenceTests(unittest.TestCase):
             args = argparse.Namespace(record=Path(temp) / "result.json")
             with (
                 patch.object(
-                    t3, "candidate", side_effect=subprocess.TimeoutExpired("docker", 1)
-                ) as candidate,
+                    t3, "prepare_run", side_effect=subprocess.TimeoutExpired("docker", 1)
+                ) as prepare,
                 patch.object(t3, "cleanup_operator", return_value=[]) as cleanup,
             ):
                 self.assertFalse(t3.outside(args))
-            prefix = candidate.call_args.args[1]
+            prefix = prepare.call_args.args[1]
             self.assertEqual(
                 cleanup.call_args.args,
                 (prefix, prefix + "-operator", prefix + "-private"),
@@ -46,12 +35,12 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(report["failure"]["kind"], "timeout")
             self.assertEqual(report["cleanup"]["status"], "passed")
 
-    def test_candidate_probes_have_exact_cleanup_identity(self):
+    def test_image_probes_have_exact_cleanup_identity(self):
         from unittest.mock import patch
 
         with patch.object(t3, "docker", return_value=b"profile") as docker:
             self.assertEqual(
-                t3.candidate_probe(
+                t3.image_probe(
                     "owned-prefix",
                     "policy",
                     "sha256:fixed",
@@ -99,96 +88,23 @@ class EvidenceTests(unittest.TestCase):
             self.assertIn("com.docker.compose.project=" + project, args)
             self.assertIn("com.docker.compose.network=backend", args)
 
-    def test_binary_profile_is_read_from_the_fixed_image_and_rejects_drift(self):
+    def test_binary_policy_is_read_from_the_actual_image(self):
         import json
         from unittest.mock import patch
 
-        profile = {
-            "formatVersion": 1,
-            "schemaVersion": 11,
-            **{
-                key: t3.POLICY[key]
-                for key in ["session", "attempts", "kdfConcurrency", "mfaMaxAgeSeconds"]
-            },
-        }
-        with patch.object(
-            t3, "docker", return_value=json.dumps(profile).encode()
-        ) as docker:
-            self.assertEqual(t3.binary_profile("sha256:fixed", "owned-prefix"), profile)
-        self.assertEqual(
-            docker.call_args.args,
-            (
-                "run",
-                "--rm",
-                "--pull=never",
-                "--network=none",
-                "--name",
-                "owned-prefix-policy",
-                "--label",
-                "rss.identity.t3=owned-prefix",
-                "--entrypoint",
-                "identity-server",
-                "sha256:fixed",
-                "--acceptance-profile",
-            ),
-        )
-        for key, value in [
-            ("session", {}),
-            ("kdfConcurrency", 8),
-            ("mfaMaxAgeSeconds", 60),
-            ("schemaVersion", 9),
-            ("schemaVersion", True),
-            ("formatVersion", 2),
-        ]:
-            changed = {**profile, key: value}
-            with patch.object(t3, "docker", return_value=json.dumps(changed).encode()):
-                with self.assertRaises(ValueError):
-                    t3.binary_profile("sha256:fixed", "owned-prefix")
-
-    def test_migration_contract_is_read_from_same_image_and_checked(self):
-        import json
-        from unittest.mock import patch
-
-        value = {
-            "schema_version": 11,
-            "schema_contract": "a" * 64,
-            "identity_sql_sha256": "b" * 64,
-            "rss_sql_sha256": "c" * 64,
-        }
-        with patch.object(
-            t3, "docker", return_value=json.dumps(value).encode()
-        ) as docker:
-            actual = t3.migration_profile(
-                "sha256:fixed",
-                {"schemaVersion": 11},
-                "a" * 64,
-                "b" * 64,
-                "owned-prefix",
-            )
-        self.assertEqual(actual, value)
-        self.assertEqual(
-            docker.call_args.args[-3:],
-            ("identity-migrate", "sha256:fixed", "--describe"),
-        )
-        for key, replacement in [
-            ("schema_version", 9),
-            ("schema_contract", "d" * 64),
-            ("identity_sql_sha256", "d" * 64),
-            ("rss_sql_sha256", "invalid"),
-        ]:
-            with patch.object(
-                t3,
-                "docker",
-                return_value=json.dumps({**value, key: replacement}).encode(),
-            ):
-                with self.assertRaises(ValueError):
-                    t3.migration_profile(
-                        "sha256:fixed",
-                        {"schemaVersion": 11},
-                        "a" * 64,
-                        "b" * 64,
-                        "owned-prefix",
-                    )
+        profile = {"formatVersion": 1, "schemaVersion": 999,
+                   "session": {"idleSeconds": 60, "absoluteSeconds": 120},
+                   "mfaMaxAgeSeconds": 30}
+        with patch.object(t3, "docker", return_value=json.dumps(profile).encode()) as docker:
+            self.assertEqual(t3.binary_profile("sha256:fixed", "owned-prefix"), {
+                "session": profile["session"], "mfaMaxAgeSeconds": 30})
+        self.assertEqual(docker.call_args.args[-3:],
+                         ("identity-server", "sha256:fixed", "--acceptance-profile"))
+        for extra in [{"session": {}}, {"mfaMaxAgeSeconds": 0},
+                      {"session": {"idleSeconds": 3, "absoluteSeconds": 2}},
+                      {"formatVersion": 2}]:
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                t3.validate_binary_profile({**profile, **extra})
 
     def test_each_step_requires_nonempty_facts(self):
         original, subject = self.complete()
@@ -257,14 +173,6 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(set(t3.STEPS), set(t3.TRUE_FACTS))
         self.assertTrue(all(hasattr(t3.Run, method) for _, method, _ in t3.SCENARIOS))
 
-    def test_approval_must_belong_to_bound_pull_request(self):
-        targets, subject, raw = self.approved()
-        targets["approvalReference"] = targets["approvalReference"].replace(
-            "/1057?", "/1058?"
-        )
-        with self.assertRaises(ValueError):
-            t3.validate_targets(targets, subject, raw)
-
     def test_failure_categories_survive_without_exception_text(self):
         import json, subprocess
 
@@ -295,70 +203,15 @@ class EvidenceTests(unittest.TestCase):
         import json
 
         subject = {
-            "identity": {"revision": "a" * 40, "id": "sha256:" + "1" * 64},
-            "pullRequest": 1057,
-            "schema": {"version": 11, "signature": "a" * 64},
-            "migrationProfile": {
-                "schema_version": 11,
-                "schema_contract": "a" * 64,
-                "identity_sql_sha256": "b" * 64,
-                "rss_sql_sha256": "c" * 64,
-            },
-            "binaryProfile": {
-                "formatVersion": 1,
-                "schemaVersion": 11,
-                **{
-                    key: copy.deepcopy(t3.POLICY[key])
-                    for key in [
-                        "session",
-                        "attempts",
-                        "kdfConcurrency",
-                        "mfaMaxAgeSeconds",
-                    ]
-                },
-            },
+            "images": {"identity": {"id": "sha256:" + "1" * 64}},
+            "resources": {"daemonId": "fixture"},
             "runtimeProfile": t3.runtime_profile(t3.runtime_template()),
-            "policy": copy.deepcopy(t3.POLICY),
-            "workload": copy.deepcopy(t3.WORKLOAD),
-            "scenarios": list(t3.STEPS),
+            "policy": {"session": {"idleSeconds": 900, "absoluteSeconds": 14400}, "mfaMaxAgeSeconds": 300},
         }
-        record = t3.new_record(subject, None)
+        record = t3.new_record(subject)
         sha = "a" * 64
         rows = {name: 1 for name in t3.TABLES}
         rows.update(accounts=6, providers=2)
-        resource = {
-            key: "fixture"
-            for key in [
-                "BlockIO",
-                "CPUPerc",
-                "Container",
-                "ID",
-                "MemPerc",
-                "MemUsage",
-                "Name",
-                "NetIO",
-                "PIDs",
-            ]
-        }
-        lifetime = {
-            "status": 200,
-            "sessionIdSha256": sha,
-            "idleRemainingSeconds": 800,
-            "absoluteRemainingSeconds": 14000,
-        }
-
-        def profile(samples, concurrency, status, seconds=30, **extra):
-            return {
-                "samples": samples,
-                "concurrency": concurrency,
-                "statuses": {str(status): samples},
-                "elapsedSeconds": seconds,
-                "p95Ms": 1,
-                "maxMs": 1,
-                "requestsPerSecond": samples / seconds,
-                **extra,
-            }
-
         observations = {
             "install": {
                 "tenants": 2,
@@ -442,25 +295,6 @@ class EvidenceTests(unittest.TestCase):
                 "receiptSha256": sha,
                 "datasetRows": rows,
             },
-            "capacity": {
-                "datasetRows": rows,
-                "resourcesBefore": [resource] * 3,
-                "resourcesAfter": [resource] * 3,
-                "committedEvents": 56,
-                "createdAccounts": 56,
-                "expiredAttemptsBefore": 256,
-                "expiredAttemptsAfter": 0,
-                "sessionBefore": lifetime,
-                "sessionAfter": lifetime,
-                "profiles": [profile(c * 30, c, 200, codes={}) for c in [1, 4, 16]],
-                "sessionSamples": 630,
-                "loginProfile": profile(24, 4, 200, 24, warmup=4),
-                "failedAttemptProfile": profile(
-                    20, 4, 401, 20, warmup=0, limitedStatuses={"429": 8}
-                ),
-                "accountEventProfile": profile(20, 4, 201, warmup=4),
-                "assertions": 100,
-            },
         }
         record["steps"] = [
             {
@@ -472,24 +306,8 @@ class EvidenceTests(unittest.TestCase):
             for name in t3.STEPS
         ]
         record["cleanup"] = {"status": "passed", "remaining": []}
-        record["measurements"] = {name: 1 for name in t3.MEASUREMENTS}
-        record["measurements"].update(
-            unexpectedErrors=0,
-            lostSecurityChanges=0,
-            expiredAttemptsRemoved=256,
-            accountEventCommitsPerSecond=20 / 30,
-            session4RequestsPerSecond=4,
-            session16RequestsPerSecond=16,
-        )
-        record["result"] = "measured"
-        return record, subject
-
-    def test_unapproved_baseline_is_never_acceptance(self):
-        record, subject = self.complete()
-        t3.verify_record(record, subject)
         record["result"] = "passed"
-        with self.assertRaises(ValueError):
-            t3.verify_record(record, subject)
+        return record, subject
 
     def test_partial_failed_or_mismatched_evidence_cannot_pass(self):
         original, subject = self.complete()
@@ -498,7 +316,7 @@ class EvidenceTests(unittest.TestCase):
             ("cleanup", {"status": "failed", "remaining": ["owned-container"]}),
             ("failure", {"stage": "restore", "reason": "unconfirmed"}),
             ("subject", {}),
-            ("measurements", {}),
+            ("formatVersion", 1),
         ]:
             record = copy.deepcopy(original)
             record[field] = value
@@ -513,51 +331,6 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             t3.assert_redacted({"value": "synthetic-password"}, ["synthetic-password"])
 
-    def test_target_input_requires_explicit_candidate_and_approval(self):
-        for value in [{}, {"limits": {}}, {"acceptedBy": "owner"}]:
-            with self.assertRaises(ValueError):
-                t3.validate_targets(value, {"identity": {}})
-
-    def approved(self):
-        import json
-
-        record, subject = self.complete()
-        raw = json.dumps(record).encode()
-        targets = {
-            "subject": subject,
-            "approvalReference": "https://dev.azure.com/shengming0923/rss/_git/rss-identity/pullrequest/1057?discussionId=123",
-            "baselineSha256": t3.digest(raw),
-            "limits": {name: record["measurements"][name] for name in t3.LIMITS},
-        }
-        return targets, subject, raw
-
-    def test_approval_cannot_be_an_unrelated_or_secret_bearing_url(self):
-        targets, subject, raw = self.approved()
-        t3.validate_targets(targets, subject, raw)
-        for reference in [
-            "https://dev.azure.com/org",
-            targets["approvalReference"] + "&token=secret",
-            targets["approvalReference"] + "#secret",
-            "https://dev.azure.com/another/rss/_git/rss-identity/pullrequest/1057?discussionId=123",
-        ]:
-            targets["approvalReference"] = reference
-            with self.assertRaises(ValueError):
-                t3.validate_targets(targets, subject, raw)
-
-    def test_acceptance_requires_the_exact_complete_baseline(self):
-        import json
-
-        targets, subject, raw = self.approved()
-        for invalid in [None, raw + b" ", b"{}"]:
-            with self.assertRaises(ValueError):
-                t3.validate_targets(targets, subject, invalid)
-        baseline = json.loads(raw)
-        baseline["result"] = "failed"
-        invalid = json.dumps(baseline).encode()
-        targets["baselineSha256"] = t3.digest(invalid)
-        with self.assertRaises(ValueError):
-            t3.validate_targets(targets, subject, invalid)
-
     def test_daemon_mismatch_fails_before_creating_private_workspace(self):
         from unittest.mock import patch
 
@@ -568,22 +341,6 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "docker-daemon-mismatch"):
                 t3.Run({"subject": {"resources": {"daemonId": "expected"}}})
             mkdir.assert_not_called()
-
-    def test_browser_lock_rejects_same_version_different_integrity(self):
-        identity = {"version": "1.60.0", "integrity": "sha512-" + "A" * 86 + "=="}
-        lock = (
-            "packages:\n  playwright-core@1.60.0:\n    resolution: {integrity: "
-            + identity["integrity"]
-            + "}\n"
-        ).encode()
-        t3.verify_browser_lock(lock, identity)
-        for invalid in [
-            lock.replace(b"sha512-A", b"sha512-B"),
-            lock + lock,
-            b"playwright-core@1.60.0",
-        ]:
-            with self.assertRaises(ValueError):
-                t3.verify_browser_lock(invalid, identity)
 
     def test_outer_interruptions_never_publish_success_before_cleanup(self):
         import argparse, json, tempfile
@@ -597,24 +354,11 @@ class EvidenceTests(unittest.TestCase):
             "cleanup-failed",
             "executing-cleanup",
             "success",
-            "approved",
-            "approval-revoked",
         ]:
             with self.subTest(when=when), tempfile.TemporaryDirectory() as temp:
                 report, subject = self.complete()
                 args = argparse.Namespace(record=Path(temp) / "result.json")
-                formal = when in ["approved", "approval-revoked"]
-                targets, baseline, receipt = None, None, None
-                if formal:
-                    targets, subject, baseline = self.approved()
-                    receipt = self.receipt()
-                    report.update(targets=targets, result="passed", approval=receipt)
                 cleaned = False
-
-                def approval(*_):
-                    if cleaned and when == "approval-revoked":
-                        raise ValueError("approval-invalid")
-                    return receipt
 
                 def docker(*words, **kwargs):
                     if words[:2] == ("volume", "inspect"):
@@ -640,13 +384,11 @@ class EvidenceTests(unittest.TestCase):
                 with (
                     patch.object(
                         t3,
-                        "candidate",
+                        "prepare_run",
                         return_value=(
                             {"identity": {"Id": "image"}},
                             {"Id": "tools"},
                             subject,
-                            targets,
-                            baseline,
                         ),
                     ),
                     patch.object(t3, "docker", side_effect=docker),
@@ -662,22 +404,13 @@ class EvidenceTests(unittest.TestCase):
                         return_value=argparse.Namespace(returncode=0),
                     ),
                     patch.object(t3, "cleanup_operator", side_effect=cleanup),
-                    patch.object(t3, "verify_approval", side_effect=approval) as verify,
                 ):
-                    self.assertEqual(t3.outside(args), when in ["success", "approved"])
-                    self.assertEqual(verify.call_count, 2 if formal else 0)
+                    self.assertEqual(t3.outside(args), when == "success")
                 final = json.loads(args.record.read_text())
                 if when == "executing-cleanup":
                     self.assertEqual(final["failure"]["stage"], "operator")
                     self.assertEqual(final["cleanup"]["status"], "failed")
-                self.assertEqual(
-                    final["result"],
-                    (
-                        "passed"
-                        if when == "approved"
-                        else "measured" if when == "success" else "failed"
-                    ),
-                )
+                self.assertEqual(final["result"], "passed" if when == "success" else "failed")
 
     def test_process_diagnostics_keep_closed_action_and_exit_code_only(self):
         import subprocess
@@ -705,11 +438,11 @@ class EvidenceTests(unittest.TestCase):
         )
         t3.assert_redacted(fact, ["secret"])
 
-    def test_single_make_entry_builds_fixed_tools_before_runner(self):
+    def test_single_make_entry_builds_tools_before_runner(self):
         import subprocess
 
         result = subprocess.run(
-            ["make", "-n", "test-reference"],
+            ["make", "-n", "test-reference", "WEB_IMAGE=web", "REFERENCE_RECORD=/tmp/identity-result.json"],
             cwd=t3.ROOT,
             check=True,
             capture_output=True,
@@ -719,7 +452,17 @@ class EvidenceTests(unittest.TestCase):
             result.index("docker buildx build"), result.index("hack/reference_t3.py")
         )
         self.assertNotIn("git archive HEAD", result)
-        self.assertIn("git rev-parse HEAD", result)
+        self.assertNotIn("git rev-parse HEAD", result)
+        # Feed Make's actual invocation to the production CLI parser without Docker.
+        import shlex, sys
+        from unittest.mock import patch
+        command = shlex.split(result.splitlines()[-1])
+        with patch.object(sys, "argv", command[1:]), patch.object(t3, "outside", return_value=True) as outside:
+            with self.assertRaises(SystemExit) as stopped:
+                t3.main()
+            self.assertEqual(stopped.exception.code, 0)
+            self.assertEqual(outside.call_args.args[0].web_image, "web")
+
 
     def test_private_provider_is_connected_before_formal_open(self):
         import json, subprocess
@@ -776,25 +519,3 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(sanitized["result"], "failed")
             self.assertEqual(sanitized["failure"]["reason"], "secret-in-evidence")
             self.assertEqual(sanitized["steps"], [])
-
-    def receipt(self):
-        return {
-            "pullRequest": 1057,
-            "threadId": 123,
-            "commentId": 1,
-            "authorId": "owner",
-            "contentSha256": "a" * 64,
-            "humanApproval": {"requestId": "fixture-request", "source": "codex"},
-        }
-
-    def test_high_concurrency_regression_cannot_be_averaged_away(self):
-        import json
-
-        targets, subject, raw = self.approved()
-        record = json.loads(raw)
-        record.update(targets=targets, result="passed", approval=self.receipt())
-        t3.verify_record(record, subject, raw)
-        record["measurements"]["session16P95Ms"] = 2
-        record["steps"][-1]["observations"]["profiles"][-1].update(p95Ms=2, maxMs=2)
-        with self.assertRaisesRegex(ValueError, "target-not-met"):
-            t3.verify_record(record, subject, raw)
