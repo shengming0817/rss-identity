@@ -40,4 +40,4 @@ backendVersion 与 Compose 的 identity image ID 精确相等；源码 revision 
 
 暂时存储故障修复后恢复 worker，未终结消息自动重试；lease 未到期时等待租约恢复，不能强制确认。日志 `component=identity-audit` 只提供封闭结算分类，不输出秘密和原始事件内容。使用受授权的租户内 Audit 公共查询确认最终可见结果。
 
-未知 contract/version/schema、非法租户/时间、同 ID 异内容进入隔离，原 Outbox 消息保留，可能同时存在 rejected Inbox receipt。隔离不是交付成功，也不会随重启自动修复。操作人员应核对原事件契约与拒绝分类，按消息组件既有受控恢复能力处理；本任务不提供改 ID、改原事件、删除 receipt 或强制覆盖 Audit 冲突的重放工具。不把 dead-letter 状态改回 pending 当作修复。
+未知 contract/version/schema、非法租户/时间、同 ID 异内容进入隔离，原 Outbox 消息保留，可能同时存在 rejected Inbox receipt。隔离不是交付成功，当前批次返回 `RejectedEvent` 并终止关键 worker/参考宿主；启动时通过公共 Outbox 接口在有界预算内检查已有隔离记录；存在未解决 dead-letter 时拒绝启动，重启本身不能绕过。恢复宿主前必须核查和处置隔离证据。操作人员应核对原事件契约与拒绝分类，按消息组件既有受控恢复能力处理；本任务不提供改 ID、改原事件、删除 receipt 或强制覆盖 Audit 冲突的重放工具。不把 dead-letter 状态改回 pending 当作修复。

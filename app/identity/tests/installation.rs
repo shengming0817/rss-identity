@@ -94,6 +94,14 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     migration::verify(install_config()).await?;
     for (corrupt, restore) in [
         (
+            "ALTER ROLE host_audit_owner CREATEDB",
+            "ALTER ROLE host_audit_owner NOCREATEDB",
+        ),
+        (
+            "ALTER ROLE host_audit_owner REPLICATION",
+            "ALTER ROLE host_audit_owner NOREPLICATION",
+        ),
+        (
             "REVOKE EXECUTE ON FUNCTION rss_audit.reserve(uuid) FROM host_audit",
             "GRANT EXECUTE ON FUNCTION rss_audit.reserve(uuid) TO host_audit",
         ),

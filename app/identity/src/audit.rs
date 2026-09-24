@@ -8,7 +8,6 @@ use rss_audit_postgres::{Control, Integrity, PgAudit};
 use rss_identity_postgres::audit::AuditDelivery;
 use rss_request_context::Deadline;
 use rss_runtime::{ManagedTask, ManagedTaskRegistration, ShutdownError};
-use rss_transactional_messaging::error::MessagingErrorKind;
 use rss_transactional_messaging_postgres::PgRuntime;
 use rss_transactional_messaging_runtime::relay::RelayBatchLimit;
 use sqlx::{PgConnection, PgPool};
@@ -41,6 +40,7 @@ pub fn validate_installation(c: &MigrationConfig) -> Result<(), AppError> {
     }
     Ok(())
 }
+const OWNER_PROFILE: &str = "SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1 AND NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication)";
 fn quoted(role: &str) -> String {
     format!("\"{}\"", role.replace('"', "\"\""))
 }
@@ -54,8 +54,10 @@ pub async fn install(c: &mut PgConnection, config: &MigrationConfig) -> Result<(
         return Ok(());
     };
     let owner = quoted(owner_role);
-    let worker = quoted(worker_role);
-    let safe: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1 AND NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication)").bind(owner_role).fetch_one(&mut *c).await?;
+    let safe: bool = sqlx::query_scalar(OWNER_PROFILE)
+        .bind(owner_role)
+        .fetch_one(&mut *c)
+        .await?;
     if !safe {
         return Err(sqlx::Error::Protocol("audit owner rejected".into()));
     }
@@ -68,7 +70,9 @@ pub async fn install(c: &mut PgConnection, config: &MigrationConfig) -> Result<(
     sqlx::raw_sql("SET LOCAL ROLE NONE")
         .execute(&mut *c)
         .await?;
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("GRANT USAGE ON SCHEMA rss_audit TO {worker}; GRANT SELECT ON ALL TABLES IN SCHEMA rss_audit TO {worker}; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_audit TO {worker}; {grants}", grants=include_str!("audit-grants.sql").replace("{role}",&worker)))).execute(c).await?;
+    rss_identity_postgres::audit::grant_worker(c, worker_role)
+        .await
+        .map_err(|_| sqlx::Error::Protocol("audit worker grants rejected".into()))?;
     Ok(())
 }
 /// Host-owned handles must be registered for cleanup before constructing the adapter.
@@ -82,14 +86,11 @@ pub async fn delivery(
         .fetch_one(&pool)
         .await
         .map_err(|_| AppError::Provider)?;
-    let safe: bool = sqlx::query_scalar(include_str!("audit-worker-probe.sql"))
-        .bind(role)
-        .fetch_one(&pool)
+    let mut connection = pool.acquire().await.map_err(|_| AppError::Provider)?;
+    rss_identity_postgres::audit::verify_worker(&mut connection, &role)
         .await
-        .map_err(|_| AppError::Provider)?;
-    if !safe {
-        return Err(AppError::Configuration);
-    }
+        .map_err(|_| AppError::Configuration)?;
+    drop(connection);
     let cancel = CancellationToken::new();
     let control = Control::new(
         &Timer,
@@ -106,6 +107,7 @@ pub async fn delivery(
         config.storage.tenants()?,
         crate::assembly::delivery_budget()?,
     )
+    .await
     .map_err(|_| AppError::Provider)
 }
 pub fn registration(
@@ -127,8 +129,8 @@ pub fn registration(
         loop {
             if stop.is_cancelled() { return Ok(()); }
             if let Err(e) = delivery.run_once(limit).await {
-                if matches!(e.kind(),MessagingErrorKind::Invariant|MessagingErrorKind::OwnershipLost|MessagingErrorKind::Permanent|MessagingErrorKind::Conflict) { return Err(ShutdownError::new(e)); }
-                eprintln!("component=identity-audit retry={:?}",e.kind());
+                eprintln!("component=identity-audit event=delivery_failure kind={} retryable={}",e.as_label(),e.is_retryable());
+                if !e.is_retryable() { return Err(ShutdownError::new(e)); }
             }
             tokio::select! { () = stop.cancelled() => return Ok(()), () = tokio::time::sleep(poll) => {} }
         }
@@ -143,19 +145,20 @@ pub async fn verify(c: &mut PgConnection, config: &MigrationConfig) -> Result<()
     else {
         return Ok(());
     };
-    let present: bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_namespace n JOIN pg_roles r ON r.oid=n.nspowner WHERE n.nspname='rss_audit' AND r.rolname=$1 AND NOT r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolbypassrls AND NOT r.rolcreaterole)").bind(owner_role).fetch_one(&mut *c).await?;
+    let owner_safe: bool = sqlx::query_scalar(OWNER_PROFILE)
+        .bind(owner_role)
+        .fetch_one(&mut *c)
+        .await?;
+    if !owner_safe {
+        return Err(sqlx::Error::Protocol("audit owner rejected".into()));
+    }
+    let present: bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_namespace n JOIN pg_roles r ON r.oid=n.nspowner WHERE n.nspname='rss_audit' AND r.rolname=$1)").bind(owner_role).fetch_one(&mut *c).await?;
     if !present {
         return Err(sqlx::Error::Protocol("audit installation mismatch".into()));
     }
-    let isolated: bool = sqlx::query_scalar(include_str!("audit-worker-probe.sql"))
-        .bind(worker_role)
-        .fetch_one(&mut *c)
-        .await?;
-    if !isolated {
-        return Err(sqlx::Error::Protocol(
-            "audit worker authority rejected".into(),
-        ));
-    }
+    rss_identity_postgres::audit::verify_worker(c, worker_role)
+        .await
+        .map_err(|_| sqlx::Error::Protocol("audit worker authority rejected".into()))?;
     let safe: bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1 AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb) AND NOT pg_has_role($1,$2,'SET') AND has_schema_privilege($1,'rss_audit','USAGE') AND has_table_privilege($1,'rss_audit.records','SELECT') AND NOT has_table_privilege($1,'rss_audit.records','INSERT,UPDATE,DELETE,TRUNCATE') AND has_function_privilege($1,'rss_audit.reserve(uuid)','EXECUTE') AND has_function_privilege($1,'rss_audit.append(uuid,text,text,bigint,bytea,bigint)','EXECUTE')").bind(worker_role).bind(owner_role).fetch_one(c).await?;
     if !safe {
         return Err(sqlx::Error::Protocol("audit worker rejected".into()));

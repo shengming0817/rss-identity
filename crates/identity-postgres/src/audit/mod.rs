@@ -1,6 +1,11 @@
 //! Identity-owned audit projection. Hosts supply same-database worker resources and own their lifetime.
 //! ref: sqlx sqlx-core/src/transaction.rs@v0.9.0 (only the message owner settles).
+mod error;
+mod profile;
+pub use error::AuditDeliveryError;
+pub use profile::{grant_worker, verify_worker};
 mod mapping;
+mod observations;
 use mapping::{accepted_contract, map_event};
 use rss_audit_postgres::PgAudit;
 use rss_contract::Timepoint;
@@ -25,7 +30,7 @@ use rss_transactional_messaging::{
     },
 };
 use rss_transactional_messaging_postgres::{
-    PgConsumerEffect, PgConsumerEffectFailure, PgConsumerTx, PgError, PgInboxStore, PgOutboxStore,
+    PgConsumerEffect, PgConsumerEffectFailure, PgConsumerTx, PgInboxStore, PgOutboxStore,
     PgRuntime, PgTransaction,
 };
 use rss_transactional_messaging_runtime::{
@@ -52,13 +57,13 @@ impl ExecutionTimer for Timer {
 struct Observations;
 impl TransactionalMessagingEmitter for Observations {
     fn emit(&self, event: TransactionalMessagingObservation) {
-        eprintln!("component=identity-audit event={event:?}");
+        observations::record(event, std::io::stderr().lock());
     }
 }
 struct Effect {
     instance: InstanceId,
     audit: Arc<PgAudit>,
-    fatal: Arc<std::sync::atomic::AtomicBool>,
+    fatal: Arc<OnceLock<AuditDeliveryError>>,
 }
 impl PgConsumerEffect<Vec<u8>> for Effect {
     async fn apply(
@@ -103,7 +108,7 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
                             ..
                         }
                 ) {
-                    self.fatal.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = self.fatal.set(AuditDeliveryError::Permanent);
                 }
                 Err(PgConsumerEffectFailure::infrastructure(e))
             }
@@ -169,7 +174,7 @@ fn outcome(decision: Option<SettlementKind>) -> PublishOutcome<()> {
     }
 }
 struct LocalPublisher {
-    fatal: Arc<std::sync::atomic::AtomicBool>,
+    fatal: Arc<OnceLock<AuditDeliveryError>>,
     inbox: PgInboxStore,
     tx: PgConsumerTx<Effect>,
     validator: Validator,
@@ -212,70 +217,68 @@ impl Publisher<Vec<u8>> for LocalPublisher {
             meta.clone(),
             message.payload().clone(),
         );
-        let result = tokio::time::timeout(
-            total,
-            consume_once(
-                &self.inbox,
-                &self.tx,
-                &execution,
-                Delivery::new(copy, LocalSettlement(decision.clone())),
-            ),
+        // consume_once owns the absolute execution/settlement budget; do not drop its transaction future.
+        let result = consume_once(
+            &self.inbox,
+            &self.tx,
+            &execution,
+            Delivery::new(copy, LocalSettlement(decision.clone())),
         )
         .await;
         match result {
-            Ok(Ok(_)) => outcome(decision.get().copied()),
-            Ok(Err(e)) if e.kind() == MessagingErrorKind::Conflict => {
+            Ok(_) => outcome(decision.get().copied()),
+            Err(e) if e.kind() == MessagingErrorKind::Conflict => {
                 outcome(Some(SettlementKind::Reject))
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 if matches!(
                     e.kind(),
                     MessagingErrorKind::Invariant
                         | MessagingErrorKind::OwnershipLost
                         | MessagingErrorKind::Permanent
                 ) {
-                    self.fatal.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = self.fatal.set(AuditDeliveryError::messaging(e.kind()));
                 }
                 outcome(None)
             }
-            _ => outcome(None),
         }
     }
 }
 /// Caller-driven bounded relay. Construction does not spawn tasks or take ownership of pools.
-/// `runtime` must be the full worker profile for the Identity database; `audit` must target that
+/// `runtime` must be the consumer-only worker profile for the Identity database; `audit` must target that
 /// same database. The host binds the actual Identity instance and admitted tenants at startup.
 pub struct AuditDelivery {
     outbox: PgOutboxStore<()>,
     publisher: LocalPublisher,
-    fatal: Arc<std::sync::atomic::AtomicBool>,
+    fatal: Arc<OnceLock<AuditDeliveryError>>,
 }
 impl AuditDelivery {
     /// Bind the existing message mechanisms to Identity's sole audit consumer group.
-    pub fn new(
+    pub async fn new(
         runtime: Arc<PgRuntime>,
         audit: Arc<PgAudit>,
         instance: InstanceId,
         tenants: Vec<TenantId>,
         budget: DeliveryBudget,
-    ) -> Result<Self, PgError> {
+    ) -> Result<Self, AuditDeliveryError> {
         if tenants.is_empty() || tenants.len() > 128 {
-            return Err(invalid().into());
+            return Err(AuditDeliveryError::Configuration);
         }
         let lease = LeaseRenewalPolicy::from_ttl(budget.lease_ttl())
-            .map_err(|_| PgError::from(invalid()))?;
-        let fatal = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        Ok(Self {
+            .map_err(|_| AuditDeliveryError::Configuration)?;
+        let fatal = Arc::new(OnceLock::new());
+        let delivery = Self {
             fatal: fatal.clone(),
             outbox: PgOutboxStore::new(
                 runtime.clone(),
                 MessagingDomain::parse("identity.security")
-                    .map_err(|_| PgError::from(invalid()))?,
+                    .map_err(|_| AuditDeliveryError::Configuration)?,
                 budget,
-            )?,
+            )
+            .map_err(AuditDeliveryError::pg)?,
             publisher: LocalPublisher {
                 fatal: fatal.clone(),
-                inbox: PgInboxStore::new(runtime.clone(), lease)?,
+                inbox: PgInboxStore::new(runtime.clone(), lease).map_err(AuditDeliveryError::pg)?,
                 tx: PgConsumerTx::receipt_only(
                     runtime,
                     Effect {
@@ -286,18 +289,38 @@ impl AuditDelivery {
                 ),
                 validator: Validator { tenants },
                 group: ConsumerGroup::parse("identity.audit.v1")
-                    .map_err(|_| PgError::from(invalid()))?,
+                    .map_err(|_| AuditDeliveryError::Configuration)?,
             },
-        })
+        };
+        if delivery
+            .outbox
+            .has_dead_letters(OperationDeadline::from_remaining(budget.settle_timeout()))
+            .await
+            .map_err(AuditDeliveryError::pg)?
+        {
+            return Err(AuditDeliveryError::RejectedEvent);
+        }
+        Ok(delivery)
     }
     /// Process at most `limit` claimed events. A returned report distinguishes published,
-    /// retried, dead-lettered and fenced deliveries; none of these is an authentication result.
-    pub async fn run_once(&self, limit: RelayBatchLimit) -> Result<RelayReport, MessagingError> {
-        let result = relay_once(&self.outbox, &self.publisher, &Timer, &Observations, limit).await;
-        if self.fatal.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(invalid());
+    /// retried and fenced deliveries. Isolated events terminate with `RejectedEvent`; none is an authentication result.
+    pub async fn run_once(
+        &self,
+        limit: RelayBatchLimit,
+    ) -> Result<RelayReport, AuditDeliveryError> {
+        if let Some(error) = self.fatal.get() {
+            return Err(*error);
         }
-        result
+        let result = relay_once(&self.outbox, &self.publisher, &Timer, &Observations, limit).await;
+        if let Some(error) = self.fatal.get() {
+            return Err(*error);
+        }
+        let report = result.map_err(|e| AuditDeliveryError::messaging(e.kind()))?;
+        if report.dead_lettered() > 0 {
+            let _ = self.fatal.set(AuditDeliveryError::RejectedEvent);
+            return Err(AuditDeliveryError::RejectedEvent);
+        }
+        Ok(report)
     }
 }
 #[cfg(test)]

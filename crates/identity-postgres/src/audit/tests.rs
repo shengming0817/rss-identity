@@ -235,3 +235,115 @@ fn unadmitted_envelope_tenant_never_receives_ingress_authority() {
         EnvelopeValidationFailure::MalformedIdentity
     );
 }
+
+#[test]
+fn complete_forensic_facts_cover_special_actor_and_resource_cases() {
+    let state = json!({"enabled":true,"member_active":true,"membership_epoch":7});
+    let cases = [
+        (
+            "account",
+            json!({"action":"account_created","tenant":TENANT,"principal":PRINCIPAL,"actor":null,"epoch":2,"state":state}),
+            "maintenance",
+            TENANT,
+            "identity.account.account_created",
+            "account",
+            PRINCIPAL,
+            json!({"epoch":2,"state":state}),
+        ),
+        (
+            "account",
+            json!({"action":"account_disabled","tenant":TENANT,"principal":PRINCIPAL,"actor":SESSION,"epoch":2,"state":state}),
+            "principal",
+            SESSION,
+            "identity.account.account_disabled",
+            "account",
+            PRINCIPAL,
+            json!({"epoch":2,"state":state}),
+        ),
+        (
+            "session",
+            json!({"action":"created","tenant":TENANT,"principal":PRINCIPAL,"session_id":SESSION,"replaced_session_id":TENANT,"epoch":2}),
+            "principal",
+            PRINCIPAL,
+            "identity.session.created",
+            "session",
+            SESSION,
+            json!({"epoch":2,"session_id":SESSION,"replaced_session_id":TENANT}),
+        ),
+        (
+            "session",
+            json!({"action":"all_revoked","tenant":TENANT,"principal":PRINCIPAL,"session_id":SESSION,"replaced_session_id":null,"epoch":3}),
+            "principal",
+            PRINCIPAL,
+            "identity.session.all_revoked",
+            "account_sessions",
+            PRINCIPAL,
+            json!({"epoch":3,"session_id":SESSION,"replaced_session_id":null}),
+        ),
+        (
+            "federation",
+            json!({"action":"provider_updated","tenant":TENANT,"principal":null,"provider_id":SESSION,"config_version":4}),
+            "system",
+            TENANT,
+            "identity.federation.provider_updated",
+            "provider",
+            SESSION,
+            json!({"provider_id":SESSION,"config_version":4,"diagnostic":null}),
+        ),
+        (
+            "federation",
+            json!({"action":"logged_in","tenant":TENANT,"principal":PRINCIPAL,"provider_id":SESSION,"config_version":4}),
+            "principal",
+            PRINCIPAL,
+            "identity.federation.logged_in",
+            "federated_principal",
+            PRINCIPAL,
+            json!({"provider_id":SESSION,"config_version":4,"diagnostic":null}),
+        ),
+    ];
+    for (kind, body, actor_kind, actor_id, action, resource_kind, resource_id, payload) in cases {
+        let event = mapped(kind, body);
+        assert_eq!(event.identity().tenant().to_string(), TENANT);
+        assert_eq!(
+            event.identity().source().source_id().as_str(),
+            format!("identity.{TENANT}")
+        );
+        assert_eq!(event.identity().event_id().as_str(), "event-1");
+        assert_eq!(
+            event.identity().source().contract().id().as_str(),
+            format!("identity.{kind}.security")
+        );
+        let (version, schema) = match kind {
+            "account" => ("v3", include_str!("../security-event-v3.json")),
+            "session" => ("v1", include_str!("../session-security-event-v1.json")),
+            _ => ("v2", include_str!("../federation-security-event-v2.json")),
+        };
+        assert_eq!(
+            event.identity().source().contract().version().to_string(),
+            version
+        );
+        assert_eq!(
+            event
+                .identity()
+                .source()
+                .contract()
+                .schema_digest()
+                .as_str(),
+            format!("sha256:{:x}", Sha256::digest(schema))
+        );
+        assert!(event.context().coordinates().correlation_id().is_none());
+        assert!(event.context().coordinates().request_id().is_none());
+        assert!(event.context().coordinates().operation_id().is_none());
+        assert_eq!(event.facts().actor().kind().as_str(), actor_kind);
+        assert_eq!(event.facts().actor().id().as_str(), actor_id);
+        assert_eq!(event.facts().action().as_str(), action);
+        assert_eq!(event.facts().resource().kind().as_str(), resource_kind);
+        assert_eq!(event.facts().resource().id().as_str(), resource_id);
+        assert_eq!(event.facts().outcome(), rss_audit_core::Outcome::Succeeded);
+        assert_eq!(event.facts().occurred_at().unix_seconds(), 100);
+        assert_eq!(
+            serde_json::from_slice::<Value>(event.context().payload().as_bytes()).unwrap(),
+            payload
+        );
+    }
+}

@@ -184,7 +184,7 @@ pub async fn serve(
                     }
                     let audit_task = if let Some(db) = config.audit.database(&config.database) {
                         let runtime = Arc::new(
-                            PgRuntime::connect(
+                            PgRuntime::connect_consumer(
                                 db.pg()?,
                                 assembly::Timer,
                                 config.storage.binding()?,
@@ -285,6 +285,10 @@ pub async fn serve(
     match outcome.exit() {
         ScopeExit::StopRequested(Ok(())) if clean => Ok(()),
         ScopeExit::Completed(Err(error)) if clean => Err(*error),
+        ScopeExit::CriticalTaskExited(exit) => {
+            record_critical_exit(exit.name(), exit.reason(), clean, std::io::stderr().lock());
+            Err(AppError::Shutdown)
+        }
         _ => Err(AppError::Shutdown),
     }
 }
@@ -307,9 +311,46 @@ impl ManagedResource for AuditPoolResource {
     }
 }
 
+fn record_critical_exit(
+    task: &str,
+    reason: rss_runtime::TaskExit,
+    clean: bool,
+    mut output: impl std::io::Write,
+) {
+    let task = match task {
+        "identity-audit" => "identity-audit",
+        "identity-http" => "identity-http",
+        _ => "other",
+    };
+    let reason = match reason {
+        rss_runtime::TaskExit::Cancelled => "cancelled",
+        rss_runtime::TaskExit::Completed => "completed",
+        rss_runtime::TaskExit::Failed(kind) => kind.as_str(),
+    };
+    let _ = writeln!(
+        output,
+        "component=identity-lifecycle event=critical_task_exit task={task} reason={reason} shutdown={}",
+        if clean { "clean" } else { "failed" }
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn critical_exit_retains_only_closed_diagnostics() {
+        let mut output = Vec::new();
+        record_critical_exit(
+            "identity-audit",
+            rss_runtime::TaskExit::Failed(rss_runtime::ShutdownErrorKind::Operation),
+            true,
+            &mut output,
+        );
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "component=identity-lifecycle event=critical_task_exit task=identity-audit reason=operation shutdown=clean\n"
+        );
+    }
     #[tokio::test]
     async fn diagnostics_keep_settlement_classification_out_of_the_http_body() {
         use rss_identity_postgres::{AuthorityError, StorageFailure};

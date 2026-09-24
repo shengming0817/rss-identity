@@ -21,3 +21,9 @@ AND NOT EXISTS(
     AND (has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
          OR has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES'))
 )
+
+AND NOT EXISTS(
+    SELECT FROM reachable r CROSS JOIN pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='rss_transactional_messaging' AND p.proname IN ('append_outbox','prepare_outbox_partitions')
+    AND has_function_privilege(r.oid,p.oid,'EXECUTE')
+)

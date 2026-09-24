@@ -37,13 +37,8 @@ impl Setup {
         sqlx::raw_sql(rss_audit_postgres::MIGRATION_SQL)
             .execute(&mut *c)
             .await?;
-        sqlx::raw_sql("RESET ROLE; GRANT USAGE ON SCHEMA rss_audit TO identity_audit_test; GRANT SELECT ON ALL TABLES IN SCHEMA rss_audit TO identity_audit_test; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_audit TO identity_audit_test;").execute(&mut *c).await?;
-        sqlx::raw_sql(sqlx::AssertSqlSafe(
-            include_str!("../../../../app/identity/src/audit-grants.sql")
-                .replace("{role}", "identity_audit_test"),
-        ))
-        .execute(&mut *c)
-        .await?;
+        sqlx::raw_sql("RESET ROLE").execute(&mut *c).await?;
+        grant_worker(&mut c, "identity_audit_test").await?;
         drop(c);
         let binding = ExecutionBinding::new(
             StorageIdentity::new([1; 16], [2; 16])?,
@@ -53,7 +48,7 @@ impl Setup {
                 .collect::<anyhow::Result<Vec<_>>>()?,
         )?;
         let runtime = Arc::new(
-            PgRuntime::connect(
+            PgRuntime::connect_consumer(
                 PgConfig::new_for_test_plaintext(
                     "127.0.0.1",
                     f.port,
@@ -98,7 +93,8 @@ impl Setup {
                 Duration::from_secs(5),
                 Duration::from_secs(5),
             )?,
-        )?;
+        )
+        .await?;
         Ok(Self {
             f,
             runtime,
@@ -345,7 +341,6 @@ async fn relay_quarantines_bad_events_and_recovers_lost_source_lease() -> anyhow
     s.f.runtime
         .local_tx(TenantId::parse(A)?, support::deadline(), move |tx| {
             Box::pin(async move {
-                writer.append(tx, PendingMessage::new(bad)).await?;
                 writer.append(tx, PendingMessage::new(valid)).await?;
                 Ok(())
             })
@@ -390,7 +385,55 @@ async fn relay_quarantines_bad_events_and_recovers_lost_source_lease() -> anyhow
     for _ in 0..3 {
         s.worker.run_once(limit).await?;
     }
+    let writer = rss_transactional_messaging_postgres::PgOutboxWriter::new(
+        s.f.runtime.clone(),
+        MessagingDomain::parse("identity.security")?,
+    );
+    s.f.runtime
+        .local_tx(TenantId::parse(A)?, support::deadline(), move |tx| {
+            Box::pin(async move {
+                writer.append(tx, PendingMessage::new(bad)).await?;
+                Ok(())
+            })
+        })
+        .await
+        .fold(
+            |_| Ok(()),
+            |e| Err(anyhow::anyhow!(e)),
+            |e| Err(anyhow::anyhow!(e)),
+            |e| Err(anyhow::anyhow!(e)),
+            |e| Err(anyhow::anyhow!(e)),
+            |_| Err(anyhow::anyhow!("fenced")),
+        )?;
+    assert!(matches!(
+        s.worker.run_once(limit).await,
+        Err(AuditDeliveryError::RejectedEvent)
+    ));
+    assert_eq!(
+        s.worker.fatal.get(),
+        Some(&AuditDeliveryError::RejectedEvent)
+    );
     assert_eq!(s.count(A).await?, 1);
+    let restarted = AuditDelivery::new(
+        s.runtime.clone(),
+        s.audit.clone(),
+        s.f.instance,
+        [SYSTEM, A, B]
+            .into_iter()
+            .map(|t| TenantId::parse(t).unwrap())
+            .collect(),
+        DeliveryBudget::new(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )?,
+    )
+    .await;
+    assert!(
+        matches!(restarted, Err(AuditDeliveryError::RejectedEvent)),
+        "restart must preserve the unresolved isolation barrier"
+    );
     let states: Vec<(String, String)> = sqlx::query_as(
         "SELECT message_id,status FROM rss_transactional_messaging.outbox ORDER BY message_id",
     )
@@ -427,7 +470,7 @@ async fn permanent_storage_failure_stops_delivery_without_ack() -> anyhow::Resul
             .await,
         PublishOutcome::Ambiguous(_)
     ));
-    assert!(s.worker.fatal.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(s.worker.fatal.get(), Some(&AuditDeliveryError::Permanent));
     let terminal: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM rss_transactional_messaging.inbox WHERE disposition IS NOT NULL",
     )

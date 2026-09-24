@@ -74,9 +74,9 @@ async fn client_address(
 
 ## 认证审计交付
 
-`rss_identity_postgres::audit::AuditDelivery` 持有 Identity 事件语义。宿主注入同库的 worker `Arc<PgRuntime>`、`Arc<PgAudit>`、真实实例与租户绑定和 delivery budget，调用有界 `run_once`。构造不创建任务或接管连接关闭；参考实现见 [审计装配](../../app/identity/src/audit.rs)。
+`rss_identity_postgres::audit::AuditDelivery` 持有 Identity 事件语义。宿主注入同库的 worker `Arc<PgRuntime>`、`Arc<PgAudit>`、真实实例与租户绑定和 delivery budget，调用有界 `run_once`。异步构造在一个有界预算内检查已有 dead-letter，不创建任务或接管连接关闭；构造和运行统一返回 `AuditDeliveryError`，宿主只对 `is_retryable()` 为真的错误重试。权限通过公开 `audit::grant_worker` / `verify_worker` 接缝装配，不复制参考 app 的 SQL。参考实现见 [审计装配](../../app/identity/src/audit.rs)。
 
-producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::connect`，Audit 开启 `messaging`。worker 不读取 Identity 私有表，也不能直接修改 Audit/Outbox；schema owner 和实际权限必须通过 startup probe。宿主负责保证来源实例对应当前 Identity 数据库，不接受请求指定的 source。
+producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::connect_consumer`，Audit 开启 `messaging`。worker 不读取 Identity 私有表，也不能直接修改 Audit/Outbox；schema owner 和实际权限必须通过 startup probe。宿主负责保证来源实例对应当前 Identity 数据库，不接受请求指定的 source。
 
 当前只接收 account v3、session v1、federation v2 的精确 schema，映射为 Audit V1。账户主体来自 actor，维护事件标识维护主体；会话主体来自 principal，all_revoked 的对象是账户会话集合；联合身份按 action 区分 provider 和认证主体。provider_test_failed 为 Failed，其余已提交事件为 Succeeded。UUID 会话坐标不是 bearer secret。输出只含稳定坐标、epoch、状态、配置版本和封闭诊断码。
 

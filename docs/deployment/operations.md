@@ -59,4 +59,4 @@ DNS 的全部 A/AAAA 必须属于公网基线或该绑定授权的私网；reqwe
 
 worker 继承 database 目标和 storage/instance 绑定；凭据文件遵循现有秘密文件规则。部署渲染器为启用配置生成独立 worker 和 NOLOGIN Audit owner，并在 migration 配置中写入 `audit.mode=enabled`、`ownerRole`、`workerRole`。仅支持全新安装，无旧配置解析或旧 schema 自动升级。嵌入宿主应自行预配等价角色。
 
-启用后任一构造/probe 失败会拒绝启动；运行期间暂时故障保留同 ID 重试，永久 schema/绑定故障终止关键 worker。关闭时先停止 worker 再关闭连接。关闭审计交付不会删除或排空 Outbox，宿主负责积压容量和保留策略。Plain 审计持久化不宣称 HMAC/WORM。
+启用后任一构造/probe 失败会拒绝启动；运行期间暂时故障保留同 ID 重试，永久 schema/绑定故障或新隔离的 dead-letter 终止关键 worker，并使参考宿主非零退出。诊断使用稳定 event/phase/status/kind 字段；关键任务退出同时记录 task、closed reason 和 shutdown 结果。关闭时先停止 worker 再关闭连接。关闭审计交付不会删除或排空 Outbox，宿主负责积压容量和保留策略。Plain 审计持久化不宣称 HMAC/WORM。

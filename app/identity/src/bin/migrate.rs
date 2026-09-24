@@ -6,7 +6,7 @@ async fn main() {
         use sha2::{Digest, Sha256};
         println!(
             "{}",
-            serde_json::json!({"schema_version":rss_identity_postgres::SCHEMA_VERSION,"schema_contract":rss_identity_postgres::SCHEMA_SIGNATURE.trim(),"identity_sql_sha256":hex::encode(Sha256::digest(rss_identity_postgres::MIGRATION_SQL)),"rss_sql_sha256":hex::encode(Sha256::digest(rss_transactional_messaging_postgres::MIGRATION_SQL))})
+            serde_json::json!({"schema_version":rss_identity_postgres::SCHEMA_VERSION,"schema_contract":rss_identity_postgres::SCHEMA_SIGNATURE.trim(),"identity_sql_sha256":hex::encode(Sha256::digest(rss_identity_postgres::MIGRATION_SQL)),"audit_sql_sha256":hex::encode(Sha256::digest(rss_audit_postgres::MIGRATION_SQL)),"rss_sql_sha256":hex::encode(Sha256::digest(rss_transactional_messaging_postgres::MIGRATION_SQL))})
         );
         return;
     }
