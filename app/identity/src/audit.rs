@@ -167,6 +167,23 @@ pub async fn verify(c: &mut PgConnection, config: &MigrationConfig) -> Result<()
 mod tests {
     use super::*;
     #[test]
+    fn enabled_worker_requires_enough_time_to_drain_active_batch() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
+        value["audit"] = serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1000,"batch":16});
+        for (resource, drain, valid) in [(29, 60, false), (30, 59, false), (30, 60, true)] {
+            value["budgets"]["resourceSeconds"] = serde_json::json!(resource);
+            value["budgets"]["drainSeconds"] = serde_json::json!(drain);
+            assert_eq!(
+                serde_json::from_value::<RuntimeConfig>(value.clone())
+                    .unwrap()
+                    .validate()
+                    .is_ok(),
+                valid
+            );
+        }
+    }
+    #[test]
     fn host_requires_explicit_mode_and_current_format() {
         let baseline: serde_json::Value =
             serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
