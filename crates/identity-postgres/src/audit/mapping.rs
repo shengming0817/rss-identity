@@ -68,6 +68,7 @@ struct Federation {
     principal: Option<Uuid>,
     provider_id: Uuid,
     config_version: i64,
+    #[serde(default, deserialize_with = "present_diagnostic")]
     diagnostic: Option<Diagnostic>,
 }
 #[derive(Deserialize, serde::Serialize)]
@@ -75,6 +76,12 @@ struct Federation {
 struct Diagnostic {
     stage: String,
     reason: String,
+}
+// The source schema allows absence, but an explicitly present diagnostic must be an object.
+fn present_diagnostic<'de, D: serde::Deserializer<'de>>(
+    value: D,
+) -> Result<Option<Diagnostic>, D::Error> {
+    Diagnostic::deserialize(value).map(Some)
 }
 fn require(ok: bool) -> Result<(), InvalidEvent> {
     if ok { Ok(()) } else { Err(InvalidEvent) }

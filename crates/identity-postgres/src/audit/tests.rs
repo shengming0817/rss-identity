@@ -347,3 +347,16 @@ fn complete_forensic_facts_cover_special_actor_and_resource_cases() {
         );
     }
 }
+
+#[test]
+fn optional_diagnostic_rejects_explicit_null_per_source_schema() {
+    let body = json!({"action":"provider_updated","tenant":TENANT,"principal":PRINCIPAL,"provider_id":SESSION,"config_version":1,"diagnostic":null});
+    assert!(
+        map_event(
+            InstanceId::generate(),
+            &envelope("federation", body),
+            Timepoint::try_from(101).unwrap()
+        )
+        .is_err()
+    );
+}
