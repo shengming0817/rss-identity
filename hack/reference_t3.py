@@ -1667,7 +1667,7 @@ class Run:
                 except ValueError:
                     self.record["failure"] = {
                         "stage": "acceptance",
-                        "reason": "incomplete-or-target-not-met",
+                        "reason": "incomplete-or-invalid-evidence",
                     }
                     self.record["result"] = "failed"
             save_evidence(self.output, self.record, self.secrets)
