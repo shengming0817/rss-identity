@@ -360,3 +360,26 @@ fn optional_diagnostic_rejects_explicit_null_per_source_schema() {
         .is_err()
     );
 }
+
+#[test]
+fn nested_event_objects_do_not_accept_sequence_encoding() {
+    for (kind, body) in [
+        (
+            "account",
+            json!({"action":"account_created","tenant":TENANT,"principal":PRINCIPAL,"actor":null,"epoch":1,"state":[true,true,1]}),
+        ),
+        (
+            "federation",
+            json!({"action":"provider_test_failed","tenant":TENANT,"principal":PRINCIPAL,"provider_id":SESSION,"config_version":1,"diagnostic":["binding","unavailable"]}),
+        ),
+    ] {
+        assert!(
+            map_event(
+                InstanceId::generate(),
+                &envelope(kind, body),
+                Timepoint::try_from(101).unwrap()
+            )
+            .is_err()
+        );
+    }
+}

@@ -68,7 +68,6 @@ struct Federation {
     principal: Option<Uuid>,
     provider_id: Uuid,
     config_version: i64,
-    #[serde(default, deserialize_with = "present_diagnostic")]
     diagnostic: Option<Diagnostic>,
 }
 #[derive(Deserialize, serde::Serialize)]
@@ -76,12 +75,6 @@ struct Federation {
 struct Diagnostic {
     stage: String,
     reason: String,
-}
-// The source schema allows absence, but an explicitly present diagnostic must be an object.
-fn present_diagnostic<'de, D: serde::Deserializer<'de>>(
-    value: D,
-) -> Result<Option<Diagnostic>, D::Error> {
-    Diagnostic::deserialize(value).map(Some)
 }
 fn require(ok: bool) -> Result<(), InvalidEvent> {
     if ok { Ok(()) } else { Err(InvalidEvent) }
@@ -92,6 +85,13 @@ fn parse<T: serde::de::DeserializeOwned>(
 ) -> Result<T, InvalidEvent> {
     // Option<T> accepts an absent field; the wire requires explicit null for these coordinates.
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| InvalidEvent)?;
+    require(value.is_object())?;
+    // Serde structs also accept sequences; these source schemas require nested JSON objects.
+    for key in ["state", "diagnostic"] {
+        if let Some(field) = value.get(key) {
+            require(field.is_object())?;
+        }
+    }
     require(required.iter().all(|key| value.get(*key).is_some()))?;
     serde_json::from_slice(bytes).map_err(|_| InvalidEvent)
 }
