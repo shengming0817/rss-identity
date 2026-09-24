@@ -13,7 +13,7 @@
 
 ## 请求与管理授权
 
-HTTP 宿主统一通过 `authenticate_request` 取得当前请求的 AuthenticatedSession，再执行产品资源授权。Active 请求检查 cookie、同源、请求标记和 CSRF 后续期；Passive 只读验证，不延长 idle。会话保留签发时的绝对期限，refresh 旋转凭据，重新认证只能绑定当前主体。不要跨请求缓存成功身份、组或部门事实。
+HTTP 宿主统一通过 `authenticate_request` 取得当前请求的 AuthenticatedSession，再执行产品资源授权。Active 请求检查 cookie、同源、请求标记和 CSRF 后续期；Passive 只读验证，不延长 idle。会话保留签发时的 idle/absolute 策略，宿主配置变更只影响新会话；refresh 旋转凭据但不延长绝对期限，重新认证只能绑定当前主体。不要跨请求缓存成功身份、组或部门事实。
 
 每次管理事务重新核对实例、租户、账户、成员、会话和失效代际后调用宿主 ManagementPolicy。策略是有界同步回调，不执行阻塞 I/O；组件落实策略要求的重新认证/MFA。宿主持有管理角色、防锁死和并发一致性，Identity 不保存 administrator/emergency/platform 角色。
 
@@ -21,9 +21,9 @@ HTTP 宿主统一通过 `authenticate_request` 取得当前请求的 Authenticat
 
 ## 组与可选可信部门树快照
 
-组与部门是带来源和固定期限的认证事实，不是资源权限。缺失、空值、非法断言与过期不同；宿主应显式处理不可用状态。当前模型、受控构造和边界分别见 [组](../../crates/identity-core/src/groups.rs)、[部门](../../crates/identity-core/src/department.rs) 与 [期限决定](../architecture/adr/202609180001-2438-trusted-group-expiry.md)。
+组与部门是带来源和固定期限的认证事实，不是资源权限。缺失、空值、非法断言与过期不同；宿主应显式处理不可用状态。当前模型、受控构造和边界见 [组](../../crates/identity-core/src/groups.rs) 与 [部门](../../crates/identity-core/src/department.rs)。
 
-组 Available 视图只能借自本次可信认证结果，每次读取 `values()` 都检查请求证明和快照截止；部门通过 `snapshot()` 做同样检查。请求证明到期使读取失败，事实独立到期不自动否定基础身份。未来观察在下次权威请求前保持不可用。已经复制的值、借出的引用和已经产生的业务效果由宿主负责。
+组 Available 视图只能借自本次可信认证结果，每次读取 `values()` 都检查请求证明和快照截止；部门通过 `snapshot()` 做同样检查。请求证明到期使读取失败，事实独立到期不自动否定基础身份。未来观察在下次权威请求前保持不可用。已经复制的值、借出的引用和已经产生的业务效果由宿主负责。宿主需维持可信数据库时钟；请求内单调期限不能修正数据库墙钟偏差。
 
 部门由 provider 显式启用签名 ID Token 内的完整树快照，不能从安全组、名称、路径或浏览器补齐。示例输入：
 
@@ -34,9 +34,9 @@ HTTP 宿主统一通过 `authenticate_request` 取得当前请求的 Authenticat
 ],"memberships":["engineering"]}
 ```
 
-树必须完整、单根、有界；稳定标识精确匹配，显示名不提供身份。空成员表示未分配，缺失不是未分配声明。配置与输入结构由 [OIDC 适配器](../../crates/identity-oidc/src/lib.rs) 和 core 模型持有，完整设计见 [部门快照 ADR](../architecture/adr/202609200001-2451-department-snapshot.md)。
+树必须完整、单根、有界；稳定标识精确匹配，显示名不提供身份。空成员表示未分配，缺失不是未分配声明。配置与输入结构由 [OIDC 适配器](../../crates/identity-oidc/src/lib.rs) 和 core 模型持有。
 
-instance、tenant、principal、provider 和配置版本由权威会话绑定；观察来自 signed iat，期限不超过 token exp。refresh、活动请求和组件重建不延长快照。provider 更新/禁用及主体/session 撤销作用于旧会话和在途流程；link target 不覆盖当前 source 快照。sourceRevision 是上游不透明版本，不表示 Identity 全局最新目录。
+instance、tenant、principal、provider 和配置版本由权威会话绑定；观察来自 signed iat，期限为 signed iat 加显式配置的有界 TTL，且不超过 token exp。refresh、活动请求和组件重建不延长快照。provider 更新/禁用及主体/session 撤销作用于旧会话和在途流程；link target 不覆盖当前 source 快照。sourceRevision 是上游不透明版本，不表示 Identity 全局最新目录。
 
 已验签但非法或超限的部门断言关闭整个部门事实，不截断树；其余认证事实仍超限则拒绝认证。签名、会话、存储格式/内容损坏或数据库故障拒绝身份，不降级为普通缺失。
 

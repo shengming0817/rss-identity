@@ -1,6 +1,6 @@
 # RSS Identity 协作说明
 
-rss-identity 提供可嵌入的本地认证、租户联合身份与实例内会话。四个能力包由宿主显式装配，管理授权策略由宿主提供；app/identity 是最小参考宿主。当前架构见 [#2435 ADR](docs/architecture/adr/202609170001-2435-embedded-authentication.md)。历史中央模式及其验收记录不作为当前运行路径。
+rss-identity 提供可嵌入的本地认证、租户联合身份与实例内会话。四个能力包由宿主显式装配，管理授权策略由宿主提供；app/identity 是最小参考宿主。宿主接入见[嵌入指南](docs/guides/embedding.md)。历史中央模式及其验收记录不作为当前运行路径。
 
 ## 工作方式
 

@@ -28,4 +28,4 @@ Identity 为宿主 Rust 产品提供本地认证、租户 OIDC 联合身份、JI
 
 ## 验证责任
 
-组件状态机与真实 PG/OIDC 接缝由 T1/T2 验证，实际产品接入与必要 T3 由对应产品持有。采用[验证规则](../rules/verification-scope.md)，实际命令、结果和未覆盖项记录在 PR。设计理由见[当前 ADR](../architecture/adr/202609170001-2435-embedded-authentication.md)，任务依赖及状态以工作项为准。
+组件状态机与真实 PG/OIDC 接缝由 T1/T2 验证，实际产品接入与必要 T3 由对应产品持有。采用[验证规则](../rules/verification-scope.md)，实际命令、结果和未覆盖项记录在 PR。宿主责任见[嵌入指南](../guides/embedding.md)，任务依赖及状态以工作项为准。
