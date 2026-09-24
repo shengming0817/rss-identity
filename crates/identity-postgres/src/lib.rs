@@ -1,5 +1,6 @@
 //! Embeddable account/session services over a host-owned PostgreSQL runtime.
 mod attempts;
+pub mod audit;
 mod auth_facts;
 mod credentials;
 mod department;

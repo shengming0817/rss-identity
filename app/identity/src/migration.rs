@@ -4,7 +4,7 @@ use rss_identity_core::InstanceId;
 use rss_identity_postgres::{AuthorityProfile, grant_profile};
 use sqlx::{Connection, PgConnection};
 pub(crate) fn validate(config: &MigrationConfig) -> Result<InstanceId, AppError> {
-    if config.format_version != 4
+    if config.format_version != 5
         || config.runtime_role == config.maintenance_role
         || config.runtime_role == config.database.user
         || config.maintenance_role == config.database.user
@@ -14,6 +14,7 @@ pub(crate) fn validate(config: &MigrationConfig) -> Result<InstanceId, AppError>
     {
         return Err(AppError::Configuration);
     }
+    crate::audit::validate_installation(config)?;
     config.storage.binding()?;
     InstanceId::parse(&config.instance_id).map_err(|_| AppError::Configuration)
 }
@@ -35,6 +36,7 @@ pub async fn verify(config: MigrationConfig) -> Result<(), AppError> {
         let mut tx = c.begin().await?;
         sqlx::raw_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY; SET LOCAL statement_timeout='30s'; SET LOCAL lock_timeout='10s'").execute(&mut *tx).await?;
         verify_storage(&mut tx, &config.storage).await?;
+        crate::audit::verify(&mut tx, &config).await?;
         for (role, profile) in [(&config.runtime_role, AuthorityProfile::Runtime), (&config.maintenance_role, AuthorityProfile::Maintenance)] {
             let switch = format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\""));
             sqlx::raw_sql(sqlx::AssertSqlSafe(switch)).execute(&mut *tx).await?;
@@ -106,6 +108,8 @@ pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
             return Err(sqlx::Error::Protocol("unexpected public storage privileges".into()));
         }
         rss_identity_postgres::install(&mut tx, instance).await?;
+        crate::audit::install(&mut tx, &config).await?;
+        crate::audit::verify(&mut tx, &config).await?;
         grant_profile(&mut tx, &config.runtime_role, AuthorityProfile::Runtime).await?;
         grant_profile(
             &mut tx,
@@ -169,7 +173,7 @@ mod tests {
             serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
         for role in ["".to_owned(), "x".repeat(64), "bad\0role".to_owned()] {
             let config = serde_json::from_value(serde_json::json!({
-                "formatVersion": 4, "instanceId": runtime["instanceId"],
+                "formatVersion": 5, "audit": {"mode":"disabled"}, "instanceId": runtime["instanceId"],
                 "storage": runtime["storage"], "database": runtime["database"],
                 "runtimeRole": role, "maintenanceRole": "maintenance"
             }))

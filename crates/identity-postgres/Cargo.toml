@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 [dependencies]
+rss-audit-core.workspace = true
+rss-audit-postgres.workspace = true
+rss-transactional-messaging-runtime.workspace = true
+tokio-util.workspace = true
 rand_core.workspace = true
 ring.workspace = true
 rss-identity-core.workspace = true

@@ -14,7 +14,7 @@ def main():
     fetch_env = dict(env)
     if token:
         count = int(fetch_env.get('GIT_CONFIG_COUNT', '0'))
-        fetch_env[f'GIT_CONFIG_KEY_{count}'] = 'http.https://dev.azure.com/shengming0923/rss/_git/rss.extraheader'
+        fetch_env[f'GIT_CONFIG_KEY_{count}'] = 'http.https://dev.azure.com/shengming0923/rss/_git/.extraheader'
         fetch_env[f'GIT_CONFIG_VALUE_{count}'] = 'AUTHORIZATION: bearer ' + token
         fetch_env['GIT_CONFIG_COUNT'] = str(count + 1)
     subprocess.run(['cargo', 'fetch', '--locked'], cwd=ROOT, env=fetch_env, check=True)

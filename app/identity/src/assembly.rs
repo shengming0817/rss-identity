@@ -110,6 +110,9 @@ struct FederationInputs {
 pub fn preflight(config: &RuntimeConfig) -> Result<(), AppError> {
     config.validate()?;
     config.database.pg()?;
+    if let Some(db) = config.audit.database(&config.database) {
+        db.pg()?;
+    }
     authority_config(config)?;
     federation_inputs(config)?;
     Ok(())

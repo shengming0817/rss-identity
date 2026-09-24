@@ -31,13 +31,13 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     let owner_db: rss_identity_app::config::DatabaseConfig =
         serde_json::from_value(value["database"].clone())?;
     let mut owner = sqlx::PgConnection::connect_with(&owner_db.sqlx()?).await?;
-    sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE host_runtime LOGIN PASSWORD 'fixture-runtime'; CREATE ROLE host_maintenance LOGIN PASSWORD 'fixture-maintenance'; CREATE ROLE unsafe_parent NOLOGIN BYPASSRLS").execute(&mut owner).await?;
+    sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE host_runtime LOGIN PASSWORD 'fixture-runtime'; CREATE ROLE host_maintenance LOGIN PASSWORD 'fixture-maintenance'; CREATE ROLE host_audit_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; GRANT CREATE ON DATABASE postgres TO host_audit_owner; CREATE ROLE host_audit LOGIN PASSWORD 'fixture-runtime'; CREATE ROLE unsafe_parent NOLOGIN BYPASSRLS").execute(&mut owner).await?;
     value["storage"]["tenants"]
         .as_array_mut()
         .unwrap()
         .push(json!("33333333-3333-4333-8333-333333333333"));
     value["bootstrapAccounts"].as_array_mut().unwrap().push(json!({"tenantId":"33333333-3333-4333-8333-333333333333","principalId":"44444444-4444-4444-8444-444444444444"}));
-    let install_value = json!({"formatVersion":4,"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
+    let install_value = json!({"formatVersion":5,"audit":{"mode":"enabled","ownerRole":"host_audit_owner","workerRole":"host_audit"},"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
     let install_config =
         || serde_json::from_value::<MigrationConfig>(install_value.clone()).unwrap();
     for (corrupt, restore) in [
@@ -144,6 +144,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     }
     value["database"]["user"] = json!("host_runtime");
     value["database"]["passwordFile"] = json!(root.join("runtime"));
+    value["audit"] = json!({"mode":"enabled","user":"host_audit","passwordFile":root.join("runtime"),"pollMillis":100,"batch":8});
     value["budgets"] = json!({"requestSeconds":1,"drainSeconds":4,"resourceSeconds":2});
     value["publicGateway"] = json!("127.0.0.1");
     let runtime_config = || serde_json::from_value::<RuntimeConfig>(value.clone()).unwrap();
@@ -447,6 +448,29 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     kdf.wait_closed().await;
     assert!(kdf.hash(password()).await.is_err());
 
+    // Enabled worker rejects inherited credential access and missing Audit permissions.
+    for (corrupt, restore) in [
+        (
+            "GRANT USAGE ON SCHEMA identity_authority TO host_audit; GRANT SELECT ON identity_authority.local_credentials TO host_audit",
+            "REVOKE SELECT ON identity_authority.local_credentials FROM host_audit; REVOKE USAGE ON SCHEMA identity_authority FROM host_audit",
+        ),
+        (
+            "REVOKE EXECUTE ON FUNCTION rss_audit.reserve(uuid) FROM host_audit",
+            "GRANT EXECUTE ON FUNCTION rss_audit.reserve(uuid) TO host_audit",
+        ),
+    ] {
+        sqlx::raw_sql(corrupt).execute(&mut owner).await?;
+        let failure = tokio::time::timeout(
+            Duration::from_secs(15),
+            lifecycle::serve(
+                serde_json::from_value(value.clone())?,
+                std::future::pending(),
+            ),
+        )
+        .await?;
+        assert!(failure.is_err());
+        sqlx::raw_sql(restore).execute(&mut owner).await?;
+    }
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     value["listen"] = json!(occupied.local_addr()?.to_string());
     let failed = tokio::time::timeout(
@@ -463,7 +487,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM pg_stat_activity WHERE usename='host_runtime'"
+            "SELECT count(*) FROM pg_stat_activity WHERE usename IN ('host_runtime','host_audit')"
         )
         .fetch_one(&mut owner)
         .await?,
@@ -575,7 +599,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     tokio::time::timeout(Duration::from_secs(10), server).await???;
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM pg_stat_activity WHERE usename='host_runtime'"
+            "SELECT count(*) FROM pg_stat_activity WHERE usename IN ('host_runtime','host_audit')"
         )
         .fetch_one(&mut owner)
         .await?,

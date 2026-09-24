@@ -206,3 +206,19 @@ class ImageContractTests(unittest.TestCase):
             (root/'called').unlink();(root/'Makefile').write_text((root/'Makefile').read_text()+'\n# dirty\n')
             result=subprocess.run(['make','image'],cwd=root,env=env,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr.decode());self.assertTrue((root/'called').exists())
+
+class AuditDeployment(unittest.TestCase):
+    def test_enabled_worker_secret_and_owner_are_separate(self):
+        from deployment_fixture import fixture
+        from unittest.mock import patch
+        import json
+        with fixture() as (root, data, images):
+            password=root/'audit-password';password.write_text('fixture-audit');password.chmod(0o600)
+            data['runtime']['audit']={'mode':'enabled','user':'identity_audit','passwordFile':str(password),'pollMillis':1000,'batch':16}
+            with patch('os.geteuid',return_value=0),patch('os.chown'),patch.object(deploy,'preflight'):
+                deploy.render(data,root/'audit-output',images)
+            runtime=json.loads((root/'audit-output/runtime.json').read_text())
+            migration=json.loads((root/'audit-output/migration.json').read_text())
+            self.assertEqual(runtime['audit']['passwordFile'],'/run/input/audit-password')
+            self.assertEqual(migration['audit'],{'mode':'enabled','ownerRole':'identity_audit_owner','workerRole':'identity_audit'})
+            self.assertIn('CREATE ROLE identity_audit_owner NOLOGIN',(root/'audit-output/00-roles.sql').read_text())

@@ -77,6 +77,8 @@ class Gates(unittest.TestCase):
         actual = {k:set(v) for k,v in deps.RSS_FEATURES.items()}
         with self.assertRaises(ValueError): deps.check_features(actual,'production')
         actual['rss-transactional-messaging-postgres']=set()
+        actual['rss-ledger']=set()
+        del actual['rss-ledger-postgres']
         deps.check_features(actual,'production')
 
     def test_advisory_acceptance_revoked_on_version_or_path_drift(self):

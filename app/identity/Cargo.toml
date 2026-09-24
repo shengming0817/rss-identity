@@ -16,6 +16,9 @@ name = "identity-migrate"
 path = "src/bin/migrate.rs"
 
 [dependencies]
+rss-audit-postgres.workspace = true
+rss-transactional-messaging-runtime.workspace = true
+tokio-util.workspace = true
 reqwest.workspace = true
 rss-runtime.workspace = true
 rss-axum = { workspace = true, features = ["http1"] }

@@ -125,6 +125,7 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
         false,
     );
     let mut migration = common;
+    migration["audit"] = json!({"mode":"disabled"});
     migration["runtimeRole"] = json!("runtime");
     migration["maintenanceRole"] = json!("maintenance");
     check(
@@ -133,6 +134,7 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
         &migration,
         true,
     );
+    migration["audit"] = json!({"mode":"disabled"});
     migration["runtimeRole"] = json!("x".repeat(64));
     check(
         env!("CARGO_BIN_EXE_identity-migrate"),
