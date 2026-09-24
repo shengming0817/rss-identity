@@ -9,8 +9,8 @@ version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
-rss-audit-core = { git = "https://dev.azure.com/shengming0923/rss/_git/rss-audit", rev = "5195f450b482df2d79e4060d835ca401b3a3ae0c" }
-rss-audit-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss-audit", rev = "5195f450b482df2d79e4060d835ca401b3a3ae0c", features = ["messaging"] }
+rss-audit-core = { git = "https://dev.azure.com/shengming0923/rss/_git/rss-audit", rev = "234f30756fb2dd42a9a65ded64a4f86813e8cefb" }
+rss-audit-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss-audit", rev = "234f30756fb2dd42a9a65ded64a4f86813e8cefb", features = ["messaging"] }
 rss-transactional-messaging-runtime = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "c752578e1b5e30724b8e81726a62553211b66dd5", default-features = false, features = ["producer", "consumer"] }
 tokio-util = "0.7"
 rss-identity-core = { path = "crates/identity-core" }

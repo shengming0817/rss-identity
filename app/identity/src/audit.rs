@@ -78,7 +78,15 @@ pub async fn delivery(
     pool: PgPool,
 ) -> Result<AuditDelivery, AppError> {
     // The worker must not acquire credential access through inherited or PUBLIC grants.
-    let safe: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='identity_authority' AND c.relkind='r' AND (has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))").fetch_one(&pool).await.map_err(|_| AppError::Provider)?;
+    let role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| AppError::Provider)?;
+    let safe: bool = sqlx::query_scalar(include_str!("audit-worker-probe.sql"))
+        .bind(role)
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| AppError::Provider)?;
     if !safe {
         return Err(AppError::Configuration);
     }
@@ -138,6 +146,15 @@ pub async fn verify(c: &mut PgConnection, config: &MigrationConfig) -> Result<()
     let present: bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_namespace n JOIN pg_roles r ON r.oid=n.nspowner WHERE n.nspname='rss_audit' AND r.rolname=$1 AND NOT r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolbypassrls AND NOT r.rolcreaterole)").bind(owner_role).fetch_one(&mut *c).await?;
     if !present {
         return Err(sqlx::Error::Protocol("audit installation mismatch".into()));
+    }
+    let isolated: bool = sqlx::query_scalar(include_str!("audit-worker-probe.sql"))
+        .bind(worker_role)
+        .fetch_one(&mut *c)
+        .await?;
+    if !isolated {
+        return Err(sqlx::Error::Protocol(
+            "audit worker authority rejected".into(),
+        ));
     }
     let safe: bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1 AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb) AND NOT pg_has_role($1,$2,'SET') AND has_schema_privilege($1,'rss_audit','USAGE') AND has_table_privilege($1,'rss_audit.records','SELECT') AND NOT has_table_privilege($1,'rss_audit.records','INSERT,UPDATE,DELETE,TRUNCATE') AND has_function_privilege($1,'rss_audit.reserve(uuid)','EXECUTE') AND has_function_privilege($1,'rss_audit.append(uuid,text,text,bigint,bytea,bigint)','EXECUTE')").bind(worker_role).bind(owner_role).fetch_one(c).await?;
     if !safe {

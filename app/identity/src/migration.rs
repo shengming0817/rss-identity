@@ -109,7 +109,6 @@ pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
         }
         rss_identity_postgres::install(&mut tx, instance).await?;
         crate::audit::install(&mut tx, &config).await?;
-        crate::audit::verify(&mut tx, &config).await?;
         grant_profile(&mut tx, &config.runtime_role, AuthorityProfile::Runtime).await?;
         grant_profile(
             &mut tx,
@@ -141,6 +140,7 @@ pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
                 .map_err(|_| sqlx::Error::Protocol("installation profile verification failed".into()))?;
             sqlx::raw_sql("SET LOCAL ROLE NONE").execute(&mut *tx).await?;
         }
+        crate::audit::verify(&mut tx, &config).await?;
         tx.commit().await
     })
     .await;

@@ -98,6 +98,10 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
                     e,
                     rss_audit_postgres::Error::Admission(_)
                         | rss_audit_postgres::Error::StorageContract
+                        | rss_audit_postgres::Error::Storage {
+                            kind: rss_audit_postgres::StorageFailure::Permanent,
+                            ..
+                        }
                 ) {
                     self.fatal.store(true, std::sync::atomic::Ordering::SeqCst);
                 }

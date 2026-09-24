@@ -176,3 +176,62 @@ fn malformed_and_sensitive_additions_are_rejected() {
         PublishOutcome::Confirmed(())
     ));
 }
+
+#[test]
+fn known_contracts_require_exact_version_and_schema() {
+    for (name, version, schema) in [
+        ("account", 3, include_str!("../security-event-v3.json")),
+        (
+            "session",
+            1,
+            include_str!("../session-security-event-v1.json"),
+        ),
+        (
+            "federation",
+            2,
+            include_str!("../federation-security-event-v2.json"),
+        ),
+    ] {
+        let id = format!("identity.{name}.security");
+        let digest = format!("sha256:{:x}", Sha256::digest(schema));
+        assert_eq!(
+            accepted_contract(&id, &format!("v{version}"), &digest),
+            Some(format!("{name}.changed").as_str())
+        );
+        assert!(accepted_contract(&id, &format!("v{}", version + 1), &digest).is_none());
+        assert!(
+            accepted_contract(
+                &id,
+                &format!("v{version}"),
+                &format!("sha256:{}", "0".repeat(64))
+            )
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn unadmitted_envelope_tenant_never_receives_ingress_authority() {
+    let message = envelope(
+        "session",
+        json!({"action":"created","tenant":TENANT,"principal":PRINCIPAL,"session_id":SESSION,"replaced_session_id":null,"epoch":1}),
+    );
+    let m = message.metadata();
+    let subscription =
+        SubscriptionIdentity::new(m.domain().clone(), m.route().clone(), m.contract().clone());
+    let validator = Validator {
+        tenants: vec![TenantId::parse(PRINCIPAL).unwrap()],
+    };
+    let rejected = rss_transactional_messaging::transaction::verify_ingress(
+        &validator,
+        ConsumerGroup::parse("identity.audit.v1").unwrap(),
+        &subscription,
+        &message,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        rejected.reason(),
+        EnvelopeValidationFailure::MalformedIdentity
+    );
+}

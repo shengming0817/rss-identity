@@ -8,7 +8,6 @@ publish.workspace = true
 rss-audit-core.workspace = true
 rss-audit-postgres.workspace = true
 rss-transactional-messaging-runtime.workspace = true
-tokio-util.workspace = true
 rand_core.workspace = true
 ring.workspace = true
 rss-identity-core.workspace = true
@@ -27,6 +26,7 @@ zeroize.workspace = true
 url = "2.5"
 thiserror.workspace = true
 [dev-dependencies]
+tokio-util.workspace = true
 syn = { version = "2", features = ["full", "visit"] }
 anyhow.workspace = true
 rss-contract.workspace = true

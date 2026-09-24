@@ -237,6 +237,12 @@ impl RuntimeConfig {
         }
         self.budgets.validate()?;
         self.audit.validate(&self.database.user)?;
+        // Relay has at most five sequential 5s I/O stages; reserve drain for its settlement and pools.
+        if matches!(self.audit, AuditConfig::Enabled { .. })
+            && (self.budgets.resource_seconds < 30 || self.budgets.drain_seconds < 60)
+        {
+            return Err(AppError::Budget);
+        }
         self.storage.binding()?;
         self.instance()?;
         self.bootstrap_keys()?;

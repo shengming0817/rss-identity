@@ -323,3 +323,125 @@ async fn manipulate(pool: &PgPool, sql: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires real PG"]
+async fn relay_quarantines_bad_events_and_recovers_lost_source_lease() -> anyhow::Result<()> {
+    use rss_transactional_messaging::outbox::{OutboxWriter, PendingMessage};
+    let s = Setup::new().await?;
+    let writer = rss_transactional_messaging_postgres::PgOutboxWriter::new(
+        s.f.runtime.clone(),
+        MessagingDomain::parse("identity.security")?,
+    );
+    let base = serde_json::json!({"action":"created","tenant":A,"principal":B,"session_id":SYSTEM,"replaced_session_id":null,"epoch":1});
+    let valid = super::tests::envelope("session", base.clone());
+    let mut bad = base;
+    bad["tenant"] = serde_json::json!(B);
+    let bad = MessageEnvelope::new(
+        rss_transactional_messaging::message::MessageId::parse("wrong-tenant")?,
+        valid.metadata().clone(),
+        serde_json::to_vec(&bad)?,
+    );
+    s.f.runtime
+        .local_tx(TenantId::parse(A)?, support::deadline(), move |tx| {
+            Box::pin(async move {
+                writer.append(tx, PendingMessage::new(bad)).await?;
+                writer.append(tx, PendingMessage::new(valid)).await?;
+                Ok(())
+            })
+        })
+        .await
+        .fold(
+            |_| Ok(()),
+            |e| Err(anyhow::anyhow!(e)),
+            |e| Err(anyhow::anyhow!(e)),
+            |e| Err(anyhow::anyhow!(e)),
+            |e| Err(anyhow::anyhow!(e)),
+            |_| Err(anyhow::anyhow!("fenced")),
+        )?;
+    let limit = RelayBatchLimit::new(std::num::NonZeroUsize::new(8).unwrap())?;
+    let mut lock = s.f.owner.begin().await?;
+    sqlx::raw_sql("LOCK TABLE rss_audit.heads IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await?;
+    let (result, injection) = tokio::join!(s.worker.run_once(limit), async {
+        // Wait for the real relay claim, then revoke its source lease while the append is blocked.
+        tokio::time::timeout(Duration::from_secs(3),async {
+            loop {
+                let held:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_transactional_messaging.outbox WHERE status='publishing')").fetch_one(&s.f.owner).await?;
+                if held { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok::<_,sqlx::Error>(())
+        }).await??;
+        manipulate(&s.f.owner,"UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE status='publishing' AND tenant_id=$1::uuid").await?;
+        lock.rollback().await?;
+        Ok::<_, anyhow::Error>(())
+    });
+    injection?;
+    // Lease loss can surface as a fenced report or store CAS error, never false source success.
+    let _ = result;
+    let published: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rss_transactional_messaging.outbox WHERE status='published'",
+    )
+    .fetch_one(&s.f.owner)
+    .await?;
+    assert_eq!(published, 0);
+    for _ in 0..3 {
+        s.worker.run_once(limit).await?;
+    }
+    assert_eq!(s.count(A).await?, 1);
+    let states: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message_id,status FROM rss_transactional_messaging.outbox ORDER BY message_id",
+    )
+    .fetch_all(&s.f.owner)
+    .await?;
+    assert_eq!(
+        states,
+        vec![
+            ("event-1".into(), "published".into()),
+            ("wrong-tenant".into(), "dead_letter".into())
+        ]
+    );
+    s.runtime.close().await;
+    s.pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires real PG"]
+async fn permanent_storage_failure_stops_delivery_without_ack() -> anyhow::Result<()> {
+    let s = Setup::new().await?;
+    let message = super::tests::envelope(
+        "session",
+        serde_json::json!({"action":"created","tenant":A,"principal":B,"session_id":SYSTEM,"replaced_session_id":null,"epoch":1}),
+    );
+    // Runtime permission loss is infrastructure failure, not a poison authentication event.
+    sqlx::raw_sql("REVOKE USAGE ON SCHEMA rss_audit FROM identity_audit_test")
+        .execute(&s.f.owner)
+        .await?;
+    assert!(matches!(
+        s.worker
+            .publisher
+            .publish(&message, support::deadline())
+            .await,
+        PublishOutcome::Ambiguous(_)
+    ));
+    assert!(s.worker.fatal.load(std::sync::atomic::Ordering::SeqCst));
+    let terminal: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rss_transactional_messaging.inbox WHERE disposition IS NOT NULL",
+    )
+    .fetch_one(&s.f.owner)
+    .await?;
+    assert_eq!(terminal, 0);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_audit.records")
+        .fetch_one(&s.f.owner)
+        .await?;
+    assert_eq!(count, 0);
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_audit TO identity_audit_test")
+        .execute(&s.f.owner)
+        .await?;
+    s.runtime.close().await;
+    s.pool.close().await;
+    Ok(())
+}

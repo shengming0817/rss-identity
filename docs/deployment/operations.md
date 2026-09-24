@@ -55,6 +55,8 @@ DNS 的全部 A/AAAA 必须属于公网基线或该绑定授权的私网；reqwe
 "audit": {"mode":"enabled","user":"identity_audit","passwordFile":"/run/input/audit-password","pollMillis":1000,"batch":16}
 ```
 
+启用审计要求 `budgets.resourceSeconds >= 30`、`budgets.drainSeconds >= 60`，覆盖正在结算的有界批次和连接关闭；收到停止信号后不再领取下一批。
+
 worker 继承 database 目标和 storage/instance 绑定；凭据文件遵循现有秘密文件规则。部署渲染器为启用配置生成独立 worker 和 NOLOGIN Audit owner，并在 migration 配置中写入 `audit.mode=enabled`、`ownerRole`、`workerRole`。仅支持全新安装，无旧配置解析或旧 schema 自动升级。嵌入宿主应自行预配等价角色。
 
 启用后任一构造/probe 失败会拒绝启动；运行期间暂时故障保留同 ID 重试，永久 schema/绑定故障终止关键 worker。关闭时先停止 worker 再关闭连接。关闭审计交付不会删除或排空 Outbox，宿主负责积压容量和保留策略。Plain 审计持久化不宣称 HMAC/WORM。
