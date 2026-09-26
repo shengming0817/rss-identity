@@ -61,7 +61,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertIn(images['web'],argv)
             self.assertIn('nginx -t',argv[-1])
             self.assertIn('/usr/share/nginx/html/index.html',argv[-1])
-            self.assertIn('/usr/share/nginx/html/identity-build.json',argv[-1])
+            self.assertEqual(argv[-1], 'nginx -t -e stderr -c /run/config/gateway.conf && test -s /usr/share/nginx/html/index.html')
             for forbidden in ['owner-password','maintenance-password','runtime-password']:
                 self.assertNotIn(forbidden,' '.join(argv))
 
