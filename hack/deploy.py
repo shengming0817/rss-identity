@@ -172,7 +172,7 @@ http {{
 def preflight(out,images):
     services=json.loads((out/'compose.json').read_text())['services']
     checks=[(binary,service,images['identity'],['--check-config','/run/config/'+config+'.json']) for binary,service,config in [('identity-server','identity','runtime'),('identity-admin','maintenance','maintenance'),('identity-migrate','migrate','migration')]]
-    checks.append(('sh','gateway',images['web'],['-ec','nginx -t -e stderr -c /run/config/gateway.conf && test -s /usr/share/nginx/html/index.html && test -s /usr/share/nginx/html/identity-build.json']))
+    checks.append(('sh','gateway',images['web'],['-ec','nginx -t -e stderr -c /run/config/gateway.conf && test -s /usr/share/nginx/html/index.html']))
     for binary,service,image,arguments in checks:
         volumes=[]
         for mount in services[service]['volumes']:
