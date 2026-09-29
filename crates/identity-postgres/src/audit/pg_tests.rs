@@ -73,11 +73,8 @@ impl Setup {
             )
             .await?;
         let cancel = CancellationToken::new();
-        let control = Control::new(
-            &Timer,
-            Deadline::from_timeout(&Timer, Duration::from_secs(10))?,
-            &cancel,
-        );
+        let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(10))?;
+        let control = Control::new(&Timer, cutoff, cutoff, &cancel);
         let audit = Arc::new(PgAudit::new(pool.clone(), Integrity::Plain, &control).await?);
         let worker = AuditDelivery::new(
             runtime.clone(),
@@ -105,11 +102,8 @@ impl Setup {
     }
     async fn count(&self, tenant: &str) -> anyhow::Result<usize> {
         let cancel = CancellationToken::new();
-        let control = Control::new(
-            &Timer,
-            Deadline::from_timeout(&Timer, Duration::from_secs(10))?,
-            &cancel,
-        );
+        let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(10))?;
+        let control = Control::new(&Timer, cutoff, cutoff, &cancel);
         let page = self
             .audit
             .read_page(
