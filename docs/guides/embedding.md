@@ -81,3 +81,5 @@ producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::co
 当前只接收 account v3、session v1、federation v2 的精确 schema，映射为 Audit V1。账户主体来自 actor，维护事件标识维护主体；会话主体来自 principal，all_revoked 的对象是账户会话集合；联合身份按 action 区分 provider 和认证主体。provider_test_failed 为 Failed，其余已提交事件为 Succeeded。UUID 会话坐标不是 bearer secret。输出只含稳定坐标、epoch、状态、配置版本和封闭诊断码。
 
 业务与安全事件先原子提交到 Outbox。独立 worker 在另一事务内同时提交 Audit 和 Inbox receipt，之后才确认源 Outbox。发生时间来自原事件，落录时间来自该 PG 事务；乱序不改变原事件含义。**认证成功及 Outbox 已提交均不表示 Audit 已落库**。查询授权仍由宿主持有。
+
+审计 worker 的日志保留发布、结算、重试和故障等闭合事件；成功 claim 的耗时 tick 不写入日志，避免空轮询制造活动记录。该日志选择不改变底层 RSS observation、投递或 readiness 语义。

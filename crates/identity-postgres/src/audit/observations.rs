@@ -1,4 +1,6 @@
-use rss_transactional_messaging::observability::TransactionalMessagingObservation as Event;
+use rss_transactional_messaging::observability::{
+    TransactionalMessagingObservation as Event, TransactionalMessagingRelayPhase,
+};
 use serde_json::json;
 
 pub(super) fn record(event: Event, mut output: impl std::io::Write) {
@@ -20,6 +22,12 @@ pub(super) fn record(event: Event, mut output: impl std::io::Write) {
         } => {
             json!({"pending_depth":pending_depth,"oldest_pending_age_seconds":oldest_pending_age.as_secs_f64(),"partition_blocked_depth":partition_blocked_depth})
         }
+        // Claim timing is emitted even for an empty poll; activity is represented
+        // by publication/settlement events, while claim failures remain explicit.
+        Event::RelayTick {
+            phase: TransactionalMessagingRelayPhase::Claim,
+            ..
+        } => return,
         Event::RelayTick { phase, duration } => {
             json!({"phase":phase.as_label(),"duration_seconds":duration.as_secs_f64()})
         }
@@ -58,6 +66,33 @@ mod tests {
         },
         transaction::EnvelopeValidationFailure,
     };
+    #[test]
+    fn polling_is_quiet_and_publication_timing_is_retained() {
+        use rss_transactional_messaging::observability::TransactionalMessagingRelayPhase;
+        let mut bytes = Vec::new();
+        record(
+            Event::RelayTick {
+                phase: TransactionalMessagingRelayPhase::Claim,
+                duration: std::time::Duration::from_millis(1),
+            },
+            &mut bytes,
+        );
+        assert!(
+            bytes.is_empty(),
+            "an empty claim tick must not produce an activity log"
+        );
+        record(
+            Event::RelayTick {
+                phase: TransactionalMessagingRelayPhase::Publish,
+                duration: std::time::Duration::from_millis(2),
+            },
+            &mut bytes,
+        );
+        let event: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(event["phase"], "publish");
+        assert_eq!(event["duration_seconds"], 0.002);
+    }
+
     #[test]
     fn diagnostics_use_stable_closed_fields() {
         for (event, expected) in [
