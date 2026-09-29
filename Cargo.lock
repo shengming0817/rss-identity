@@ -2123,7 +2123,7 @@ dependencies = [
 [[package]]
 name = "rss-audit-core"
 version = "0.1.0"
-source = "git+https://dev.azure.com/shengming0923/rss/_git/rss-audit?rev=ab9484dcf9f72652483979aab5bd41bc059d4110#ab9484dcf9f72652483979aab5bd41bc059d4110"
+source = "git+https://dev.azure.com/shengming0923/rss/_git/rss-audit?rev=4bfc1d62e609ad7aac977f569d81e5241212fb53#4bfc1d62e609ad7aac977f569d81e5241212fb53"
 dependencies = [
  "rss-contract",
  "rss-diag-context",
@@ -2136,7 +2136,7 @@ dependencies = [
 [[package]]
 name = "rss-audit-postgres"
 version = "0.1.0"
-source = "git+https://dev.azure.com/shengming0923/rss/_git/rss-audit?rev=ab9484dcf9f72652483979aab5bd41bc059d4110#ab9484dcf9f72652483979aab5bd41bc059d4110"
+source = "git+https://dev.azure.com/shengming0923/rss/_git/rss-audit?rev=4bfc1d62e609ad7aac977f569d81e5241212fb53#4bfc1d62e609ad7aac977f569d81e5241212fb53"
 dependencies = [
  "futures",
  "rss-audit-core",
