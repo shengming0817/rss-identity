@@ -92,11 +92,9 @@ pub async fn delivery(
         .map_err(|_| AppError::Configuration)?;
     drop(connection);
     let cancel = CancellationToken::new();
-    let control = Control::new(
-        &Timer,
-        Deadline::from_timeout(&Timer, Duration::from_secs(10)).map_err(|_| AppError::Budget)?,
-        &cancel,
-    );
+    let cutoff =
+        Deadline::from_timeout(&Timer, Duration::from_secs(10)).map_err(|_| AppError::Budget)?;
+    let control = Control::new(&Timer, cutoff, cutoff, &cancel);
     let audit = PgAudit::new(pool, Integrity::Plain, &control)
         .await
         .map_err(|_| AppError::Provider)?;
