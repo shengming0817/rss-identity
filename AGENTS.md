@@ -26,7 +26,7 @@ RSS 通过同一仓库 URL 与固定完整 Git commit 消费，提交独立 Carg
 
 ## 验证与交付
 
-遵循 [验证规则](docs/rules/verification-scope.md)。文档变更检查链接、来源、diff、忽略范围；工程验证按实际改动运行本仓受影响检查、业务测试与必要集成，复用有效结果和构建缓存；不执行父仓检查代替产品证明。
+本仓验证入口、环境与证据边界见[验证规则](docs/rules/verification-scope.md)；PR 如实记录运行结果与未覆盖项。
 
 产品 T3 必须独立 Issue、独立 PR、独立必要性评估，不混入实现 PR。需求、依赖和实时进度由 Azure Boards 工作项持有，运行结果归对应 PR。
 

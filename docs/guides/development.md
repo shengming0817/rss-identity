@@ -2,7 +2,7 @@
 
 使用系统 `/usr/bin/git`。Rust 工具链以 [rust-toolchain.toml](../../rust-toolchain.toml) 为准；需要 Python 3.11+、Docker，以及 CI 配置选定的 cargo-deny。依赖由 manifest/lock 持有，provider 镜像由 [providers.lock.json](../../deployment/providers.lock.json) 持有。私有 RSS Git 依赖需要读取权限。
 
-从 [Makefile](../../Makefile) 选择受影响入口：`make check`、`make test`、`make test-pg`、`make test-oidc`、`make test-federated`、`make test-assembly`、`make test-gateway`。`make ci` 是完整工程入口，不是每次文档整理或阶段切换的必跑项；完整政策见[验证范围](../rules/verification-scope.md)。
+[Makefile](../../Makefile) 提供 `make check`、`make test`、`make test-pg`、`make test-oidc`、`make test-federated`、`make test-assembly`、`make test-gateway` 等专项入口；`make ci` 是完整工程入口。项目证据边界见[验证范围](../rules/verification-scope.md)。
 
 真实 provider 的 ignored 测试通过已有 runner 执行；runner 校验实际用例和执行结果，缺少 Docker/provider 失败，不把零测试或部分执行当通过。工作树可直接测试，无需预先提交。Make 共用 Identity 主 checkout 的 Cargo target；显式 CARGO_TARGET_DIR 可覆盖，保留可用缓存。
 
