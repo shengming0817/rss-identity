@@ -128,9 +128,9 @@ http {{
   add_header Referrer-Policy no-referrer always;
   add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" always;
   add_header Cache-Control no-store always;
-  location = /api/identity-host/v1/config.json {{ alias /run/config/ui.json; default_type application/json; }}
-  location ^~ /api/v2/ {{ {proxy} }}
-  location ~ "^/api/identity-host/v1/tenants/[0-9a-f-]{{36}}/(context|mfa-example)$" {{ {proxy} }}
+  location = /api/v1/identity-host/config.json {{ alias /run/config/ui.json; default_type application/json; }}
+  location ^~ /api/v1/identity/ {{ {proxy} }}
+  location ~ "^/api/v1/identity-host/tenants/[0-9a-f-]{{36}}/(context|mfa-example)$" {{ {proxy} }}
   location ^~ /internal/ {{ return 404; }}
   location = /livez {{ return 404; }}
   location = /readyz {{ return 404; }}

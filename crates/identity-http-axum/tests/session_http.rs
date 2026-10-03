@@ -307,7 +307,7 @@ fn request(
 ) -> Request<Body> {
     let mut req = Request::builder()
         .method(method)
-        .uri(format!("/api/v2/tenants/{A}/{path}"))
+        .uri(format!("/api/v1/identity/tenants/{A}/{path}"))
         .header("origin", ORIGIN)
         .header("content-type", "application/json")
         .header("x-identity-request", "1");
@@ -603,7 +603,7 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
         idle
     );
     let mut req = request("GET", "session", Some(&cookie), None, json!(null));
-    *req.uri_mut() = format!("/api/v2/tenants/{B}/session").parse()?;
+    *req.uri_mut() = format!("/api/v1/identity/tenants/{B}/session").parse()?;
     assert_eq!(
         app.clone().oneshot(req).await?.status(),
         StatusCode::UNAUTHORIZED
@@ -804,7 +804,7 @@ async fn session_http_lookup_never_inserts_tenant_guard() -> anyhow::Result<()> 
     ] {
         for method in ["GET", "HEAD"] {
             let mut req = request(method, "session", Some(&fake), None, json!(null));
-            *req.uri_mut() = format!("/api/v2/tenants/{target}/session").parse()?;
+            *req.uri_mut() = format!("/api/v1/identity/tenants/{target}/session").parse()?;
             assert!(!app.clone().oneshot(req).await?.status().is_success());
         }
     }
@@ -901,7 +901,7 @@ async fn session_http_pending_commit_preserves_settlement() -> anyhow::Result<()
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
-async fn session_http_v2_reauthentication_is_bound_and_has_no_legacy_role_surface()
+async fn session_http_v1_reauthentication_is_bound_and_has_no_legacy_role_surface()
 -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
@@ -911,14 +911,28 @@ async fn session_http_v2_reauthentication_is_bound_and_has_no_legacy_role_surfac
     assert!(first["identity"].get("administrator").is_none());
     for path in [
         format!("/api/v1/tenants/{A}/session"),
+        format!("/api/v2/tenants/{A}/session"),
+        format!("/api/v2/tenants/{A}/sessions"),
+        format!("/api/v2/tenants/{A}/accounts"),
+        format!("/tenants/{A}/session"),
         "/auth/callback".into(),
-        "/api/v2/oidc/callback".into(),
+        "/api/v1/identity/oidc/callback".into(),
     ] {
         let response = app
             .clone()
             .oneshot(Request::builder().uri(path).body(Body::empty())?)
             .await?;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    // The public prefix counts toward the URI budget, even inside a nested Router.
+    let prefix = format!("/api/v1/identity/tenants/{A}/session?padding=");
+    for (length, expected) in [(8192, StatusCode::OK), (8193, StatusCode::BAD_REQUEST)] {
+        let path = format!("{prefix}{}", "a".repeat(length - prefix.len()));
+        let mut req = request("GET", "session", Some(&cookie), None, json!(null));
+        *req.uri_mut() = path.parse()?;
+        let response = app.clone().oneshot(req).await?;
+        assert_eq!(response.status(), expected);
+        assert!(!response.headers().contains_key("set-cookie"));
     }
     let response = app
         .clone()

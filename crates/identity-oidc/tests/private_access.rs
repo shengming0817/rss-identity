@@ -17,7 +17,7 @@ fn settings(issuer: &str, client: &str) -> ProviderSettings {
     ProviderSettingsInput {
         issuer: issuer.into(),
         client_id: client.into(),
-        redirect_uri: "https://reference.example.test/api/v2/oidc/callback".into(),
+        redirect_uri: "https://reference.example.test/api/v1/identity/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
             email: None,

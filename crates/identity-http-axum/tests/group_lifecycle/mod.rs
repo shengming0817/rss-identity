@@ -255,7 +255,7 @@ async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
             .clone()
             .oneshot(request(
                 "POST",
-                &format!("/api/v2/tenants/{A}/oidc/{}/login", p.id),
+                &format!("/api/v1/identity/tenants/{A}/oidc/{}/login", p.id),
                 BROWSER,
                 None,
                 json!({"returnTarget":"home"}),

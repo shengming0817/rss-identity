@@ -50,18 +50,12 @@ pub fn federated_router(
     };
 
     let routes = Router::new()
-        .route("/api/v2/tenants/{tenant}/session/security", get(security))
+        .route("/tenants/{tenant}/session/security", get(security))
+        .route("/tenants/{tenant}/oidc/{provider}/login", post(begin))
+        .route("/tenants/{tenant}/oidc/{provider}/link", post(link))
+        .route("/tenants/{tenant}/oidc/{provider}/step-up", post(step_up))
         .route(
-            "/api/v2/tenants/{tenant}/oidc/{provider}/login",
-            post(begin),
-        )
-        .route("/api/v2/tenants/{tenant}/oidc/{provider}/link", post(link))
-        .route(
-            "/api/v2/tenants/{tenant}/oidc/{provider}/step-up",
-            post(step_up),
-        )
-        .route(
-            "/api/v2/oidc/callback",
+            "/oidc/callback",
             get(callback).head(|| async { StatusCode::METHOD_NOT_ALLOWED }),
         )
         .layer(axum::extract::DefaultBodyLimit::max(4096))
@@ -71,7 +65,7 @@ pub fn federated_router(
         ))
         .with_state(state);
 
-    Ok(routes.merge(management))
+    Ok(crate::mount(routes.merge(management)))
 }
 
 async fn security(

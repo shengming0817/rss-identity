@@ -304,7 +304,7 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
         ScriptedOidc::new(),
         StateSigner::new([7; 32], &f.instance.to_string())?,
         FederationConfig {
-            callback: "https://identity.example.test/api/v2/oidc/callback".into(),
+            callback: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
             credential_keys: credential_keys(),
             targets: std::collections::BTreeMap::from([("home".into(), RETURN.into())]),
         },
@@ -477,7 +477,7 @@ async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
         ScriptedOidc::new(),
         StateSigner::new([7; 32], &f.instance.to_string())?,
         FederationConfig {
-            callback: "https://identity.example.test/api/v2/oidc/callback".into(),
+            callback: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
             credential_keys: credential_keys(),
             targets: std::collections::BTreeMap::from([("home".into(), RETURN.into())]),
         },

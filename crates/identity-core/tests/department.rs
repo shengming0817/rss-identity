@@ -80,7 +80,7 @@ fn department_mapping_cannot_reuse_email_or_group_claims() {
             ProviderSettings::try_from(ProviderSettingsInput {
                 issuer: "https://idp.test".into(),
                 client_id: "client".into(),
-                redirect_uri: "https://host.test/api/v2/oidc/callback".into(),
+                redirect_uri: "https://host.test/api/v1/identity/oidc/callback".into(),
                 scopes: vec!["openid".into()],
                 jit: false,
                 claims: ClaimMapping {

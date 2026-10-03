@@ -69,7 +69,7 @@ async function read(c, path) {
   return result;
 }
 async function current(c) {
-  return read(c, `/api/v2/tenants/${c.t}/session`);
+  return read(c, `/api/v1/identity/tenants/${c.t}/session`);
 }
 async function request(c, method, path, body, headers = {}) {
   return c.page.evaluate(
@@ -97,7 +97,7 @@ async function write(c, method, suffix, body) {
   const session = await current(c);
   check(session.status === 200, "writer-session");
   remember(session.body.csrfToken);
-  return request(c, method, `/api/v2/tenants/${c.t}/${suffix}`, body, {
+  return request(c, method, `/api/v1/identity/tenants/${c.t}/${suffix}`, body, {
     "x-csrf-token": session.body.csrfToken,
   });
 }
@@ -113,7 +113,7 @@ async function login(c, name, password) {
   const response = c.page.waitForResponse(
     (r) =>
       r.request().method() === "POST" &&
-      new URL(r.url()).pathname === `/api/v2/tenants/${c.t}/login`,
+      new URL(r.url()).pathname === `/api/v1/identity/tenants/${c.t}/login`,
   );
   await c.page
     .locator("#login-password")
@@ -188,7 +188,7 @@ async function createAccount(c, name, password, expected = 201) {
   await c.page.getByRole("alert").waitFor();
 }
 async function provider(c) {
-  const r = await read(c, `/api/v2/tenants/${c.t}/providers`);
+  const r = await read(c, `/api/v1/identity/tenants/${c.t}/providers`);
   check(r.status === 200 && r.body.providers.length === 1, "provider-list");
   return r.body.providers[0];
 }
@@ -228,7 +228,7 @@ async function expectOldCookie(c, cookies, t = tenant) {
     storageState: { cookies, origins: [] },
   });
   const r = await temp.request.get(
-    `${origin}/api/identity-host/v1/tenants/${t}/context`,
+    `${origin}/api/v1/identity-host/tenants/${t}/context`,
   );
   check(r.status() === 401, "old-cookie-rejected");
   await temp.close();
@@ -297,7 +297,7 @@ async function keycloak(
     check((await current(c)).status === 200, "oidc-session");
   } else
     check(
-      (await read(c, `/api/identity-host/v1/tenants/${c.t}/mfa-example`))
+      (await read(c, `/api/v1/identity-host/tenants/${c.t}/mfa-example`))
         .status !== 200,
       "failed-mfa-not-authorized",
     );
@@ -343,7 +343,7 @@ async function local() {
     "browser-cookie-attributes",
   );
   check(
-    (await read(a, `/api/identity-host/v1/tenants/${other}/context`)).status ===
+    (await read(a, `/api/v1/identity-host/tenants/${other}/context`)).status ===
       401,
     "tenant-isolation",
   );
@@ -353,7 +353,7 @@ async function local() {
   ]) {
     const before = {};
     for (const route of ["accounts", "providers", "sessions"]) {
-      const path = `/api/v2/tenants/${target.t}/${route}`;
+      const path = `/api/v1/identity/tenants/${target.t}/${route}`;
       const actual = await read(target, path);
       check(actual.status === 200, "cross-tenant-reference-read");
       before[route] = actual.body;
@@ -372,7 +372,7 @@ async function local() {
           settings: {
             issuer: input.issuer,
             clientId: "reference",
-            redirectUri: origin + "/api/v2/oidc/callback",
+            redirectUri: origin + "/api/v1/identity/oidc/callback",
             scopes: ["openid"],
             claims: { email: null, groups: null },
             jit: true,
@@ -386,14 +386,14 @@ async function local() {
       const denied = await request(
         actor,
         "POST",
-        `/api/v2/tenants/${target.t}/${route}`,
+        `/api/v1/identity/tenants/${target.t}/${route}`,
         body,
         { "x-csrf-token": csrf },
       );
       check(denied.status === 401, "cross-tenant-management-write");
     }
     for (const route of ["accounts", "providers", "sessions"]) {
-      const after = await read(target, `/api/v2/tenants/${target.t}/${route}`);
+      const after = await read(target, `/api/v1/identity/tenants/${target.t}/${route}`);
       // Passive list operations may advance idle timestamps. Compare durable identities and authority.
       const stable = (v) =>
         JSON.stringify(v, (k, x) =>
@@ -407,7 +407,7 @@ async function local() {
   }
   const anon = await open("anonymous", tenant, true);
   check(
-    (await read(anon, `/api/identity-host/v1/tenants/${tenant}/context`))
+    (await read(anon, `/api/v1/identity-host/tenants/${tenant}/context`))
       .status === 401,
     "anonymous-resource",
   );
@@ -416,13 +416,13 @@ async function local() {
   const c = await open("local", tenant, true);
   await login(c, "local", input.userPassword);
   check(
-    (await read(c, `/api/v2/tenants/${tenant}/accounts`)).status === 403,
+    (await read(c, `/api/v1/identity/tenants/${tenant}/accounts`)).status === 403,
     "nonmanager-server-denial",
   );
   const before = await current(c);
   const old = await c.context.cookies();
   const bad = await c.context.request.post(
-    `${origin}/api/v2/tenants/${tenant}/session/refresh`,
+    `${origin}/api/v1/identity/tenants/${tenant}/session/refresh`,
     {
       headers: {
         origin,
@@ -433,7 +433,7 @@ async function local() {
   );
   check(bad.status() === 403, "csrf-rejection");
   const evil = await c.context.request.post(
-    `${origin}/api/v2/tenants/${tenant}/session/refresh`,
+    `${origin}/api/v1/identity/tenants/${tenant}/session/refresh`,
     {
       headers: {
         origin: "https://untrusted.example.test",
@@ -490,7 +490,7 @@ async function local() {
     const r = await request(
       limited,
       "POST",
-      `/api/v2/tenants/${tenant}/login`,
+      `/api/v1/identity/tenants/${tenant}/login`,
       { login: "limited", password: "wrong-private-password" },
     );
     check(r.status === (i < 5 ? 401 : 429), "failed-attempt-budget");
@@ -499,7 +499,7 @@ async function local() {
   const blocked = await request(
     limited,
     "POST",
-    `/api/v2/tenants/${tenant}/login`,
+    `/api/v1/identity/tenants/${tenant}/login`,
     { login: "limited", password: input.userPassword },
   );
   check(blocked.status === 429, "correct-password-obeys-budget");
@@ -546,7 +546,7 @@ async function oidc() {
   check(data.accounts.linked !== data.alicePrincipal, "no-email-auto-link");
   const weak = await read(
     linked,
-    `/api/identity-host/v1/tenants/${tenant}/mfa-example`,
+    `/api/v1/identity-host/tenants/${tenant}/mfa-example`,
   );
   check(weak.status === 403, "ordinary-login-is-not-mfa");
   await store(linked);
@@ -563,7 +563,7 @@ async function oidc() {
     if (
       location &&
       new URL(location).origin === origin &&
-      new URL(location).pathname === "/api/v2/oidc/callback"
+      new URL(location).pathname === "/api/v1/identity/oidc/callback"
     ) {
       callback = location;
       rememberProtocol(callback);
@@ -588,7 +588,7 @@ async function oidc() {
   );
   check(
     (
-      await foreign.request.get(`${origin}/api/v2/tenants/${tenant}/session`)
+      await foreign.request.get(`${origin}/api/v1/identity/tenants/${tenant}/session`)
     ).status() === 401,
     "foreign-callback-no-session",
   );
@@ -654,7 +654,7 @@ async function mfa() {
   await expectOldCookie(c, before);
   let resource = await read(
     c,
-    `/api/identity-host/v1/tenants/${tenant}/mfa-example`,
+    `/api/v1/identity-host/tenants/${tenant}/mfa-example`,
   );
   check(
     resource.status === 200 && resource.body.authentication.acr === "mfa",
@@ -666,7 +666,7 @@ async function mfa() {
   check(refresh.status === 200, "mfa-refresh");
   resource = await read(
     c,
-    `/api/identity-host/v1/tenants/${tenant}/mfa-example`,
+    `/api/v1/identity-host/tenants/${tenant}/mfa-example`,
   );
   check(
     resource.body.authentication.authTime === authTime,
@@ -676,14 +676,14 @@ async function mfa() {
     setTimeout(r, Math.max(0, (authTime + input.policy.mfaMaxAgeSeconds + 1) * 1000 - Date.now())),
   );
   check(
-    (await read(c, `/api/identity-host/v1/tenants/${tenant}/mfa-example`))
+    (await read(c, `/api/v1/identity-host/tenants/${tenant}/mfa-example`))
       .status === 403,
     "mfa-real-expiry",
   );
   journey = "mfa-after-expiry";
   await stepUp(c);
   check(
-    (await read(c, `/api/identity-host/v1/tenants/${tenant}/mfa-example`))
+    (await read(c, `/api/v1/identity-host/tenants/${tenant}/mfa-example`))
       .status === 200,
     "repeat-step-up",
   );
@@ -755,7 +755,7 @@ async function responseLoss() {
   await a.page.goto(`${origin}/tenants/${tenant}/accounts`);
   let requests = 0;
   await a.page.route(
-    `${origin}/api/v2/tenants/${tenant}/accounts`,
+    `${origin}/api/v1/identity/tenants/${tenant}/accounts`,
     async (route) => {
       if (route.request().method() !== "POST") {
         await route.continue();
@@ -789,7 +789,7 @@ async function responseLoss() {
     .waitFor();
   await new Promise((r) => setTimeout(r, 300));
   check(requests === 1, "unknown-write-not-retried");
-  await a.page.unroute(`${origin}/api/v2/tenants/${tenant}/accounts`);
+  await a.page.unroute(`${origin}/api/v1/identity/tenants/${tenant}/accounts`);
   await store(a);
   return { singleWrite: true, noFalseUiSuccess: true };
 }
@@ -814,7 +814,7 @@ async function beginState() {
   const r = await request(
     c,
     "POST",
-    `/api/v2/tenants/${tenant}/oidc/${data.providers[tenant]}/login`,
+    `/api/v1/identity/tenants/${tenant}/oidc/${data.providers[tenant]}/login`,
     { returnTarget: "resume" },
   );
   check(r.status === 200, "begin-state");
@@ -863,7 +863,7 @@ try {
       const failed = await request(
         rejected,
         "POST",
-        `/api/v2/tenants/${tenant}/login`,
+        `/api/v1/identity/tenants/${tenant}/login`,
         { login: "linked", password: "wrong-private-password" },
       );
       check(failed.status === 401, "rollback-independent-attempt-budget");
@@ -913,12 +913,12 @@ try {
     case "pg-down": {
       const a = await open("admin");
       check(
-        (await read(a, `/api/identity-host/v1/tenants/${tenant}/context`))
+        (await read(a, `/api/v1/identity-host/tenants/${tenant}/context`))
           .status === 503,
         "pg-resource-denied",
       );
       const anon = await open("pg-login", other, true);
-      const r = await request(anon, "POST", `/api/v2/tenants/${other}/login`, {
+      const r = await request(anon, "POST", `/api/v1/identity/tenants/${other}/login`, {
         login: "operator",
         password: input.adminPassword,
       });
@@ -929,7 +929,7 @@ try {
     case "pg-ready": {
       const a = await admin();
       check(
-        (await read(a, `/api/identity-host/v1/tenants/${tenant}/context`))
+        (await read(a, `/api/v1/identity-host/tenants/${tenant}/context`))
           .status === 200,
         "storage-recovered",
       );
@@ -985,7 +985,7 @@ try {
     case "restored": {
       const c = await open("restored-admin", tenant, true);
       await expectOldCookie(c, data.preRecoveryAdminCookies);
-      const old = await request(c, "POST", `/api/v2/tenants/${tenant}/login`, {
+      const old = await request(c, "POST", `/api/v1/identity/tenants/${tenant}/login`, {
         login: "operator",
         password: input.adminPassword,
       });
@@ -994,7 +994,7 @@ try {
       const a = await admin();
       check((await current(a)).status === 200, "restored-new-password");
       for (const name of ["disabled", "inactive"]) {
-        const r = await request(c, "POST", `/api/v2/tenants/${tenant}/login`, {
+        const r = await request(c, "POST", `/api/v1/identity/tenants/${tenant}/login`, {
           login: name,
           password: input.userPassword,
         });

@@ -24,7 +24,7 @@ use support::*;
 use tower::ServiceExt;
 use zeroize::Zeroizing;
 const ORIGIN: &str = "https://identity.example.test";
-const CALLBACK: &str = "https://identity.example.test/api/v2/oidc/callback";
+const CALLBACK: &str = "https://identity.example.test/api/v1/identity/oidc/callback";
 const BROWSER: &str = "__Host-identity-oidc-browser=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 fn fixture_transport(keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
     Ok(HttpOidc::for_loopback_test(vec![
@@ -169,7 +169,7 @@ async fn begin(
         .oneshot(request(
             "POST",
             &format!(
-                "/api/v2/tenants/{A}/oidc/{}/{}",
+                "/api/v1/identity/tenants/{A}/oidc/{}/{}",
                 p.id,
                 if link { "link" } else { "login" }
             ),
@@ -228,7 +228,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
     let p = provider(&f, &s).await?;
     let app = app(&s);
     let original = successful(&app, &p, "alice").await?;
-    let path = format!("/api/v2/tenants/{A}/oidc/{}/step-up", p.id);
+    let path = format!("/api/v1/identity/tenants/{A}/oidc/{}/step-up", p.id);
     let browser = format!("{BROWSER}; {original}");
     let csrf = secret(&original).csrf();
     let input = json!({"returnTarget":"home"});
@@ -681,7 +681,7 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
     let response = callback(
         &mock_app,
         &format!(
-            "/api/v2/oidc/callback?state={state}&code=bob&iss={}",
+            "/api/v1/identity/oidc/callback?state={state}&code=bob&iss={}",
             p.settings.issuer().as_str()
         ),
         BROWSER,

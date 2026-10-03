@@ -34,4 +34,4 @@ RSS 通过同一仓库 URL 与固定完整 Git commit 消费，提交独立 Carg
 
 ## 管理与协议边界
 
-日常管理只接受组件签发的 AuthenticatedSession，事务内复核后调用必选宿主 ManagementPolicy。AuthenticationCandidate 与底层会话签发私有。identity-admin 仅使用 Maintenance initialize/recover_local_password。唯一 OIDC callback 是 `/api/v2/oidc/callback`，不新增兼容入口。
+日常管理只接受组件签发的 AuthenticatedSession，事务内复核后调用必选宿主 ManagementPolicy。AuthenticationCandidate 与底层会话签发私有。identity-admin 仅使用 Maintenance initialize/recover_local_password。唯一 OIDC callback 是 `/api/v1/identity/oidc/callback`，不新增兼容入口。

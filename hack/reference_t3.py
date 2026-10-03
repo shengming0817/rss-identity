@@ -908,7 +908,7 @@ class Run:
                     "publicClient": False,
                     "standardFlowEnabled": True,
                     "directAccessGrantsEnabled": False,
-                    "redirectUris": [ORIGIN + "/api/v2/oidc/callback"],
+                    "redirectUris": [ORIGIN + "/api/v1/identity/oidc/callback"],
                     "attributes": {"pkce.code.challenge.method": "S256"},
                 }
             ],
@@ -1486,7 +1486,7 @@ class Run:
 
         try:
             urllib.request.urlopen(
-                ORIGIN + "/api/identity-host/v1/config.json",
+                ORIGIN + "/api/v1/identity-host/config.json",
                 context=ssl.create_default_context(cafile=str(old_public_ca)),
                 timeout=10,
             )

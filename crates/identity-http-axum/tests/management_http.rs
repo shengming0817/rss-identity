@@ -66,7 +66,7 @@ async fn login_as(app: &Router, name: &str, pw: &str) -> anyhow::Result<(String,
         .clone()
         .oneshot(req(
             "POST",
-            &format!("/api/v2/tenants/{A}/login"),
+            &format!("/api/v1/identity/tenants/{A}/login"),
             "",
             "",
             json!({"login":name,"password":pw}),
@@ -91,7 +91,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     f.policy.protect(f.key);
     let (app, _, _) = app(&f);
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
-    let base = format!("/api/v2/tenants/{A}");
+    let base = format!("/api/v1/identity/tenants/{A}");
     let security = app
         .clone()
         .oneshot(req(
@@ -127,7 +127,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
         .clone()
         .oneshot(req(
             "GET",
-            &format!("/api/v2/tenants/{B}/session/security"),
+            &format!("/api/v1/identity/tenants/{B}/session/security"),
             &cookie,
             "",
             json!(null),
@@ -246,7 +246,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
         ))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
-    let foreign = format!("/api/v2/tenants/{B}/accounts");
+    let foreign = format!("/api/v1/identity/tenants/{B}/accounts");
     assert_eq!(
         app.clone()
             .oneshot(req("GET", &foreign, &cookie, "", json!(null)))
@@ -397,7 +397,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     f.bootstrap().await?;
     let (app, _, upstream) = app(&f);
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
-    let base = format!("/api/v2/tenants/{A}");
+    let base = format!("/api/v1/identity/tenants/{A}");
     let r = app
         .clone()
         .oneshot(req(
@@ -556,7 +556,20 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let (app, s, upstream) = app(&f);
-    let oversized = format!("/api/v2/oidc/callback?state={}", "a".repeat(8192));
+    for path in [
+        "/api/v2/oidc/callback".to_owned(),
+        "/oidc/callback".to_owned(),
+        format!("/api/v2/tenants/{A}/providers"),
+        format!("/api/v2/tenants/{A}/accounts"),
+    ] {
+        let r = app
+            .clone()
+            .oneshot(req("GET", &path, "", "", json!(null)))
+            .await?;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+    let prefix = "/api/v1/identity/oidc/callback?state=";
+    let oversized = format!("{prefix}{}", "a".repeat(8193 - prefix.len()));
     let r = app
         .clone()
         .oneshot(req("GET", &oversized, "", "", json!(null)))
@@ -565,7 +578,7 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
     assert_eq!(r.headers()["location"], "/auth/error?reason=failed");
     let p = federation_support::enabled(&f, &s).await?;
     let state = federation_support::begin(&f, &s, &p).await?;
-    let mut url = url::Url::parse(&format!("{ORIGIN}/api/v2/oidc/callback"))?;
+    let mut url = url::Url::parse(&format!("{ORIGIN}/api/v1/identity/oidc/callback"))?;
     url.query_pairs_mut()
         .append_pair("state", &state)
         .append_pair("error", "access_denied")
@@ -682,7 +695,7 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
             .clone()
             .oneshot(req(
                 "POST",
-                &format!("/api/v2/tenants/{A}/providers/{}/test", p.id),
+                &format!("/api/v1/identity/tenants/{A}/providers/{}/test", p.id),
                 &cookie,
                 &csrf,
                 json!({}),
@@ -722,7 +735,7 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
     sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2,decode(repeat('00',32),'hex'),1 FROM generate_series(1,99)")
         .bind(A).bind(&settings).execute(&f.owner).await?;
     let settings = json!({"settings":settings_wire(&federation_support::settings().input()),"clientSecret":"fixture-secret"});
-    let path = format!("/api/v2/tenants/{A}/providers");
+    let path = format!("/api/v1/identity/tenants/{A}/providers");
     let (first, second) = tokio::join!(
         app.clone()
             .oneshot(req("POST", &path, &cookie, &csrf, settings.clone())),
@@ -774,7 +787,7 @@ async fn management_rejects_password_for_federated_only_account() -> anyhow::Res
         .clone()
         .oneshot(req(
             "GET",
-            &format!("/api/v2/tenants/{A}/session/security"),
+            &format!("/api/v1/identity/tenants/{A}/session/security"),
             &format!("__Host-identity-session={}", issued.secret().expose()),
             "",
             json!(null),
@@ -791,7 +804,7 @@ async fn management_rejects_password_for_federated_only_account() -> anyhow::Res
         .oneshot(req(
             "POST",
             &format!(
-                "/api/v2/tenants/{A}/accounts/{}/password",
+                "/api/v1/identity/tenants/{A}/accounts/{}/password",
                 issued.identity().principal_id.as_uuid()
             ),
             &cookie,

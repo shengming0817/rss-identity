@@ -28,33 +28,33 @@ pub fn router(authority: Authority, config: HttpConfig) -> Result<Router, Author
     authority.require_runtime()?;
     let management = management::management_router(authority.clone(), config.clone())?;
     let state = AppState { authority, config };
-    Ok(Router::new()
-        .route("/api/v2/tenants/{tenant}/login", post(handlers::login))
-        .route(
-            "/api/v2/tenants/{tenant}/session/reauthenticate",
-            post(handlers::reauthenticate),
-        )
-        .route("/api/v2/tenants/{tenant}/session", get(handlers::current))
-        .route(
-            "/api/v2/tenants/{tenant}/session/refresh",
-            post(handlers::refresh),
-        )
-        .route(
-            "/api/v2/tenants/{tenant}/session/logout",
-            post(handlers::logout),
-        )
-        .route(
-            "/api/v2/tenants/{tenant}/sessions/logout-all",
-            post(handlers::logout_all),
-        )
-        .route("/api/v2/tenants/{tenant}/sessions", get(handlers::list))
-        .layer(axum::extract::DefaultBodyLimit::max(4096))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            boundary::request_boundary,
-        ))
-        .with_state(state)
-        .merge(management))
+    Ok(mount(
+        Router::new()
+            .route("/tenants/{tenant}/login", post(handlers::login))
+            .route(
+                "/tenants/{tenant}/session/reauthenticate",
+                post(handlers::reauthenticate),
+            )
+            .route("/tenants/{tenant}/session", get(handlers::current))
+            .route("/tenants/{tenant}/session/refresh", post(handlers::refresh))
+            .route("/tenants/{tenant}/session/logout", post(handlers::logout))
+            .route(
+                "/tenants/{tenant}/sessions/logout-all",
+                post(handlers::logout_all),
+            )
+            .route("/tenants/{tenant}/sessions", get(handlers::list))
+            .layer(axum::extract::DefaultBodyLimit::max(4096))
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                boundary::request_boundary,
+            ))
+            .with_state(state)
+            .merge(management),
+    ))
+}
+
+fn mount(routes: Router) -> Router {
+    Router::new().nest("/api/v1/identity", routes)
 }
 #[cfg(test)]
 mod tests {

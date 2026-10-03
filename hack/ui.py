@@ -22,7 +22,7 @@ class Gateway(http.server.SimpleHTTPRequestHandler):
         self.send_header('Content-Security-Policy',"default-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         super().end_headers()
     def do_GET(self):
-        if self.path == '/api/identity-host/v1/config.json':
+        if self.path == '/api/v1/identity-host/config.json':
             data=json.dumps({'canonicalOrigin':self.server.origin,'oidcEnabled':True}).encode()
             self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
         if self.path.startswith('/api/'):
