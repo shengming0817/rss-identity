@@ -2,6 +2,8 @@
 
 `rss-identity-http-axum` 提供可挂载 Router。宿主提供 canonical HTTPS origin、TLS 和可信代理/连接来源；不能直接信任浏览器转发头。仅 `/api/v1/identity`，旧中央/internal/platform/CLI、HTTP V2 及历史 V1 路由不存在。应用 JSON 字段使用 camelCase，旧 snake_case 字段拒绝；OIDC callback 标准参数 `error_description` / `error_uri` / `session_state` 保留上游协议拼写。DTO 留在 HTTP adapter 内，浏览器响应不能作为宿主 Rust 认证证明。
 
+`router` 与 `federated_router` 保持现有公开签名，各自将相对路由挂载到固定 `/api/v1/identity`，宿主直接 merge；不得再次添加该前缀。请求边界通过 OriginalUri 检查完整路径及 8192 字节 URI 上限，callback 的 HEAD 返回 405。参考宿主资源独立使用 `/api/v1/identity-host/...`。
+
 ## 本地会话
 
 以下路径以 `/api/v1/identity/tenants/{tenant}` 为前缀。tenant、principal、session 标识为非 nil UUID。

@@ -177,8 +177,19 @@ http {
                 )
                 rows.append(json.loads(body))
             verify_rows(rows, source)
+            for path in [
+                "/api/v2/probe",
+                "/api/v2/oidc/callback",
+                "/api/v1/tenants/00000000-0000-0000-0000-000000000001/session",
+                "/api/identity-host/v1/config.json",
+                "/api/identity-host/v1/tenants/00000000-0000-0000-0000-000000000001/mfa-example",
+            ]:
+                client.request("GET", path, headers={"Host": "identity.example.test"})
+                response = client.getresponse()
+                response.read()
+                deploy.require(response.status == 404, f"retired route reachable: {path}")
             print(
-                "gateway T2: 64 requests across both routes reuse one upstream connection; headers isolated"
+                "gateway T2: 64 requests across both routes reuse one upstream connection; headers isolated; retired routes return 404"
             )
     finally:
         failed = sys.exception() is not None

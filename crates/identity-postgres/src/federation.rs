@@ -647,6 +647,31 @@ impl FederationConfig {
 mod contract_tests {
     use super::*;
     #[test]
+    fn callback_configuration_requires_fixed_v1_identity_namespace() {
+        let mut config = FederationConfig {
+            callback: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
+            credential_keys: Arc::new(
+                CredentialKeys::new("fixture".into(), vec![("fixture".into(), [8; 32])]).unwrap(),
+            ),
+            targets: BTreeMap::new(),
+        };
+        assert!(config.validate().is_ok());
+        for callback in [
+            "https://identity.example.test/api/v2/oidc/callback",
+            "https://identity.example.test/api/v1/oidc/callback",
+            "https://identity.example.test/oidc/callback",
+            "https://identity.example.test/api/v1/identity/oidc/callback?state=secret",
+            "https://identity.example.test/api/v1/identity/oidc/callback#fragment",
+            "http://identity.example.test/api/v1/identity/oidc/callback",
+        ] {
+            config.callback = callback.into();
+            assert!(
+                config.validate().is_err(),
+                "accepted invalid callback: {callback}"
+            );
+        }
+    }
+    #[test]
     fn action_vocabulary_and_payload_match_schema() {
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("federation-security-event-v2.json")).unwrap();

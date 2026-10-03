@@ -556,7 +556,20 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let (app, s, upstream) = app(&f);
-    let oversized = format!("/api/v1/identity/oidc/callback?state={}", "a".repeat(8192));
+    for path in [
+        "/api/v2/oidc/callback".to_owned(),
+        "/oidc/callback".to_owned(),
+        format!("/api/v2/tenants/{A}/providers"),
+        format!("/api/v2/tenants/{A}/accounts"),
+    ] {
+        let r = app
+            .clone()
+            .oneshot(req("GET", &path, "", "", json!(null)))
+            .await?;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+    let prefix = "/api/v1/identity/oidc/callback?state=";
+    let oversized = format!("{prefix}{}", "a".repeat(8193 - prefix.len()));
     let r = app
         .clone()
         .oneshot(req("GET", &oversized, "", "", json!(null)))

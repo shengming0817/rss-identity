@@ -911,6 +911,10 @@ async fn session_http_v1_reauthentication_is_bound_and_has_no_legacy_role_surfac
     assert!(first["identity"].get("administrator").is_none());
     for path in [
         format!("/api/v1/tenants/{A}/session"),
+        format!("/api/v2/tenants/{A}/session"),
+        format!("/api/v2/tenants/{A}/sessions"),
+        format!("/api/v2/tenants/{A}/accounts"),
+        format!("/tenants/{A}/session"),
         "/auth/callback".into(),
         "/api/v1/identity/oidc/callback".into(),
     ] {
@@ -919,6 +923,16 @@ async fn session_http_v1_reauthentication_is_bound_and_has_no_legacy_role_surfac
             .oneshot(Request::builder().uri(path).body(Body::empty())?)
             .await?;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    // The public prefix counts toward the URI budget, even inside a nested Router.
+    let prefix = format!("/api/v1/identity/tenants/{A}/session?padding=");
+    for (length, expected) in [(8192, StatusCode::OK), (8193, StatusCode::BAD_REQUEST)] {
+        let path = format!("{prefix}{}", "a".repeat(length - prefix.len()));
+        let mut req = request("GET", "session", Some(&cookie), None, json!(null));
+        *req.uri_mut() = path.parse()?;
+        let response = app.clone().oneshot(req).await?;
+        assert_eq!(response.status(), expected);
+        assert!(!response.headers().contains_key("set-cookie"));
     }
     let response = app
         .clone()
