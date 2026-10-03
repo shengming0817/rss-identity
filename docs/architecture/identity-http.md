@@ -1,10 +1,10 @@
-# Instance-local HTTP v2
+# Instance-local HTTP v1
 
-`rss-identity-http-axum` 提供可挂载 Router。宿主提供 canonical HTTPS origin、TLS 和可信代理/连接来源；不能直接信任浏览器转发头。仅 `/api/v2`，旧中央/internal/platform/CLI/v1 路由不存在。应用 JSON 字段使用 camelCase，旧 snake_case 字段拒绝；OIDC callback 标准参数 `error_description` / `error_uri` / `session_state` 保留上游协议拼写。DTO 留在 HTTP adapter 内，浏览器响应不能作为宿主 Rust 认证证明。
+`rss-identity-http-axum` 提供可挂载 Router。宿主提供 canonical HTTPS origin、TLS 和可信代理/连接来源；不能直接信任浏览器转发头。仅 `/api/v1/identity`，旧中央/internal/platform/CLI、HTTP V2 及历史 V1 路由不存在。应用 JSON 字段使用 camelCase，旧 snake_case 字段拒绝；OIDC callback 标准参数 `error_description` / `error_uri` / `session_state` 保留上游协议拼写。DTO 留在 HTTP adapter 内，浏览器响应不能作为宿主 Rust 认证证明。
 
 ## 本地会话
 
-以下路径以 `/api/v2/tenants/{tenant}` 为前缀。tenant、principal、session 标识为非 nil UUID。
+以下路径以 `/api/v1/identity/tenants/{tenant}` 为前缀。tenant、principal、session 标识为非 nil UUID。
 
 | 方法 / 路径 | 请求 / 行为 |
 | --- | --- |
@@ -28,7 +28,7 @@ bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpO
 
 仅合并 `federated_router` 后可用。同一 tenant 前缀：GET `/login-options`；POST `/oidc/{provider}/login`（`{returnTarget}`）、`/link`（重新认证与受控目标）、`/step-up`（受控目标）；GET `/session/security`。后者提供 `authentication:{authTime,acr,amr}` 和 `eligibleStepUpProviders:[{providerId,label}]`；普通 OIDC 未提供认证时间时 `authTime:null`，不回填 iat。它只提供认证事实，不返回管理角色。
 
-唯一回调 GET `/api/v2/oidc/callback`：state/code/iss 与独立 HttpOnly browser cookie 绑定；拒绝重放、过期、不匹配和不确定结算，不释放 cookie。returnTarget 是宿主白名单键，不接受任意 URL；不再接受中央 clientId。
+唯一回调 GET `/api/v1/identity/oidc/callback`：state/code/iss 与独立 HttpOnly browser cookie 绑定；拒绝重放、过期、不匹配和不确定结算，不释放 cookie。returnTarget 是宿主白名单键，不接受任意 URL；不再接受中央 clientId。
 
 IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/providers/{provider}/enabled`、`/test`。写入使用 expectedVersion 乐观并发；创建初始配置不需要该字段。凭据只写，加密存储，不返回明文。provider 管理字段由 [provider 管理适配器](../../crates/identity-http-axum/src/provider_management.rs) 持有。部门映射须显式启用并给出有界期限，省略/null 表示禁用；旧标量字段拒绝。更新映射和期限经过同一并发版本与凭据更新流程，撤销旧会话及在途认证。完整快照只来自签名 ID Token，浏览器响应不成为部门授权证明。
 

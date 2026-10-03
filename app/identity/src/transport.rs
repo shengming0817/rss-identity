@@ -104,7 +104,7 @@ mod tests {
         let mut h = axum::http::HeaderMap::new();
         h.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
         assert_eq!(
-            i.client(i.public, "/api/v2/login", &h),
+            i.client(i.public, "/api/v1/identity/login", &h),
             Some("203.0.113.5".parse().unwrap())
         );
         assert!(i.client("10.0.0.4".parse().unwrap(), "/api", &h).is_none());

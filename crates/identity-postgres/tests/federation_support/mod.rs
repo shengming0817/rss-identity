@@ -180,7 +180,7 @@ pub fn service(f: &Fixture, oidc: Arc<dyn UpstreamOidc>) -> Federation {
         oidc,
         StateSigner::new([7; 32], "https://identity.example.test").unwrap(),
         FederationConfig {
-            callback: "https://identity.example.test/api/v2/oidc/callback".into(),
+            callback: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
             credential_keys: credential_keys(),
             targets: BTreeMap::from([("home".into(), RETURN.into())]),
         },
@@ -192,7 +192,7 @@ pub fn settings() -> ProviderSettings {
         issuer: "https://idp.example.test".into(),
         client_id: "identity".into(),
 
-        redirect_uri: "https://identity.example.test/api/v2/oidc/callback".into(),
+        redirect_uri: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
             department_snapshot: None,

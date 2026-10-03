@@ -631,7 +631,7 @@ impl FederationConfig {
             url::Url::parse(&self.callback).map_err(|_| FederationError::Configuration)?;
         if callback_url.scheme() != "https"
             || callback_url.host_str().is_none()
-            || callback_url.path() != "/api/v2/oidc/callback"
+            || callback_url.path() != "/api/v1/identity/oidc/callback"
             || callback_url.query().is_some()
             || callback_url.fragment().is_some()
             || !callback_url.username().is_empty()

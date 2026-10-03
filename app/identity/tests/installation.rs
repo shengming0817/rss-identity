@@ -190,7 +190,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         upstream.clone(),
         rss_identity_core::federation::StateSigner::new([7; 32], &config.public_origin)?,
         FederationConfig {
-            callback: format!("{}/api/v2/oidc/callback", config.public_origin),
+            callback: format!("{}/api/v1/identity/oidc/callback", config.public_origin),
             credential_keys: support::credential_keys(),
             targets: std::collections::BTreeMap::from([(
                 "resume".into(),
@@ -226,7 +226,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 .oneshot(
                     axum::http::Request::builder()
                         .uri(format!(
-                            "/api/identity-host/v1/tenants/{}/context",
+                            "/api/v1/identity-host/tenants/{}/context",
                             key.tenant
                         ))
                         .header(
@@ -557,7 +557,10 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     })
     .await?;
     let response = client
-        .post(format!("{url}/api/v2/tenants/{}/login", keys[1].tenant))
+        .post(format!(
+            "{url}/api/v1/identity/tenants/{}/login",
+            keys[1].tenant
+        ))
         .header("origin", value["publicOrigin"].as_str().unwrap())
         .header("x-identity-request", "1")
         .header("x-forwarded-for", "203.0.113.7")
@@ -577,7 +580,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         keys[1].principal.as_uuid().to_string()
     );
     let resource = format!(
-        "{url}/api/identity-host/v1/tenants/{}/context",
+        "{url}/api/v1/identity-host/tenants/{}/context",
         keys[1].tenant
     );
     let reply = client
@@ -596,7 +599,10 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     assert_eq!(context["navigation"]["manageAccounts"], true);
     assert_eq!(context["navigation"]["manageProviders"], true);
     let member = client
-        .post(format!("{url}/api/v2/tenants/{}/login", keys[1].tenant))
+        .post(format!(
+            "{url}/api/v1/identity/tenants/{}/login",
+            keys[1].tenant
+        ))
         .header("origin", value["publicOrigin"].as_str().unwrap())
         .header("x-identity-request", "1")
         .header("x-forwarded-for", "203.0.113.8")
@@ -642,7 +648,10 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .execute(&mut *barrier)
         .await?;
     let fresh = client
-        .post(format!("{url}/api/v2/tenants/{}/login", keys[1].tenant))
+        .post(format!(
+            "{url}/api/v1/identity/tenants/{}/login",
+            keys[1].tenant
+        ))
         .header("origin", value["publicOrigin"].as_str().unwrap())
         .header("x-identity-request", "1")
         .header("x-forwarded-for", "203.0.113.9")
@@ -724,7 +733,7 @@ async fn assert_mfa_response(
 ) -> anyhow::Result<()> {
     use tower::ServiceExt;
     let mut request = axum::http::Request::builder().uri(format!(
-        "/api/identity-host/v1/tenants/{tenant}/mfa-example"
+        "/api/v1/identity-host/tenants/{tenant}/mfa-example"
     ));
     if let Some(cookie) = cookie {
         request = request.header("cookie", format!("__Host-identity-session={cookie}"));

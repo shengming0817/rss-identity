@@ -326,7 +326,7 @@ async fn production_dns_denial_prevents_connecting_to_loopback() {
             listener.local_addr().unwrap().port()
         ),
         client_id: "fixture".into(),
-        redirect_uri: "https://identity.example.test/api/v2/oidc/callback".into(),
+        redirect_uri: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
             department_snapshot: None,

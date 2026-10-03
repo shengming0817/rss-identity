@@ -368,7 +368,7 @@ mod tests {
     }
     #[test]
     fn provider_department_is_atomic_camel_case_and_optional() {
-        let base = json!({"issuer":"https://idp.test","clientId":"client","redirectUri":"https://host.test/api/v2/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":null},"jit":false});
+        let base = json!({"issuer":"https://idp.test","clientId":"client","redirectUri":"https://host.test/api/v1/identity/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":null},"jit":false});
         let settings = serde_json::from_value::<ProviderSettings>(base.clone())
             .unwrap()
             .into_domain()
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn provider_wire_owns_fields_and_excludes_internal_assurance() {
-        let input = json!({"issuer":"https://idp.example.test","clientId":"host","redirectUri":"https://host.example.test/api/v2/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":"groups","departmentSnapshot":null},"jit":true});
+        let input = json!({"issuer":"https://idp.example.test","clientId":"host","redirectUri":"https://host.example.test/api/v1/identity/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":"groups","departmentSnapshot":null},"jit":true});
         let settings = serde_json::from_value::<ProviderSettings>(input.clone())
             .unwrap()
             .into_domain()

@@ -157,7 +157,7 @@ fn federation_inputs(config: &RuntimeConfig) -> Result<Option<FederationInputs>,
     let signer = StateSigner::new(*key, &config.instance()?.to_string())
         .map_err(|_| AppError::Configuration)?;
     let options = FederationConfig {
-        callback: format!("{}/api/v2/oidc/callback", config.public_origin),
+        callback: format!("{}/api/v1/identity/oidc/callback", config.public_origin),
         credential_keys: c.credential_keyring.load()?,
         targets: c.return_targets.clone(),
     };

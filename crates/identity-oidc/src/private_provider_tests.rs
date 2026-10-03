@@ -43,7 +43,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     let config: ProviderSettings = ProviderSettingsInput {
         issuer: issuer.clone(),
         client_id: "identity-test".into(),
-        redirect_uri: "https://identity.example.test/api/v2/oidc/callback".into(),
+        redirect_uri: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
             email: None,

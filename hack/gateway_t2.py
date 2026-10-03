@@ -152,8 +152,8 @@ http {
                     time.sleep(0.1)
             rows = []
             paths = [
-                "/api/v2/probe",
-                "/api/identity-host/v1/tenants/00000000-0000-0000-0000-000000000001/mfa-example",
+                "/api/v1/identity/probe",
+                "/api/v1/identity-host/tenants/00000000-0000-0000-0000-000000000001/mfa-example",
             ]
             for i in range(64):
                 client.request(

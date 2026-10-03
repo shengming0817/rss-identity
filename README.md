@@ -6,7 +6,7 @@ core、postgres、可选 oidc 和 http-axum 四个能力包由宿主显式装配
 
 - [嵌入指南](docs/guides/embedding.md)：宿主责任、本地与 OIDC 装配。
 - [产品需求](docs/product/rss-identity-prd.md)。
-- [开发与验证](docs/guides/development.md)、[HTTP 接入](docs/architecture/identity-wire-v2.md)。
+- [开发与验证](docs/guides/development.md)、[HTTP 接入](docs/architecture/identity-http.md)。
 - [参考部署](docs/deployment/README.md)：app/identity 的构建、安装、维护与恢复。
 - [文档导航](docs/README.md)、[协作规则](AGENTS.md)、[来源与恢复](reference/README.md)。
 

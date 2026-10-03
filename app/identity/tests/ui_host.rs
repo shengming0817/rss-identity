@@ -28,7 +28,7 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
         federation_support::ScriptedOidc::new(),
         rss_identity_core::federation::StateSigner::new([7; 32], &origin)?,
         FederationConfig {
-            callback: format!("{origin}/api/v2/oidc/callback"),
+            callback: format!("{origin}/api/v1/identity/oidc/callback"),
             credential_keys: credential_keys(),
             targets: std::collections::BTreeMap::from([(
                 "resume".into(),

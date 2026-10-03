@@ -51,7 +51,7 @@ let routes = rss_identity_http_axum::router(authority, http.clone())?
     .merge(rss_identity_http_axum::federated_router(federation, http)?);
 ```
 
-OIDC 使用 Code/PKCE、state/nonce 和浏览器绑定，登录事务原子单次消费；邮箱不是自动关联依据。显式关联与 step-up 绑定当前主体，provider 配置变化使旧流程失效。唯一 callback 是宿主 origin 下的 `/api/v2/oidc/callback`，回跳只接受宿主白名单键。
+OIDC 使用 Code/PKCE、state/nonce 和浏览器绑定，登录事务原子单次消费；邮箱不是自动关联依据。显式关联与 step-up 绑定当前主体，provider 配置变化使旧流程失效。唯一 callback 是宿主 origin 下的 `/api/v1/identity/oidc/callback`，回跳只接受宿主白名单键。
 
 宿主持有 TLS、listener、可信代理、日志脱敏和有界关闭，必须注入 `ClientAddress`；仅有 ConnectInfo 不会自动转换，缺失来源时登录拒绝。直连中间件可从真实 peer 注入：
 
@@ -68,7 +68,7 @@ async fn client_address(
 
 直连 listener 还须通过 `into_make_service_with_connect_info::<SocketAddr>()` 提供 peer。RSS listener 的参考宿主使用 AcceptedConnectionInfo；反代须先验证真实 peer 是可信网关，再读取它覆盖的来源头。不能直接信任浏览器 forwarded headers。
 
-不要用通用 timeout 丢弃数据库写 future。组件/RSS 持有有界事务结算；CommitUnknown、RollbackFailed 等内部结果保留在 HttpFailure 中，不能据 503 推断可安全重试。对外错误、cookie 与 CSRF 规则见 [HTTP 接入](../architecture/identity-wire-v2.md)。安全事件 schema 由 postgres 持有，不含凭据或上游 token。
+不要用通用 timeout 丢弃数据库写 future。组件/RSS 持有有界事务结算；CommitUnknown、RollbackFailed 等内部结果保留在 HttpFailure 中，不能据 503 推断可安全重试。对外错误、cookie 与 CSRF 规则见 [HTTP 接入](../architecture/identity-http.md)。安全事件 schema 由 postgres 持有，不含凭据或上游 token。
 
 密钥重加密复用组件的租户事务接口与既有 storage fence，宿主最终提交或回滚；维护角色不因此扩权。参考部署的操作顺序见[恢复与轮换](../deployment/recovery.md)。
 

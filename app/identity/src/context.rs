@@ -29,11 +29,11 @@ pub fn router(
 ) -> Result<Router, AppError> {
     Ok(Router::new()
         .route(
-            "/api/identity-host/v1/tenants/{tenant}/context",
+            "/api/v1/identity-host/tenants/{tenant}/context",
             get(context),
         )
         .route(
-            "/api/identity-host/v1/tenants/{tenant}/mfa-example",
+            "/api/v1/identity-host/tenants/{tenant}/mfa-example",
             get(mfa_example),
         )
         .with_state(Context {
