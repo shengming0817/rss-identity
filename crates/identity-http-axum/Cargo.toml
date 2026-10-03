@@ -13,7 +13,7 @@ rss-identity-core.workspace = true
 rss-identity-postgres = { path = "../identity-postgres" }
 rss-request-context.workspace = true
 rss-transactional-messaging.workspace = true
-axum = { version = "=0.8.9", default-features = false, features = ["json", "query", "tokio", "http1"] }
+axum = { version = "=0.8.9", default-features = false, features = ["json", "query", "tokio", "http1", "original-uri"] }
 serde.workspace = true
 serde_json.workspace = true
 url = "2.5"

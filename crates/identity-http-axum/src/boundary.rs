@@ -1,7 +1,7 @@
 use crate::AppState;
 use axum::{
     Json,
-    extract::{Request, State},
+    extract::{OriginalUri, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -214,14 +214,15 @@ pub(crate) fn clear_cookie() -> Response {
 }
 pub(crate) async fn request_boundary(
     State(state): State<AppState>,
+    OriginalUri(original_uri): OriginalUri,
     mut request: Request,
     next: Next,
 ) -> Response {
     let callback = request.method() == axum::http::Method::GET
-        && request.uri().path() == "/api/v2/oidc/callback";
+        && original_uri.path() == "/api/v1/identity/oidc/callback";
     let budget = RequestBudget::new(state.config.timeout);
     request.extensions_mut().insert(budget);
-    let origin = if request.uri().to_string().len() > 8192 {
+    let origin = if original_uri.to_string().len() > 8192 {
         Err(BAD)
     } else if request.method().is_safe() {
         Ok(())

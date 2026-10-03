@@ -86,25 +86,22 @@ pub fn management_router(
     };
     Ok(Router::new()
         .route(
-            "/api/v2/tenants/{tenant}/accounts",
+            "/tenants/{tenant}/accounts",
             get(accounts).post(create_account),
         )
         .route(
-            "/api/v2/tenants/{tenant}/accounts/{principal}/enabled",
+            "/tenants/{tenant}/accounts/{principal}/enabled",
             post(enabled),
         )
         .route(
-            "/api/v2/tenants/{tenant}/accounts/{principal}/membership",
+            "/tenants/{tenant}/accounts/{principal}/membership",
             post(membership),
         )
         .route(
-            "/api/v2/tenants/{tenant}/accounts/{principal}/password",
+            "/tenants/{tenant}/accounts/{principal}/password",
             post(reset_password),
         )
-        .route(
-            "/api/v2/tenants/{tenant}/account/password",
-            post(own_password),
-        )
+        .route("/tenants/{tenant}/account/password", post(own_password))
         .layer(axum::extract::DefaultBodyLimit::max(32768))
         .route_layer(middleware::from_fn_with_state(local, request_boundary))
         .with_state(Management { authority }))

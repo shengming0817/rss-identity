@@ -28,21 +28,21 @@ pub(crate) fn router(
     let authority = federation.authority();
     authority.require_runtime()?;
     Ok(Router::new()
-        .route("/api/v2/tenants/{tenant}/login-options", get(options))
+        .route("/tenants/{tenant}/login-options", get(options))
         .route(
-            "/api/v2/tenants/{tenant}/providers",
+            "/tenants/{tenant}/providers",
             get(providers).post(create_provider),
         )
         .route(
-            "/api/v2/tenants/{tenant}/providers/{provider}",
+            "/tenants/{tenant}/providers/{provider}",
             put(update_provider),
         )
         .route(
-            "/api/v2/tenants/{tenant}/providers/{provider}/enabled",
+            "/tenants/{tenant}/providers/{provider}/enabled",
             post(provider_enabled),
         )
         .route(
-            "/api/v2/tenants/{tenant}/providers/{provider}/test",
+            "/tenants/{tenant}/providers/{provider}/test",
             post(test_provider),
         )
         .layer(axum::extract::DefaultBodyLimit::max(32768))
