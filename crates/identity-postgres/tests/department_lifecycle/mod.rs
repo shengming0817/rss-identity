@@ -88,6 +88,19 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
         assert_eq!(department.issuer(), provider.settings.issuer().as_str());
         assert_eq!(department.provider_config_version(), provider.version);
         assert_eq!(department.expires_at() - department.observed_at(), 2);
+        let reference = actor.reference()?;
+        let checked = f
+            .store
+            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .await?;
+        let VerifiedDepartmentSnapshot::Available(checked_department) =
+            checked.department_snapshot()?
+        else {
+            anyhow::bail!("reference department unavailable");
+        };
+        assert_eq!(checked_department.snapshot_id(), department.snapshot_id());
+        assert_eq!(checked_department.expires_at(), department.expires_at());
+        assert!(matches!(checked.groups()?, VerifiedGroups::Available(_)));
         let before = facts(&f, &session).await?;
         let managed = Authority::connect_runtime(
             f.runtime.clone(),
@@ -133,6 +146,13 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
             VerifiedDepartmentSnapshot::Expired
         ));
         assert!(actor.assurance().is_ok());
+        assert!(matches!(
+            f.store
+                .recheck_session_reference(f.key.tenant, &reference, deadline())
+                .await?
+                .department_snapshot()?,
+            VerifiedDepartmentSnapshot::Expired
+        ));
         assert!(matches!(actor.groups()?, VerifiedGroups::Available(_)));
         assert!(
             managed
@@ -220,6 +240,11 @@ async fn department_configuration_revokes_sessions_and_pending_attempts() -> any
     let federation = service(&f, ScriptedOidc::new());
     let provider = enabled_department(&f, &federation, 60).await?;
     let old = login_department(&f, &federation, &provider).await?;
+    let reference = f
+        .store
+        .inspect_session(f.key.tenant, secret(&old), deadline())
+        .await?
+        .reference()?;
     let pending = begin(&f, &federation, &provider).await?;
     let mut settings = provider.settings.input();
     settings.claims.department_snapshot = Some(DepartmentSnapshotClaim::new(
@@ -242,6 +267,12 @@ async fn department_configuration_revokes_sessions_and_pending_attempts() -> any
             && next.credential_version > provider.credential_version
     );
     assert!(finish(&federation, pending, "alice").await.is_err());
+    assert!(
+        f.store
+            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .await
+            .is_err()
+    );
     assert!(
         f.store
             .inspect_session(f.key.tenant, secret(&old), deadline())

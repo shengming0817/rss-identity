@@ -14,6 +14,7 @@ mod management;
 mod operations;
 mod runtime;
 mod schema;
+mod session_reference;
 mod session_storage;
 mod sessions;
 mod storage;
@@ -48,6 +49,7 @@ pub use schema::{
     MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_SIGNATURE_SQL, SCHEMA_VERSION, grant_profile, install,
     verify_profile,
 };
+pub use session_reference::{RevalidatedSession, SessionReference};
 pub use sessions::{
     AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
 };

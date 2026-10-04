@@ -141,7 +141,7 @@ enum SessionAction {
     AllRevoked,
 }
 // Both authentication and rotation must account for every database wait before success.
-fn checked_expiry(
+pub(crate) fn checked_expiry(
     loaded: &db::Loaded,
     budget: Instant,
 ) -> Result<Instant, rss_transactional_messaging_postgres::PgError> {

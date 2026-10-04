@@ -233,6 +233,7 @@ async fn session_account_changes_fence_racing_credentials() -> anyhow::Result<()
             )
             .await?;
         let issued = f.store.create_session(c, None, deadline()).await?;
+        let reference = proof(&f, &issued).await?.reference()?;
         let pending = f
             .store
             .verify_password(
@@ -250,6 +251,12 @@ async fn session_account_changes_fence_racing_credentials() -> anyhow::Result<()
             support::apply_change(&f.store, actor, member.key(), change, deadline())
         );
         change?;
+        assert!(
+            f.store
+                .recheck_session_reference(f.key.tenant, &reference, deadline())
+                .await
+                .is_err()
+        );
         assert!(
             f.store
                 .authenticate_session(f.key.tenant, secret(&issued), deadline())
@@ -632,6 +639,82 @@ async fn session_events_match_committed_operations() -> anyhow::Result<()> {
         .await?;
     expect_session_event(&f, "all_revoked", live.view().id, None, 2).await?;
     assert_eq!(f.events().await?, baseline + 6);
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn durable_reference_is_passive_exact_and_revocable() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let issued = issue(&f).await?;
+    let authenticated = proof(&f, &issued).await?;
+    let reference = authenticated.reference()?;
+    let document = serde_json::to_string(&reference)?;
+    assert!(!document.contains(issued.secret().expose()));
+    assert!(!document.contains("digest"));
+    let restored = serde_json::from_str::<SessionReference>(&document)?;
+    let checked = f
+        .store
+        .recheck_session_reference(f.key.tenant, &restored, deadline())
+        .await?;
+    assert_eq!(checked.instance(), f.instance);
+    assert_eq!(checked.account(), f.key);
+    assert_eq!(checked.view().id, issued.view().id);
+    assert_eq!(
+        checked.view().idle_expires_at,
+        issued.view().idle_expires_at
+    );
+    checked.check_live()?;
+    assert!(
+        f.store
+            .recheck_session_reference(TenantId::parse(B)?, &restored, deadline())
+            .await
+            .is_err()
+    );
+    for field in ["instance", "tenant", "principal", "session"] {
+        let mut altered = serde_json::to_value(&reference)?;
+        altered[field] = serde_json::json!(uuid::Uuid::new_v4());
+        let altered: SessionReference = serde_json::from_value(altered)?;
+        assert!(
+            f.store
+                .recheck_session_reference(f.key.tenant, &altered, deadline())
+                .await
+                .is_err()
+        );
+    }
+    let refreshed = f
+        .store
+        .refresh_session(f.key.tenant, secret(&issued), deadline())
+        .await?;
+    assert_eq!(
+        f.store
+            .recheck_session_reference(f.key.tenant, &restored, deadline())
+            .await?
+            .view()
+            .id,
+        refreshed.view().id
+    );
+    f.store
+        .revoke_current_session(proof(&f, &refreshed).await?, deadline())
+        .await?;
+    assert!(
+        f.store
+            .recheck_session_reference(f.key.tenant, &restored, deadline())
+            .await
+            .is_err()
+    );
+    let next = issue(&f).await?;
+    let next_ref = proof(&f, &next).await?.reference()?;
+    sqlx::query("UPDATE identity_authority.sessions SET auth_time=1,idle_expires_at=14401,absolute_expires_at=14401 WHERE session_id=$1::uuid")
+        .bind(next.view().id.to_string()).execute(&f.owner).await?;
+    assert!(
+        f.store
+            .recheck_session_reference(f.key.tenant, &next_ref, deadline())
+            .await
+            .is_err()
+    );
     f.close().await;
     Ok(())
 }
