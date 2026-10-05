@@ -46,6 +46,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
         redirect_uri: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
+            subject: rss_identity_core::entra::SubjectMapping::Oidc,
             email: None,
             groups: None,
             department_snapshot: None,
@@ -158,6 +159,6 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
         "code exchange must traverse the production resolver"
     );
     assert_eq!(claims.issuer, issuer);
-    assert!(!claims.subject.is_empty());
+    assert!(claims.subject.validate().is_ok());
     Ok(())
 }

@@ -191,7 +191,7 @@ async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()>
         "facts from an unsynchronized approval must not be displayed"
     );
     upstream.trusted_assurance.store(true, Ordering::SeqCst);
-    sqlx::query("INSERT INTO identity_authority.external_identities(tenant_id,identity_id,principal_id,provider_id,issuer,subject) SELECT tenant_id,$1,principal_id,provider_id,issuer,'second-subject' FROM identity_authority.external_identities WHERE provider_id=$2::uuid")
+    sqlx::query("INSERT INTO identity_authority.external_identities(tenant_id,identity_id,principal_id,provider_id,issuer,subject) SELECT tenant_id,$1,principal_id,provider_id,issuer,'oidc:second-subject' FROM identity_authority.external_identities WHERE provider_id=$2::uuid")
         .bind(uuid::Uuid::new_v4()).bind(p.id.to_string()).execute(&f.owner).await?;
     let snapshot = s
         .current_session_security(
@@ -1436,7 +1436,7 @@ async fn federation_concurrent_linking_keeps_one_owner() -> anyhow::Result<()> {
         .account();
     assert_ne!(winner, loser);
     let owner: uuid::Uuid = sqlx::query_scalar(
-        "SELECT principal_id FROM identity_authority.external_identities WHERE subject='shared'",
+        "SELECT principal_id FROM identity_authority.external_identities WHERE subject='oidc:shared'",
     )
     .fetch_one(&f.owner)
     .await?;
@@ -1685,7 +1685,7 @@ async fn federation_group_snapshot_storage_bounds() -> anyhow::Result<()> {
             .is_err()
     );
     let overflow: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM identity_authority.external_identities WHERE subject='size-overflow'",
+        "SELECT count(*) FROM identity_authority.external_identities WHERE subject='oidc:size-overflow'",
     )
     .fetch_one(&f.owner)
     .await?;
@@ -1774,7 +1774,7 @@ async fn federation_signed_time_skew_preserves_identity() -> anyhow::Result<()> 
         .is_err()
     );
     let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM identity_authority.external_identities WHERE subject='beyond-skew'",
+        "SELECT count(*) FROM identity_authority.external_identities WHERE subject='oidc:beyond-skew'",
     )
     .fetch_one(&f.owner)
     .await?;

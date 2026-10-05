@@ -4,6 +4,8 @@ pub mod audit;
 mod auth_facts;
 mod credentials;
 mod department;
+mod entra;
+pub use entra::{EntraAuthority, RevalidatedAccount, VerifiedExternalSubject};
 mod federation;
 mod federation_link;
 mod federation_login;

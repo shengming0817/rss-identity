@@ -58,6 +58,7 @@ fn config() -> anyhow::Result<ProviderSettings> {
         redirect_uri: CALLBACK.into(),
         scopes: vec!["openid".into(), "profile".into(), "email".into()],
         claims: ClaimMapping {
+            subject: rss_identity_core::entra::SubjectMapping::Oidc,
             department_snapshot: Some(rss_identity_core::department::DepartmentSnapshotClaim::new(
                 "organization_snapshot".into(),
                 60,

@@ -6,6 +6,7 @@ mod egress;
 #[cfg(test)]
 mod private_provider_tests;
 pub use ipnet::IpNet;
+pub mod entra;
 use openidconnect::{
     AsyncHttpClient, AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
     HttpRequest, HttpResponse, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
@@ -571,7 +572,7 @@ impl UpstreamOidc for HttpOidc {
 
             let value = UpstreamClaims {
                 issuer: c.issuer().as_str().to_owned(),
-                subject: claims.subject().as_str().to_owned(),
+                subject: mapped_subject(&c.claims().subject, claims.subject().as_str(), &all)?,
                 email,
                 email_verified: c.claims().email.as_deref() == Some("email")
                     && claims.email_verified() == Some(true),
@@ -668,3 +669,32 @@ fn mapped_department(
 
 #[cfg(test)]
 mod tests;
+
+fn mapped_subject(
+    mapping: &rss_identity_core::entra::SubjectMapping,
+    sub: &str,
+    all: &serde_json::Value,
+) -> Result<rss_identity_core::entra::ExternalSubject, FederationError> {
+    use rss_identity_core::entra::{ExternalSubject, SubjectMapping};
+    let subject = match mapping {
+        SubjectMapping::Oidc => ExternalSubject::Oidc(sub.to_owned()),
+        SubjectMapping::Entra { tenant } => {
+            let tid = all
+                .get("tid")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .ok_or(FederationError::Claims)?;
+            let user = all
+                .get("oid")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .ok_or(FederationError::Claims)?;
+            if tid != *tenant {
+                return Err(FederationError::Claims);
+            }
+            ExternalSubject::Entra { tenant: tid, user }
+        }
+    };
+    subject.validate()?;
+    Ok(subject)
+}

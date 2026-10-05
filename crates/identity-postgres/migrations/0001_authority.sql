@@ -1,7 +1,7 @@
--- Fresh schema v11 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v12 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=11));
-INSERT INTO identity_authority.schema_version VALUES(11);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=12));
+INSERT INTO identity_authority.schema_version VALUES(12);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000')
@@ -58,7 +58,7 @@ CREATE TABLE identity_authority.provider_credentials (
 CREATE TABLE identity_authority.external_identities (
  tenant_id uuid NOT NULL, identity_id uuid NOT NULL, principal_id uuid NOT NULL, provider_id uuid NOT NULL,
  issuer text NOT NULL CHECK(octet_length(issuer) BETWEEN 1 AND 2048),
- subject text NOT NULL CHECK(octet_length(subject) BETWEEN 1 AND 255),
+ subject text NOT NULL CHECK(octet_length(subject)>=6 AND octet_length(subject)<=260 AND (subject LIKE 'oidc:%' OR subject ~ '^entra:[0-9a-f-]{36}:[0-9a-f-]{36}$')),
  PRIMARY KEY(tenant_id,identity_id), UNIQUE(tenant_id,principal_id,identity_id), UNIQUE(tenant_id,provider_id,issuer,subject),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts,
  FOREIGN KEY(tenant_id,provider_id) REFERENCES identity_authority.providers

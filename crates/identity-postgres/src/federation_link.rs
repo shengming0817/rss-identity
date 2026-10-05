@@ -312,7 +312,7 @@ impl Federation {
                     let now = session_storage::now(c).await?;
                     if source_id != source.id
                         || issuer != claims.issuer
-                        || subject != claims.subject
+                        || subject != claims.subject.storage_key()
                         || claims
                             .assurance
                             .check(AuthenticationMode::Reauthenticate, attempt.created, now)

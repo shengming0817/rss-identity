@@ -41,6 +41,7 @@ fn provider(issuer: &str) -> anyhow::Result<(HttpOidc, ProviderSettings)> {
         redirect_uri: REDIRECT.into(),
         scopes: vec!["openid".into(), "profile".into()],
         claims: ClaimMapping {
+            subject: rss_identity_core::entra::SubjectMapping::Oidc,
             department_snapshot: Some(rss_identity_core::department::DepartmentSnapshotClaim::new(
                 "organization_snapshot".into(),
                 60,
@@ -97,6 +98,12 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
     let (p, c) = provider(issuer)?;
     let (url, material) = prepare(&p, &c).await?;
     assert_eq!(query(&url, "code_challenge_method")?, "S256");
+    assert_eq!(
+        query(&url, "scope")?
+            .split_ascii_whitespace()
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["openid", "profile"])
+    );
     let cb = keycloak_login(url).await?;
     assert_eq!(query(&cb, "state")?, material.state.as_str());
     let code = query(&cb, "code")?;
@@ -111,7 +118,7 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(claims.issuer, issuer);
-    assert!(!claims.subject.is_empty());
+    assert!(claims.subject.validate().is_ok());
     assert!(
         matches!(claims.department_snapshot, rss_identity_core::department::UpstreamDepartmentSnapshot::Present(ref snapshot) if snapshot.memberships()[0].as_str() == "dept-01")
     );

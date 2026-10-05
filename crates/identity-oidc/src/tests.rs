@@ -103,6 +103,7 @@ fn config(issuer: &str) -> ProviderSettings {
         redirect_uri: "http://127.0.0.1/callback".into(),
         scopes: vec!["openid".into()],
         claims: rss_identity_core::federation::ClaimMapping {
+            subject: rss_identity_core::entra::SubjectMapping::Oidc,
             department_snapshot: None,
             email: None,
             groups: None,
@@ -329,6 +330,7 @@ async fn production_dns_denial_prevents_connecting_to_loopback() {
         redirect_uri: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
+            subject: rss_identity_core::entra::SubjectMapping::Oidc,
             department_snapshot: None,
             email: None,
             groups: None,
@@ -439,5 +441,31 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
                 }
             }
         }
+    }
+}
+
+#[test]
+fn entra_browser_requires_canonical_subject_without_fallback() {
+    use rss_identity_core::entra::{ExternalSubject, SubjectMapping};
+    let tenant = uuid::Uuid::new_v4();
+    let user = uuid::Uuid::new_v4();
+    let mapping = SubjectMapping::Entra { tenant };
+    let claims = serde_json::json!({"tid":tenant,"oid":user,"email":"same@example.test"});
+    let expected = ExternalSubject::Entra { tenant, user };
+    assert_eq!(
+        super::mapped_subject(&mapping, "pairwise-one", &claims).unwrap(),
+        expected
+    );
+    assert_eq!(
+        super::mapped_subject(&mapping, "pairwise-two", &claims).unwrap(),
+        expected
+    );
+    for invalid in [
+        serde_json::json!({"tid":tenant,"email":"same@example.test"}),
+        serde_json::json!({"oid":user}),
+        serde_json::json!({"tid":uuid::Uuid::new_v4(),"oid":user}),
+        serde_json::json!({"tid":tenant,"oid":uuid::Uuid::nil()}),
+    ] {
+        assert!(super::mapped_subject(&mapping, "valid-pairwise-sub", &invalid).is_err());
     }
 }

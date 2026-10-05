@@ -55,6 +55,7 @@ impl<'de> Deserialize<'de> for ProviderId {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimMapping {
+    pub subject: crate::entra::SubjectMapping,
     pub email: Option<String>,
     pub groups: Option<String>,
     pub department_snapshot: Option<crate::department::DepartmentSnapshotClaim>,
@@ -74,6 +75,13 @@ pub struct ProviderSettingsInput {
 
 impl ProviderSettingsInput {
     fn validate(&self) -> Result<(), FederationError> {
+        if let crate::entra::SubjectMapping::Entra { tenant } = &self.claims.subject
+            && (tenant.is_nil()
+                || self.issuer != format!("https://login.microsoftonline.com/{tenant}/v2.0")
+                || !self.scopes.iter().any(|s| s == "profile"))
+        {
+            return Err(FederationError::Configuration);
+        }
         for (s, max) in [
             (&self.issuer, 2048),
             (&self.client_id, 256),
@@ -388,7 +396,7 @@ impl ProtocolMaterial {
 #[derive(Clone)]
 pub struct UpstreamClaims {
     pub issuer: String,
-    pub subject: String,
+    pub subject: crate::entra::ExternalSubject,
     pub email: Option<String>,
     pub email_verified: bool,
     pub groups: crate::groups::UpstreamGroups,
@@ -400,17 +408,15 @@ pub struct UpstreamClaims {
 
 impl UpstreamClaims {
     pub fn validate(&self) -> Result<(), FederationError> {
+        self.subject.validate()?;
         self.groups.validate()?;
         if self.issued_at <= 0 || self.expires_at <= self.issued_at {
             return Err(FederationError::Claims);
         }
-        if self.subject.is_empty()
-            || self.subject.len() > 255
-            || self.subject.chars().any(char::is_control)
-            || self
-                .email
-                .as_ref()
-                .is_some_and(|s| s.len() > 320 || s.chars().any(char::is_control))
+        if self
+            .email
+            .as_ref()
+            .is_some_and(|s| s.len() > 320 || s.chars().any(char::is_control))
         {
             return Err(FederationError::Claims);
         }

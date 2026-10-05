@@ -252,7 +252,7 @@ mod tests {
             department_snapshot:
                 rss_identity_core::department::UpstreamDepartmentSnapshot::NotConfigured,
             issuer: "https://idp.test".into(),
-            subject: "subject".into(),
+            subject: rss_identity_core::entra::ExternalSubject::Oidc("subject".into()),
             email: None,
             email_verified: false,
             issued_at: 1000,

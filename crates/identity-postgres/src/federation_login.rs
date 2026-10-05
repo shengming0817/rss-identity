@@ -240,6 +240,7 @@ impl Federation {
             )
             .await?;
         claims.validate()?;
+        if !claims.subject.matches(&view.settings.claims().subject) { return Err(FederationError::Claims.into()); }
         if claims.issuer != view.settings.issuer().as_str() {
             return Err(FederationError::Claims.into());
         }
@@ -278,7 +279,7 @@ impl Federation {
                     .bind(tenant.to_string())
                     .bind(view.id.to_string())
                     .bind(&claims.issuer)
-                    .bind(&claims.subject)
+                    .bind(claims.subject.storage_key())
                     .fetch_optional(&mut *c)
                     .await?;
                     let linked = attempt.purpose == Purpose::Link;
@@ -309,7 +310,7 @@ impl Federation {
                         row.try_get("identity_id")?
                     } else {
                         let id = Uuid::new_v4();
-                        sqlx::query("INSERT INTO identity_authority.external_identities(tenant_id,identity_id,principal_id,provider_id,issuer,subject) VALUES($1::uuid,$2,$3,$4::uuid,$5,$6)").bind(tenant.to_string()).bind(id).bind(key.principal.as_uuid()).bind(view.id.to_string()).bind(&claims.issuer).bind(&claims.subject).execute(&mut *c).await?;
+                        sqlx::query("INSERT INTO identity_authority.external_identities(tenant_id,identity_id,principal_id,provider_id,issuer,subject) VALUES($1::uuid,$2,$3,$4::uuid,$5,$6)").bind(tenant.to_string()).bind(id).bind(key.principal.as_uuid()).bind(view.id.to_string()).bind(&claims.issuer).bind(claims.subject.storage_key()).execute(&mut *c).await?;
                         id
                     };
                     let mut state = load(c, key).await?.state;

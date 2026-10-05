@@ -131,6 +131,7 @@ impl From<rss_identity_postgres::SessionPage> for SessionPage {
 #[derive(serde::Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaimMapping {
+    subject: rss_identity_core::entra::SubjectMapping,
     email: Option<String>,
     groups: Option<String>,
     department_snapshot: Option<DepartmentSnapshotClaim>,
@@ -164,6 +165,7 @@ impl ProviderSettings {
             redirect_uri: self.redirect_uri,
             scopes: self.scopes,
             claims: rss_identity_core::federation::ClaimMapping {
+                subject: self.claims.subject,
                 email: self.claims.email,
                 groups: self.claims.groups,
                 department_snapshot: self
@@ -190,6 +192,7 @@ impl From<&rss_identity_core::federation::ProviderSettings> for ProviderSettings
             redirect_uri: v.redirect_uri().into(),
             scopes: v.scopes().to_vec(),
             claims: ClaimMapping {
+                subject: v.claims().subject.clone(),
                 email: v.claims().email.clone(),
                 groups: v.claims().groups.clone(),
                 department_snapshot: v.claims().department_snapshot.as_ref().map(|d| {
@@ -368,7 +371,7 @@ mod tests {
     }
     #[test]
     fn provider_department_is_atomic_camel_case_and_optional() {
-        let base = json!({"issuer":"https://idp.test","clientId":"client","redirectUri":"https://host.test/api/v1/identity/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":null},"jit":false});
+        let base = json!({"issuer":"https://idp.test","clientId":"client","redirectUri":"https://host.test/api/v1/identity/oidc/callback","scopes":["openid"],"claims":{"subject":{"kind":"oidc"},"email":null,"groups":null},"jit":false});
         let settings = serde_json::from_value::<ProviderSettings>(base.clone())
             .unwrap()
             .into_domain()
@@ -416,7 +419,7 @@ mod tests {
 
     #[test]
     fn provider_wire_owns_fields_and_excludes_internal_assurance() {
-        let input = json!({"issuer":"https://idp.example.test","clientId":"host","redirectUri":"https://host.example.test/api/v1/identity/oidc/callback","scopes":["openid"],"claims":{"email":null,"groups":"groups","departmentSnapshot":null},"jit":true});
+        let input = json!({"issuer":"https://idp.example.test","clientId":"host","redirectUri":"https://host.example.test/api/v1/identity/oidc/callback","scopes":["openid"],"claims":{"subject":{"kind":"oidc"},"email":null,"groups":"groups","departmentSnapshot":null},"jit":true});
         let settings = serde_json::from_value::<ProviderSettings>(input.clone())
             .unwrap()
             .into_domain()

@@ -8,6 +8,8 @@ publish.workspace = true
 test-support = []
 [dependencies]
 openidconnect.workspace = true
+uuid.workspace = true
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["aws_lc_rs"] }
 reqwest.workspace = true
 thiserror.workspace = true
 rss-identity-core.workspace = true
@@ -19,6 +21,7 @@ zeroize.workspace = true
 tokio = { workspace = true, features = ["net"] }
 ipnet = "2.11"
 [dev-dependencies]
+axum = "0.8"
 anyhow.workspace = true
 reqwest = { workspace = true, features = ["cookies"] }
 scraper = "0.26"

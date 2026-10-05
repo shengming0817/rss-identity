@@ -111,7 +111,18 @@ impl UpstreamOidc for ScriptedOidc {
                     rss_identity_core::department::UpstreamDepartmentSnapshot::NotConfigured
                 },
                 issuer: c.issuer().as_str().to_owned(),
-                subject: code.to_string(),
+                subject: match c.claims().subject {
+                    rss_identity_core::entra::SubjectMapping::Oidc => {
+                        rss_identity_core::entra::ExternalSubject::Oidc(code.to_string())
+                    }
+                    rss_identity_core::entra::SubjectMapping::Entra { tenant } => {
+                        rss_identity_core::entra::ExternalSubject::Entra {
+                            tenant,
+                            user: uuid::Uuid::parse_str(&code)
+                                .map_err(|_| FederationError::Claims)?,
+                        }
+                    }
+                },
                 email: Some("same@example.test".into()),
                 email_verified: self.email_verified.load(Ordering::SeqCst),
                 groups: rss_identity_core::groups::UpstreamGroups::present(
@@ -195,6 +206,7 @@ pub fn settings() -> ProviderSettings {
         redirect_uri: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
+            subject: rss_identity_core::entra::SubjectMapping::Oidc,
             department_snapshot: None,
             email: Some("email".into()),
             groups: Some("groups".into()),

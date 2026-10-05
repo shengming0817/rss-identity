@@ -84,6 +84,7 @@ fn department_mapping_cannot_reuse_email_or_group_claims() {
                 scopes: vec!["openid".into()],
                 jit: false,
                 claims: ClaimMapping {
+                    subject: rss_identity_core::entra::SubjectMapping::Oidc,
                     email,
                     groups,
                     department_snapshot: Some(

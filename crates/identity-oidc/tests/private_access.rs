@@ -20,6 +20,7 @@ fn settings(issuer: &str, client: &str) -> ProviderSettings {
         redirect_uri: "https://reference.example.test/api/v1/identity/oidc/callback".into(),
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
+            subject: rss_identity_core::entra::SubjectMapping::Oidc,
             email: None,
             groups: None,
             department_snapshot: None,

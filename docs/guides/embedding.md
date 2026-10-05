@@ -74,6 +74,18 @@ async fn client_address(
 
 密钥重加密复用组件的租户事务接口与既有 storage fence，宿主最终提交或回滚；维护角色不因此扩权。参考部署的操作顺序见[恢复与轮换](../deployment/recovery.md)。
 
+## Entra 浏览器与原生人员身份
+
+每个 provider 的 `claims.subject` 必须显式选择 `{"kind":"oidc"}` 或 `{"kind":"entra","tenant":"<tenant UUID>"}`。Entra 只接受该租户的 `https://login.microsoftonline.com/<tenant UUID>/v2.0` issuer。浏览器必须配置 `openid` 与 `profile` scopes；Microsoft 的 `oid` 需要 `profile`，缺失此 scope 的配置在保存/恢复时直接拒绝（见 [ID Token claims](https://learn.microsoft.com/en-us/entra/identity-platform/id-token-claims-reference)）。已验签 ID Token 中的 `(tid, oid)` 是唯一人员关联，不使用 pairwise `sub`、邮箱、UPN 或 device ID。浏览器与原生接入必须装配同一个 Identity tenant/provider；不同 provider 不自动合并账户。当前 schema 仅全新安装，旧原始 subject 和省略 subject 的配置不再读取。
+
+原生接入由宿主装配 `HttpEntra` 与 `EntraAuthority`，固定 customer tenant、MDM appId、允许的 `azp` 客户端、委派 scopes 和设备 claim profile；请求不能选择这些信任参数。仅接受 Microsoft 公共云 Entra v2 的 RS256 人员 access token，`aud` 精确为 appId。部署应用须为 access token 配置 `idtyp` 的 `include_user_token`，使人员令牌明确携带 `idtyp=user`；缺失或 app-only 一律拒绝。scopes、客户端与设备 claim 按实际应用契约配置，不能从任意客户端 token 猜测。参考 [Microsoft access-token claims](https://learn.microsoft.com/en-us/entra/identity-platform/access-token-claims-reference) 与 [optional claims](https://learn.microsoft.com/en-us/entra/identity-platform/optional-claims-reference)。
+
+先 `verify` 得到不可构造的 `VerifiedExternalSubject`，宿主检查组织、注册范围、TOU、设备与配额策略后，才调用 `resolve`。已有 canonical 关联复用同一账户；未知人员仅在 provider 显式开启 JIT 时原子创建账户、关联及安全事件。JIT 默认应关闭。CommitUnknown 不返回证明；调用方按结算语义处理，不据超时断言未创建。原生接入不签发浏览器会话，也不调用管理授权接口。
+
+`RevalidatedAccount` 是短期、不可序列化的人员事实，不能替代 `AuthenticatedSession`。在业务最终绑定前通过 `recheck` 检查账户、成员、provider epoch 与关联当前状态；它不会延长原证明期限。长期业务任务须用当前 token 重新验证，不保存此证明或借其延长身份。宿主持有资源权限、设备身份、同意及注册事务；Identity 不对设备授权。
+
+JWKS 只从固定 Microsoft tenant 地址经有界、禁重定向的 HTTPS 取回，公共 key 缓存最多 60 秒，过期后重新获取；缓存期间的新 key 或移除 key 可能分别被拒绝或继续用于验签，最长受该缓存期限约束。token 有效期与本地 proof 期限仍单独检查。外部 Entra 撤权依赖签名 token 的剩余期限，本接口不承诺即时 CAE；本地禁用及配置变更在复核时立即拒绝。TOU 阶段可没有设备 claim，实际设备注册必须由 MDM 的操作 profile 要求并绑定设备 claim。原生 access token 不使用浏览器 OIDC nonce。
+
 ## 认证审计交付
 
 `rss_identity_postgres::audit::AuditDelivery` 持有 Identity 事件语义。宿主注入同库的 worker `Arc<PgRuntime>`、`Arc<PgAudit>`、真实实例与租户绑定和 delivery budget，调用有界 `run_once`。异步构造在一个有界预算内检查已有 dead-letter，不创建任务或接管连接关闭；构造和运行统一返回 `AuditDeliveryError`，宿主只对 `is_retryable()` 为真的错误重试。权限通过公开 `audit::grant_worker` / `verify_worker` 接缝装配，不复制参考 app 的 SQL。参考实现见 [审计装配](../../app/identity/src/audit.rs)。
