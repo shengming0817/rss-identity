@@ -11,13 +11,14 @@ async fn notifications_settle_with_security_events() -> anyhow::Result<()> {
     let _ = f.actor().await?; // Establish the management session before listening.
     let channel = notification_channel(f.instance, f.key.tenant);
     let mut listener = PgListener::connect_with(&f.owner).await?;
+    let channels = [
+        channel.clone(),
+        notification_channel(f.instance, TenantId::parse(B)?),
+        notification_channel(f.instance, TenantId::parse(SYSTEM)?),
+        notification_channel(InstanceId::generate(), f.key.tenant),
+    ];
     listener
-        .listen_all(&[
-            channel.clone(),
-            notification_channel(f.instance, TenantId::parse(B)?),
-            notification_channel(f.instance, TenantId::parse(SYSTEM)?),
-            notification_channel(InstanceId::generate(), f.key.tenant),
-        ])
+        .listen_all(channels.iter().map(String::as_str))
         .await?;
     committed_event(&f, &mut listener, &channel).await?;
     unknown_commit(&f, &mut listener, &channel).await?;
