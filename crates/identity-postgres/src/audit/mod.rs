@@ -30,8 +30,8 @@ use rss_transactional_messaging::{
     },
 };
 use rss_transactional_messaging_postgres::{
-    PgConsumerEffect, PgConsumerEffectFailure, PgConsumerTx, PgInboxStore, PgOutboxStore,
-    PgRuntime, PgTransaction,
+    OutboxWakeup, PgConsumerEffect, PgConsumerEffectFailure, PgConsumerTx, PgInboxStore,
+    PgOutboxStore, PgRuntime, PgTransaction,
 };
 use rss_transactional_messaging_runtime::{
     consumer::{ConsumerExecution, consume_once},
@@ -42,6 +42,21 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
+
+/// Database-local, opaque wakeup channel for one authoritative Identity instance and tenant.
+/// The channel is `id_audit_` followed by the first 48 lowercase hex characters of SHA-256
+/// over the instance UUID bytes followed by the tenant UUID bytes (57 ASCII bytes total).
+/// Identity transactions send an empty payload. Notifications may be lost or forged;
+/// hosts must retain durable scans and obtain delivery authority from the worker runtime.
+#[must_use]
+pub fn notification_channel(instance: InstanceId, tenant: TenantId) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(instance.as_uuid().as_bytes());
+    hash.update(tenant.octets());
+    let digest = format!("{:x}", hash.finalize());
+    format!("id_audit_{}", &digest[..48])
+}
 
 struct Timer;
 impl Clock for Timer {
@@ -253,6 +268,20 @@ pub struct AuditDelivery {
     fatal: Arc<OnceLock<AuditDeliveryError>>,
 }
 impl AuditDelivery {
+    /// Read persistent eligibility using the worker's bound tenants, domain and injected clock.
+    /// Does not claim, publish or prove audit delivery; the host owns waiting and recovery scans.
+    pub async fn next_wakeup(
+        &self,
+        deadline: OperationDeadline,
+    ) -> Result<OutboxWakeup, AuditDeliveryError> {
+        if let Some(error) = self.fatal.get() {
+            return Err(*error);
+        }
+        self.outbox
+            .next_wakeup(deadline)
+            .await
+            .map_err(AuditDeliveryError::pg)
+    }
     /// Bind the existing message mechanisms to Identity's sole audit consumer group.
     pub async fn new(
         runtime: Arc<PgRuntime>,

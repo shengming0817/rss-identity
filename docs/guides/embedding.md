@@ -92,6 +92,10 @@ JWKS 只从固定 Microsoft tenant 地址经有界、禁重定向的 HTTPS 取�
 
 producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::connect_consumer`，Audit 开启 `messaging`。worker 不读取 Identity 私有表，也不能直接修改 Audit/Outbox；schema owner 和实际权限必须通过 startup probe。宿主负责保证来源实例对应当前 Identity 数据库，不接受请求指定的 source。
 
+有安全事件的业务事务在全部 Outbox append 后调用同事务 `pg_notify`，提交后发送空 payload；通知 SQL 失败按原事务错误传播，未知提交仍为未知。无事件的条件写入不发送通知。宿主通过公开 `audit::notification_channel(instance, tenant)` 计算每个可信实例/租户的稳定频道，先完成同库 `LISTEN` 再扫描，重连后重新扫描。频道不提供访问控制或投递证明，通知可能丢失或被伪造；不要发送身份、令牌或事件内容。
+
+宿主调用 `AuditDelivery::next_wakeup(OperationDeadline)` 获取原 RSS `OutboxWakeup`：`due_now` 与未来最早 `next_deadline` 独立存在，已到期但被其他 worker 锁住的工作不会掩盖未来期限。查询不领取、发布或证明审计成功，仍受 worker runtime 的租户 fencing、领域和总预算约束。宿主持有通知、期限和周期恢复扫描的等待策略，并在空领取后限制即时重扫；连接池与 worker 生命周期仍由宿主负责。
+
 当前只接收 account v3、session v1、federation v2 的精确 schema，映射为 Audit V1。账户主体来自 actor，维护事件标识维护主体；会话主体来自 principal，all_revoked 的对象是账户会话集合；联合身份按 action 区分 provider 和认证主体。provider_test_failed 为 Failed，其余已提交事件为 Succeeded。UUID 会话坐标不是 bearer secret。输出只含稳定坐标、epoch、状态、配置版本和封闭诊断码。
 
 业务与安全事件先原子提交到 Outbox。独立 worker 在另一事务内同时提交 Audit 和 Inbox receipt，之后才确认源 Outbox。发生时间来自原事件，落录时间来自该 PG 事务；乱序不改变原事件含义。**认证成功及 Outbox 已提交均不表示 Audit 已落库**。查询授权仍由宿主持有。
