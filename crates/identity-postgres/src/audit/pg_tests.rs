@@ -13,6 +13,7 @@ use sqlx::{
 };
 use support::{A, B, Fixture, SYSTEM};
 use tokio_util::sync::CancellationToken;
+mod wakeup;
 struct Setup {
     f: Fixture,
     runtime: Arc<PgRuntime>,
@@ -127,7 +128,10 @@ impl Setup {
 #[ignore = "requires real PG"]
 async fn authentication_outbox_reaches_audit_and_recovers() -> anyhow::Result<()> {
     let s = Setup::new().await?;
+    let idle = s.worker.next_wakeup(support::deadline()).await?;
+    assert!(!idle.due_now() && idle.next_deadline().is_none());
     s.f.bootstrap().await?;
+    assert!(s.worker.next_wakeup(support::deadline()).await?.due_now());
     let issued = s.f.login().await?;
     let secret = issued.secret().expose().to_owned();
     let actor =
@@ -149,6 +153,8 @@ async fn authentication_outbox_reaches_audit_and_recovers() -> anyhow::Result<()
     assert_eq!(s.count(A).await?, 3);
     assert_eq!(s.count(SYSTEM).await?, 1);
     assert_eq!(s.count(B).await?, 0);
+    let idle = s.worker.next_wakeup(support::deadline()).await?;
+    assert!(!idle.due_now() && idle.next_deadline().is_none());
     let bytes: Vec<Vec<u8>> =
         sqlx::query_scalar("SELECT canonical FROM rss_audit.records ORDER BY position")
             .fetch_all(&s.f.owner)

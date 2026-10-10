@@ -1,5 +1,24 @@
 use super::*;
 #[test]
+fn notification_channel_is_stable_opaque_and_scope_bound() {
+    let instance = InstanceId::parse("11111111-1111-4111-8111-111111111111").unwrap();
+    let tenant = TenantId::parse("22222222-2222-4222-8222-222222222222").unwrap();
+    let channel = notification_channel(instance, tenant);
+    assert_eq!(
+        channel,
+        "id_audit_6b98298d7dd945af598b610aa8801c898a349ad3f6f8796a"
+    );
+    assert_eq!(channel.len(), 57);
+    assert_ne!(
+        channel,
+        notification_channel(InstanceId::generate(), tenant)
+    );
+    assert_ne!(
+        channel,
+        notification_channel(instance, TenantId::parse(TENANT).unwrap())
+    );
+}
+#[test]
 fn rejects_unknown_contract() {
     assert!(accepted_contract("identity.unknown", "1.0.0", "sha256:bad").is_none());
 }

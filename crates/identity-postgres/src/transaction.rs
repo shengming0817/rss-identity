@@ -306,6 +306,7 @@ impl Authority {
     {
         let bundle = self.runtimes.snapshot()?;
         let outbox = bundle.outbox.clone();
+        let channel = crate::audit::notification_channel(self.instance(), tenant);
         let reason = std::sync::Arc::new(std::sync::OnceLock::new());
         let reason_slot = reason.clone();
         let result = Self::read_bundle(bundle, tenant, deadline, true, move |tx| {
@@ -316,6 +317,7 @@ impl Authority {
                 if (require_event && events.is_empty()) || events.len() > MAX_MUTATION_EVENTS {
                     return Err(corrupt());
                 }
+                let has_events = !events.is_empty();
                 for event in events {
                     if event.tenant() != tenant.to_string() {
                         return Err(corrupt());
@@ -360,6 +362,19 @@ impl Authority {
                     {
                         return Err(corrupt());
                     }
+                }
+                if has_events {
+                    // ref: PostgreSQL REL_17_6 src/backend/commands/async.c:
+                    // pending notifications settle with this transaction, including failures.
+                    tx.with_connection(move |c| {
+                        Box::pin(async move {
+                            sqlx::query("SELECT pg_catalog.pg_notify($1, '')")
+                                .bind(channel)
+                                .execute(c)
+                                .await
+                        })
+                    })
+                    .await?;
                 }
                 Ok(result)
             })
