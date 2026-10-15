@@ -44,6 +44,13 @@ pub struct ManagementContext<'a> {
     expires: Instant,
 }
 impl ManagementContext<'_> {
+    pub fn check_live(&self) -> Result<(), ManagementDenied> {
+        if Instant::now() < self.expires {
+            Ok(())
+        } else {
+            Err(ManagementDenied)
+        }
+    }
     pub fn instance(&self) -> InstanceId {
         self.instance
     }
@@ -128,16 +135,7 @@ pub(crate) async fn authorize(
         ReauthenticationRequirement::Recent(age) => (age, false),
         ReauthenticationRequirement::RecentMfa(age) => (age, true),
     };
-    let age = loaded
-        .assurance
-        .auth_time()
-        .and_then(|time| loaded.now.checked_sub(time));
-    if max_age.is_zero()
-        || age.is_none_or(|age| {
-            age < 0 || u64::try_from(age).is_ok_and(|age| age >= max_age.as_secs())
-        })
-        || (mfa && loaded.assurance.acr() != Acr::Mfa)
-    {
+    if !loaded.recently_authenticated(max_age) || (mfa && loaded.assurance.acr() != Acr::Mfa) {
         return Err(AccountRuleError::ReauthenticationRequired);
     }
     Ok(())

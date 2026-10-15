@@ -96,7 +96,7 @@ producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::co
 
 宿主调用 `AuditDelivery::next_wakeup(OperationDeadline)` 获取原 RSS `OutboxWakeup`：`due_now` 与未来最早 `next_deadline` 独立存在，已到期但被其他 worker 锁住的工作不会掩盖未来期限。查询不领取、发布或证明审计成功，仍受 worker runtime 的租户 fencing、领域和总预算约束。宿主持有通知、期限和周期恢复扫描的等待策略，并在空领取后限制即时重扫；连接池与 worker 生命周期仍由宿主负责。
 
-当前只接收 account v3、session v1、federation v2 的精确 schema，映射为 Audit V1。账户主体来自 actor，维护事件标识维护主体；会话主体来自 principal，all_revoked 的对象是账户会话集合；联合身份按 action 区分 provider 和认证主体。provider_test_failed 为 Failed，其余已提交事件为 Succeeded。UUID 会话坐标不是 bearer secret。输出只含稳定坐标、epoch、状态、配置版本和封闭诊断码。
+当前只接收 account v3、account.provisioning v1、session v1、federation v2 的精确 schema，映射为 Audit V1。账户主体来自 actor，维护事件标识维护主体；会话主体来自 principal，all_revoked 的对象是账户会话集合；联合身份按 action 区分 provider 和认证主体。provider_test_failed 为 Failed，其余已提交事件为 Succeeded。UUID 会话坐标不是 bearer secret。输出只含稳定坐标、epoch、状态、配置版本和封闭诊断码。
 
 业务与安全事件先原子提交到 Outbox。独立 worker 在另一事务内同时提交 Audit 和 Inbox receipt，之后才确认源 Outbox。发生时间来自原事件，落录时间来自该 PG 事务；乱序不改变原事件含义。**认证成功及 Outbox 已提交均不表示 Audit 已落库**。查询授权仍由宿主持有。
 
@@ -106,6 +106,6 @@ producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::co
 
 跨租户创建账户由独立 `AccountProvisioner` 承接，普通 Authority 管理仍然只允许同租户。宿主显式装配 Provisioning 数据库 profile、固定源租户与已准入的目标租户，并持有 PgRuntime 和 KDF 生命周期。此 profile 不拥有凭据恢复、会话签发或 IdP 写能力。
 
-先用 `prepare_local_account` 处理密码，再在宿主目标事务中调用 `authorize_in`（包括历史回执重放）和 `create_local_account_in`。组件在源租户作用域复查真实会话与宿主 ProvisionAccount 权限，恢复目标作用域后才写账户及安全事件；源租户必须由产品固定并保持有效。宿主在同事务写产品授权和回执，任何组件错误均须传播并回滚，禁止捕获错误后继续提交。组件不签发目标租户会话，也不赋予产品管理员权限。
+先用 `prepare_local_account` 处理密码，再在宿主目标事务中调用 `authorize_in`（包括历史回执重放）和 `create_local_account_in`。组件在源租户作用域复查真实会话与宿主 ProvisionAccount 权限，恢复目标作用域后才写账户及安全事件；组件通过 RSS 同连接接缝校验源租户 execution binding 并持有源栅栏直至目标事务结算，源 epoch 失效时拒绝操作。宿主在同事务写产品授权和回执，任何组件错误均须传播并回滚，禁止捕获错误后继续提交。组件不签发目标租户会话，也不赋予产品管理员权限。
 
 `identity.account.provisioning/v1` 事件包含源 actor 的实例、租户和主体，消费者使用组件审计 worker。产品持有操作幂等、密码安全指纹和首次使用登记；不得用随机盐密码编码作为请求指纹或把明文秘密写进回执。

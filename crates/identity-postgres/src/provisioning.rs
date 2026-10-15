@@ -105,18 +105,12 @@ impl AccountProvisioner {
         let source = self.source;
         let instance = self.authority.instance;
         let policy = self.authority.policy.clone();
-        transaction::connection(tx, move |c| {
+        tx.with_tenant_connection(source, move |c| {
             Box::pin(async move {
-                if authority_id(c).await? != instance.as_uuid() {
-                    return Err(ProvisioningError::Rejected);
-                }
-                // This is a trusted companion read scope, not a second RSS transaction.
-                // No target write/outbox may run until it has been restored successfully.
-                sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-                    .bind(source.to_string())
-                    .execute(&mut *c)
-                    .await?;
-                let result = async {
+                Ok(async {
+                    if authority_id(c).await? != instance.as_uuid() {
+                        return Err(ProvisioningError::Rejected);
+                    }
                     let loaded = crate::session_storage::recheck(c, &actor).await?;
                     crate::management::authorize(
                         policy.as_ref(),
@@ -129,15 +123,10 @@ impl AccountProvisioner {
                     .await?;
                     Ok::<_, ProvisioningError>(())
                 }
-                .await;
-                sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-                    .bind(target.to_string())
-                    .execute(&mut *c)
-                    .await?;
-                result
+                .await)
             })
         })
-        .await
+        .await?
     }
     /// Append account and security event without committing. The host must propagate every
     /// failure and roll back; its authorization, product audit and receipt share this transaction.

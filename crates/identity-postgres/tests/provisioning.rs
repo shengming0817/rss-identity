@@ -147,6 +147,33 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
     .fetch_one(&f.owner)
     .await?;
     assert_eq!(count, 0);
+    // A valid target epoch cannot authorize a stale source runtime.
+    sqlx::query(
+        "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid",
+    )
+    .bind(A)
+    .execute(&f.owner)
+    .await?;
+    let svc = service.clone();
+    let who = actor.clone();
+    let stale = runtime
+        .local_tx(target, deadline(), move |tx| {
+            Box::pin(async move {
+                match svc.authorize_in(tx, who).await {
+                    Err(ProvisioningError::Storage(error)) => Err(error),
+                    _ => panic!("source epoch mismatch must reject before host authorization"),
+                }
+            })
+        })
+        .await
+        .fold(|()| None, Some, Some, Some, Some, Some);
+    sqlx::query(
+        "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=1 WHERE tenant_id=$1::uuid",
+    )
+    .bind(A)
+    .execute(&f.owner)
+    .await?;
+    assert!(stale.is_some());
     f.policy.revoke(f.key);
     let svc = service.clone();
     let who = actor.clone();
