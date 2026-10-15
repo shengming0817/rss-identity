@@ -46,32 +46,41 @@ impl BootstrapPolicy {
     }
 }
 impl ManagementPolicy for BootstrapPolicy {
-    fn authorize(
-        &self,
-        context: &ManagementContext<'_>,
-    ) -> Result<ReauthenticationRequirement, ManagementDenied> {
-        if context.operation() == ManagementOperation::ChangeOwnPassword
-            && context.target() == Some(context.actor())
-        {
-            return Ok(ReauthenticationRequirement::Recent(Duration::from_secs(
+    fn authorize<'a>(
+        &'a self,
+        context: &'a ManagementContext<'a>,
+        _connection: &'a mut sqlx::PgConnection,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ReauthenticationRequirement, ManagementDenied>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if context.operation() == ManagementOperation::ChangeOwnPassword
+                && context.target() == Some(context.actor())
+            {
+                return Ok(ReauthenticationRequirement::Recent(Duration::from_secs(
+                    300,
+                )));
+            }
+            if !self.is_manager(context.actor())
+                || (context
+                    .target()
+                    .is_some_and(|target| self.0.contains(&target))
+                    && matches!(
+                        context.operation(),
+                        ManagementOperation::SetAccountEnabled(false)
+                            | ManagementOperation::SetMembership(false)
+                    ))
+            {
+                return Err(ManagementDenied);
+            }
+            Ok(ReauthenticationRequirement::Recent(Duration::from_secs(
                 300,
-            )));
-        }
-        if !self.is_manager(context.actor())
-            || (context
-                .target()
-                .is_some_and(|target| self.0.contains(&target))
-                && matches!(
-                    context.operation(),
-                    ManagementOperation::SetAccountEnabled(false)
-                        | ManagementOperation::SetMembership(false)
-                ))
-        {
-            return Err(ManagementDenied);
-        }
-        Ok(ReauthenticationRequirement::Recent(Duration::from_secs(
-            300,
-        )))
+            )))
+        })
     }
 }
 /// Session policy used by the reference host and its offline acceptance profile.

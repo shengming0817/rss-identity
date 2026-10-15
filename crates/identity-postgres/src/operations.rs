@@ -107,7 +107,9 @@ impl Authority {
                     &loaded,
                     ManagementOperation::CreateAccount,
                     Some(key),
-                )?;
+                    c,
+                )
+                .await?;
                 insert_account(c, key, login.as_str(), hash.as_str()).await?;
                 let state = load(c, key).await?.state;
                 Ok((
@@ -292,7 +294,7 @@ impl Authority {
                 if proof.account() != actor.key || target != actor.key { return Err(crate::transaction::reject().into()); }
                 current(c, &proof).await?;
             }
-            crate::management::authorize(policy.as_ref(),instance,&loaded,operation,Some(target))?;
+            crate::management::authorize(policy.as_ref(),instance,&loaded,operation,Some(target), c).await?;
             let old = load(c, target).await?.state;
             let (next, action) = old.change(change)?;
             sqlx::query("UPDATE identity_authority.accounts SET enabled=$3,auth_epoch=$4 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
@@ -323,7 +325,7 @@ impl Authority {
         let instance = self.instance;
         self.read_sql(actor.key.tenant, budget.remaining(), move |c| Box::pin(async move {
             let loaded = crate::session_storage::recheck(c, &actor).await?;
-            crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListAccounts,None)?;
+            crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListAccounts,None, c).await?;
             let rows:Vec<(uuid::Uuid,Option<String>)>=sqlx::query_as("SELECT a.principal_id,l.login_key FROM identity_authority.accounts a LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND ($2::uuid IS NULL OR a.principal_id>$2) ORDER BY a.principal_id LIMIT $3")
                 .bind(actor.key.tenant.to_string()).bind(cursor.map(|id|id.as_uuid())).bind(i64::from(limit)+1).fetch_all(&mut *c).await?;
             let more=rows.len()>usize::from(limit); let mut accounts=Vec::new();

@@ -124,6 +124,8 @@ SUITES[("rss-identity-postgres", "entra")] = {
 }
 SUITES[("rss-identity-oidc", "entra")] = {"signed_entra_resource_tokens"}
 
+SUITES[('rss-identity-postgres', 'provisioning')] = {'provisioned_account_and_event_share_host_commit_and_revalidate_source'}
+
 def cargo(package, test, env, features=()):
     expected = SUITES[(package,test)]
     internal = (package=="rss-identity-postgres" and test in {"atomic","session_atomic","federated_atomic","audit::pg_tests"}) or (package=="rss-identity-oidc" and test=="private_provider_tests")
@@ -166,6 +168,7 @@ def pg():
         cargo("rss-identity-postgres", "federated_atomic", env)
         cargo("rss-identity-postgres", "atomic", env)
         cargo("rss-identity-postgres", "embedded", env)
+        cargo("rss-identity-postgres", "provisioning", env)
         cargo("rss-identity-postgres", "audit::pg_tests", env)
         cargo("rss-identity-postgres", "session_atomic", env)
         cargo("rss-identity-http-axum", "session_http", env)

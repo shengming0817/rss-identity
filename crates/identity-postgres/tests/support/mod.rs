@@ -66,24 +66,33 @@ impl HostPolicy {
     }
 }
 impl ManagementPolicy for HostPolicy {
-    fn authorize(
-        &self,
-        c: &ManagementContext<'_>,
-    ) -> Result<ReauthenticationRequirement, ManagementDenied> {
-        if !self.managers.read().unwrap().contains(&c.actor()) {
-            return Err(ManagementDenied);
-        }
-        if c.target()
-            .is_some_and(|key| self.protected.read().unwrap().contains(&key))
-            && matches!(
-                c.operation(),
-                ManagementOperation::SetAccountEnabled(false)
-                    | ManagementOperation::SetMembership(false)
-            )
-        {
-            return Err(ManagementDenied);
-        }
-        Ok(*self.recent.read().unwrap())
+    fn authorize<'a>(
+        &'a self,
+        c: &'a ManagementContext<'a>,
+        _connection: &'a mut sqlx::PgConnection,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ReauthenticationRequirement, ManagementDenied>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if !self.managers.read().unwrap().contains(&c.actor()) {
+                return Err(ManagementDenied);
+            }
+            if c.target()
+                .is_some_and(|key| self.protected.read().unwrap().contains(&key))
+                && matches!(
+                    c.operation(),
+                    ManagementOperation::SetAccountEnabled(false)
+                        | ManagementOperation::SetMembership(false)
+                )
+            {
+                return Err(ManagementDenied);
+            }
+            Ok(*self.recent.read().unwrap())
+        })
     }
 }
 pub struct Fixture {
@@ -207,6 +216,7 @@ impl Fixture {
     pub async fn probe(&self, profile: AuthorityProfile) -> Result<Authority, AuthorityError> {
         let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new());
         match profile {
+            AuthorityProfile::Provisioning => Err(AuthorityError::Configuration),
             AuthorityProfile::Runtime => {
                 Authority::connect_runtime(
                     self.runtime.clone(),

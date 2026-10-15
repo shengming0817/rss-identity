@@ -34,6 +34,7 @@ pub async fn grant_profile(
     let sql = match profile {
         AuthorityProfile::Runtime => include_str!("grants-runtime.sql"),
         AuthorityProfile::Maintenance => include_str!("grants-maintenance.sql"),
+        AuthorityProfile::Provisioning => include_str!("grants-provisioning.sql"),
     };
     // Only substitution is a quoted identifier; embedded quotes are doubled above.
     sqlx::raw_sql(sqlx::AssertSqlSafe(sql.replace("{role}", &role)))
@@ -115,6 +116,7 @@ pub(crate) async fn probe(
         .bind(match profile {
             AuthorityProfile::Runtime => "runtime",
             AuthorityProfile::Maintenance => "maintenance",
+            AuthorityProfile::Provisioning => "provisioning",
         })
         .fetch_one(&mut *connection)
         .await?;

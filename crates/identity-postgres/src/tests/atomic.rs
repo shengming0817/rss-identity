@@ -686,6 +686,7 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             .execute(&f.owner)
             .await?;
             let result = match profile {
+                AuthorityProfile::Provisioning => unreachable!("covered by provisioning tests"),
                 rss_identity_postgres::AuthorityProfile::Runtime => {
                     Authority::connect_runtime(
                         runtime.clone(),
@@ -716,6 +717,7 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
             .execute(&f.owner)
             .await?;
             match profile {
+                AuthorityProfile::Provisioning => unreachable!("covered by provisioning tests"),
                 rss_identity_postgres::AuthorityProfile::Runtime => {
                     Authority::connect_runtime(
                         runtime.clone(),

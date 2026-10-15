@@ -21,27 +21,36 @@ struct DepartmentPolicy {
     expected: Option<String>,
 }
 impl ManagementPolicy for DepartmentPolicy {
-    fn authorize(
-        &self,
-        c: &ManagementContext<'_>,
-    ) -> Result<ReauthenticationRequirement, ManagementDenied> {
-        let VerifiedDepartmentSnapshot::Available(d) =
-            c.department_snapshot().map_err(|_| ManagementDenied)?
-        else {
-            return Err(ManagementDenied);
-        };
-        if d.account() != c.actor()
-            || d.instance() != c.instance()
-            || d.snapshot()
-                .map_err(|_| ManagementDenied)?
-                .memberships()
-                .first()
-                .map(DepartmentId::as_str)
-                != self.expected.as_deref()
-        {
-            return Err(ManagementDenied);
-        }
-        Ok(ReauthenticationRequirement::None)
+    fn authorize<'a>(
+        &'a self,
+        c: &'a ManagementContext<'a>,
+        _connection: &'a mut sqlx::PgConnection,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ReauthenticationRequirement, ManagementDenied>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let VerifiedDepartmentSnapshot::Available(d) =
+                c.department_snapshot().map_err(|_| ManagementDenied)?
+            else {
+                return Err(ManagementDenied);
+            };
+            if d.account() != c.actor()
+                || d.instance() != c.instance()
+                || d.snapshot()
+                    .map_err(|_| ManagementDenied)?
+                    .memberships()
+                    .first()
+                    .map(DepartmentId::as_str)
+                    != self.expected.as_deref()
+            {
+                return Err(ManagementDenied);
+            }
+            Ok(ReauthenticationRequirement::None)
+        })
     }
 }
 

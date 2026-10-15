@@ -116,7 +116,7 @@ pub(crate) async fn by_id(
     let row = sqlx::query(concat!(
         "SELECT principal_id,auth_epoch,membership_epoch,auth_time,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at",
         ",revoked_at,token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
-        " AND session_id=$2::uuid FOR UPDATE"
+        " AND session_id=$2::uuid"
     ))
     .bind(tenant.to_string())
     .bind(&id)

@@ -184,4 +184,6 @@ mod diagnostic_tests {
 pub enum AuthorityProfile {
     Runtime,
     Maintenance,
+    /// Account insertion and source-session inspection, without credential recovery.
+    Provisioning,
 }

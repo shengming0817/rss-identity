@@ -171,7 +171,7 @@ impl Federation {
         let instance = self.authority.instance;
         let tenant = actor.key.tenant;
         self.authority.write_sql(tenant,deadline,move|c|Box::pin(async move {
-            let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None)?;
+            let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
             if count>=100{return Err(FederationError::ProviderLimitReached.into());}
             let view=ProviderView{id:ProviderId::generate(),version:1,enabled:false,revocation_epoch:1,settings,assurance_profile:profile,credential_version:1};
@@ -214,7 +214,7 @@ impl Federation {
         let instance = self.authority.instance;
         let tenant = actor.key.tenant;
         self.authority.write_sql(tenant,deadline,move|c|Box::pin(async move {
-            let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None)?;
+            let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let mut view=db::provider(c,tenant,id).await?;
             if view.version!=expected{return Err(FederationError::StaleConfiguration.into());}
             let action=if let Some((settings,credentials,profile))=settings {
@@ -248,7 +248,7 @@ impl Federation {
         self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let loaded = crate::session_storage::recheck(c, &actor).await?;
-                    crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListProviders,None)?;
+                    crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListProviders,None, c).await?;
                     let ids: Vec<Uuid> = sqlx::query_scalar(concat!(
                         "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid OR",
                         "DER BY provider_id LIMIT 101"
@@ -306,7 +306,9 @@ impl Federation {
                         &loaded,
                         ManagementOperation::TestProvider(id),
                         None,
-                    )?;
+                        c,
+                    )
+                    .await?;
                     Ok((actor, db::provider(c, tenant, id).await?))
                 })
             })
@@ -338,7 +340,9 @@ impl Federation {
                         &loaded,
                         ManagementOperation::TestProvider(id),
                         None,
-                    )?;
+                        c,
+                    )
+                    .await?;
                     let current = db::provider(c, tenant, id).await?;
                     if current.version != view.version {
                         return Err(FederationError::StaleConfiguration.into());

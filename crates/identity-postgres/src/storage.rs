@@ -31,7 +31,7 @@ pub(crate) async fn load(c: &mut PgConnection, key: AccountKey) -> Result<Stored
         " NULL) AS has_local_password,l.password_hash,m.active,m.epoch FROM identity_auth",
         "ority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal",
         "_id) LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_",
-        "id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid FOR UPDATE OF a,m"
+        "id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid"
     ))
     .bind(key.tenant.to_string())
     .bind(key.principal.as_uuid().to_string())
