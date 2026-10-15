@@ -332,19 +332,29 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     );
     struct StaffPolicy;
     impl ManagementPolicy for StaffPolicy {
-        fn authorize(
-            &self,
-            context: &ManagementContext<'_>,
-        ) -> Result<ReauthenticationRequirement, ManagementDenied> {
-            let VerifiedGroups::Available(groups) =
-                context.groups().map_err(|_| ManagementDenied)?
-            else {
-                return Err(ManagementDenied);
-            };
-            if groups.values().map_err(|_| ManagementDenied)? != ["staff"] {
-                return Err(ManagementDenied);
-            }
-            Ok(ReauthenticationRequirement::None)
+        fn authorize<'a>(
+            &'a self,
+            context: &'a ManagementContext<'a>,
+            _connection: &'a mut sqlx::PgConnection,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<ReauthenticationRequirement, ManagementDenied>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                let VerifiedGroups::Available(groups) =
+                    context.groups().map_err(|_| ManagementDenied)?
+                else {
+                    return Err(ManagementDenied);
+                };
+                if groups.values().map_err(|_| ManagementDenied)? != ["staff"] {
+                    return Err(ManagementDenied);
+                }
+                Ok(ReauthenticationRequirement::None)
+            })
         }
     }
     let managed = Authority::connect_runtime(

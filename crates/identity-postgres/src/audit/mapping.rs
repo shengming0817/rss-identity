@@ -13,6 +13,11 @@ pub(super) struct InvalidEvent;
 
 pub(super) fn accepted_contract(id: &str, version: &str, digest: &str) -> Option<&'static str> {
     let (expected, schema, route) = match id {
+        "identity.account.provisioning" => (
+            "v1",
+            include_str!("../account-provisioning-v1.json"),
+            "account.provisioned",
+        ),
         "identity.account.security" => (
             "v3",
             include_str!("../security-event-v3.json"),
@@ -40,6 +45,18 @@ struct Account {
     tenant: Uuid,
     principal: Uuid,
     actor: Option<Uuid>,
+    epoch: i64,
+    state: State,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Provisioned {
+    action: String,
+    tenant: Uuid,
+    principal: Uuid,
+    actor: Uuid,
+    actor_tenant: Uuid,
+    actor_instance: Uuid,
     epoch: i64,
     state: State,
 }
@@ -113,6 +130,30 @@ pub(super) fn map_event(
     require(message.payload().len() <= 4096 && meta.occurred_at() <= recorded)?;
     let tenant = meta.tenant_id().to_string();
     let (action, actor_kind, actor_id, resource_kind, resource_id, outcome, payload) = match route {
+        "account.provisioned" => {
+            let e: Provisioned = parse(message.payload(), &[])?;
+            require(
+                e.action == "account_created"
+                    && e.tenant.to_string() == tenant
+                    && e.actor_instance == instance.as_uuid()
+                    && e.actor_tenant != e.tenant
+                    && !e.actor.is_nil()
+                    && !e.actor_tenant.is_nil()
+                    && !e.principal.is_nil()
+                    && e.epoch > 0
+                    && e.state.membership_epoch > 0,
+            )?;
+            (
+                "identity.account.provisioned".into(),
+                "principal",
+                format!("{}:{}", e.actor_tenant, e.actor),
+                "account",
+                e.principal.to_string(),
+                Outcome::Succeeded,
+                json!({"epoch":e.epoch,"state":e.state,
+                    "actor_instance":e.actor_instance,"actor_tenant":e.actor_tenant,"actor_principal":e.actor}),
+            )
+        }
         "account.changed" => {
             let e: Account = parse(message.payload(), &["actor"])?;
             require(e.tenant.to_string() == tenant && e.epoch > 0 && e.state.membership_epoch > 0)?;

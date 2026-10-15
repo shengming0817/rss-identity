@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 pub enum ManagementOperation {
     ListAccounts,
     CreateAccount,
+    /// Restricted provisioner only; normal Authority never invokes this operation.
+    ProvisionAccount(rss_request_context::TenantId),
     SetAccountEnabled(bool),
     SetMembership(bool),
     ResetPassword,
@@ -42,6 +44,13 @@ pub struct ManagementContext<'a> {
     expires: Instant,
 }
 impl ManagementContext<'_> {
+    pub fn check_live(&self) -> Result<(), ManagementDenied> {
+        if Instant::now() < self.expires {
+            Ok(())
+        } else {
+            Err(ManagementDenied)
+        }
+    }
     pub fn instance(&self) -> InstanceId {
         self.instance
     }
@@ -67,46 +76,56 @@ impl ManagementContext<'_> {
         self.groups.view(self.expires)
     }
 }
-/// Bounded in-process policy, invoked for every management operation. Do not perform blocking I/O.
+/// Transaction-bound host policy. Borrow the existing connection; do not commit,
+/// change tenant scope, block, or acquire another connection. The caller owns the deadline.
 pub trait ManagementPolicy: Send + Sync {
-    fn authorize(
-        &self,
-        context: &ManagementContext<'_>,
-    ) -> Result<ReauthenticationRequirement, ManagementDenied>;
+    fn authorize<'a>(
+        &'a self,
+        context: &'a ManagementContext<'a>,
+        connection: &'a mut sqlx::PgConnection,
+    ) -> futures::future::BoxFuture<'a, Result<ReauthenticationRequirement, ManagementDenied>>;
 }
 pub(crate) struct DenyManagement;
 impl ManagementPolicy for DenyManagement {
-    fn authorize(
-        &self,
-        _: &ManagementContext<'_>,
-    ) -> Result<ReauthenticationRequirement, ManagementDenied> {
-        Err(ManagementDenied)
+    fn authorize<'a>(
+        &'a self,
+        _: &'a ManagementContext<'a>,
+        _connection: &'a mut sqlx::PgConnection,
+    ) -> futures::future::BoxFuture<'a, Result<ReauthenticationRequirement, ManagementDenied>> {
+        Box::pin(async move { Err(ManagementDenied) })
     }
 }
-pub(crate) fn authorize(
+pub(crate) async fn authorize(
     policy: &dyn ManagementPolicy,
     instance: InstanceId,
     loaded: &Loaded,
     operation: ManagementOperation,
     target: Option<AccountKey>,
+    connection: &mut sqlx::PgConnection,
 ) -> Result<(), AccountRuleError> {
     if Instant::now() >= loaded.expires {
         return Err(AccountRuleError::InsufficientPrivilege);
     }
-    if target.is_some_and(|t| t.tenant != loaded.state.key().tenant) {
+    if target.is_some_and(|t| t.tenant != loaded.state.key().tenant)
+        && !matches!(operation, ManagementOperation::ProvisionAccount(_))
+    {
         return Err(AccountRuleError::InsufficientPrivilege);
     }
     let requirement = policy
-        .authorize(&ManagementContext {
-            instance,
-            actor: loaded.state.key(),
-            target,
-            operation,
-            assurance: &loaded.assurance,
-            groups: &loaded.groups,
-            department_snapshot: &loaded.department_snapshot,
-            expires: loaded.expires,
-        })
+        .authorize(
+            &ManagementContext {
+                instance,
+                actor: loaded.state.key(),
+                target,
+                operation,
+                assurance: &loaded.assurance,
+                groups: &loaded.groups,
+                department_snapshot: &loaded.department_snapshot,
+                expires: loaded.expires,
+            },
+            connection,
+        )
+        .await
         .map_err(|_| AccountRuleError::InsufficientPrivilege)?;
     if Instant::now() >= loaded.expires {
         return Err(AccountRuleError::InsufficientPrivilege);
@@ -116,16 +135,7 @@ pub(crate) fn authorize(
         ReauthenticationRequirement::Recent(age) => (age, false),
         ReauthenticationRequirement::RecentMfa(age) => (age, true),
     };
-    let age = loaded
-        .assurance
-        .auth_time()
-        .and_then(|time| loaded.now.checked_sub(time));
-    if max_age.is_zero()
-        || age.is_none_or(|age| {
-            age < 0 || u64::try_from(age).is_ok_and(|age| age >= max_age.as_secs())
-        })
-        || (mfa && loaded.assurance.acr() != Acr::Mfa)
-    {
+    if !loaded.recently_authenticated(max_age) || (mfa && loaded.assurance.acr() != Acr::Mfa) {
         return Err(AccountRuleError::ReauthenticationRequired);
     }
     Ok(())

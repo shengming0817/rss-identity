@@ -46,27 +46,54 @@ impl AccountEvent {
         }
     }
 }
+#[derive(Serialize)]
+pub(crate) struct ProvisioningEvent {
+    #[serde(flatten)]
+    account: AccountEvent,
+    actor_tenant: String,
+    actor_instance: String,
+}
 /// Closed set of event contracts using the same settlement path.
 #[derive(Serialize)]
 #[serde(untagged)]
 pub(crate) enum SecurityEvent {
     Account(AccountEvent),
+    Provisioned(ProvisioningEvent),
     Session(crate::sessions::SessionEvent),
     Federation(crate::federation::FederationEvent),
 }
 impl SecurityEvent {
+    pub(crate) fn provisioned(
+        state: AccountState,
+        actor: AccountKey,
+        instance: rss_identity_core::InstanceId,
+    ) -> Self {
+        Self::Provisioned(ProvisioningEvent {
+            account: AccountEvent::account(SecurityAction::AccountCreated, state, Some(actor)),
+            actor_tenant: actor.tenant.to_string(),
+            actor_instance: instance.to_string(),
+        })
+    }
+
     pub fn account(action: SecurityAction, state: AccountState, actor: Option<AccountKey>) -> Self {
         Self::Account(AccountEvent::account(action, state, actor))
     }
     fn tenant(&self) -> &str {
         match self {
             Self::Account(v) => &v.tenant,
+            Self::Provisioned(v) => &v.account.tenant,
             Self::Session(v) => &v.tenant,
             Self::Federation(v) => &v.tenant,
         }
     }
     fn contract(&self) -> (&'static str, &'static str, u32, &'static str) {
         match self {
+            Self::Provisioned(_) => (
+                "account.provisioned",
+                "identity.account.provisioning",
+                1,
+                include_str!("account-provisioning-v1.json"),
+            ),
             Self::Account(_) => (
                 "account.changed",
                 "identity.account.security",
@@ -317,65 +344,7 @@ impl Authority {
                 if (require_event && events.is_empty()) || events.len() > MAX_MUTATION_EVENTS {
                     return Err(corrupt());
                 }
-                let has_events = !events.is_empty();
-                for event in events {
-                    if event.tenant() != tenant.to_string() {
-                        return Err(corrupt());
-                    }
-                    let now: i64 = tx
-                        .with_connection(|c| {
-                            Box::pin(async {
-                                sqlx::query_scalar(
-                                    "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint",
-                                )
-                                .fetch_one(c)
-                                .await
-                            })
-                        })
-                        .await?;
-                    let (route, contract, version, schema) = event.contract();
-                    let envelope = MessageEnvelope::new(
-                        MessageId::parse(&Uuid::new_v4().to_string()).map_err(|_| corrupt())?,
-                        MessageMetadata::new(
-                            AuthoredMessageMetadata::new(
-                                tenant,
-                                Timepoint::try_from(now).map_err(|_| corrupt())?,
-                                MessagingDomain::parse("identity.security")
-                                    .map_err(|_| corrupt())?,
-                                MessageRoute::parse(route).map_err(|_| corrupt())?,
-                                ContractIdentity::new(
-                                    ContractId::parse(contract).map_err(|_| corrupt())?,
-                                    ContractVersion::from_major(version).map_err(|_| corrupt())?,
-                                    SchemaDigest::parse(&format!(
-                                        "sha256:{:x}",
-                                        Sha256::digest(schema)
-                                    ))
-                                    .map_err(|_| corrupt())?,
-                                ),
-                            ),
-                            MessageMetadataExtensions::default(),
-                        ),
-                        serde_json::to_vec(&event).map_err(|_| corrupt())?,
-                    );
-                    if outbox.append(tx, PendingMessage::new(envelope)).await?
-                        != AppendOutcome::Inserted
-                    {
-                        return Err(corrupt());
-                    }
-                }
-                if has_events {
-                    // ref: PostgreSQL REL_17_6 src/backend/commands/async.c:
-                    // pending notifications settle with this transaction, including failures.
-                    tx.with_connection(move |c| {
-                        Box::pin(async move {
-                            sqlx::query("SELECT pg_catalog.pg_notify($1, '')")
-                                .bind(channel)
-                                .execute(c)
-                                .await
-                        })
-                    })
-                    .await?;
-                }
+                append_events(tx, &outbox, &channel, tenant, events).await?;
                 Ok(result)
             })
         })
@@ -421,6 +390,70 @@ fn domain_result<T>(
         (Err(AuthorityError::Rejected), Some(reason)) => Err(reason),
         (result, _) => result,
     }
+}
+
+pub(crate) async fn append_events(
+    tx: &mut PgTransaction<'_>,
+    outbox: &rss_transactional_messaging_postgres::PgOutboxStore<()>,
+    channel: &str,
+    tenant: TenantId,
+    events: Vec<SecurityEvent>,
+) -> Result<(), PgError> {
+    let has_events = !events.is_empty();
+    for event in events {
+        if event.tenant() != tenant.to_string() {
+            return Err(corrupt());
+        }
+        let now: i64 = tx
+            .with_connection(|c| {
+                Box::pin(async {
+                    sqlx::query_scalar(
+                        "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint",
+                    )
+                    .fetch_one(c)
+                    .await
+                })
+            })
+            .await?;
+        let (route, contract, version, schema) = event.contract();
+        let envelope = MessageEnvelope::new(
+            MessageId::parse(&Uuid::new_v4().to_string()).map_err(|_| corrupt())?,
+            MessageMetadata::new(
+                AuthoredMessageMetadata::new(
+                    tenant,
+                    Timepoint::try_from(now).map_err(|_| corrupt())?,
+                    MessagingDomain::parse("identity.security").map_err(|_| corrupt())?,
+                    MessageRoute::parse(route).map_err(|_| corrupt())?,
+                    ContractIdentity::new(
+                        ContractId::parse(contract).map_err(|_| corrupt())?,
+                        ContractVersion::from_major(version).map_err(|_| corrupt())?,
+                        SchemaDigest::parse(&format!("sha256:{:x}", Sha256::digest(schema)))
+                            .map_err(|_| corrupt())?,
+                    ),
+                ),
+                MessageMetadataExtensions::default(),
+            ),
+            serde_json::to_vec(&event).map_err(|_| corrupt())?,
+        );
+        if outbox.append(tx, PendingMessage::new(envelope)).await? != AppendOutcome::Inserted {
+            return Err(corrupt());
+        }
+    }
+    if has_events {
+        let channel = channel.to_owned();
+        // ref: PostgreSQL REL_17_6 src/backend/commands/async.c:
+        // pending notifications settle with this transaction, including failures.
+        tx.with_connection(move |c| {
+            Box::pin(async move {
+                sqlx::query("SELECT pg_catalog.pg_notify($1, '')")
+                    .bind(channel)
+                    .execute(c)
+                    .await
+            })
+        })
+        .await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

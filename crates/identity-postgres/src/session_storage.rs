@@ -32,6 +32,16 @@ impl TimeSample {
         }
         Ok(Self { started, micros })
     }
+    fn within_age(&self, authenticated: i64, max_age: Duration, now: Instant) -> bool {
+        if max_age.is_zero() {
+            return false;
+        }
+        i64::try_from(max_age.as_secs())
+            .ok()
+            .and_then(|age| authenticated.checked_add(age))
+            .and_then(|end| self.deadline(end).ok())
+            .is_some_and(|deadline| now < deadline)
+    }
     pub(crate) fn seconds(&self) -> i64 {
         self.micros / 1_000_000
     }
@@ -76,6 +86,17 @@ pub(crate) struct Loaded {
     pub lifetime: SessionLifetime,
     pub now: i64,
 }
+impl Loaded {
+    /// The post-lock sample includes all time spent awaiting the host policy.
+    pub(crate) fn recently_authenticated(&self, max_age: Duration) -> bool {
+        self.assurance.auth_time().is_some_and(|authenticated| {
+            authenticated <= self.now
+                && self
+                    .sample
+                    .within_age(authenticated, max_age, Instant::now())
+        })
+    }
+}
 pub(crate) async fn lookup(
     c: &mut PgConnection,
     tenant: TenantId,
@@ -116,7 +137,7 @@ pub(crate) async fn by_id(
     let row = sqlx::query(concat!(
         "SELECT principal_id,auth_epoch,membership_epoch,auth_time,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at",
         ",revoked_at,token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
-        " AND session_id=$2::uuid FOR UPDATE"
+        " AND session_id=$2::uuid"
     ))
     .bind(tenant.to_string())
     .bind(&id)
@@ -249,6 +270,18 @@ pub(crate) fn lifetime_policy(row: &sqlx::postgres::PgRow) -> Result<SessionPoli
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn policy_wait_cannot_extend_recent_authentication() {
+        let start = Instant::now();
+        let sample = TimeSample {
+            started: start,
+            micros: 399_000_000,
+        };
+        let age = Duration::from_secs(300);
+        assert!(sample.within_age(100, age, start));
+        assert!(!sample.within_age(100, age, start + Duration::from_secs(2)));
+        assert!(!sample.within_age(100, Duration::ZERO, start));
+    }
     #[test]
     fn database_fraction_and_all_later_latency_consume_deadline() {
         let start = Instant::now();
