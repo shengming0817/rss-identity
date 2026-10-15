@@ -392,30 +392,6 @@ fn domain_result<T>(
     }
 }
 
-#[cfg(test)]
-mod settlement_tests {
-    use super::*;
-
-    #[test]
-    fn domain_rejection_preserves_reason_only_after_confirmed_rollback() {
-        let reason = AuthorityError::RuleRejected(AccountRuleError::Rejected);
-        assert_eq!(
-            domain_result::<()>(Err(AuthorityError::Rejected), Some(reason)),
-            Err(reason)
-        );
-        for failure in [
-            AuthorityError::RollbackFailed(crate::StorageFailure::DeadlineElapsed),
-            AuthorityError::CommitUnknown(crate::StorageFailure::DeadlineElapsed),
-            AuthorityError::Fenced,
-        ] {
-            assert_eq!(
-                domain_result::<()>(Err(failure), Some(reason)),
-                Err(failure)
-            );
-        }
-    }
-}
-
 pub(crate) async fn append_events(
     tx: &mut PgTransaction<'_>,
     outbox: &rss_transactional_messaging_postgres::PgOutboxStore<()>,
@@ -478,4 +454,28 @@ pub(crate) async fn append_events(
         .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod settlement_tests {
+    use super::*;
+
+    #[test]
+    fn domain_rejection_preserves_reason_only_after_confirmed_rollback() {
+        let reason = AuthorityError::RuleRejected(AccountRuleError::Rejected);
+        assert_eq!(
+            domain_result::<()>(Err(AuthorityError::Rejected), Some(reason)),
+            Err(reason)
+        );
+        for failure in [
+            AuthorityError::RollbackFailed(crate::StorageFailure::DeadlineElapsed),
+            AuthorityError::CommitUnknown(crate::StorageFailure::DeadlineElapsed),
+            AuthorityError::Fenced,
+        ] {
+            assert_eq!(
+                domain_result::<()>(Err(failure), Some(reason)),
+                Err(failure)
+            );
+        }
+    }
 }
