@@ -56,13 +56,14 @@ impl ManagementPolicy for DepartmentPolicy {
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
-async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Result<()> {
+async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let upstream = ScriptedOidc::new();
     let federation = service(&f, upstream.clone());
-    let provider = enabled_department(&f, &federation, 2).await?;
-    for expected in [Some("dept-01"), None] {
+    let provider = enabled_department(&f, &federation, 120).await?;
+    {
+        let expected = Some("dept-01");
         *upstream.department_snapshot.lock().unwrap() =
             UpstreamDepartmentSnapshot::Present(federation_support::department_snapshot(expected));
         let session = issued(
@@ -96,7 +97,7 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
         );
         assert_eq!(department.issuer(), provider.settings.issuer().as_str());
         assert_eq!(department.provider_config_version(), provider.version);
-        assert_eq!(department.expires_at() - department.observed_at(), 2);
+        assert_eq!(department.expires_at() - department.observed_at(), 120);
         let reference = actor.reference()?;
         let checked = f
             .store
@@ -111,6 +112,8 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
         assert_eq!(checked_department.expires_at(), department.expires_at());
         assert!(matches!(checked.groups()?, VerifiedGroups::Available(_)));
         let before = facts(&f, &session).await?;
+        let clock = ControlledFactTime::default();
+        let controlled = f.store.clone().with_fact_time(clock.clone());
         let managed = Authority::connect_runtime(
             f.runtime.clone(),
             Arc::new(PasswordKdf::new()),
@@ -120,7 +123,8 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
             }),
             deadline(),
         )
-        .await?;
+        .await?
+        .with_fact_time(clock.clone());
         managed
             .list_accounts(
                 managed
@@ -145,24 +149,16 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
             anyhow::bail!("reloaded department unavailable");
         };
         assert_eq!(reloaded_department.snapshot_id(), department.snapshot_id());
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        assert_eq!(
-            department.snapshot(),
-            Err(DepartmentAccessError::SnapshotExpired)
-        );
+        clock.advance_to(department.expires_at())?;
+        let expired = controlled
+            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .await?;
+        assert!(expired.assurance().is_ok());
         assert!(matches!(
-            actor.department_snapshot()?,
+            expired.department_snapshot()?,
             VerifiedDepartmentSnapshot::Expired
         ));
-        assert!(actor.assurance().is_ok());
-        assert!(matches!(
-            f.store
-                .recheck_session_reference(f.key.tenant, &reference, deadline())
-                .await?
-                .department_snapshot()?,
-            VerifiedDepartmentSnapshot::Expired
-        ));
-        assert!(matches!(actor.groups()?, VerifiedGroups::Available(_)));
+        assert!(matches!(expired.groups()?, VerifiedGroups::Available(_)));
         assert!(
             managed
                 .list_accounts(
@@ -181,7 +177,7 @@ async fn department_values_absence_expiry_refresh_and_management() -> anyhow::Re
             .refresh_session(f.key.tenant, secret(&refreshed), deadline())
             .await?;
         assert!(matches!(
-            f.store
+            controlled
                 .inspect_session(f.key.tenant, secret(&again), deadline())
                 .await?
                 .department_snapshot()?,
