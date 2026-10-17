@@ -109,3 +109,13 @@ producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::co
 先用 `prepare_local_account` 处理密码，再在宿主目标事务中调用 `authorize_in`（包括历史回执重放）和 `create_local_account_in`。组件在源租户作用域复查真实会话与宿主 ProvisionAccount 权限，恢复目标作用域后才写账户及安全事件；组件通过 RSS 同连接接缝校验源租户 execution binding 并持有源栅栏直至目标事务结算，源 epoch 失效时拒绝操作。宿主在同事务写产品授权和回执，任何组件错误均须传播并回滚，禁止捕获错误后继续提交。组件不签发目标租户会话，也不赋予产品管理员权限。
 
 `identity.account.provisioning/v1` 事件包含源 actor 的实例、租户和主体，消费者使用组件审计 worker。产品持有操作幂等、密码安全指纹和首次使用登记；不得用随机盐密码编码作为请求指纹或把明文秘密写进回执。
+
+## 消费方的事实到期测试
+
+仅测试构建可启用 `rss-identity-postgres/test-support`，以
+`Authority::with_fact_time(ControlledFactTime::default())` 给指定 Authority 配置事实时间。
+保留该控制句柄，在首次成功读取后用 `advance_to(fact.expires_at())` 推进后续读取；
+`inspect_session`、活动认证、reference 重检及管理事务仍走实际存储与身份校验。
+时间只影响新加载的 group/department 事实投影，不改变 JWT、持久事实、会话有效期、
+借用中的旧证明或事务预算。已有 Authority 克隆不受新配置影响，后续克隆共享该控制句柄；
+生产装配不启用此 feature。借用事实的即时到期边界由组件 T1 持有，无需消费方重复真实等待。

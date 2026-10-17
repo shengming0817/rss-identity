@@ -32,6 +32,13 @@ impl TimeSample {
         }
         Ok(Self { started, micros })
     }
+    fn for_facts(&self, time: &crate::fact_time::FactTime) -> Self {
+        let seconds = time.seconds(self.seconds());
+        Self {
+            started: self.started,
+            micros: self.micros.max(seconds.saturating_mul(1_000_000)),
+        }
+    }
     fn within_age(&self, authenticated: i64, max_age: Duration, now: Instant) -> bool {
         if max_age.is_zero() {
             return false;
@@ -101,6 +108,7 @@ pub(crate) async fn lookup(
     c: &mut PgConnection,
     tenant: TenantId,
     digest: &[u8; 32],
+    fact_time: &crate::fact_time::FactTime,
 ) -> Result<Loaded, PgError> {
     lock_guard(c, tenant).await?;
     let locator = sqlx::query(concat!(
@@ -117,7 +125,7 @@ pub(crate) async fn lookup(
         principal: principal(&locator.try_get::<String, _>("principal_id")?)?,
     };
     let id: String = locator.try_get("session_id")?;
-    let loaded = by_id(c, key, session_id(&id)?).await?;
+    let loaded = by_id(c, key, session_id(&id)?, fact_time).await?;
     let stored: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
         .bind(tenant.to_string()).bind(&id).fetch_one(c).await?;
     if stored != digest.as_slice() {
@@ -130,6 +138,7 @@ pub(crate) async fn by_id(
     c: &mut PgConnection,
     key: AccountKey,
     sid: SessionId,
+    fact_time: &crate::fact_time::FactTime,
 ) -> Result<Loaded, PgError> {
     let tenant = key.tenant;
     let id = sid.to_string();
@@ -169,12 +178,13 @@ pub(crate) async fn by_id(
     if !lifetime.valid_at(now) {
         return Err(reject());
     }
+    let fact_sample = sample.for_facts(fact_time);
     let department = match (&origin, &source) {
         (Some(origin), Some(source)) => crate::department::DepartmentFacts::new(
             *origin.facts.department_snapshot.clone(),
             source.clone(),
             origin.facts.provider_config_version,
-            &sample,
+            &fact_sample,
         )?,
         (None, None) => crate::department::DepartmentFacts::Unavailable(
             rss_identity_core::department::DepartmentUnavailableReason::LocalIdentity,
@@ -184,7 +194,7 @@ pub(crate) async fn by_id(
     let (assurance, groups) = match (origin, source) {
         (Some(origin), Some(source)) => (
             origin.facts.assurance.clone(),
-            origin.facts.project(source, now)?,
+            origin.facts.project(source, fact_sample.seconds())?,
         ),
         (None, None) => (
             Assurance::password(lifetime.auth_time()).map_err(|_| corrupt())?,
@@ -199,7 +209,7 @@ pub(crate) async fn by_id(
         .map_err(|_| reject())?;
     Ok(Loaded {
         assurance,
-        groups: GroupFacts::new(groups, &sample)?,
+        groups: GroupFacts::new(groups, &fact_sample)?,
         department_snapshot: Box::new(department),
         expires: sample.deadline(lifetime.idle_expires_at())?,
         sample,
@@ -216,7 +226,7 @@ pub(crate) async fn recheck(
     if std::time::Instant::now() >= proof.expires || authority_id(c).await? != proof.authority {
         return Err(reject());
     }
-    let mut loaded = lookup(c, proof.key.tenant, &proof.digest).await?;
+    let mut loaded = lookup(c, proof.key.tenant, &proof.digest, &proof.fact_time).await?;
     loaded.expires = loaded.expires.min(proof.expires);
     if loaded.state.key() != proof.key
         || loaded.view.id != proof.view.id

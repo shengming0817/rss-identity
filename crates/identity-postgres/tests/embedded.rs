@@ -299,7 +299,7 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let federation = Federation::new(
-        GroupFactsMaxAge::new(2)?,
+        GroupFactsMaxAge::new(300)?,
         f.store.clone(),
         ScriptedOidc::new(),
         StateSigner::new([7; 32], &f.instance.to_string())?,
@@ -357,6 +357,8 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
             })
         }
     }
+    let clock = ControlledFactTime::default();
+    let controlled = f.store.clone().with_fact_time(clock.clone());
     let managed = Authority::connect_runtime(
         f.runtime.clone(),
         Arc::new(PasswordKdf::new()),
@@ -364,15 +366,29 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
         Arc::new(StaffPolicy),
         deadline(),
     )
-    .await?;
+    .await?
+    .with_fact_time(clock.clone());
     let fresh = managed
         .inspect_session(f.key.tenant, secret(&session), deadline())
         .await?;
     managed.list_accounts(fresh, None, 10, deadline()).await?;
     let original_expiry = groups.expires_at();
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    assert_eq!(groups.values(), Err(GroupAccessError::SnapshotExpired));
-    assert!(matches!(actor.groups()?, VerifiedGroups::Expired));
+    let original: serde_json::Value = sqlx::query_scalar(
+        "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1",
+    )
+    .bind(session.view().id.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    clock.advance_to(original_expiry)?;
+    clock.advance_to(original_expiry - 1)?; // A stale caller cannot rewind the floor.
+    // A separate Authority remains on PG time, even over the same runtime/session.
+    assert!(matches!(
+        f.store
+            .inspect_session(f.key.tenant, secret(&session), deadline())
+            .await?
+            .groups()?,
+        VerifiedGroups::Available(_)
+    ));
     assert!(actor.assurance().is_ok());
     let before = f.events().await?;
     let expired = managed
@@ -393,17 +409,22 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     assert_eq!(f.events().await?, before);
     drop(managed);
 
-    let refreshed = f
-        .store
+    let refreshed = controlled
         .refresh_session(f.key.tenant, secret(&session), deadline())
         .await?;
-    let current = f
-        .store
+    let current = controlled
         .inspect_session(f.key.tenant, secret(&refreshed), deadline())
         .await?;
     assert!(matches!(current.groups()?, VerifiedGroups::Expired));
     assert_eq!(current.view().auth_time, session.view().auth_time);
     assert!(original_expiry < current.view().absolute_expires_at);
+    let persisted: serde_json::Value = sqlx::query_scalar(
+        "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1",
+    )
+    .bind(session.view().id.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(original, persisted);
     f.close().await;
     Ok(())
 }

@@ -6,6 +6,9 @@ mod credentials;
 mod department;
 mod entra;
 pub use entra::{EntraAuthority, RevalidatedAccount, VerifiedExternalSubject};
+mod fact_time;
+#[cfg(feature = "test-support")]
+pub use fact_time::ControlledFactTime;
 mod federation;
 mod federation_link;
 mod federation_login;
@@ -90,6 +93,7 @@ impl AuthorityConfig {
 }
 #[derive(Clone)]
 pub struct Authority {
+    fact_time: fact_time::FactTime,
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
     runtimes: Arc<runtime::RuntimeState>,
     profile: AuthorityProfile,
@@ -143,6 +147,7 @@ impl Authority {
         let tenant = config.tenants[0];
         let instance = config.instance;
         let authority = Self {
+            fact_time: Default::default(),
             kdf,
             runtimes: Arc::new(runtime::RuntimeState::new(
                 runtime,

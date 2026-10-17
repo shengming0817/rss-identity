@@ -83,6 +83,7 @@ impl IssuedSession {
 /// fn copy(p: rss_identity_postgres::AuthenticatedSession) { let _ = p.clone(); }
 /// ```
 pub struct AuthenticatedSession {
+    pub(crate) fact_time: crate::fact_time::FactTime,
     pub(crate) key: AccountKey,
     pub(crate) digest: [u8; 32],
     pub(crate) authority: Uuid,
@@ -293,17 +294,19 @@ impl Authority {
         self.require_runtime()?;
         let budget = Budget::new(deadline)?;
         let digest = secret.digest();
+        let fact_time = self.fact_time.clone();
         self.read(tenant, budget.remaining(), move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
-                        let mut loaded = db::lookup(c, tenant, &digest).await?;
+                        let mut loaded = db::lookup(c, tenant, &digest, &fact_time).await?;
                         if touch {
                             db::touch(c, &mut loaded).await?;
                         }
                         let authority = authority_id(c).await?;
                         let expires = checked_expiry(&loaded, budget.0)?;
                         Ok(AuthenticatedSession {
+                            fact_time,
                             identity: SessionIdentity::from_state(loaded.state),
                             assurance: loaded.assurance,
                             groups: loaded.groups,
@@ -330,9 +333,10 @@ impl Authority {
         self.require_runtime()?;
         let budget = Budget::new(deadline)?;
         let secret = SessionSecret::generate().map_err(|_| AuthorityError::Unavailable)?;
+        let fact_time = self.fact_time.clone();
         self.mutate(tenant,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
-                let mut loaded = db::lookup(c,tenant,&old.digest()).await?;
+                let mut loaded = db::lookup(c,tenant,&old.digest(), &fact_time).await?;
                 db::touch(c,&mut loaded).await?;
                 sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
                     .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;

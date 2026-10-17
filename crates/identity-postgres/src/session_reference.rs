@@ -119,6 +119,7 @@ impl Authority {
         };
         let session = SessionId::parse(&reference.session.to_string())
             .map_err(|_| AuthorityError::Rejected)?;
+        let fact_time = self.fact_time.clone();
         self.read(tenant, budget.remaining(), move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
@@ -127,7 +128,7 @@ impl Authority {
                         if authority_id(c).await? != reference.instance {
                             return Err(reject());
                         }
-                        let loaded = db::by_id(c, key, session).await?;
+                        let loaded = db::by_id(c, key, session, &fact_time).await?;
                         let expires = checked_expiry(&loaded, budget.0)?;
                         Ok(RevalidatedSession {
                             reference,

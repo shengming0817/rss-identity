@@ -197,55 +197,8 @@ async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
         Ok::<_, anyhow::Error>(cookie)
     })
     .await?;
-    // Fresh request proof outlives the group snapshot while retaining the same signed deadline.
-    let expiry: i64 = sqlx::query_scalar("SELECT max((auth_facts->'groups'->>'expires_at')::bigint) FROM identity_authority.sessions WHERE auth_facts IS NOT NULL")
-        .fetch_one(&f.owner).await?;
-    let now: i64 =
-        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
-            .fetch_one(&f.owner)
-            .await?;
-    tokio::time::sleep(Duration::from_secs(
-        (expiry - now).saturating_sub(1).max(0) as u64
-    ))
-    .await;
-    let near = inspect(&f, &first).await?;
-    let retained = match near.groups()? {
-        VerifiedGroups::Available(g) => Some(g),
-        VerifiedGroups::Expired => None,
-        _ => panic!("unexpected groups"),
-    };
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    if let Some(groups) = retained {
-        assert_eq!(groups.values(), Err(GroupAccessError::SnapshotExpired));
-    }
-    assert!(near.assurance().is_ok());
-    for cookie in [&first, &second] {
-        let old = inspect(&f, cookie).await?;
-        assert_eq!(old.account(), actor.account());
-        assert!(matches!(old.groups()?, VerifiedGroups::Expired));
-    }
-    let before: Value = sqlx::query_scalar(
-        "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1",
-    )
-    .bind(actor.view().id.as_uuid())
-    .fetch_one(&f.owner)
-    .await?;
-    let refreshed = f
-        .store
-        .refresh_session(tenant(), secret(&first), deadline())
-        .await?;
-    let after: Value = sqlx::query_scalar(
-        "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1",
-    )
-    .bind(actor.view().id.as_uuid())
-    .fetch_one(&f.owner)
-    .await?;
-    assert_eq!(before, after);
-    let refreshed = format!("session={}", refreshed.secret().expose());
-    assert!(matches!(
-        inspect(&f, &refreshed).await?.groups()?,
-        VerifiedGroups::Expired
-    ));
+    // Fact expiry and refresh persistence are owned by the PostgreSQL embedded test;
+    // this case retains only real provider snapshots, outage and revocation.
     let fresh = login_browser(&app, &p, 'D').await?;
     assert_ne!(available(&inspect(&f, &fresh).await?, p.id), snapshot);
     {
@@ -277,7 +230,7 @@ async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
             deadline(),
         )
         .await?;
-    for cookie in [&refreshed, &second, &removed, &fresh] {
+    for cookie in [&first, &second, &removed, &fresh] {
         assert!(inspect(&f, cookie).await.is_err());
     }
     let missing = login_browser(&app, &changed, 'E').await?;

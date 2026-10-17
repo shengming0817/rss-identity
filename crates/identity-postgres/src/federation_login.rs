@@ -423,7 +423,9 @@ pub(crate) async fn check_actor(
         {
             return Err(reject());
         }
-        let actor = session_storage::lookup(c, tenant, &session.ok_or_else(reject)?).await?;
+        let actor =
+            session_storage::lookup(c, tenant, &session.ok_or_else(reject)?, &Default::default())
+                .await?;
         if actor.view.id != intent.session
             || actor.state.key().principal != intent.principal
             || actor.state.epoch() != intent.epoch
@@ -433,7 +435,9 @@ pub(crate) async fn check_actor(
         }
         Ok(Some(actor))
     } else if let Some(expected) = attempt.replacement {
-        let actor = session_storage::lookup(c, tenant, &session.ok_or_else(reject)?).await?;
+        let actor =
+            session_storage::lookup(c, tenant, &session.ok_or_else(reject)?, &Default::default())
+                .await?;
         if actor.view.id != expected {
             return Err(reject());
         }
