@@ -228,7 +228,8 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
     let s = service(&f, Arc::new(fixture_transport(true)?));
     let p = provider(&f, &s).await?;
     let app = app(&s);
-    let original = successful(&app, &p, "alice").await?;
+    // The directory case consumes Alice's TOTP; this case owns an independent credential.
+    let original = successful(&app, &p, "step-up").await?;
     let path = format!("/api/v1/identity/tenants/{A}/oidc/{}/step-up", p.id);
     let browser = format!("{BROWSER}; {original}");
     let csrf = secret(&original).csrf();
@@ -267,7 +268,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
     lowered.query_pairs_mut().clear().extend_pairs(pairs);
-    let cb = authorize(lowered.as_str(), "alice").await?;
+    let cb = authorize(lowered.as_str(), "step-up").await?;
     let r = callback(&app, &cb, &browser).await?;
     assert_eq!(r.headers()["location"], "/auth/error?reason=failed");
     assert!(!r.headers().contains_key("set-cookie"));
@@ -295,7 +296,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         .as_str()
         .unwrap()
         .to_owned();
-    let cb = authorize_factor(&url, "alice", true).await?;
+    let cb = authorize_factor(&url, "step-up", true).await?;
     let r = callback(&app, &cb, &browser).await?;
     assert_eq!(r.headers()["location"], format!("{ORIGIN}/done"));
     let upgraded = cookie(&r);

@@ -271,7 +271,7 @@ def keycloak(redirect_uri="https://identity.example.test/api/v1/identity/oidc/ca
              "users":[{"username":name,"enabled":True,"email":"same@example.test","emailVerified":True,
                        "firstName":name,"lastName":"Fixture","groups":["staff"],
                        "attributes":{} if name == "alice" else {},
-                       "credentials":[{"type":"password","value":"fixture-password","temporary":False}]} for name in ["alice","bob"]]}
+                       "credentials":[{"type":"password","value":"fixture-password","temporary":False}]} for name in ["alice","bob","step-up"]]}
     configure_totp(realm)
     with tempfile.TemporaryDirectory(prefix="identity-federated-") as tmp, contextlib.ExitStack() as stack:
         tmp=Path(tmp);cert=tmp/"tls.crt";key=tmp/"tls.key";realm_file=tmp/"identity-realm.json"
