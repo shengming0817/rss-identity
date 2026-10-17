@@ -2383,6 +2383,7 @@ dependencies = [
  "rss-audit-postgres",
  "rss-contract",
  "rss-identity-core",
+ "rss-identity-postgres",
  "rss-request-context",
  "rss-transactional-messaging",
  "rss-transactional-messaging-postgres",
