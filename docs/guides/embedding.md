@@ -88,9 +88,11 @@ JWKS 只从固定 Microsoft tenant 地址经有界、禁重定向的 HTTPS 取�
 
 ## 认证审计交付
 
-`rss_identity_postgres::audit::AuditDelivery` 持有 Identity 事件语义。宿主注入同库的 worker `Arc<PgRuntime>`、`Arc<PgAudit>`、真实实例与租户绑定和 delivery budget，调用有界 `run_once`。异步构造在一个有界预算内检查已有 dead-letter，不创建任务或接管连接关闭；构造和运行统一返回 `AuditDeliveryError`，宿主只对 `is_retryable()` 为真的错误重试。权限通过公开 `audit::grant_worker` / `verify_worker` 接缝装配，不复制参考 app 的 SQL。参考实现见 [审计装配](../../app/identity/src/audit.rs)。
+`rss_identity_postgres::audit::AuditDelivery` 持有 Identity 事件语义。宿主注入同库的 worker `Arc<PgRuntime>`、`Arc<PgAudit>`、真实实例与租户绑定和 delivery budget，调用有界 `run_once`。异步构造在一个有界预算内使用 worker 实际事务连接完成 Audit（启用 Ledger 时包括 Ledger）启动验证，并检查已有 dead-letter，不创建任务或接管连接关闭；构造和运行统一返回 `AuditDeliveryError`，宿主只对 `is_retryable()` 为真的错误重试。权限通过公开 `audit::grant_worker` / `verify_worker` 接缝装配，不复制参考 app 的 SQL。参考实现见 [审计装配](../../app/identity/src/audit.rs)。
 
 producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::connect_consumer`，Audit 开启 `messaging`。worker 不读取 Identity 私有表，也不能直接修改 Audit/Outbox；schema owner 和实际权限必须通过 startup probe。宿主负责保证来源实例对应当前 Identity 数据库，不接受请求指定的 source。
+
+存储角色、结构或函数的受控变更须先停止相关写实例并排空，再变更、以实际 worker 角色重新验证并恢复接流；不承诺逐次操作主动发现管理员带外漂移。真实 SQL 权限失败仍停止投递、不 ACK。
 
 有安全事件的业务事务在全部 Outbox append 后调用同事务 `pg_notify`，提交后发送空 payload；通知 SQL 失败按原事务错误传播，未知提交仍为未知。无事件的条件写入不发送通知。宿主通过公开 `audit::notification_channel(instance, tenant)` 计算每个可信实例/租户的稳定频道，先完成同库 `LISTEN` 再扫描，重连后重新扫描。频道不提供访问控制或投递证明，通知可能丢失或被伪造；不要发送身份、令牌或事件内容。
 

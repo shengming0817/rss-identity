@@ -283,18 +283,7 @@ pub(super) fn map_event(
     };
     let build = || -> Result<_, rss_audit_core::Error> {
         Ok(AuditEventV1::new(
-            RecordIdentity::new(
-                meta.tenant_id(),
-                SourceIdentity::new(
-                    SourceId::parse(&format!("identity.{instance}"))?,
-                    SourceContract::new(
-                        contract.id().clone(),
-                        contract.version(),
-                        contract.schema_digest().clone(),
-                    ),
-                ),
-                EventId::parse(message.id().as_str())?,
-            ),
+            record_identity(instance, message)?,
             EventFacts::new(
                 ActorRef::new(ActorKind::parse(actor_kind)?, ActorId::parse(&actor_id)?),
                 Action::parse(&action)?,
@@ -315,4 +304,24 @@ pub(super) fn map_event(
         ))
     };
     build().map_err(|_| InvalidEvent)
+}
+
+pub(super) fn record_identity(
+    instance: InstanceId,
+    message: &MessageEnvelope<Vec<u8>>,
+) -> Result<RecordIdentity, rss_audit_core::Error> {
+    let meta = message.metadata();
+    let contract = meta.contract();
+    Ok(RecordIdentity::new(
+        meta.tenant_id(),
+        SourceIdentity::new(
+            SourceId::parse(&format!("identity.{instance}"))?,
+            SourceContract::new(
+                contract.id().clone(),
+                contract.version(),
+                contract.schema_digest().clone(),
+            ),
+        ),
+        EventId::parse(message.id().as_str())?,
+    ))
 }

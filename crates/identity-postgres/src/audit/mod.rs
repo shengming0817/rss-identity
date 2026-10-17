@@ -6,9 +6,8 @@ pub use error::AuditDeliveryError;
 pub use profile::{grant_worker, verify_worker};
 mod mapping;
 mod observations;
-use mapping::{accepted_contract, map_event};
+use mapping::{accepted_contract, map_event, record_identity};
 use rss_audit_postgres::PgAudit;
-use rss_contract::Timepoint;
 use rss_identity_core::InstanceId;
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
 use rss_transactional_messaging::{
@@ -75,6 +74,15 @@ impl TransactionalMessagingEmitter for Observations {
         observations::record(event, std::io::stderr().lock());
     }
 }
+enum ProjectionError {
+    Invalid,
+    Audit(rss_audit_postgres::Error),
+}
+impl From<rss_audit_postgres::Error> for ProjectionError {
+    fn from(error: rss_audit_postgres::Error) -> Self {
+        Self::Audit(error)
+    }
+}
 struct Effect {
     instance: InstanceId,
     audit: Arc<PgAudit>,
@@ -87,33 +95,38 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
         message: &MessageEnvelope<Vec<u8>>,
         _: OperationDeadline,
     ) -> Result<TerminalDisposition, PgConsumerEffectFailure> {
-        let seconds: i64 = tx
-            .with_connection(|c| {
-                Box::pin(async {
-                    sqlx::query_scalar(
-                        "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint",
-                    )
-                    .fetch_one(c)
-                    .await
-                })
-            })
-            .await
-            .map_err(PgConsumerEffectFailure::infrastructure)?;
-        let recorded =
-            Timepoint::try_from(seconds).map_err(PgConsumerEffectFailure::infrastructure)?;
-        let Ok(event) = map_event(self.instance, message, recorded) else {
-            return Ok(TerminalDisposition::Rejected(RejectKind::Permanent));
+        let identity = match record_identity(self.instance, message) {
+            Ok(identity) => identity,
+            Err(_) => return Ok(TerminalDisposition::Rejected(RejectKind::Permanent)),
         };
-        let request = rss_audit_core::prepare(event, recorded)
-            .map_err(PgConsumerEffectFailure::infrastructure)?;
-        match self.audit.append_in(tx, &request).await {
+        let result = self
+            .audit
+            .append_with_in(tx, &identity, |previous, now| {
+                let recorded = match previous {
+                    Some(record) => {
+                        rss_audit_core::decode_untrusted(record.prepared().canonical_bytes())
+                            .map_err(|e| ProjectionError::Audit(e.into()))?
+                            .recorded_at()
+                    }
+                    None => now,
+                };
+                let event = map_event(self.instance, message, recorded)
+                    .map_err(|_| ProjectionError::Invalid)?;
+                rss_audit_core::prepare(event, recorded)
+                    .map_err(|e| ProjectionError::Audit(e.into()))
+            })
+            .await;
+        match result {
+            Err(ProjectionError::Invalid) => {
+                Ok(TerminalDisposition::Rejected(RejectKind::Permanent))
+            }
             Ok(_) => Ok(TerminalDisposition::Succeeded),
-            Err(
+            Err(ProjectionError::Audit(
                 rss_audit_postgres::Error::Conflict
                 | rss_audit_postgres::Error::ScopeMismatch
                 | rss_audit_postgres::Error::Protocol(_),
-            ) => Ok(TerminalDisposition::Rejected(RejectKind::Invariant)),
-            Err(e) => {
+            )) => Ok(TerminalDisposition::Rejected(RejectKind::Invariant)),
+            Err(ProjectionError::Audit(e)) => {
                 if matches!(
                     e,
                     rss_audit_postgres::Error::Admission(_)
@@ -293,6 +306,20 @@ impl AuditDelivery {
         if tenants.is_empty() || tenants.len() > 128 {
             return Err(AuditDeliveryError::Configuration);
         }
+        let startup_cutoff = Deadline::from_timeout(&Timer, budget.settle_timeout())
+            .map_err(|_| AuditDeliveryError::Configuration)?;
+        let validator = audit.clone();
+        runtime
+            .local_tx(
+                tenants[0],
+                OperationDeadline::from_cutoff(startup_cutoff, &Timer),
+                move |tx| {
+                    Box::pin(async move { validator.validate_in(tx).await.map_err(Into::into) })
+                },
+            )
+            .await
+            .fold(Ok, Err, Err, Err, Err, Err)
+            .map_err(AuditDeliveryError::pg)?;
         let lease = LeaseRenewalPolicy::from_ttl(budget.lease_ttl())
             .map_err(|_| AuditDeliveryError::Configuration)?;
         let fatal = Arc::new(OnceLock::new());
@@ -323,7 +350,7 @@ impl AuditDelivery {
         };
         if delivery
             .outbox
-            .has_dead_letters(OperationDeadline::from_remaining(budget.settle_timeout()))
+            .has_dead_letters(OperationDeadline::from_cutoff(startup_cutoff, &Timer))
             .await
             .map_err(AuditDeliveryError::pg)?
         {

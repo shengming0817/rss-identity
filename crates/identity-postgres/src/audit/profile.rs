@@ -19,7 +19,7 @@ pub async fn grant_worker(
     Ok(())
 }
 /// Verify the host-selected worker's complete SET-role authority closure, without changing grants.
-/// Provider schema admission remains owned by `PgRuntime::connect_consumer` and `PgAudit::new`.
+/// Provider schema admission remains owned by `PgRuntime::connect_consumer` and the actual worker validation in `AuditDelivery::new`.
 pub async fn verify_worker(
     connection: &mut PgConnection,
     role: &str,

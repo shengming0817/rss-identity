@@ -488,3 +488,80 @@ async fn permanent_storage_failure_stops_delivery_without_ack() -> anyhow::Resul
     s.pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires real PG"]
+async fn concentrated_projection_replays_exact_bytes_after_clock_advances() -> anyhow::Result<()> {
+    let s = Setup::new().await?;
+    let body = serde_json::json!({"action":"created","tenant":A,"principal":B,"session_id":SYSTEM,"replaced_session_id":null,"epoch":1});
+    let mut original = Vec::new();
+    for (attempt, epoch) in [(0, 1), (1, 1), (2, 2)] {
+        let mut payload = body.clone();
+        payload["epoch"] = serde_json::json!(epoch);
+        let message = super::tests::envelope("session", payload);
+        let effect = Effect {
+            instance: s.f.instance,
+            audit: s.audit.clone(),
+            fatal: Arc::new(OnceLock::new()),
+        };
+        let result = s
+            .runtime
+            .local_tx(TenantId::parse(A)?, support::deadline(), move |tx| {
+                Box::pin(async move {
+                    Ok(effect
+                        .apply(tx, &message, support::deadline())
+                        .await
+                        .unwrap())
+                })
+            })
+            .await
+            .fold(Ok, Err, Err, Err, Err, Err)?;
+        assert_eq!(
+            matches!(result, TerminalDisposition::Succeeded),
+            attempt != 2
+        );
+        if attempt == 2 {
+            assert!(matches!(
+                result,
+                TerminalDisposition::Rejected(RejectKind::Invariant)
+            ));
+        }
+        let bytes: Vec<Vec<u8>> = sqlx::query_scalar("SELECT canonical FROM rss_audit.records")
+            .fetch_all(&s.f.owner)
+            .await?;
+        assert_eq!(bytes.len(), 1);
+        if attempt == 0 {
+            original = bytes[0].clone();
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+        } else {
+            assert_eq!(bytes[0], original);
+        }
+    }
+    s.runtime.close().await;
+    s.pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires real PG"]
+async fn startup_validates_actual_worker_not_audit_pool() -> anyhow::Result<()> {
+    let s = Setup::new().await?;
+    // Audit owns a valid worker pool, but the supplied producer runtime has no Audit grants.
+    let result = AuditDelivery::new(
+        s.f.runtime.clone(),
+        s.audit.clone(),
+        s.f.instance,
+        vec![TenantId::parse(A)?],
+        DeliveryBudget::new(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )?,
+    )
+    .await;
+    assert!(matches!(result, Err(AuditDeliveryError::Invariant)));
+    s.runtime.close().await;
+    s.pool.close().await;
+    Ok(())
+}
