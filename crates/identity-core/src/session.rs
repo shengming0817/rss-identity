@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 #[error("invalid or expired session")]
 pub struct SessionError;
 
-/// Owned bearer secret. Never serialize, clone or log it; expose only at the HTTP boundary.
+/// Owned browser session secret. Never serialize, clone or log it; expose only at the HTTP boundary.
 /// ```compile_fail
 /// fn copy(s: rss_identity_core::session::SessionSecret) { let _ = s.clone(); }
 /// ```
@@ -54,6 +54,37 @@ impl SessionSecret {
         bool::from(self.csrf().as_bytes().ct_eq(presented.as_bytes()))
     }
 }
+/// The presentation selected at issuance; persisted and checked on every credential lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialKind {
+    Cookie,
+    Bearer,
+}
+impl CredentialKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cookie => "cookie",
+            Self::Bearer => "bearer",
+        }
+    }
+}
+
+/// Programmatic credential, separate from browser cookies. Never serialized or cloned.
+#[derive(Debug)]
+pub struct BearerSecret(SessionSecret);
+impl BearerSecret {
+    pub fn parse(value: String) -> Result<Self, SessionError> {
+        SessionSecret::parse(value).map(Self)
+    }
+    pub fn expose(&self) -> &str {
+        self.0.expose()
+    }
+    pub fn digest(&self) -> [u8; 32] {
+        self.0.digest()
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut value = String::with_capacity(bytes.len() * 2);

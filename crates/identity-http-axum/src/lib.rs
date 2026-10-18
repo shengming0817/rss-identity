@@ -1,6 +1,8 @@
 //! Instance-local authentication HTTP adapter; no listener or forwarded-header trust.
 //! ref: axum extract/state.rs @ c59208c86fded335cd85e388030ad59347b0e5ae.
+mod bearer;
 mod boundary;
+pub use bearer::{authenticate_bearer_request, bearer_router};
 mod dto;
 mod federation;
 mod handlers;
@@ -178,6 +180,7 @@ pub async fn authenticate_request(
     let budget = boundary::RequestBudget::new(deadline.timeout().min(config.timeout));
     let result = async {
         authority.require_runtime()?;
+        boundary::cookie_presentation(headers)?;
         if activity == SessionActivity::Active {
             boundary::same_origin(headers, config)?;
             if boundary::unique(headers, "x-identity-request")? != Some("1") {

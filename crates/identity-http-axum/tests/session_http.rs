@@ -1008,3 +1008,232 @@ async fn session_http_v1_reauthentication_is_bound_and_has_no_legacy_role_surfac
     f.close().await;
     Ok(())
 }
+
+fn bearer_app(f: &Fixture) -> Router {
+    app(f).merge(
+        rss_identity_http_axum::bearer_router(
+            f.store.clone(),
+            HttpConfig::new(ORIGIN, Duration::from_secs(10)).unwrap(),
+        )
+        .unwrap(),
+    )
+}
+fn bearer_login() -> Request<Body> {
+    let mut req = request(
+        "POST",
+        "bearer/login",
+        None,
+        None,
+        json!({"login":"admin","password":PASSWORD}),
+    );
+    req.headers_mut().remove("origin");
+    req.headers_mut().remove("x-identity-request");
+    req
+}
+fn bearer_headers(secret: &str) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {secret}").parse().unwrap());
+    headers
+}
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let app = bearer_app(&f);
+    let config = HttpConfig::new(ORIGIN, Duration::from_secs(10))?;
+    let (cookie, csrf, _) = successful_login(&app).await?;
+    // Browser router alone must not expose a programmatic issuance bypass.
+    assert_eq!(super_router_status(&f).await?, StatusCode::NOT_FOUND);
+    let response = app.clone().oneshot(bearer_login()).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(!response.headers().contains_key("set-cookie"));
+    let issued = body(response).await?;
+    let token = issued["accessToken"].as_str().unwrap();
+    assert_eq!(issued["tokenType"], "Bearer");
+    assert!(
+        issued["absoluteExpiresAt"].as_i64().unwrap() > issued["idleExpiresAt"].as_i64().unwrap()
+    );
+    let headers = bearer_headers(token);
+    let (proof, retained) = rss_identity_http_axum::authenticate_bearer_request(
+        &f.store,
+        &config,
+        f.key.tenant,
+        &headers,
+        deadline(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("bearer rejected"))?;
+    assert_eq!(proof.view().id.to_string(), issued["sessionId"]);
+    assert_eq!(retained.expose(), token);
+    for (name, value) in [
+        ("cookie", cookie.clone()),
+        ("x-api-key", "opaque-key".into()),
+        ("authorization", format!("Bearer {token}")),
+    ] {
+        let mut mixed = headers.clone();
+        mixed.append(name, value.parse()?);
+        let error = rss_identity_http_axum::authenticate_bearer_request(
+            &f.store,
+            &config,
+            f.key.tenant,
+            &mixed,
+            deadline(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.headers()["cache-control"], "no-store");
+        assert!(
+            !String::from_utf8(to_bytes(error.into_body(), 4096).await?.to_vec())?.contains(token)
+        );
+    }
+    let mut mixed = request("GET", "session", Some(&cookie), None, json!(null));
+    mixed
+        .headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse()?);
+    assert_eq!(
+        app.clone().oneshot(mixed).await?.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let fake_cookie = format!("__Host-identity-session={token}");
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "session",
+                Some(&fake_cookie),
+                None,
+                json!(null)
+            ))
+            .await?
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let browser_secret = cookie.split_once('=').unwrap().1;
+    let error = rss_identity_http_axum::authenticate_bearer_request(
+        &f.store,
+        &config,
+        f.key.tenant,
+        &bearer_headers(browser_secret),
+        deadline(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+    let mut logout = request("POST", "bearer/logout", None, None, json!(null));
+    logout.headers_mut().remove("origin");
+    logout
+        .headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse()?);
+    let response = app.clone().oneshot(logout).await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(!response.headers().contains_key("set-cookie"));
+    assert_eq!(
+        rss_identity_http_axum::authenticate_bearer_request(
+            &f.store,
+            &config,
+            f.key.tenant,
+            &headers,
+            deadline()
+        )
+        .await
+        .err()
+        .unwrap()
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "session/logout",
+                Some(&cookie),
+                Some(&csrf),
+                json!(null)
+            ))
+            .await?
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    f.close().await;
+    Ok(())
+}
+async fn super_router_status(f: &Fixture) -> anyhow::Result<StatusCode> {
+    Ok(app(f).oneshot(bearer_login()).await?.status())
+}
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let app = bearer_app(&f);
+    for name in ["cookie", "authorization", "x-api-key"] {
+        let mut req = bearer_login();
+        req.headers_mut().insert(
+            name,
+            (if name == "cookie" {
+                "__Host-identity-session=broken"
+            } else {
+                "invalid"
+            })
+            .parse()?,
+        );
+        assert_eq!(
+            app.clone().oneshot(req).await?.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let mut missing_source = bearer_login();
+    missing_source
+        .extensions_mut()
+        .remove::<rss_identity_http_axum::ClientAddress>();
+    assert_eq!(
+        app.clone().oneshot(missing_source).await?.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let mut query = bearer_login();
+    *query.uri_mut() =
+        format!("/api/v1/identity/tenants/{A}/bearer/login?password=secret-marker").parse()?;
+    let denied = app.clone().oneshot(query).await?;
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !String::from_utf8(to_bytes(denied.into_body(), 4096).await?.to_vec())?
+            .contains("secret-marker")
+    );
+    for i in 0..5 {
+        let path = if i % 2 == 0 { "login" } else { "bearer/login" };
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                path,
+                None,
+                None,
+                json!({"login":"admin","password":"incorrect-password"}),
+            ))
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        app.clone().oneshot(bearer_login()).await?.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    f.reset_attempts().await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reject_programmatic_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private-event-marker'; END $$; CREATE TRIGGER reject_programmatic_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_programmatic_event();").execute(&f.owner).await?;
+    let response = app.clone().oneshot(bearer_login()).await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!response.headers().contains_key("set-cookie"));
+    let value = body(response).await?;
+    assert!(value.get("accessToken").is_none());
+    assert!(!value.to_string().contains("private-event-marker"));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
+        .fetch_one(&f.owner)
+        .await?;
+    assert_eq!(count, 0);
+    f.close().await;
+    Ok(())
+}

@@ -147,7 +147,20 @@ pub(crate) fn unique<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'
     }
     Ok(first)
 }
+pub(crate) fn cookie_presentation(headers: &HeaderMap) -> Result<(), HttpError> {
+    if headers.contains_key(header::AUTHORIZATION) || headers.contains_key("x-api-key") {
+        return Err(BAD);
+    }
+    Ok(())
+}
+pub(crate) fn bearer_presentation(headers: &HeaderMap) -> Result<(), HttpError> {
+    if named_cookie(headers, SESSION_COOKIE_NAME)?.is_some() || headers.contains_key("x-api-key") {
+        return Err(BAD);
+    }
+    Ok(())
+}
 pub(crate) fn cookie(headers: &HeaderMap) -> Result<Option<SessionSecret>, HttpError> {
+    cookie_presentation(headers)?;
     cookie_value(headers)?
         .map(|value| SessionSecret::parse(value.into()).map_err(|_| UNAUTH))
         .transpose()
@@ -222,7 +235,9 @@ pub(crate) async fn request_boundary(
         && original_uri.path() == "/api/v1/identity/oidc/callback";
     let budget = RequestBudget::new(state.config.timeout);
     request.extensions_mut().insert(budget);
-    let origin = if original_uri.to_string().len() > 8192 {
+    let origin = if original_uri.to_string().len() > 8192
+        || cookie_presentation(request.headers()).is_err()
+    {
         Err(BAD)
     } else if request.method().is_safe() {
         Ok(())

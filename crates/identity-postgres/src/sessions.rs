@@ -6,7 +6,7 @@ use crate::{
     *,
 };
 use rss_identity_core::SessionId;
-use rss_identity_core::session::{SessionLifetime, SessionPolicy, SessionSecret};
+use rss_identity_core::session::{CredentialKind, SessionLifetime, SessionPolicy, SessionSecret};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
 use serde::Serialize;
@@ -16,15 +16,21 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct SessionView {
+    pub credential_kind: CredentialKind,
     pub id: SessionId,
     pub auth_time: i64,
     pub idle_expires_at: i64,
     pub absolute_expires_at: i64,
 }
 impl SessionView {
-    pub(crate) fn new(id: SessionId, lifetime: SessionLifetime) -> Self {
+    pub(crate) fn new(
+        id: SessionId,
+        lifetime: SessionLifetime,
+        credential_kind: CredentialKind,
+    ) -> Self {
         Self {
             id,
+            credential_kind,
             auth_time: lifetime.auth_time(),
             idle_expires_at: lifetime.idle_expires_at(),
             absolute_expires_at: lifetime.absolute_expires_at(),
@@ -183,6 +189,7 @@ pub(crate) async fn insert(
     origin: Option<crate::federation_storage::Origin>,
     now: i64,
     policy: SessionPolicy,
+    kind: CredentialKind,
 ) -> Result<(IssuedSession, SecurityEvent), transaction::MutationError> {
     let key = state.key();
     let secret = SessionSecret::generate().map_err(|_| corrupt())?;
@@ -198,8 +205,8 @@ pub(crate) async fn insert(
     sqlx::query(concat!(
         "INSERT INTO identity_authority.sessions(tenant_id,principal_id,session_id,token_",
         "hash,auth_epoch,membership_epoch,auth_time,idle_expires_at,absolute_expires_at,e",
-        "xternal_identity_id,provider_epoch,auth_facts,idle_timeout,absolute_timeout) VALUES($1::uuid,$2::uuid,$3::uuid",
-        ",$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)"
+        "xternal_identity_id,provider_epoch,auth_facts,idle_timeout,absolute_timeout,credential_kind) VALUES($1::uuid,$2::uuid,$3::uuid",
+        ",$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)"
     ))
     .bind(key.tenant.to_string())
     .bind(key.principal.as_uuid().to_string())
@@ -215,10 +222,11 @@ pub(crate) async fn insert(
     .bind(facts)
     .bind(policy.idle_seconds())
     .bind(policy.absolute_seconds())
+    .bind(kind.as_str())
     .execute(c)
     .await?;
     Ok((
-        IssuedSession::new(secret, SessionView::new(id, lifetime), now, state),
+        IssuedSession::new(secret, SessionView::new(id, lifetime, kind), now, state),
         event(SessionAction::Created, state, id, replaced),
     ))
 }
@@ -229,11 +237,21 @@ impl Authority {
         replacement: Option<AuthenticatedSession>,
         deadline: OperationDeadline,
     ) -> Result<IssuedSession, AuthorityError> {
+        self.create_session_for(candidate, replacement, CredentialKind::Cookie, deadline)
+            .await
+    }
+    pub(crate) async fn create_session_for(
+        &self,
+        candidate: AuthenticationCandidate,
+        replacement: Option<AuthenticatedSession>,
+        kind: CredentialKind,
+        deadline: OperationDeadline,
+    ) -> Result<IssuedSession, AuthorityError> {
         self.require_runtime()?;
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.min(candidate.expires);
         if let Some(old) = &replacement {
-            if old.key != candidate.state.key() {
+            if old.key != candidate.state.key() || old.view.credential_kind != kind {
                 return Err(AuthorityError::Rejected);
             }
             budget.0 = budget.0.min(old.expires);
@@ -255,7 +273,8 @@ impl Authority {
                         if Instant::now() >= candidate.expires {
                             return Err(reject().into());
                         }
-                        let (issued, fact) = insert(c, state, replaced, None, now, policy).await?;
+                        let (issued, fact) =
+                            insert(c, state, replaced, None, now, policy, kind).await?;
                         Ok((issued, fact))
                     })
                 })
@@ -271,7 +290,14 @@ impl Authority {
         secret: SessionSecret,
         deadline: OperationDeadline,
     ) -> Result<AuthenticatedSession, AuthorityError> {
-        self.session_proof(tenant, secret, deadline, false).await
+        self.session_proof(
+            tenant,
+            secret.digest(),
+            CredentialKind::Cookie,
+            deadline,
+            false,
+        )
+        .await
     }
     /// Authenticate a host-designated activity request and renew idle within the original absolute limit.
     /// The host must apply its request/CSRF policy first; passive checks use `inspect_session`.
@@ -282,24 +308,31 @@ impl Authority {
         secret: SessionSecret,
         deadline: OperationDeadline,
     ) -> Result<AuthenticatedSession, AuthorityError> {
-        self.session_proof(tenant, secret, deadline, true).await
+        self.session_proof(
+            tenant,
+            secret.digest(),
+            CredentialKind::Cookie,
+            deadline,
+            true,
+        )
+        .await
     }
-    async fn session_proof(
+    pub(crate) async fn session_proof(
         &self,
         tenant: TenantId,
-        secret: SessionSecret,
+        digest: [u8; 32],
+        kind: CredentialKind,
         deadline: OperationDeadline,
         touch: bool,
     ) -> Result<AuthenticatedSession, AuthorityError> {
         self.require_runtime()?;
         let budget = Budget::new(deadline)?;
-        let digest = secret.digest();
         let fact_time = self.fact_time.clone();
         self.read(tenant, budget.remaining(), move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
-                        let mut loaded = db::lookup(c, tenant, &digest, &fact_time).await?;
+                        let mut loaded = db::lookup(c, tenant, &digest, kind, &fact_time).await?;
                         if touch {
                             db::touch(c, &mut loaded).await?;
                         }
@@ -336,7 +369,7 @@ impl Authority {
         let fact_time = self.fact_time.clone();
         self.mutate(tenant,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
-                let mut loaded = db::lookup(c,tenant,&old.digest(), &fact_time).await?;
+                let mut loaded = db::lookup(c,tenant,&old.digest(), CredentialKind::Cookie, &fact_time).await?;
                 db::touch(c,&mut loaded).await?;
                 sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
                     .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;
@@ -398,12 +431,12 @@ impl Authority {
         self.read(actor.key.tenant,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let loaded = db::recheck(c,&actor).await?;
-                let rows = sqlx::query(concat!("SELECT session_id::text,auth_time,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at FROM ident","ity_authority.sessions s WHERE (external_identity_id IS NULL OR EXISTS(SELECT FR","OM identity_authority.external_identities e JOIN identity_authority.providers p ","USING(tenant_id,provider_id) WHERE e.tenant_id=s.tenant_id AND e.identity_id=s.e","xternal_identity_id AND p.enabled AND p.revocation_epoch=s.provider_epoch)) AND ","tenant_id=$1::uuid AND principal_id=$2::uuid AND auth_epoch=$3 AND membership_ep","och=$4 AND revoked_at IS NULL AND auth_time <= $5 AND idle_expires_at > $5 AND a","bsolute_expires_at > $5 AND ($6::uuid IS NULL OR session_id > $6::uuid) ORDER BY"," session_id LIMIT $7"))
+                let rows = sqlx::query(concat!("SELECT credential_kind,session_id::text,auth_time,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at FROM ident","ity_authority.sessions s WHERE (external_identity_id IS NULL OR EXISTS(SELECT FR","OM identity_authority.external_identities e JOIN identity_authority.providers p ","USING(tenant_id,provider_id) WHERE e.tenant_id=s.tenant_id AND e.identity_id=s.e","xternal_identity_id AND p.enabled AND p.revocation_epoch=s.provider_epoch)) AND ","tenant_id=$1::uuid AND principal_id=$2::uuid AND auth_epoch=$3 AND membership_ep","och=$4 AND revoked_at IS NULL AND auth_time <= $5 AND idle_expires_at > $5 AND a","bsolute_expires_at > $5 AND ($6::uuid IS NULL OR session_id > $6::uuid) ORDER BY"," session_id LIMIT $7"))
                     .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid().to_string()).bind(loaded.state.epoch()).bind(loaded.state.membership_epoch()).bind(loaded.now).bind(cursor.map(|v|v.to_string())).bind(i64::from(limit)+1).fetch_all(c).await?;
                 let mut sessions = Vec::with_capacity(rows.len());
                 for row in rows {
                     let lifetime = SessionLifetime::restore(row.try_get("auth_time")?,row.try_get("idle_expires_at")?,row.try_get("absolute_expires_at")?,db::lifetime_policy(&row)?).map_err(|_|corrupt())?;
-                    sessions.push(SessionView::new(db::session_id(&row.try_get::<String,_>("session_id")?)?,lifetime));
+                    sessions.push(SessionView::new(db::session_id(&row.try_get::<String,_>("session_id")?)?,lifetime,db::credential_kind(&row)?));
                 }
                 let next_cursor = if sessions.len() > usize::from(limit) { sessions.pop(); sessions.last().map(|v|v.id) } else { None };
                 Ok(SessionPage {sessions,next_cursor})

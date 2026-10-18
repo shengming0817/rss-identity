@@ -1,4 +1,4 @@
-//! Private v2 HTTP response projections. Bearer secrets only travel in Set-Cookie.
+//! Private browser HTTP response projections. Cookie secrets only travel in Set-Cookie.
 use serde::Serialize;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -82,6 +82,10 @@ impl Federation {
             target,
             source,
         } = request;
+        if actor.view().credential_kind != rss_identity_core::session::CredentialKind::Cookie {
+            return Err(AuthorityError::Rejected);
+        }
+
         check_browser(&browser)?;
         let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;

@@ -718,3 +718,306 @@ async fn durable_reference_is_passive_exact_and_revocable() -> anyhow::Result<()
     f.close().await;
     Ok(())
 }
+
+use rss_identity_core::session::{BearerSecret, CredentialKind};
+async fn bearer(f: &Fixture) -> anyhow::Result<IssuedBearer> {
+    f.reset_attempts().await?;
+    Ok(f.store
+        .login_local_bearer(
+            f.key.tenant,
+            login("admin"),
+            password(),
+            source(),
+            deadline(),
+        )
+        .await?)
+}
+fn bearer_secret(s: &IssuedBearer) -> BearerSecret {
+    BearerSecret::parse(s.secret().expose().into()).unwrap()
+}
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let browser = issue(&f).await?;
+    let token = bearer(&f).await?;
+    assert_eq!(token.view().credential_kind, CredentialKind::Bearer);
+    assert!(
+        f.store
+            .inspect_bearer(
+                f.key.tenant,
+                BearerSecret::parse(browser.secret().expose().into())?,
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    for active in [false, true] {
+        let secret = SessionSecret::parse(token.secret().expose().into())?;
+        let result = if active {
+            f.store
+                .authenticate_session(f.key.tenant, secret, deadline())
+                .await
+        } else {
+            f.store
+                .inspect_session(f.key.tenant, secret, deadline())
+                .await
+        };
+        assert!(matches!(result, Err(AuthorityError::Rejected)));
+    }
+    assert!(
+        f.store
+            .refresh_session(
+                f.key.tenant,
+                SessionSecret::parse(token.secret().expose().into())?,
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    let p = f
+        .store
+        .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+        .await?;
+    let reference = p.reference()?;
+    assert!(
+        f.store
+            .reauthenticate_local(p, password(), source(), deadline())
+            .await
+            .is_err()
+    );
+    assert!(proof(&f, &browser).await.is_ok());
+    assert!(
+        f.store
+            .inspect_bearer(TenantId::parse(B)?, bearer_secret(&token), deadline())
+            .await
+            .is_err()
+    );
+    // Real restart of the component; the persisted discriminator remains authoritative.
+    let restarted = f.probe(AuthorityProfile::Runtime).await?;
+    let p = restarted
+        .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+        .await?;
+    assert_eq!(p.reference()?, reference);
+    assert_eq!(
+        p.assurance()?.amr(),
+        &[rss_identity_core::assurance::Amr::Pwd]
+    );
+    let mut altered = serde_json::to_value(&reference)?;
+    altered["credentialKind"] = serde_json::json!("cookie");
+    assert!(
+        restarted
+            .recheck_session_reference(f.key.tenant, &serde_json::from_value(altered)?, deadline())
+            .await
+            .is_err()
+    );
+    // Move the stored authentication time back without changing its original absolute duration.
+    sqlx::query("UPDATE identity_authority.sessions SET auth_time=auth_time-100,idle_expires_at=idle_expires_at-100,absolute_expires_at=absolute_expires_at-100 WHERE session_id=$1")
+        .bind(token.view().id.as_uuid()).execute(&f.owner).await?;
+    let passive = restarted
+        .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+        .await?;
+    let before = passive.view().idle_expires_at;
+    let absolute = passive.view().absolute_expires_at;
+    let rechecked = restarted
+        .recheck_session_reference(f.key.tenant, &reference, deadline())
+        .await?;
+    assert_eq!(rechecked.view().idle_expires_at, before);
+    let active = restarted
+        .authenticate_bearer(f.key.tenant, bearer_secret(&token), deadline())
+        .await?;
+    assert!(active.view().idle_expires_at > before);
+    assert_eq!(active.view().absolute_expires_at, absolute);
+    sqlx::query("UPDATE identity_authority.sessions SET auth_time=floor(extract(epoch FROM clock_timestamp()))::bigint-14400, idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint WHERE session_id=$1")
+        .bind(token.view().id.as_uuid()).execute(&f.owner).await?;
+    assert!(
+        restarted
+            .authenticate_bearer(f.key.tenant, bearer_secret(&token), deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        restarted
+            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .await
+            .is_err()
+    );
+    f.close().await;
+    Ok(())
+}
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn bearer_account_changes_and_logout_are_current() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let admin = issue(&f).await?;
+    let member = f
+        .store
+        .create_local_account(
+            proof(&f, &admin).await?,
+            login("member"),
+            password(),
+            deadline(),
+        )
+        .await?;
+    for change in 0..3 {
+        f.reset_attempts().await?;
+        let token = f
+            .store
+            .login_local_bearer(
+                f.key.tenant,
+                login("member"),
+                password(),
+                source(),
+                deadline(),
+            )
+            .await?;
+        let p = f
+            .store
+            .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+            .await?;
+        let reference = p.reference()?;
+        match change {
+            0 => {
+                f.store
+                    .set_account_enabled(proof(&f, &admin).await?, member.key(), false, deadline())
+                    .await?;
+            }
+            1 => {
+                f.store
+                    .set_account_membership(
+                        proof(&f, &admin).await?,
+                        member.key(),
+                        false,
+                        deadline(),
+                    )
+                    .await?;
+            }
+            _ => {
+                f.store
+                    .reset_local_password(
+                        proof(&f, &admin).await?,
+                        member.key(),
+                        password(),
+                        deadline(),
+                    )
+                    .await?;
+            }
+        }
+        assert!(
+            f.store
+                .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+                .await
+                .is_err()
+        );
+        assert!(
+            f.store
+                .recheck_session_reference(f.key.tenant, &reference, deadline())
+                .await
+                .is_err()
+        );
+        if change < 2 {
+            assert!(
+                f.store
+                    .login_local_bearer(
+                        f.key.tenant,
+                        login("member"),
+                        password(),
+                        source(),
+                        deadline()
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        match change {
+            0 => {
+                f.store
+                    .set_account_enabled(proof(&f, &admin).await?, member.key(), true, deadline())
+                    .await?;
+            }
+            1 => {
+                f.store
+                    .set_account_membership(
+                        proof(&f, &admin).await?,
+                        member.key(),
+                        true,
+                        deadline(),
+                    )
+                    .await?;
+            }
+            _ => {}
+        }
+        assert!(
+            f.store
+                .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+                .await
+                .is_err()
+        );
+    }
+    let one = bearer(&f).await?;
+    let two = bearer(&f).await?;
+    let p = f
+        .store
+        .inspect_bearer(f.key.tenant, bearer_secret(&one), deadline())
+        .await?;
+    f.store.revoke_current_session(p, deadline()).await?;
+    assert!(
+        f.store
+            .inspect_bearer(f.key.tenant, bearer_secret(&one), deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        f.store
+            .inspect_bearer(f.key.tenant, bearer_secret(&two), deadline())
+            .await
+            .is_ok()
+    );
+    f.store
+        .revoke_all_sessions(proof(&f, &admin).await?, deadline())
+        .await?;
+    assert!(
+        f.store
+            .inspect_bearer(f.key.tenant, bearer_secret(&two), deadline())
+            .await
+            .is_err()
+    );
+    assert!(proof(&f, &admin).await.is_err());
+    f.close().await;
+    Ok(())
+}
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn bearer_issuance_settlement_never_exposes_uncertain_secret() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let candidate = f.candidate().await?;
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    let result = f
+        .store
+        .create_session_for(candidate, None, CredentialKind::Bearer, deadline())
+        .await;
+    assert!(matches!(result, Err(AuthorityError::CommitUnknown(_))));
+    let kind: String = sqlx::query_scalar(
+        "SELECT credential_kind FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
+    )
+    .bind(A)
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(kind, "bearer");
+    sqlx::raw_sql("CREATE FUNCTION public.reject_bearer_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'secret-marker'; END $$; CREATE TRIGGER reject_bearer_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_bearer_event();").execute(&f.owner).await?;
+    let result = bearer(&f).await;
+    assert!(result.is_err());
+    assert!(!format!("{result:?}").contains("secret-marker"));
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.sessions WHERE credential_kind='bearer'",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(count, 1);
+    f.close().await;
+    Ok(())
+}

@@ -13,13 +13,23 @@
 
 ## 请求与管理授权
 
-HTTP 宿主统一通过 `authenticate_request` 取得当前请求的 AuthenticatedSession，再执行产品资源授权。Active 请求检查 cookie、同源、请求标记和 CSRF 后续期；Passive 只读验证，不延长 idle。会话保留签发时的 idle/absolute 策略，宿主配置变更只影响新会话；refresh 旋转凭据但不延长绝对期限，重新认证只能绑定当前主体。不要跨请求缓存成功身份、组或部门事实。
+浏览器 HTTP 宿主通过 `authenticate_request` 取得当前请求的 AuthenticatedSession，再执行产品资源授权。Active 请求检查 cookie、同源、请求标记和 CSRF 后续期；Passive 只读验证，不延长 idle。会话保留签发时的 idle/absolute 策略，宿主配置变更只影响新会话；refresh 旋转凭据但不延长绝对期限，重新认证只能绑定当前主体。不要跨请求缓存成功身份、组或部门事实。
 
 每次管理事务重新核对实例、租户、账户、成员、会话和失效代际后调用宿主 ManagementPolicy。策略是有界异步回调，借用当前事务连接读取宿主权威规则，不另开连接、不提交或修改租户作用域；组件落实策略要求的重新认证/MFA。宿主持有管理角色、防锁死和并发一致性，Identity 不保存 administrator/emergency/platform 角色。
 
 异步业务可在认证原请求后，通过 `AuthenticatedSession::reference()` 将非凭据会话引用存入宿主可信数据。后续用 `Authority::recheck_session_reference` 复核原会话、账户和来源，取得本次有界的 `RevalidatedSession` 身份/组/部门事实。被撤销、失效或过期的会话不能通过；检查不延长 idle 或快照期限。引用不是登录凭据，不能从 HTTP 请求接收它替代认证，返回事实也不能用于管理操作；宿主仍负责资源授权和原请求归属。
 
 参考宿主为每个配置租户指定唯一 bootstrap 账户，并阻止其自我禁用；这是示范宿主策略，不成为其它产品的默认授权。密码恢复与 IdP 故障都不能自动提升权限或复活禁用状态。
+
+## 可选程序化 Bearer
+
+宿主显式挂载 `bearer_router(authority, http)`，并在其外层及选定业务 API 统一执行产品 IP 准入。浏览器 router 不自动开启程序化路由。宿主仍负责 HTTPS、真实 peer/受信代理来源、租户路由、资源授权和秘密脱敏；API Key 属于消费产品，不进入 Identity。
+
+`POST /api/v1/identity/tenants/{tenant}/bearer/login` 使用 JSON 账号密码，返回一次性 `accessToken`、`tokenType`、`sessionId`、`principalId`、`idleExpiresAt` 和 `absoluteExpiresAt`。随后使用 `Authorization: Bearer`，通过 `authenticate_bearer_request` 获取真实身份和仅限当前请求的凭据。每次有效认证包括 GET 都续空闲期限，不延长绝对期限；宿主续查使用 `inspect_bearer`，不续空闲。不存在 refresh token；绝对到期后重新密码登录。
+
+两种呈现共用账户、密码限流及签发时会话策略；数据库持久化用途，Cookie/Bearer 双向串用均拒绝。Bearer 路由不需要浏览器 Origin/CSRF，不设置或清除 Cookie，拒绝身份 Cookie、API Key、重复 Authorization 和 URL 查询参数。不得将凭据放入 URL、日志、审计或浏览器持久存储。响应为 `no-store`；没有凭据回查入口。
+
+`POST /api/v1/identity/tenants/{tenant}/bearer/logout` 只撤销当前 Bearer；浏览器当前注销不影响其它会话。账户全注销、密码重置、账户停用及成员撤销按既有 epoch/state 合同同时约束两种呈现。密码登录只证明密码认证，不产生 MFA；产品授权仍消费当前账户与可信 assurance。当前 schema 为全新安装，旧 schema 和旧引用结构不兼容。
 
 ## 组与可选可信部门树快照
 
