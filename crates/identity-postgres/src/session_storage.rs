@@ -285,6 +285,14 @@ pub(crate) fn lifetime_policy(row: &sqlx::postgres::PgRow) -> Result<SessionPoli
     .map_err(|_| corrupt())
 }
 
+pub(crate) fn credential_kind(row: &sqlx::postgres::PgRow) -> Result<CredentialKind, PgError> {
+    match row.try_get::<&str, _>("credential_kind")? {
+        "cookie" => Ok(CredentialKind::Cookie),
+        "bearer" => Ok(CredentialKind::Bearer),
+        _ => Err(corrupt()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,13 +333,5 @@ mod tests {
             micros: 100_999_999,
         };
         assert_eq!(edge.deadline(101).unwrap(), start);
-    }
-}
-
-pub(crate) fn credential_kind(row: &sqlx::postgres::PgRow) -> Result<CredentialKind, PgError> {
-    match row.try_get::<&str, _>("credential_kind")? {
-        "cookie" => Ok(CredentialKind::Cookie),
-        "bearer" => Ok(CredentialKind::Bearer),
-        _ => Err(corrupt()),
     }
 }
