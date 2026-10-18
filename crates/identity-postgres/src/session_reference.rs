@@ -23,6 +23,7 @@ pub struct SessionReference {
     tenant: Uuid,
     principal: Uuid,
     session: Uuid,
+    credential_kind: rss_identity_core::session::CredentialKind,
 }
 
 impl AuthenticatedSession {
@@ -34,6 +35,7 @@ impl AuthenticatedSession {
             tenant: Uuid::parse_str(&self.key.tenant.to_string()).expect("validated tenant"),
             principal: self.key.principal.as_uuid(),
             session: self.view.id.as_uuid(),
+            credential_kind: self.view.credential_kind,
         })
     }
 }
@@ -129,6 +131,9 @@ impl Authority {
                             return Err(reject());
                         }
                         let loaded = db::by_id(c, key, session, &fact_time).await?;
+                        if loaded.view.credential_kind != reference.credential_kind {
+                            return Err(reject());
+                        }
                         let expires = checked_expiry(&loaded, budget.0)?;
                         Ok(RevalidatedSession {
                             reference,

@@ -8,7 +8,7 @@ use crate::{
 };
 use rss_identity_core::SessionId;
 use rss_identity_core::assurance::{Assurance, AuthenticationMode};
-use rss_identity_core::session::{SessionLifetime, SessionPolicy};
+use rss_identity_core::session::{CredentialKind, SessionLifetime, SessionPolicy};
 use rss_request_context::TenantId;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row};
@@ -108,6 +108,7 @@ pub(crate) async fn lookup(
     c: &mut PgConnection,
     tenant: TenantId,
     digest: &[u8; 32],
+    kind: CredentialKind,
     fact_time: &crate::fact_time::FactTime,
 ) -> Result<Loaded, PgError> {
     lock_guard(c, tenant).await?;
@@ -128,7 +129,7 @@ pub(crate) async fn lookup(
     let loaded = by_id(c, key, session_id(&id)?, fact_time).await?;
     let stored: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
         .bind(tenant.to_string()).bind(&id).fetch_one(c).await?;
-    if stored != digest.as_slice() {
+    if stored != digest.as_slice() || loaded.view.credential_kind != kind {
         return Err(reject());
     }
     Ok(loaded)
@@ -144,7 +145,7 @@ pub(crate) async fn by_id(
     let id = sid.to_string();
     let state = load(c, key).await?.state;
     let row = sqlx::query(concat!(
-        "SELECT principal_id,auth_epoch,membership_epoch,auth_time,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at",
+        "SELECT credential_kind,principal_id,auth_epoch,membership_epoch,auth_time,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at",
         ",revoked_at,token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
         " AND session_id=$2::uuid"
     ))
@@ -214,7 +215,7 @@ pub(crate) async fn by_id(
         expires: sample.deadline(lifetime.idle_expires_at())?,
         sample,
         state,
-        view: SessionView::new(session_id(&id)?, lifetime),
+        view: SessionView::new(session_id(&id)?, lifetime, credential_kind(&row)?),
         lifetime,
         now,
     })
@@ -226,7 +227,14 @@ pub(crate) async fn recheck(
     if std::time::Instant::now() >= proof.expires || authority_id(c).await? != proof.authority {
         return Err(reject());
     }
-    let mut loaded = lookup(c, proof.key.tenant, &proof.digest, &proof.fact_time).await?;
+    let mut loaded = lookup(
+        c,
+        proof.key.tenant,
+        &proof.digest,
+        proof.view.credential_kind,
+        &proof.fact_time,
+    )
+    .await?;
     loaded.expires = loaded.expires.min(proof.expires);
     if loaded.state.key() != proof.key
         || loaded.view.id != proof.view.id
@@ -238,7 +246,7 @@ pub(crate) async fn recheck(
 }
 pub(crate) async fn touch(c: &mut PgConnection, loaded: &mut Loaded) -> Result<(), PgError> {
     loaded.lifetime.renew(loaded.now).map_err(|_| reject())?;
-    loaded.view = SessionView::new(loaded.view.id, loaded.lifetime);
+    loaded.view = SessionView::new(loaded.view.id, loaded.lifetime, loaded.view.credential_kind);
     loaded.expires = loaded.sample.deadline(loaded.lifetime.idle_expires_at())?;
     sqlx::query(concat!(
         "UPDATE identity_authority.sessions SET idle_expires_at=$3 WHERE tenant_id=$1::uu",
@@ -275,6 +283,14 @@ pub(crate) fn lifetime_policy(row: &sqlx::postgres::PgRow) -> Result<SessionPoli
         row.try_get("absolute_timeout")?,
     )
     .map_err(|_| corrupt())
+}
+
+pub(crate) fn credential_kind(row: &sqlx::postgres::PgRow) -> Result<CredentialKind, PgError> {
+    match row.try_get::<&str, _>("credential_kind")? {
+        "cookie" => Ok(CredentialKind::Cookie),
+        "bearer" => Ok(CredentialKind::Bearer),
+        _ => Err(corrupt()),
+    }
 }
 
 #[cfg(test)]

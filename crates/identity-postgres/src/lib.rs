@@ -322,3 +322,6 @@ async fn session_actor(
 
 mod provisioning;
 pub use provisioning::{AccountProvisioner, PreparedLocalAccount, ProvisioningError};
+
+mod bearer;
+pub use bearer::IssuedBearer;

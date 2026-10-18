@@ -47,6 +47,11 @@ impl Federation {
             replacement,
             source,
         } = request;
+        if replacement.as_ref().is_some_and(|p| {
+            p.view().credential_kind != rss_identity_core::session::CredentialKind::Cookie
+        }) {
+            return Err(AuthorityError::Rejected);
+        }
         check_browser(&browser)?;
         let budget = Budget::new(deadline)?;
         let return_url = self.target(&target)?;
@@ -355,7 +360,7 @@ impl Federation {
                             attempt.replacement,
                         )
                     };
-                    let (issued, session_event) = sessions::insert(c, state, replaced, origin, now, session_policy).await?;
+                    let (issued, session_event) = sessions::insert(c, state, replaced, origin, now, session_policy, rss_identity_core::session::CredentialKind::Cookie).await?;
                     if session_storage::now(c).await? >= attempt.expiry {
                         return Err(reject().into());
                     }
@@ -423,9 +428,14 @@ pub(crate) async fn check_actor(
         {
             return Err(reject());
         }
-        let actor =
-            session_storage::lookup(c, tenant, &session.ok_or_else(reject)?, &Default::default())
-                .await?;
+        let actor = session_storage::lookup(
+            c,
+            tenant,
+            &session.ok_or_else(reject)?,
+            rss_identity_core::session::CredentialKind::Cookie,
+            &Default::default(),
+        )
+        .await?;
         if actor.view.id != intent.session
             || actor.state.key().principal != intent.principal
             || actor.state.epoch() != intent.epoch
@@ -435,9 +445,14 @@ pub(crate) async fn check_actor(
         }
         Ok(Some(actor))
     } else if let Some(expected) = attempt.replacement {
-        let actor =
-            session_storage::lookup(c, tenant, &session.ok_or_else(reject)?, &Default::default())
-                .await?;
+        let actor = session_storage::lookup(
+            c,
+            tenant,
+            &session.ok_or_else(reject)?,
+            rss_identity_core::session::CredentialKind::Cookie,
+            &Default::default(),
+        )
+        .await?;
         if actor.view.id != expected {
             return Err(reject());
         }

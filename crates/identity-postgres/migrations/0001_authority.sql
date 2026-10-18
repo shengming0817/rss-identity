@@ -1,7 +1,7 @@
--- Fresh schema v12 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v13 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=12));
-INSERT INTO identity_authority.schema_version VALUES(12);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=13));
+INSERT INTO identity_authority.schema_version VALUES(13);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000')
@@ -66,6 +66,7 @@ CREATE TABLE identity_authority.external_identities (
 CREATE TABLE identity_authority.sessions (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL,
  session_id uuid NOT NULL CHECK(session_id <> '00000000-0000-0000-0000-000000000000'),
+ credential_kind text NOT NULL CHECK(credential_kind IN ('cookie','bearer')),
  token_hash bytea NOT NULL CHECK(octet_length(token_hash)=32),
  auth_epoch bigint NOT NULL CHECK(auth_epoch>0),
  membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
@@ -78,6 +79,7 @@ CREATE TABLE identity_authority.sessions (
  external_identity_id uuid,
  provider_epoch bigint,
  auth_facts jsonb,
+ CONSTRAINT session_presentation CHECK(credential_kind='cookie' OR external_identity_id IS NULL),
  CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL) OR (external_identity_id IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND octet_length(auth_facts::text)<=32768 AND (auth_facts->'format_version'='3'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
  FOREIGN KEY(tenant_id,principal_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,principal_id,identity_id),
  PRIMARY KEY(tenant_id,session_id),
