@@ -1045,9 +1045,33 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
     let (cookie, csrf, _) = successful_login(&app).await?;
     // Browser router alone must not expose a programmatic issuance bypass.
     assert_eq!(super_router_status(&f).await?, StatusCode::NOT_FOUND);
+    for headers in [
+        axum::http::HeaderMap::new(),
+        bearer_headers(&"a".repeat(64)),
+    ] {
+        let error = rss_identity_http_axum::authenticate_bearer_request(
+            &f.store,
+            &config,
+            f.key.tenant,
+            &headers,
+            deadline(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(error.headers()["www-authenticate"], "Bearer");
+        assert_eq!(error.headers()["cache-control"], "no-store");
+        let mut logout = request("POST", "bearer/logout", None, None, json!(null));
+        logout.headers_mut().extend(headers);
+        let response = app.clone().oneshot(logout).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["www-authenticate"], "Bearer");
+    }
     let response = app.clone().oneshot(bearer_login()).await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(!response.headers().contains_key("www-authenticate"));
     assert!(!response.headers().contains_key("set-cookie"));
     let issued = body(response).await?;
     let token = issued["accessToken"].as_str().unwrap();
@@ -1086,6 +1110,7 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         .unwrap();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
         assert_eq!(error.headers()["cache-control"], "no-store");
+        assert!(!error.headers().contains_key("www-authenticate"));
         assert!(
             !String::from_utf8(to_bytes(error.into_body(), 4096).await?.to_vec())?.contains(token)
         );

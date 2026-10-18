@@ -33,6 +33,12 @@ pub fn bearer_router(authority: Authority, config: HttpConfig) -> Result<Router,
     ))
 }
 fn secure(mut response: Response) -> Response {
+    if response.status() == StatusCode::UNAUTHORIZED {
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            header::HeaderValue::from_static("Bearer"),
+        );
+    }
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
