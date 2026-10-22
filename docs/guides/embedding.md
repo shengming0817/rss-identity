@@ -131,3 +131,65 @@ producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::co
 时间只影响新加载的 group/department 事实投影，不改变 JWT、持久事实、会话有效期、
 借用中的旧证明或事务预算。已有 Authority 克隆不受新配置影响，后续克隆共享该控制句柄；
 生产装配不启用此 feature。借用事实的即时到期边界由组件 T1 持有，无需消费方重复真实等待。
+
+
+## 登录资料与属性
+
+Provider claims 使用当前结构 `profile: {"extensionsClaim": "attributes", "maxAgeSeconds": 14400}`，
+常用资料读取标准 `name/preferred_username/email/email_verified`，不再配置任意 email 映射。
+`extensionsClaim` 指向管理员批准的非凭据发布对象，不能指向原始 token 或安全声明；没有配置时不采集扩展。
+动态对象默认最多 64 KiB、256 个成员、8 层、每数组 128 项；宿主可通过 `AuthorityConfig::with_profile_limits`
+进一步收紧预算及 TTL。业务 key 不需要增加 Rust 字段或数据库列。
+
+成功登录原子提交资料观察、会话绑定和安全事件。普通资料非法或缺失不默认拒绝登录；签名、主体绑定、存储损坏与持久化失败仍拒绝。
+`Authority::current_profile(&session, deadline)` 只提供该会话本次接受的观察；平台未取得属性时返回 unavailable。
+同一账户／来源只保存最新观察，新观察替换旧观察后，旧会话的 current 不自动跟随。
+`latest_profile` 接受明确账户和来源，并通过 `ReadLatestProfile` 宿主策略；过期值仅供获准的最近观察展示，不是当前事实。
+每次通过 `TrustedProfile::view()` 读取都检查请求／事实期限。DTO、复制后的值及已发生的业务效果不是受信证明。
+
+`observedAt/expiresAt` 为 Unix 秒；`collectedAtMicros` 是宿主 PG 记录的采集时间（Unix 微秒），
+供 MDM 新映射的采集门槛使用，不把 IdP iat 当作宿主时序。TTL 与来源到期及采集会话绝对期限取最早，读取再受当前会话期限约束。
+refresh、idle 和 GET 不重新采集。组与部门的独立短期合同不变。
+
+本地资料管理使用 `ReadLocalProfile/UpdateLocalProfile`，来源目录使用 `ReadProfileSources`，
+必须由宿主明确授权，不能默认把字段配置写权限映射为这些权限。
+HTTP 本地资料位于 `/api/v1/identity/tenants/{tenant}/accounts/{principal}/profile`，
+PUT 使用 operationId、expectedRevision、value（必须出现，显式 null 删除），GET 返回 revision 与 value。
+响应丢失时查询其 `/operations/{operationId}`；409 后重新读取，不自动重放写。
+每账户最多保留 4096 条本地资料操作回执；达到容量后新操作拒绝（Rejected），原回执仍可查询和精确重放。
+回执不按时间删除，不重用 operationId；账户删除时随账户清理。
+本地修改只更新本地 authority，下次成功登录才产生新观察；首期没有本地邮箱验证声明。
+
+## 平台会话接缝
+
+宿主实现 `platform::PlatformVerifier` 并通过 `AuthorityConfig::with_platform` 在启动时安装。
+`resolve/recheck` 必须借传入 PG connection 锁定 MDM 当前绑定与资格；不得另取连接、提交、切租户或在事务内调用网络。
+绑定必须由受控注册／人员关联流程建立，设备本地账号名、邮箱或浏览器 principal 均不构成绑定证明。
+可信装配代码本身属于信任边界；Rust opaque proof 不防止恶意宿主替换 verifier。
+
+`begin_platform_login` 为固定 audience 的浏览器登录生成最长 120 秒的挑战；宿主必须用安全 Cookie 将 browser binding 绑定实际浏览器，
+并实施同源、CSRF／登录替换保护和请求预算。`complete_platform_login` 只接受挑战、nonce、browser binding 和有界证据，
+不接受 principal 或 assurance DTO。`verify` 在事务外验证来源、平台签名、用途、nonce 和用户证据，
+最终签发事务重新检查账户／成员、外部关联和宿主绑定，消费挑战并提交会话及安全事件。
+
+平台仅签发 Cookie；`issued_session_response` 复用现有 Set-Cookie／CSRF 与 no-store 响应格式。
+未知提交绝不返回秘密，不能通过重放挑战取回可能已经提交的凭据。
+verifier 随 Authority 持续存在，会话请求、refresh、管理和后台 session reference 都重新执行绑定复核；缺少 verifier 时拒绝。
+硬件持有、用户在场和用户验证不自动映射为 MFA；缺少真实用户认证时间时 assurance.auth_time 为 None。
+`PlatformProfile::Unavailable` 不复活旧 IdP 属性；显式 IdentityLocal 在签发事务采集本地资料，
+Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identity 的属性证据。不会继承旧组／部门。
+
+会话 `issuedAt` 仅表示签发时间；敏感操作必须使用受信 assurance.auth_time 检查近期认证。
+本次替换不提供旧 authTime 会话字段、旧配置解码或旧库升级路径。
+
+
+宿主将字段定义写入与来源准入组合时，使用 `admit_profile_source_on` 借用已打开 READ COMMITTED 事务、已设置租户 fence 的 PG 连接。
+部署使用 `grant_profile_source_admission` 为该业务角色授权，并在启动时用 `verify_profile_source_admission` 验证；
+不授予完整 Runtime 或 Provisioning 权限。该接口只读取来源发布元数据，不授予用户资料或管理权限。
+锁顺序为 Audit/可选 Ledger → Identity tenant guard → 宿主授权锁 → 业务定义/回执；
+调用方保持同一事务直至提交或回滚，不能在已持有宿主授权锁后调用该接口。
+
+
+聚合某个账户的 latest 资料时，先用 `latest_profile_sources` 按目标账户分页发现观察来源，再调用 `latest_profile`。
+来源发现与值读取均执行 `ReadLatestProfile` 策略；不从查看者登录来源、业务字段映射或邮箱猜测目标来源。
+来源定位符不是认证证明，也不保证观察仍有效；值读取继续执行当前来源、账户和有效期限复核。

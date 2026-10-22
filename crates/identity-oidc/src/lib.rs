@@ -5,12 +5,13 @@ mod assurance;
 mod egress;
 #[cfg(test)]
 mod private_provider_tests;
+mod profile_token;
 pub use ipnet::IpNet;
 pub mod entra;
 use openidconnect::{
     AsyncHttpClient, AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
     HttpRequest, HttpResponse, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
-    Scope, TokenResponse, core::*,
+    Scope, core::*,
 };
 use reqwest::Url;
 use rss_identity_core::{assurance::AuthenticationMode, federation::*};
@@ -375,43 +376,6 @@ type Metadata = openidconnect::ProviderMetadata<
     CoreResponseType,
     CoreSubjectIdentifierType,
 >;
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Extra {
-    #[serde(flatten)]
-    values: serde_json::Map<String, serde_json::Value>,
-}
-
-impl openidconnect::AdditionalClaims for Extra {}
-
-type MappedToken = openidconnect::IdToken<
-    Extra,
-    openidconnect::core::CoreGenderClaim,
-    openidconnect::core::CoreJweContentEncryptionAlgorithm,
-    openidconnect::core::CoreJwsSigningAlgorithm,
->;
-
-fn verify<'a>(
-    token: &'a MappedToken,
-    verifier: &openidconnect::core::CoreIdTokenVerifier<'_>,
-    nonce: &Nonce,
-    client: &ClientId,
-) -> Result<
-    &'a openidconnect::IdTokenClaims<Extra, openidconnect::core::CoreGenderClaim>,
-    FederationError,
-> {
-    let claims = token
-        .claims(verifier, nonce)
-        .map_err(|_| FederationError::Claims)?;
-
-    if claims.subject().as_str().is_empty()
-        || claims.authorized_party().is_some_and(|v| v != client)
-    {
-        return Err(FederationError::Claims);
-    }
-
-    Ok(claims)
-}
-
 impl UpstreamOidc for HttpOidc {
     fn assurance_profile(&self, tenant: TenantId, c: &ProviderSettings) -> AssuranceProfile {
         let approved = self.trusted(tenant, c);
@@ -523,19 +487,21 @@ impl UpstreamOidc for HttpOidc {
 
             let client_id = ClientId::new(c.client_id().as_str().to_owned());
 
-            let client = CoreClient::from_provider_metadata(
-                metadata,
-                client_id.clone(),
-                Some(ClientSecret::new(credentials.client_secret().to_string())),
-            )
-            .set_redirect_uri(
-                RedirectUrl::new(c.redirect_uri().to_owned())
-                    .map_err(|_| FederationError::Configuration)?,
-            );
+            let client = profile_token::TokenClient::new(client_id.clone())
+                .set_client_secret(ClientSecret::new(credentials.client_secret().to_string()))
+                .set_token_uri(
+                    metadata
+                        .token_endpoint()
+                        .ok_or(FederationError::Configuration)?
+                        .clone(),
+                )
+                .set_redirect_uri(
+                    RedirectUrl::new(c.redirect_uri().to_owned())
+                        .map_err(|_| FederationError::Configuration)?,
+                );
 
             let token = client
                 .exchange_code(AuthorizationCode::new(code.to_string()))
-                .map_err(|_| FederationError::Configuration)?
                 .set_pkce_verifier(PkceCodeVerifier::new(m.verifier.to_string()))
                 .request_async(&transport)
                 .await
@@ -547,49 +513,35 @@ impl UpstreamOidc for HttpOidc {
                     _ => failure(ProviderStage::Exchange, ProviderReason::InvalidResponse),
                 })?;
 
-            let raw = token.id_token().ok_or(FederationError::Claims)?;
-
-            let token: MappedToken =
-                serde_json::from_value(serde_json::Value::String(raw.to_string()))
-                    .map_err(|_| FederationError::Claims)?;
-
-            let claims = verify(
-                &token,
-                &client.id_token_verifier(),
+            let claims = profile_token::verify(
+                &token.extra_fields().id_token,
+                &metadata,
                 &Nonce::new(m.nonce.to_string()),
-                &client_id,
+                client_id.as_str(),
+                credentials.client_secret(),
             )?;
-
-            let all = serde_json::to_value(claims).map_err(|_| FederationError::Claims)?;
-
-            let email = match c.claims().email.as_ref().and_then(|k| all.get(k)) {
-                None | Some(serde_json::Value::Null) => None,
-                Some(serde_json::Value::String(s)) => Some(s.clone()),
-                _ => return Err(FederationError::Claims),
-            };
+            let all = serde_json::to_value(&claims).map_err(|_| FederationError::Claims)?;
 
             let groups = mapped_groups(c.claims().groups.as_deref(), &all)?;
 
             let value = UpstreamClaims {
                 issuer: c.issuer().as_str().to_owned(),
-                subject: mapped_subject(&c.claims().subject, claims.subject().as_str(), &all)?,
-                email,
-                email_verified: c.claims().email.as_deref() == Some("email")
-                    && claims.email_verified() == Some(true),
+                subject: mapped_subject(&c.claims().subject, &claims.sub, &all)?,
+                profile: rss_identity_core::profile::Profile::from_claims(
+                    all.as_object().ok_or(FederationError::Claims)?,
+                    &c.claims().profile,
+                ),
                 groups,
                 department_snapshot: mapped_department(
                     c.claims().department_snapshot.as_ref().map(|d| d.claim()),
                     &all,
                 ),
-                issued_at: claims.issue_time().timestamp(),
-                expires_at: claims.expiration().timestamp(),
+                issued_at: claims.iat,
+                expires_at: claims.exp,
                 assurance: assurance::normalize(
-                    claims.auth_time().map(|v| v.timestamp()),
-                    claims.auth_context_ref().map(|v| v.as_str()),
-                    claims
-                        .auth_method_refs()
-                        .map(|v| v.iter().map(|v| v.as_str().to_owned()).collect())
-                        .unwrap_or_default(),
+                    claims.auth_time,
+                    claims.acr.as_deref(),
+                    claims.amr.clone().unwrap_or_default(),
                     self.trusted(tenant, c),
                 )?,
             };

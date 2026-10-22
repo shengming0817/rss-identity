@@ -184,6 +184,27 @@ impl StaffMembership {
         self.set(self.original).await
     }
 
+    pub async fn user_profile(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(self
+            .client
+            .get(self.groups_url.trim_end_matches("/groups"))
+            .bearer_auth(self.token.as_str())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+    pub async fn set_user_profile(&self, value: &serde_json::Value) -> anyhow::Result<()> {
+        self.client
+            .put(self.groups_url.trim_end_matches("/groups"))
+            .bearer_auth(self.token.as_str())
+            .json(value)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
     pub async fn organization(&self) -> anyhow::Result<serde_json::Value> {
         let user: serde_json::Value = self
             .client

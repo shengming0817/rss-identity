@@ -123,7 +123,7 @@ impl SessionPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionLifetime {
     policy: SessionPolicy,
-    auth_time: i64,
+    issued_at: i64,
     idle_expires_at: i64,
     absolute_expires_at: i64,
 }
@@ -138,29 +138,29 @@ impl SessionLifetime {
         )
     }
     pub fn restore(
-        auth_time: i64,
+        issued_at: i64,
         idle_expires_at: i64,
         absolute_expires_at: i64,
         policy: SessionPolicy,
     ) -> Result<Self, SessionError> {
-        if auth_time <= 0
-            || idle_expires_at <= auth_time
+        if issued_at <= 0
+            || idle_expires_at <= issued_at
             || idle_expires_at > absolute_expires_at
             || absolute_expires_at
-                .checked_sub(auth_time)
+                .checked_sub(issued_at)
                 .is_none_or(|duration| duration != policy.absolute)
         {
             return Err(SessionError);
         }
         Ok(Self {
             policy,
-            auth_time,
+            issued_at,
             idle_expires_at,
             absolute_expires_at,
         })
     }
     pub fn valid_at(self, now: i64) -> bool {
-        now >= self.auth_time && now < self.idle_expires_at && now < self.absolute_expires_at
+        now >= self.issued_at && now < self.idle_expires_at && now < self.absolute_expires_at
     }
     /// Renew only idle expiry within the original absolute deadline.
     pub fn renew(&mut self, now: i64) -> Result<(), SessionError> {
@@ -174,8 +174,8 @@ impl SessionLifetime {
         );
         Ok(())
     }
-    pub fn auth_time(self) -> i64 {
-        self.auth_time
+    pub fn issued_at(self) -> i64 {
+        self.issued_at
     }
     pub fn idle_expires_at(self) -> i64 {
         self.idle_expires_at
@@ -183,4 +183,13 @@ impl SessionLifetime {
     pub fn absolute_expires_at(self) -> i64 {
         self.absolute_expires_at
     }
+}
+
+/// Authentication origin is independent of credential presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthenticationSource {
+    LocalPassword,
+    Oidc,
+    Platform,
 }

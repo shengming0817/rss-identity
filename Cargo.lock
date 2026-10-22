@@ -2357,6 +2357,7 @@ dependencies = [
  "axum",
  "ipnet",
  "jsonwebtoken",
+ "oauth2",
  "openidconnect",
  "reqwest",
  "rss-identity-core",

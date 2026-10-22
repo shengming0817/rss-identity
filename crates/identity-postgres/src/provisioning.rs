@@ -34,6 +34,8 @@ impl From<sqlx::Error> for ProvisioningError {
 impl From<MutationError> for ProvisioningError {
     fn from(error: MutationError) -> Self {
         match error {
+            MutationError::RevisionConflict => Self::Rejected,
+            MutationError::OperationConflict => Self::Rejected,
             MutationError::Storage(e) => Self::Storage(e),
             MutationError::Rule(e) => Self::Rule(e),
             MutationError::Federation(_) => Self::Rejected,

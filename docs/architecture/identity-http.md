@@ -50,3 +50,14 @@ HTTP 宿主资源请求统一调用 `authenticate_request`：用户活动选择 
 参考宿主提供同源 UI 配置、当前上下文及 MFA 示范资源，由 [宿主 HTTP 模块](../../app/identity/src/context.rs) 持有。导航只是展示，管理事务仍重新授权。MFA 资源以当前请求的可信 assurance 判定，缺失/未来/过期事实要求重新认证，不接受浏览器提供的 MFA 结论。
 
 这些只读资源不续期、不签发 cookie，并使用 no-store；实际策略通过宿主查询命令读取。前端接口与业务权限由对应产品维护，不能将示范资源扩展成通用授权协议。
+
+
+## 登录资料接入
+
+当前会话元数据的签发时间为 `issuedAt`；`authentication.authTime` 是独立的、可能未知的真实认证时间，
+`authentication.source` 为 local_password、oidc 或 platform。客户端必须使用当前唯一结构。
+
+`GET /api/v1/identity/tenants/{tenant}/profile` 返回本次会话绑定资料，观察被替换或不可用时不回退到其他来源。
+账户资料 GET/PUT 和 operation receipt 入口及期限语义见[嵌入指南](../guides/embedding.md#登录资料与属性)。
+资料请求体单独限制 96 KiB，普通身份请求保持原有边界；成功及失败响应沿用 no-store、Cookie／CSRF 与错误投影。
+资料 CAS 与 operationId 冲突分别为 409 revision_conflict / operation_conflict；未知提交仍为既有不可判定结果，须查询回执。

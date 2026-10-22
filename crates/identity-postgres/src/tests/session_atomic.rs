@@ -113,11 +113,11 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
         .await?;
     let member_session = f.store.create_session(candidate, None, deadline()).await?;
     assert_eq!(
-        member_session.view().absolute_expires_at - member_session.view().auth_time,
+        member_session.view().absolute_expires_at - member_session.view().issued_at,
         14_400
     );
     assert_eq!(
-        first.view().absolute_expires_at - first.view().auth_time,
+        first.view().absolute_expires_at - first.view().issued_at,
         14_400
     );
     assert!(
@@ -322,7 +322,7 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
         f.store.create_session(candidate, None, deadline()).await,
         Err(AuthorityError::CommitUnknown(_))
     ));
-    assert_eq!(f.events().await?, before + 1);
+    assert_eq!(f.events().await?, before + 2);
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
     )
@@ -400,9 +400,9 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
         if envelope["route"] == "session.changed" {
             let payload: serde_json::Value = serde_json::from_str(&body)?;
             assert_eq!(envelope["contract"], "identity.session.security");
-            assert_eq!(payload.as_object().unwrap().len(), 6);
+            assert_eq!(payload.as_object().unwrap().len(), 7);
             for banned in ["token", "cookie", "password", "hash", "verifier", "code"] {
-                assert!(!body.contains(banned));
+                assert!(payload.get(banned).is_none());
             }
         }
     }
@@ -457,10 +457,10 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
     );
     lock.rollback().await?;
     assert!(proof(&f, &live).await.is_ok());
-    sqlx::raw_sql("UPDATE identity_authority.sessions SET auth_time=floor(extract(epoch FROM clock_timestamp()))::bigint-100, idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint-100+14400").execute(&f.owner).await?;
+    sqlx::raw_sql("UPDATE identity_authority.sessions SET issued_at=floor(extract(epoch FROM clock_timestamp()))::bigint-100,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN floor(extract(epoch FROM clock_timestamp()))::bigint-100 ELSE local_authenticated_at END, idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint-100+14400").execute(&f.owner).await?;
     assert!(proof(&f, &live).await.is_err());
     let live = issue(&f).await?;
-    sqlx::query("UPDATE identity_authority.sessions SET auth_time=1,idle_expires_at=14401,absolute_expires_at=14401 WHERE session_id=$1::uuid").bind(live.view().id.to_string()).execute(&f.owner).await?;
+    sqlx::query("UPDATE identity_authority.sessions SET issued_at=1,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN 1 ELSE local_authenticated_at END,idle_expires_at=14401,absolute_expires_at=14401 WHERE session_id=$1::uuid").bind(live.view().id.to_string()).execute(&f.owner).await?;
     assert!(proof(&f, &live).await.is_err());
     let live = issue(&f).await?;
     sqlx::raw_sql("UPDATE identity_authority.accounts SET auth_epoch=9223372036854775807; UPDATE identity_authority.sessions SET auth_epoch=9223372036854775807").execute(&f.owner).await?;
@@ -540,15 +540,15 @@ async fn session_logout_rotation_races_and_invalid_storage() -> anyhow::Result<(
     sqlx::raw_sql("ALTER TABLE identity_authority.sessions DROP CONSTRAINT session_duration")
         .execute(&f.owner)
         .await?;
-    sqlx::query("UPDATE identity_authority.sessions SET absolute_expires_at=auth_time+28800 WHERE session_id=$1::uuid").bind(live.view().id.to_string()).execute(&f.owner).await?;
+    sqlx::query("UPDATE identity_authority.sessions SET absolute_expires_at=issued_at+28800 WHERE session_id=$1::uuid").bind(live.view().id.to_string()).execute(&f.owner).await?;
     assert!(proof(&f, &live).await.is_err());
-    sqlx::query("UPDATE identity_authority.sessions SET absolute_expires_at=auth_time+14400 WHERE session_id=$1::uuid").bind(live.view().id.to_string()).execute(&f.owner).await?;
+    sqlx::query("UPDATE identity_authority.sessions SET absolute_expires_at=issued_at+14400 WHERE session_id=$1::uuid").bind(live.view().id.to_string()).execute(&f.owner).await?;
     assert!(proof(&f, &live).await.is_ok());
-    sqlx::raw_sql("ALTER TABLE identity_authority.sessions ADD CONSTRAINT session_duration CHECK(absolute_expires_at::numeric-auth_time::numeric=absolute_timeout)").execute(&f.owner).await?;
+    sqlx::raw_sql("ALTER TABLE identity_authority.sessions ADD CONSTRAINT session_duration CHECK(absolute_expires_at::numeric-issued_at::numeric=absolute_timeout)").execute(&f.owner).await?;
     // A constraint with the right count/name but weakened meaning must fail the probe.
-    sqlx::raw_sql("ALTER TABLE identity_authority.sessions DROP CONSTRAINT session_lifetime; ALTER TABLE identity_authority.sessions ADD CONSTRAINT session_lifetime CHECK(auth_time <= idle_expires_at)").execute(&f.owner).await?;
+    sqlx::raw_sql("ALTER TABLE identity_authority.sessions DROP CONSTRAINT session_lifetime; ALTER TABLE identity_authority.sessions ADD CONSTRAINT session_lifetime CHECK(issued_at <= idle_expires_at)").execute(&f.owner).await?;
     assert!(f.probe(AuthorityProfile::Runtime).await.is_err());
-    sqlx::raw_sql("ALTER TABLE identity_authority.sessions DROP CONSTRAINT session_lifetime; ALTER TABLE identity_authority.sessions ADD CONSTRAINT session_lifetime CHECK(auth_time < idle_expires_at AND idle_expires_at <= absolute_expires_at)").execute(&f.owner).await?;
+    sqlx::raw_sql("ALTER TABLE identity_authority.sessions DROP CONSTRAINT session_lifetime; ALTER TABLE identity_authority.sessions ADD CONSTRAINT session_lifetime CHECK(issued_at < idle_expires_at AND idle_expires_at <= absolute_expires_at)").execute(&f.owner).await?;
     assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
     let before = f.events().await?;
     let candidate = f.candidate().await?;
@@ -578,7 +578,7 @@ async fn expect_session_event(
 ) -> anyhow::Result<()> {
     use sha2::{Digest, Sha256};
     let raw: String = sqlx::query_scalar(
-        "SELECT envelope::text FROM rss_transactional_messaging.outbox ORDER BY seq DESC LIMIT 1",
+        "SELECT envelope::text FROM rss_transactional_messaging.outbox WHERE envelope->>'route'='session.changed' ORDER BY seq DESC LIMIT 1",
     )
     .fetch_one(&f.owner)
     .await?;
@@ -587,7 +587,7 @@ async fn expect_session_event(
     let payload: serde_json::Value = serde_json::from_slice(&bytes)?;
     assert_eq!(
         payload,
-        serde_json::json!({"action":action,"tenant":A,"principal":f.key.principal.as_uuid(),"session_id":id,"replaced_session_id":replaced,"epoch":epoch})
+        serde_json::json!({"action":action,"tenant":A,"principal":f.key.principal.as_uuid(),"session_id":id,"replaced_session_id":replaced,"epoch":epoch,"source":"local_password"})
     );
     assert_eq!(
         envelope["schema"],
@@ -638,7 +638,7 @@ async fn session_events_match_committed_operations() -> anyhow::Result<()> {
         .revoke_all_sessions(proof(&f, &live).await?, deadline())
         .await?;
     expect_session_event(&f, "all_revoked", live.view().id, None, 2).await?;
-    assert_eq!(f.events().await?, baseline + 6);
+    assert_eq!(f.events().await?, baseline + 9);
     f.close().await;
     Ok(())
 }
@@ -707,7 +707,7 @@ async fn durable_reference_is_passive_exact_and_revocable() -> anyhow::Result<()
     );
     let next = issue(&f).await?;
     let next_ref = proof(&f, &next).await?.reference()?;
-    sqlx::query("UPDATE identity_authority.sessions SET auth_time=1,idle_expires_at=14401,absolute_expires_at=14401 WHERE session_id=$1::uuid")
+    sqlx::query("UPDATE identity_authority.sessions SET issued_at=1,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN 1 ELSE local_authenticated_at END,idle_expires_at=14401,absolute_expires_at=14401 WHERE session_id=$1::uuid")
         .bind(next.view().id.to_string()).execute(&f.owner).await?;
     assert!(
         f.store
@@ -813,7 +813,7 @@ async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
             .is_err()
     );
     // Move the stored authentication time back without changing its original absolute duration.
-    sqlx::query("UPDATE identity_authority.sessions SET auth_time=auth_time-100,idle_expires_at=idle_expires_at-100,absolute_expires_at=absolute_expires_at-100 WHERE session_id=$1")
+    sqlx::query("UPDATE identity_authority.sessions SET issued_at=issued_at-100,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN issued_at-100 ELSE local_authenticated_at END,idle_expires_at=idle_expires_at-100,absolute_expires_at=absolute_expires_at-100 WHERE session_id=$1")
         .bind(token.view().id.as_uuid()).execute(&f.owner).await?;
     let passive = restarted
         .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
@@ -829,7 +829,7 @@ async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
         .await?;
     assert!(active.view().idle_expires_at > before);
     assert_eq!(active.view().absolute_expires_at, absolute);
-    sqlx::query("UPDATE identity_authority.sessions SET auth_time=floor(extract(epoch FROM clock_timestamp()))::bigint-14400, idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint WHERE session_id=$1")
+    sqlx::query("UPDATE identity_authority.sessions SET issued_at=floor(extract(epoch FROM clock_timestamp()))::bigint-14400,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN floor(extract(epoch FROM clock_timestamp()))::bigint-14400 ELSE local_authenticated_at END, idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint WHERE session_id=$1")
         .bind(token.view().id.as_uuid()).execute(&f.owner).await?;
     assert!(
         restarted

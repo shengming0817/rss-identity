@@ -140,6 +140,7 @@ pub(crate) async fn identity(
     ))
 }
 pub(crate) struct Attempt {
+    pub profile_sequence: i64,
     pub mode: AuthenticationMode,
     pub browser: [u8; 32],
     pub provider: ProviderId,
@@ -185,6 +186,7 @@ pub(crate) async fn attempt(
     };
     Ok((
         Attempt {
+            profile_sequence: r.try_get("profile_sequence")?,
             mode: AuthenticationMode::from_storage(r.try_get("authentication_mode")?)
                 .map_err(|_| corrupt())?,
             browser: digest(browser),
@@ -258,11 +260,12 @@ pub(crate) async fn insert_attempt(
     if count >= 10000 {
         return Err(reject().into());
     }
+    let profile_sequence = crate::profiles::sequence(c, tenant).await?;
     sqlx::query(concat!(
         "INSERT INTO identity_authority.oidc_transactions(tenant_id,attempt_id,provider_i",
         "d,config_version,state_hash,browser_hash,purpose,nonce,verifier,created_at,expir",
-        "es_at,return_url,link_intent,replacement_session,authentication_mode) VALUES($1::uuid,",
-        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::uuid,$15)"
+        "es_at,return_url,link_intent,replacement_session,authentication_mode,profile_sequence) VALUES($1::uuid,",
+        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::uuid,$15,$16)"
     ))
     .bind(tenant.to_string())
     .bind(input.locator.id().as_slice())
@@ -279,6 +282,7 @@ pub(crate) async fn insert_attempt(
     .bind(input.link)
     .bind(input.replacement.map(|v| v.to_string()))
     .bind(input.mode as i16)
+    .bind(profile_sequence)
     .execute(c)
     .await?;
     Ok(())

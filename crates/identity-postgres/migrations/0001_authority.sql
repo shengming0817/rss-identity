@@ -1,7 +1,7 @@
--- Fresh schema v13 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v14 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=13));
-INSERT INTO identity_authority.schema_version VALUES(13);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=14));
+INSERT INTO identity_authority.schema_version VALUES(14);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000')
@@ -11,7 +11,7 @@ BEGIN
  RAISE EXCEPTION 'immutable authentication instance';
 END $$;
 CREATE TRIGGER protect_deployment BEFORE UPDATE OR DELETE ON identity_authority.deployment FOR EACH ROW EXECUTE FUNCTION identity_authority.protect_deployment();
-CREATE TABLE identity_authority.guard(tenant_id uuid PRIMARY KEY);
+CREATE TABLE identity_authority.guard(tenant_id uuid PRIMARY KEY, profile_sequence bigint NOT NULL DEFAULT 0 CHECK(profile_sequence>=0));
 CREATE TABLE identity_authority.accounts (
  tenant_id uuid NOT NULL,
  principal_id uuid NOT NULL CHECK(principal_id <> '00000000-0000-0000-0000-000000000000'),
@@ -66,34 +66,44 @@ CREATE TABLE identity_authority.external_identities (
 CREATE TABLE identity_authority.sessions (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL,
  session_id uuid NOT NULL CHECK(session_id <> '00000000-0000-0000-0000-000000000000'),
+ authentication_source text NOT NULL CHECK(authentication_source IN ('local_password','oidc','platform')),
+ local_authenticated_at bigint,
+ platform_authentication jsonb,
  credential_kind text NOT NULL CHECK(credential_kind IN ('cookie','bearer')),
  token_hash bytea NOT NULL CHECK(octet_length(token_hash)=32),
  auth_epoch bigint NOT NULL CHECK(auth_epoch>0),
  membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
- auth_time bigint NOT NULL CHECK(auth_time>0),
+ issued_at bigint NOT NULL CHECK(issued_at>0),
  idle_timeout bigint NOT NULL CHECK(idle_timeout>0),
  absolute_timeout bigint NOT NULL CHECK(absolute_timeout>=idle_timeout),
  idle_expires_at bigint NOT NULL,
  absolute_expires_at bigint NOT NULL,
  revoked_at bigint,
+ profile_source text,
+ profile_snapshot uuid,
+ CHECK ((profile_source IS NULL) = (profile_snapshot IS NULL)),
  external_identity_id uuid,
  provider_epoch bigint,
  auth_facts jsonb,
- CONSTRAINT session_presentation CHECK(credential_kind='cookie' OR external_identity_id IS NULL),
+ CONSTRAINT session_presentation CHECK(credential_kind='cookie' OR authentication_source='local_password'),
+ CONSTRAINT authentication_kind CHECK (((authentication_source='local_password' AND local_authenticated_at>0 AND local_authenticated_at<=issued_at AND platform_authentication IS NULL AND external_identity_id IS NULL)
+ OR (authentication_source='oidc' AND local_authenticated_at IS NULL AND platform_authentication IS NULL AND external_identity_id IS NOT NULL)
+ OR (authentication_source='platform' AND local_authenticated_at IS NULL AND external_identity_id IS NULL AND jsonb_typeof(platform_authentication)='object' AND octet_length(platform_authentication::text)<=4096)) IS TRUE),
  CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL) OR (external_identity_id IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND octet_length(auth_facts::text)<=32768 AND (auth_facts->'format_version'='3'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
  FOREIGN KEY(tenant_id,principal_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,principal_id,identity_id),
  PRIMARY KEY(tenant_id,session_id),
  UNIQUE(tenant_id,token_hash), UNIQUE(tenant_id,principal_id,session_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts,
- CONSTRAINT session_lifetime CHECK(auth_time < idle_expires_at AND idle_expires_at <= absolute_expires_at),
- CONSTRAINT session_duration CHECK(absolute_expires_at::numeric-auth_time::numeric=absolute_timeout),
- CONSTRAINT session_revocation CHECK(revoked_at IS NULL OR revoked_at >= auth_time)
+ CONSTRAINT session_lifetime CHECK(issued_at < idle_expires_at AND idle_expires_at <= absolute_expires_at),
+ CONSTRAINT session_duration CHECK(absolute_expires_at::numeric-issued_at::numeric=absolute_timeout),
+ CONSTRAINT session_revocation CHECK(revoked_at IS NULL OR revoked_at >= issued_at)
 );
 CREATE INDEX sessions_principal ON identity_authority.sessions(tenant_id,principal_id,session_id);
 CREATE TABLE identity_authority.link_intents (
  tenant_id uuid NOT NULL, intent_id uuid NOT NULL, principal_id uuid NOT NULL, session_id uuid NOT NULL,
  auth_epoch bigint NOT NULL CHECK(auth_epoch>0), membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
- source_identity uuid, source_epoch bigint, source_facts jsonb,
+ source_identity uuid, source_epoch bigint, source_facts jsonb, local_authenticated_at bigint,
+ CHECK (((source_identity IS NULL AND local_authenticated_at>0) OR (source_identity IS NOT NULL AND local_authenticated_at IS NULL)) IS TRUE),
  target_provider uuid NOT NULL, target_version bigint NOT NULL CHECK(target_version>0),
  browser_hash bytea NOT NULL CHECK(octet_length(browser_hash)=32),
  stage smallint NOT NULL CHECK(stage BETWEEN 0 AND 2),
@@ -109,6 +119,7 @@ CREATE TABLE identity_authority.oidc_transactions (
  tenant_id uuid NOT NULL, attempt_id bytea NOT NULL CHECK(octet_length(attempt_id)=32),
  provider_id uuid NOT NULL, config_version bigint NOT NULL CHECK(config_version>0),
  state_hash bytea NOT NULL CHECK(octet_length(state_hash)=32), browser_hash bytea NOT NULL CHECK(octet_length(browser_hash)=32),
+ profile_sequence bigint NOT NULL CHECK(profile_sequence>0),
  purpose smallint NOT NULL CHECK(purpose BETWEEN 0 AND 2),
  authentication_mode smallint NOT NULL CHECK(authentication_mode BETWEEN 0 AND 2),
  nonce text, verifier text, claimed boolean NOT NULL DEFAULT false,
@@ -125,8 +136,45 @@ CREATE TABLE identity_authority.oidc_transactions (
 );
 CREATE INDEX oidc_expiry ON identity_authority.oidc_transactions(tenant_id,expires_at);
 CREATE INDEX link_expiry ON identity_authority.link_intents(tenant_id,expires_at);
+CREATE TABLE identity_authority.platform_challenges (
+ tenant_id uuid NOT NULL, challenge_id uuid NOT NULL, principal_id uuid NOT NULL,
+ binding jsonb NOT NULL CHECK(jsonb_typeof(binding)='object' AND octet_length(binding::text)<=4096),
+ audience text NOT NULL CHECK(octet_length(audience) BETWEEN 1 AND 256),
+ nonce_hash bytea NOT NULL CHECK(octet_length(nonce_hash)=32), browser_hash bytea NOT NULL CHECK(octet_length(browser_hash)=32),
+ auth_epoch bigint NOT NULL CHECK(auth_epoch>0), membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
+ created_at bigint NOT NULL CHECK(created_at>0), expires_at bigint NOT NULL CHECK(expires_at>created_at AND expires_at-created_at<=120),
+ profile_sequence bigint NOT NULL CHECK(profile_sequence>0),
+ PRIMARY KEY(tenant_id,challenge_id),
+ FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
+);
+CREATE INDEX platform_challenge_expiry ON identity_authority.platform_challenges(tenant_id,expires_at);
+CREATE TABLE identity_authority.local_profiles (
+ tenant_id uuid NOT NULL, principal_id uuid NOT NULL, revision bigint NOT NULL CHECK(revision>0),
+ value jsonb CHECK(value IS NULL OR (jsonb_typeof(value)='object' AND octet_length(value::text)<=98304)),
+ PRIMARY KEY(tenant_id,principal_id),
+ FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
+);
+CREATE TABLE identity_authority.profile_observations (
+ tenant_id uuid NOT NULL, principal_id uuid NOT NULL, source text NOT NULL,
+ provider_id uuid, config_version bigint, source_epoch bigint, source_revision bigint,
+ snapshot_id uuid NOT NULL, sequence bigint NOT NULL CHECK(sequence>0),
+ observed_at bigint NOT NULL CHECK(observed_at>0), collected_at bigint NOT NULL CHECK(collected_at>0),
+ expires_at bigint NOT NULL CHECK(expires_at>observed_at AND expires_at-observed_at<=86400),
+ value jsonb NOT NULL CHECK(jsonb_typeof(value)='object' AND octet_length(value::text)<=98304),
+ CHECK (((source='local' AND provider_id IS NULL AND config_version IS NULL AND source_epoch IS NULL)
+ OR (provider_id IS NOT NULL AND source=provider_id::text AND config_version>0 AND source_epoch>0 AND source_revision IS NULL)) IS TRUE),
+ PRIMARY KEY(tenant_id,principal_id,source),
+ FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE,
+ FOREIGN KEY(tenant_id,provider_id) REFERENCES identity_authority.providers ON DELETE CASCADE
+);
+CREATE TABLE identity_authority.profile_operations (
+ tenant_id uuid NOT NULL, operation_id uuid NOT NULL, principal_id uuid NOT NULL, actor uuid NOT NULL,
+ digest bytea NOT NULL CHECK(octet_length(digest)=32), revision bigint NOT NULL CHECK(revision>0),
+ PRIMARY KEY(tenant_id,operation_id),
+ FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
+);
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['provider_credentials','guard','local_credentials','accounts','memberships','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
+ FOREACH t IN ARRAY ARRAY['platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','guard','local_credentials','accounts','memberships','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
  EXECUTE format('ALTER TABLE identity_authority.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE identity_authority.%I FORCE ROW LEVEL SECURITY',t);
  EXECUTE format('CREATE POLICY tenant ON identity_authority.%I USING (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',t);

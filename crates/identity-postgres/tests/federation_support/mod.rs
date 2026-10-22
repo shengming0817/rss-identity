@@ -22,6 +22,7 @@ pub struct ScriptedOidc {
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
+    pub profile: Mutex<Option<rss_identity_core::profile::Profile>>,
     pub groups: Mutex<Vec<String>>,
     pub department_snapshot: Mutex<rss_identity_core::department::UpstreamDepartmentSnapshot>,
     pub issued_at_offset: AtomicI64,
@@ -38,6 +39,7 @@ impl ScriptedOidc {
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
+            profile: Mutex::new(None),
             groups: Mutex::new(vec!["staff".into()]),
             department_snapshot: Mutex::new(
                 rss_identity_core::department::UpstreamDepartmentSnapshot::Present(
@@ -123,8 +125,9 @@ impl UpstreamOidc for ScriptedOidc {
                         }
                     }
                 },
-                email: Some("same@example.test".into()),
-                email_verified: self.email_verified.load(Ordering::SeqCst),
+                profile: self.profile.lock().unwrap().clone().unwrap_or_else(||rss_identity_core::profile::Profile::from_claims(
+                    serde_json::json!({"email":"same@example.test","email_verified":self.email_verified.load(Ordering::SeqCst)}).as_object().unwrap(), &c.claims().profile)),
+
                 groups: rss_identity_core::groups::UpstreamGroups::present(
                     self.groups.lock().unwrap().clone(),
                 )?,
@@ -208,7 +211,7 @@ pub fn settings() -> ProviderSettings {
         claims: ClaimMapping {
             subject: rss_identity_core::entra::SubjectMapping::Oidc,
             department_snapshot: None,
-            email: Some("email".into()),
+            profile: rss_identity_core::profile::ProfileSettings::default(),
             groups: Some("groups".into()),
         },
         jit: true,

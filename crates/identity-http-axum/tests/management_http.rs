@@ -15,7 +15,7 @@ use std::{sync::atomic::Ordering, time::Duration};
 use support::*;
 use tower::ServiceExt;
 fn settings_wire(v: &rss_identity_core::federation::ProviderSettingsInput) -> Value {
-    json!({"issuer":v.issuer,"clientId":v.client_id,"redirectUri":v.redirect_uri,"scopes":v.scopes,"claims":{"subject":v.claims.subject,"email":v.claims.email,"groups":v.claims.groups},"jit":v.jit})
+    json!({"issuer":v.issuer,"clientId":v.client_id,"redirectUri":v.redirect_uri,"scopes":v.scopes,"claims":{"subject":v.claims.subject,"profile":v.claims.profile,"groups":v.claims.groups},"jit":v.jit})
 }
 const ORIGIN: &str = "https://identity.example.test";
 fn app(
@@ -797,7 +797,7 @@ async fn management_rejects_password_for_federated_only_account() -> anyhow::Res
     assert_eq!(security.headers()["cache-control"], "no-store");
     assert_eq!(
         json_body(security).await?["authentication"],
-        json!({"authTime":null,"acr":"unspecified","amr":[]})
+        json!({"source":"oidc","authTime":null,"acr":"unspecified","amr":[]})
     );
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let response = app

@@ -46,7 +46,7 @@ fn provider(issuer: &str) -> anyhow::Result<(HttpOidc, ProviderSettings)> {
                 "organization_snapshot".into(),
                 60,
             )?),
-            email: None,
+            profile: rss_identity_core::profile::ProfileSettings::default(),
             groups: None,
         },
         jit: false,

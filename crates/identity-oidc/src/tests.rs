@@ -1,57 +1,59 @@
 use super::*;
-use openidconnect::core::{
-    CoreHmacKey, CoreIdToken, CoreIdTokenClaims, CoreIdTokenVerifier, CoreJsonWebKeySet,
-    CoreJwsSigningAlgorithm,
-};
 use serde_json::json;
 use std::{
     io::{Read, Write},
     net::TcpListener,
 };
 
+fn token_metadata() -> Metadata {
+    let metadata:Metadata=serde_json::from_value(json!({"issuer":"https://issuer.test","authorization_endpoint":"https://issuer.test/auth","jwks_uri":"https://issuer.test/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})).unwrap();
+    metadata.set_jwks(serde_json::from_value(json!({"keys":[serde_json::from_str::<serde_json::Value>(include_str!("../tests/fixtures/entra-a.json")).unwrap()]})).unwrap())
+}
+fn signed_token(claims: &serde_json::Value, valid_key: bool) -> String {
+    let key = if valid_key {
+        include_bytes!("../tests/fixtures/entra-a.der").as_slice()
+    } else {
+        include_bytes!("../tests/fixtures/entra-b.der").as_slice()
+    };
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some("entra-a".into());
+    jsonwebtoken::encode(
+        &header,
+        claims,
+        &jsonwebtoken::EncodingKey::from_rsa_der(key),
+    )
+    .unwrap()
+}
 #[test]
 fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
-    let client = ClientId::new("client".into());
-    let issuer = IssuerUrl::new("https://issuer.test".into()).unwrap();
-    let verifier = CoreIdTokenVerifier::new_confidential_client(
-        client.clone(),
-        ClientSecret::new("fixture-secret".into()),
-        issuer,
-        CoreJsonWebKeySet::new(vec![]),
-    )
-    .set_allowed_algs(vec![CoreJwsSigningAlgorithm::HmacSha256]);
+    let metadata = token_metadata();
     for (field, value, valid) in [
         ("azp", json!(null), true),
         ("azp", json!("client"), true),
-        ("azp", json!("other-client"), false),
+        ("azp", json!("other"), false),
         ("iss", json!("https://other.test"), false),
-        ("aud", json!(["other-client"]), false),
+        ("aud", json!(["other"]), false),
+        ("aud", json!(["client", "other"]), false),
+        ("nonce", json!("wrong"), false),
         ("exp", json!(1), false),
+        ("iat", json!(4102444800_i64), false),
     ] {
-        let mut value_claims = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce"});
-        if !value.is_null() {
-            value_claims[field] = value;
+        let mut claims = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce"});
+        claims[field] = value;
+        for key in [true, false] {
+            assert_eq!(
+                profile_token::verify(
+                    &signed_token(&claims, key),
+                    &metadata,
+                    &Nonce::new("nonce".into()),
+                    "client",
+                    "fixture-secret"
+                )
+                .is_ok(),
+                valid && key,
+                "{field}"
+            );
         }
-        let claims: CoreIdTokenClaims = serde_json::from_value(value_claims).unwrap();
-        let token = CoreIdToken::new(
-            claims,
-            &CoreHmacKey::new("fixture-secret"),
-            CoreJwsSigningAlgorithm::HmacSha256,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            verify(
-                &serde_json::from_value(serde_json::json!(token.to_string())).unwrap(),
-                &verifier,
-                &Nonce::new("nonce".into()),
-                &client
-            )
-            .is_ok(),
-            valid,
-            "{field}"
-        );
     }
 }
 
@@ -105,7 +107,7 @@ fn config(issuer: &str) -> ProviderSettings {
         claims: rss_identity_core::federation::ClaimMapping {
             subject: rss_identity_core::entra::SubjectMapping::Oidc,
             department_snapshot: None,
-            email: None,
+            profile: rss_identity_core::profile::ProfileSettings::default(),
             groups: None,
         },
         jit: false,
@@ -332,7 +334,7 @@ async fn production_dns_denial_prevents_connecting_to_loopback() {
         claims: ClaimMapping {
             subject: rss_identity_core::entra::SubjectMapping::Oidc,
             department_snapshot: None,
-            email: None,
+            profile: rss_identity_core::profile::ProfileSettings::default(),
             groups: None,
         },
         jit: false,
@@ -395,14 +397,7 @@ fn department_mapping_withholds_missing_or_invalid_assertions() {
 
 #[test]
 fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification() {
-    let client = ClientId::new("client".into());
-    let verifier = CoreIdTokenVerifier::new_confidential_client(
-        client.clone(),
-        ClientSecret::new("fixture-secret".into()),
-        IssuerUrl::new("https://issuer.test".into()).unwrap(),
-        CoreJsonWebKeySet::new(vec![]),
-    )
-    .set_allowed_algs(vec![CoreJwsSigningAlgorithm::HmacSha256]);
+    let metadata = token_metadata();
     for value in [json!(null), department_assertion(), json!([])] {
         for (field, bad, accepted) in [
             ("unused", json!(true), true),
@@ -413,27 +408,22 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
         ] {
             let mut raw = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce","organization_snapshot":value});
             raw[field] = bad;
-            let claims: openidconnect::IdTokenClaims<Extra, openidconnect::core::CoreGenderClaim> =
-                serde_json::from_value(raw).unwrap();
-            for secret in ["fixture-secret", "wrong-secret"] {
-                let token = MappedToken::new(
-                    claims.clone(),
-                    &CoreHmacKey::new(secret),
-                    CoreJwsSigningAlgorithm::HmacSha256,
-                    None,
-                    None,
-                )
-                .unwrap();
-                let verified = verify(&token, &verifier, &Nonce::new("nonce".into()), &client);
-                assert_eq!(verified.is_ok(), accepted && secret == "fixture-secret");
-                if let Ok(verified) = verified {
-                    let mapped = mapped_department(
-                        Some("organization_snapshot"),
-                        &serde_json::to_value(verified).unwrap(),
-                    );
+            for key in [true, false] {
+                let verified = profile_token::verify(
+                    &signed_token(&raw, key),
+                    &metadata,
+                    &Nonce::new("nonce".into()),
+                    "client",
+                    "fixture-secret",
+                );
+                assert_eq!(verified.is_ok(), accepted && key);
+                if let Ok(claims) = verified {
                     assert_eq!(
                         matches!(
-                            mapped,
+                            mapped_department(
+                                Some("organization_snapshot"),
+                                &serde_json::to_value(claims).unwrap()
+                            ),
                             rss_identity_core::department::UpstreamDepartmentSnapshot::Present(_)
                         ),
                         value.is_object()
@@ -442,6 +432,46 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
             }
         }
     }
+}
+#[test]
+fn malformed_profile_is_independent_of_verified_security_claims() {
+    let metadata = token_metadata();
+    let raw = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce","email":42,"name":false,"email_verified":"true","attributes":{"mfa":true,"number":0,"remote":false}});
+    let claims = profile_token::verify(
+        &signed_token(&raw, true),
+        &metadata,
+        &Nonce::new("nonce".into()),
+        "client",
+        "fixture-secret",
+    )
+    .unwrap();
+    let settings = rss_identity_core::profile::ProfileSettings {
+        extensions_claim: Some("attributes".into()),
+        max_age_seconds: 14400,
+    };
+    let profile = rss_identity_core::profile::Profile::from_claims(&claims.ordinary, &settings);
+    assert!(matches!(
+        profile.email,
+        rss_identity_core::profile::Attribute::Invalid
+    ));
+    assert!(matches!(
+        profile.email_verified,
+        rss_identity_core::profile::Attribute::Invalid
+    ));
+    assert_eq!(
+        profile.extensions.value().unwrap().object()["remote"],
+        false
+    );
+    assert!(
+        profile_token::verify(
+            &signed_token(&raw, false),
+            &metadata,
+            &Nonce::new("nonce".into()),
+            "client",
+            "fixture-secret"
+        )
+        .is_err()
+    );
 }
 
 #[test]

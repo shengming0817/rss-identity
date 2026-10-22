@@ -32,7 +32,7 @@ impl TimeSample {
         }
         Ok(Self { started, micros })
     }
-    fn for_facts(&self, time: &crate::fact_time::FactTime) -> Self {
+    fn for_facts(&self, time: &crate::session_checks::SessionChecks) -> Self {
         let seconds = time.seconds(self.seconds());
         Self {
             started: self.started,
@@ -83,6 +83,7 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 }
 
 pub(crate) struct Loaded {
+    pub source: rss_identity_core::session::AuthenticationSource,
     pub assurance: Assurance,
     pub groups: GroupFacts,
     pub department_snapshot: Box<crate::department::DepartmentFacts>,
@@ -109,7 +110,7 @@ pub(crate) async fn lookup(
     tenant: TenantId,
     digest: &[u8; 32],
     kind: CredentialKind,
-    fact_time: &crate::fact_time::FactTime,
+    session_checks: &crate::session_checks::SessionChecks,
 ) -> Result<Loaded, PgError> {
     lock_guard(c, tenant).await?;
     let locator = sqlx::query(concat!(
@@ -126,7 +127,7 @@ pub(crate) async fn lookup(
         principal: principal(&locator.try_get::<String, _>("principal_id")?)?,
     };
     let id: String = locator.try_get("session_id")?;
-    let loaded = by_id(c, key, session_id(&id)?, fact_time).await?;
+    let loaded = by_id(c, key, session_id(&id)?, session_checks).await?;
     let stored: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
         .bind(tenant.to_string()).bind(&id).fetch_one(c).await?;
     if stored != digest.as_slice() || loaded.view.credential_kind != kind {
@@ -139,14 +140,14 @@ pub(crate) async fn by_id(
     c: &mut PgConnection,
     key: AccountKey,
     sid: SessionId,
-    fact_time: &crate::fact_time::FactTime,
+    session_checks: &crate::session_checks::SessionChecks,
 ) -> Result<Loaded, PgError> {
     let tenant = key.tenant;
     let id = sid.to_string();
     let state = load(c, key).await?.state;
     let row = sqlx::query(concat!(
-        "SELECT credential_kind,principal_id,auth_epoch,membership_epoch,auth_time,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at",
-        ",revoked_at,token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
+        "SELECT credential_kind,principal_id,auth_epoch,membership_epoch,issued_at,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at",
+        ",authentication_source,local_authenticated_at,platform_authentication,revoked_at,token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
         " AND session_id=$2::uuid"
     ))
     .bind(tenant.to_string())
@@ -168,7 +169,7 @@ pub(crate) async fn by_id(
         None => None,
     };
     let lifetime = SessionLifetime::restore(
-        row.try_get("auth_time")?,
+        row.try_get("issued_at")?,
         row.try_get("idle_expires_at")?,
         row.try_get("absolute_expires_at")?,
         lifetime_policy(&row)?,
@@ -179,7 +180,8 @@ pub(crate) async fn by_id(
     if !lifetime.valid_at(now) {
         return Err(reject());
     }
-    let fact_sample = sample.for_facts(fact_time);
+    let fact_sample = sample.for_facts(session_checks);
+    let source_kind: String = row.try_get("authentication_source")?;
     let department = match (&origin, &source) {
         (Some(origin), Some(source)) => crate::department::DepartmentFacts::new(
             *origin.facts.department_snapshot.clone(),
@@ -187,28 +189,51 @@ pub(crate) async fn by_id(
             origin.facts.provider_config_version,
             &fact_sample,
         )?,
-        (None, None) => crate::department::DepartmentFacts::Unavailable(
-            rss_identity_core::department::DepartmentUnavailableReason::LocalIdentity,
-        ),
+        (None, None) => {
+            crate::department::DepartmentFacts::Unavailable(if source_kind == "platform" {
+                rss_identity_core::department::DepartmentUnavailableReason::NotConfigured
+            } else {
+                rss_identity_core::department::DepartmentUnavailableReason::LocalIdentity
+            })
+        }
         _ => return Err(corrupt()),
     };
-    let (assurance, groups) = match (origin, source) {
-        (Some(origin), Some(source)) => (
+    let (assurance, groups) = match (source_kind.as_str(), origin, source) {
+        ("oidc", Some(origin), Some(source)) => (
             origin.facts.assurance.clone(),
             origin.facts.project(source, fact_sample.seconds())?,
         ),
-        (None, None) => (
-            Assurance::password(lifetime.auth_time()).map_err(|_| corrupt())?,
+        ("local_password", None, None) => (
+            Assurance::password(row.try_get("local_authenticated_at")?).map_err(|_| corrupt())?,
             rss_identity_core::groups::Groups::unavailable(
                 rss_identity_core::facts::FactUnavailableReason::LocalIdentity,
             ),
         ),
+        ("platform", None, None) => {
+            let platform: crate::platform::PlatformAuthentication =
+                serde_json::from_value(row.try_get("platform_authentication")?)
+                    .map_err(|_| corrupt())?;
+            crate::platform::recheck(c, key, &platform, session_checks).await?;
+            (
+                platform.assurance()?,
+                rss_identity_core::groups::Groups::unavailable(
+                    rss_identity_core::facts::FactUnavailableReason::NotConfigured,
+                ),
+            )
+        }
+        _ => return Err(corrupt()),
+    };
+    let source = match source_kind.as_str() {
+        "local_password" => rss_identity_core::session::AuthenticationSource::LocalPassword,
+        "oidc" => rss_identity_core::session::AuthenticationSource::Oidc,
+        "platform" => rss_identity_core::session::AuthenticationSource::Platform,
         _ => return Err(corrupt()),
     };
     assurance
-        .check(AuthenticationMode::Login, lifetime.auth_time(), now)
+        .check(AuthenticationMode::Login, lifetime.issued_at(), now)
         .map_err(|_| reject())?;
     Ok(Loaded {
+        source,
         assurance,
         groups: GroupFacts::new(groups, &fact_sample)?,
         department_snapshot: Box::new(department),
@@ -232,7 +257,7 @@ pub(crate) async fn recheck(
         proof.key.tenant,
         &proof.digest,
         proof.view.credential_kind,
-        &proof.fact_time,
+        &proof.session_checks,
     )
     .await?;
     loaded.expires = loaded.expires.min(proof.expires);

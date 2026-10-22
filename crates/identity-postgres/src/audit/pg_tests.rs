@@ -143,6 +143,34 @@ async fn authentication_outbox_reaches_audit_and_recovers() -> anyhow::Result<()
             )
             .await?;
     s.f.store
+        .update_local_profile(
+            actor,
+            s.f.key,
+            crate::ProfileChange {
+                operation_id: uuid::Uuid::new_v4(),
+                expected_revision: 0,
+                value: Some(rss_identity_core::profile::LocalProfile {
+                    display_name: Some("private-profile-value".into()),
+                    username: None,
+                    email: None,
+                    extensions: rss_identity_core::profile::Extensions::try_from(
+                        serde_json::json!({"employeeNumber":"private-profile-value"}),
+                    )?,
+                    max_age_seconds: 60,
+                }),
+            },
+            support::deadline(),
+        )
+        .await?;
+    let actor =
+        s.f.store
+            .inspect_session(
+                s.f.key.tenant,
+                rss_identity_core::session::SessionSecret::parse(secret.clone())?,
+                support::deadline(),
+            )
+            .await?;
+    s.f.store
         .revoke_all_sessions(actor, support::deadline())
         .await?;
     assert_eq!(s.count(A).await?, 0);
@@ -150,7 +178,7 @@ async fn authentication_outbox_reaches_audit_and_recovers() -> anyhow::Result<()
     for _ in 0..3 {
         s.worker.run_once(limit).await?;
     }
-    assert_eq!(s.count(A).await?, 3);
+    assert_eq!(s.count(A).await?, 5);
     assert_eq!(s.count(SYSTEM).await?, 1);
     assert_eq!(s.count(B).await?, 0);
     let idle = s.worker.next_wakeup(support::deadline()).await?;
@@ -164,6 +192,22 @@ async fn authentication_outbox_reaches_audit_and_recovers() -> anyhow::Result<()
             .iter()
             .all(|b| !b.windows(secret.len()).any(|w| w == secret.as_bytes()))
     );
+    assert!(bytes.iter().all(|b| {
+        !b.windows("private-profile-value".len())
+            .any(|w| w == b"private-profile-value")
+    }));
+    let profile_actions: Vec<_> = bytes
+        .iter()
+        .map(|b| rss_audit_core::decode_untrusted(b).unwrap())
+        .filter_map(|record| {
+            let action = record.event().facts().action().as_str();
+            action
+                .starts_with("identity.profile.")
+                .then(|| action.to_owned())
+        })
+        .collect();
+    assert!(profile_actions.contains(&"identity.profile.local_updated".to_owned()));
+    assert!(profile_actions.contains(&"identity.profile.observed".to_owned()));
     assert!(bytes.iter().any(|b| {
         rss_audit_core::decode_untrusted(b)
             .unwrap()
@@ -179,7 +223,7 @@ async fn authentication_outbox_reaches_audit_and_recovers() -> anyhow::Result<()
     for _ in 0..3 {
         s.worker.run_once(limit).await?;
     }
-    assert_eq!(s.count(A).await?, 3);
+    assert_eq!(s.count(A).await?, 5);
     let forbidden:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='identity_authority' AND c.relname='local_credentials' AND has_table_privilege(current_user,c.oid,'SELECT')) OR has_table_privilege(current_user,'rss_audit.records','INSERT') OR has_table_privilege(current_user,'rss_transactional_messaging.outbox','UPDATE')").fetch_one(&s.pool).await?;
     assert!(!forbidden);
     s.runtime.close().await;
@@ -190,7 +234,7 @@ async fn authentication_outbox_reaches_audit_and_recovers() -> anyhow::Result<()
 #[ignore = "requires real PG"]
 async fn conflicts_rollback_unknown_commit_and_lease_loss() -> anyhow::Result<()> {
     let s = Setup::new().await?;
-    let body = serde_json::json!({"action":"created","tenant":A,"principal":B,"session_id":SYSTEM,"replaced_session_id":null,"epoch":1});
+    let body = serde_json::json!({"action":"created","tenant":A,"principal":B,"source":"local_password","session_id":SYSTEM,"replaced_session_id":null,"epoch":1});
     let message = super::tests::envelope("session", body.clone());
     let p = &s.worker.publisher;
     let meta = message.metadata();
@@ -329,7 +373,7 @@ async fn relay_quarantines_bad_events_and_recovers_lost_source_lease() -> anyhow
         s.f.runtime.clone(),
         MessagingDomain::parse("identity.security")?,
     );
-    let base = serde_json::json!({"action":"created","tenant":A,"principal":B,"session_id":SYSTEM,"replaced_session_id":null,"epoch":1});
+    let base = serde_json::json!({"action":"created","tenant":A,"principal":B,"source":"local_password","session_id":SYSTEM,"replaced_session_id":null,"epoch":1});
     let valid = super::tests::envelope("session", base.clone());
     let mut bad = base;
     bad["tenant"] = serde_json::json!(B);
@@ -457,7 +501,7 @@ async fn permanent_storage_failure_stops_delivery_without_ack() -> anyhow::Resul
     let s = Setup::new().await?;
     let message = super::tests::envelope(
         "session",
-        serde_json::json!({"action":"created","tenant":A,"principal":B,"session_id":SYSTEM,"replaced_session_id":null,"epoch":1}),
+        serde_json::json!({"action":"created","tenant":A,"principal":B,"source":"local_password","session_id":SYSTEM,"replaced_session_id":null,"epoch":1}),
     );
     // Runtime permission loss is infrastructure failure, not a poison authentication event.
     sqlx::raw_sql("REVOKE USAGE ON SCHEMA rss_audit FROM identity_audit_test")
@@ -493,7 +537,7 @@ async fn permanent_storage_failure_stops_delivery_without_ack() -> anyhow::Resul
 #[ignore = "requires real PG"]
 async fn concentrated_projection_replays_exact_bytes_after_clock_advances() -> anyhow::Result<()> {
     let s = Setup::new().await?;
-    let body = serde_json::json!({"action":"created","tenant":A,"principal":B,"session_id":SYSTEM,"replaced_session_id":null,"epoch":1});
+    let body = serde_json::json!({"action":"created","tenant":A,"principal":B,"source":"local_password","session_id":SYSTEM,"replaced_session_id":null,"epoch":1});
     let mut original = Vec::new();
     for (attempt, epoch) in [(0, 1), (1, 1), (2, 2)] {
         let mut payload = body.clone();

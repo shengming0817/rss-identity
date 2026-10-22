@@ -22,7 +22,9 @@ struct Login {
 }
 pub(crate) fn issued(value: IssuedSession) -> Result<Response> {
     let max_age = value.cookie_max_age();
-    if max_age == 0 {
+    if max_age == 0
+        || value.view().credential_kind != rss_identity_core::session::CredentialKind::Cookie
+    {
         return Err(HttpError::from(AuthorityError::Unavailable));
     }
     let header = session_cookie(value.secret(), max_age)
@@ -50,7 +52,7 @@ fn project_session(
         },
         session: SessionInfo {
             id: view.id.to_string(),
-            auth_time: view.auth_time,
+            issued_at: view.issued_at,
             idle_expires_at: view.idle_expires_at,
             absolute_expires_at: view.absolute_expires_at,
         },

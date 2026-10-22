@@ -511,6 +511,7 @@ impl Federation {
                 }
             }
             Ok(SessionSecurity {
+                source: loaded.source,
                 session_id: loaded.view.id,
                 assurance: loaded.assurance,
                 eligible_step_up_providers: providers,
@@ -605,6 +606,7 @@ pub struct FederationConfig {
     pub targets: BTreeMap<String, String>,
 }
 pub struct SessionSecurity {
+    pub source: rss_identity_core::session::AuthenticationSource,
     pub session_id: rss_identity_core::SessionId,
     pub assurance: rss_identity_core::assurance::Assurance,
     pub eligible_step_up_providers: Vec<LoginOption>,

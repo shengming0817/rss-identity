@@ -74,8 +74,9 @@ fn department_mapping_is_complete_validated_and_has_no_default_age() {
 }
 
 #[test]
-fn department_mapping_cannot_reuse_email_or_group_claims() {
-    for (email, groups) in [(Some("custom".into()), None), (None, Some("custom".into()))] {
+fn department_mapping_cannot_reuse_extension_or_group_claims() {
+    for (extensions_claim, groups) in [(Some("custom".into()), None), (None, Some("custom".into()))]
+    {
         assert!(
             ProviderSettings::try_from(ProviderSettingsInput {
                 issuer: "https://idp.test".into(),
@@ -85,7 +86,10 @@ fn department_mapping_cannot_reuse_email_or_group_claims() {
                 jit: false,
                 claims: ClaimMapping {
                     subject: rss_identity_core::entra::SubjectMapping::Oidc,
-                    email,
+                    profile: rss_identity_core::profile::ProfileSettings {
+                        extensions_claim,
+                        max_age_seconds: 14400
+                    },
                     groups,
                     department_snapshot: Some(
                         DepartmentSnapshotClaim::new("custom".into(), 60).unwrap()

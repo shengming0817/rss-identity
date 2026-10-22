@@ -1,11 +1,12 @@
-//! Fact projection time only; session validity and transaction budgets retain real time.
+//! Shared source revalidation and fact projection clock for every session path.
 //! ref: tokio tokio/src/time/clock.rs (test-only, explicitly scoped time control).
 #[derive(Clone, Default)]
-pub(crate) struct FactTime {
+pub(crate) struct SessionChecks {
+    pub(crate) platform: Option<std::sync::Arc<dyn crate::platform::PlatformVerifier>>,
     #[cfg(feature = "test-support")]
-    controlled: Option<ControlledFactTime>,
+    pub(crate) controlled: Option<ControlledFactTime>,
 }
-impl FactTime {
+impl SessionChecks {
     pub(crate) fn seconds(&self, database_now: i64) -> i64 {
         #[cfg(feature = "test-support")]
         if let Some(clock) = &self.controlled {
@@ -37,7 +38,7 @@ impl ControlledFactTime {
 impl crate::Authority {
     /// Test-only fact projection time; clones made before this call are unaffected.
     pub fn with_fact_time(mut self, clock: ControlledFactTime) -> Self {
-        self.fact_time.controlled = Some(clock);
+        self.session_checks.controlled = Some(clock);
         self
     }
 }

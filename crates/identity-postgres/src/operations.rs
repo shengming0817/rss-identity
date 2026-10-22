@@ -46,13 +46,13 @@ impl Authority {
             crate::transaction::connection(tx,move|c|Box::pin(async move {
                 let id:Option<String>=sqlx::query_scalar(concat!("SELECT principal_id::text FROM identity_authority.local_credentials WHERE tenant","_id=$1::uuid AND login_key=$2")).bind(tenant.to_string()).bind(login.as_str()).fetch_optional(&mut *c).await?;
                 match id {
-                    Some(id)=>Ok(Some((load(c,AccountKey {tenant,principal:principal(&id)?}).await?,authority_id(c).await?))),
+                    Some(id)=>Ok(Some((load(c,AccountKey {tenant,principal:principal(&id)?}).await?,authority_id(c).await?,crate::session_storage::now(c).await?))),
                     None=>Ok(None)
                 }
             })).await
         })).await?;
         let kdf = &self.kdf;
-        let Some((stored, authority)) = snapshot else {
+        let Some((stored, authority, authenticated_at)) = snapshot else {
             budget.password(kdf.dummy(password)).await?;
             return Err(AuthorityError::Rejected);
         };
@@ -65,6 +65,7 @@ impl Authority {
             state: stored.state,
             authority,
             expires: budget.0,
+            authenticated_at,
         };
         self.read(tenant, budget.remaining(), move |tx| {
             Box::pin(async move {

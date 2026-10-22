@@ -273,7 +273,7 @@ async fn host_role_names_and_session_policy_survive_composition() -> anyhow::Res
         refreshed.view().absolute_expires_at,
         old.view().absolute_expires_at
     );
-    assert_eq!(refreshed.view().auth_time, old.view().auth_time);
+    assert_eq!(refreshed.view().issued_at, old.view().issued_at);
     let new = changed
         .login_local(
             f.key.tenant,
@@ -284,7 +284,7 @@ async fn host_role_names_and_session_policy_survive_composition() -> anyhow::Res
             deadline(),
         )
         .await?;
-    assert_eq!(new.view().absolute_expires_at - new.view().auth_time, 600);
+    assert_eq!(new.view().absolute_expires_at - new.view().issued_at, 600);
     drop(changed);
     runtime.close().await;
     f.close().await;
@@ -416,7 +416,7 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
         .inspect_session(f.key.tenant, secret(&refreshed), deadline())
         .await?;
     assert!(matches!(current.groups()?, VerifiedGroups::Expired));
-    assert_eq!(current.view().auth_time, session.view().auth_time);
+    assert_eq!(current.view().issued_at, session.view().issued_at);
     assert!(original_expiry < current.view().absolute_expires_at);
     let persisted: serde_json::Value = sqlx::query_scalar(
         "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1",
@@ -553,11 +553,11 @@ async fn refresh_rejects_expiry_during_writes_without_rotating_or_emitting() -> 
     // Cover both blocking writes and both session limits. Only the selected write sleeps.
     for (column, idle, absolute) in [("idle_expires_at", 2, 120), ("token_hash", 120, 120)] {
         let session = f.login().await?;
-        sqlx::query("UPDATE identity_authority.sessions SET auth_time=floor(extract(epoch FROM clock_timestamp()))::bigint + 2 - $3, idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2, idle_timeout=$2, absolute_timeout=$3 WHERE session_id=$1")
+        sqlx::query("UPDATE identity_authority.sessions SET issued_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2 - $3,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN floor(extract(epoch FROM clock_timestamp()))::bigint + 2 - $3 ELSE local_authenticated_at END, idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2, idle_timeout=$2, absolute_timeout=$3 WHERE session_id=$1")
             .bind(session.view().id.as_uuid()).bind(idle).bind(absolute).execute(&f.owner).await?;
         // The idle case keeps ample absolute lifetime, isolating the renewed idle cutoff.
         if idle == 2 {
-            sqlx::query("UPDATE identity_authority.sessions SET auth_time=floor(extract(epoch FROM clock_timestamp()))::bigint, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 120 WHERE session_id=$1")
+            sqlx::query("UPDATE identity_authority.sessions SET issued_at=floor(extract(epoch FROM clock_timestamp()))::bigint,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN floor(extract(epoch FROM clock_timestamp()))::bigint ELSE local_authenticated_at END, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 120 WHERE session_id=$1")
                 .bind(session.view().id.as_uuid()).execute(&f.owner).await?;
         }
         let before: (Vec<u8>, i64) = sqlx::query_as("SELECT token_hash,idle_expires_at FROM identity_authority.sessions WHERE session_id=$1")

@@ -60,7 +60,7 @@ fn state_authentication_precedes_tenant_use_and_separates_purpose() {
 #[test]
 fn provider_settings_are_validated_at_every_deserialization_boundary() {
     use rss_identity_core::federation::*;
-    let valid = serde_json::json!({"issuer":"https://idp.example.test","client_id":"client","redirect_uri":"https://identity.example.test/callback","scopes":["openid"],"claims":{"subject":{"kind":"oidc"},"email":null,"groups":null},"jit":false});
+    let valid = serde_json::json!({"issuer":"https://idp.example.test","client_id":"client","redirect_uri":"https://identity.example.test/callback","scopes":["openid"],"claims":{"subject":{"kind":"oidc"},"profile":{"extensionsClaim":null,"maxAgeSeconds":14400},"groups":null},"jit":false});
     let checked: ProviderSettings = serde_json::from_value(valid.clone()).unwrap();
     assert!(!checked.jit());
     assert_eq!(checked.issuer().as_str(), "https://idp.example.test");
@@ -71,7 +71,10 @@ fn provider_settings_are_validated_at_every_deserialization_boundary() {
         ),
         ("client_id", serde_json::json!("")),
         ("scopes", serde_json::json!(["openid", "offline_access"])),
-        ("claims", serde_json::json!({"email":"sub","groups":null})),
+        (
+            "claims",
+            serde_json::json!({"profile":{"extensionsClaim":"sub","maxAgeSeconds":14400},"groups":null}),
+        ),
     ] {
         let mut invalid = valid.clone();
         invalid[key] = value;

@@ -10,7 +10,7 @@ pub struct Identity {
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
     pub id: String,
-    pub auth_time: i64,
+    pub issued_at: i64,
     pub idle_expires_at: i64,
     pub absolute_expires_at: i64,
 }
@@ -26,6 +26,7 @@ pub struct Issued {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthenticationFacts {
+    pub source: rss_identity_core::session::AuthenticationSource,
     pub auth_time: Option<i64>,
     pub acr: rss_identity_core::assurance::Acr,
     pub amr: Vec<rss_identity_core::assurance::Amr>,
@@ -53,6 +54,7 @@ impl From<rss_identity_postgres::SessionSecurity> for SessionSecurity {
         Self {
             session_id: value.session_id.to_string(),
             authentication: AuthenticationFacts {
+                source: value.source,
                 auth_time: value.assurance.auth_time(),
                 acr: value.assurance.acr(),
                 amr: value.assurance.amr().to_vec(),
@@ -107,7 +109,7 @@ impl From<&rss_identity_postgres::SessionView> for SessionInfo {
     fn from(v: &rss_identity_postgres::SessionView) -> Self {
         Self {
             id: v.id.to_string(),
-            auth_time: v.auth_time,
+            issued_at: v.issued_at,
             idle_expires_at: v.idle_expires_at,
             absolute_expires_at: v.absolute_expires_at,
         }
@@ -132,7 +134,7 @@ impl From<rss_identity_postgres::SessionPage> for SessionPage {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaimMapping {
     subject: rss_identity_core::entra::SubjectMapping,
-    email: Option<String>,
+    profile: rss_identity_core::profile::ProfileSettings,
     groups: Option<String>,
     department_snapshot: Option<DepartmentSnapshotClaim>,
 }
@@ -166,7 +168,7 @@ impl ProviderSettings {
             scopes: self.scopes,
             claims: rss_identity_core::federation::ClaimMapping {
                 subject: self.claims.subject,
-                email: self.claims.email,
+                profile: self.claims.profile,
                 groups: self.claims.groups,
                 department_snapshot: self
                     .claims
@@ -193,7 +195,7 @@ impl From<&rss_identity_core::federation::ProviderSettings> for ProviderSettings
             scopes: v.scopes().to_vec(),
             claims: ClaimMapping {
                 subject: v.claims().subject.clone(),
-                email: v.claims().email.clone(),
+                profile: v.claims().profile.clone(),
                 groups: v.claims().groups.clone(),
                 department_snapshot: v.claims().department_snapshot.as_ref().map(|d| {
                     DepartmentSnapshotClaim {
@@ -306,6 +308,7 @@ mod tests {
     #[test]
     fn security_view_preserves_absent_upstream_authentication_time() {
         let value = rss_identity_postgres::SessionSecurity {
+            source: rss_identity_core::session::AuthenticationSource::Oidc,
             session_id: rss_identity_core::SessionId::generate(),
             assurance: rss_identity_core::assurance::Assurance::new(
                 None,
@@ -318,7 +321,7 @@ mod tests {
         let wire = serde_json::to_value(SessionSecurity::from(value)).unwrap();
         assert_eq!(
             wire["authentication"],
-            json!({"authTime":null,"acr":"unspecified","amr":[]})
+            json!({"source":"oidc","authTime":null,"acr":"unspecified","amr":[]})
         );
     }
     #[test]
@@ -331,14 +334,14 @@ mod tests {
                 },
                 session: SessionInfo {
                     id: "session".into(),
-                    auth_time: 1,
+                    issued_at: 1,
                     idle_expires_at: 2,
                     absolute_expires_at: 3
                 },
                 csrf_token: "csrf".into(),
             })
             .unwrap(),
-            json!({"identity":{"principalId":"subject","hasLocalPassword":true},"session":{"id":"session","authTime":1,"idleExpiresAt":2,"absoluteExpiresAt":3},"csrfToken":"csrf"})
+            json!({"identity":{"principalId":"subject","hasLocalPassword":true},"session":{"id":"session","issuedAt":1,"idleExpiresAt":2,"absoluteExpiresAt":3},"csrfToken":"csrf"})
         );
         assert_eq!(
             serde_json::to_value(SessionPage {
@@ -371,7 +374,7 @@ mod tests {
     }
     #[test]
     fn provider_department_is_atomic_camel_case_and_optional() {
-        let base = json!({"issuer":"https://idp.test","clientId":"client","redirectUri":"https://host.test/api/v1/identity/oidc/callback","scopes":["openid"],"claims":{"subject":{"kind":"oidc"},"email":null,"groups":null},"jit":false});
+        let base = json!({"issuer":"https://idp.test","clientId":"client","redirectUri":"https://host.test/api/v1/identity/oidc/callback","scopes":["openid"],"claims":{"subject":{"kind":"oidc"},"profile":{"extensionsClaim":null,"maxAgeSeconds":14400},"groups":null},"jit":false});
         let settings = serde_json::from_value::<ProviderSettings>(base.clone())
             .unwrap()
             .into_domain()
@@ -419,7 +422,7 @@ mod tests {
 
     #[test]
     fn provider_wire_owns_fields_and_excludes_internal_assurance() {
-        let input = json!({"issuer":"https://idp.example.test","clientId":"host","redirectUri":"https://host.example.test/api/v1/identity/oidc/callback","scopes":["openid"],"claims":{"subject":{"kind":"oidc"},"email":null,"groups":"groups","departmentSnapshot":null},"jit":true});
+        let input = json!({"issuer":"https://idp.example.test","clientId":"host","redirectUri":"https://host.example.test/api/v1/identity/oidc/callback","scopes":["openid"],"claims":{"subject":{"kind":"oidc"},"profile":{"extensionsClaim":null,"maxAgeSeconds":14400},"groups":"groups","departmentSnapshot":null},"jit":true});
         let settings = serde_json::from_value::<ProviderSettings>(input.clone())
             .unwrap()
             .into_domain()
