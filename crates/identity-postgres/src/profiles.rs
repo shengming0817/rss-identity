@@ -53,6 +53,12 @@ pub struct ProfileView {
     pub expires_at: Option<i64>,
     pub profile: Option<Profile>,
 }
+/// A bounded page of sources with an observation for the explicitly authorized target.
+/// Locators are not authentication proofs; use latest_profile to recheck each observation.
+pub struct ProfileSourcePage {
+    pub sources: Vec<ProfileSource>,
+    pub next_cursor: Option<ProfileSource>,
+}
 /// Private construction and a request deadline distinguish this view from a JSON DTO.
 pub struct TrustedProfile {
     view: ProfileView,
@@ -345,6 +351,34 @@ impl Authority {
     ) -> Result<TrustedProfile, AuthorityError> {
         self.read_profile(actor, Some((target, source)), deadline)
             .await
+    }
+    /// Discover the target's observations independently of the caller's login source or any
+    /// host mapping. Each page uses the same ReadLatestProfile policy as reading values.
+    pub async fn latest_profile_sources(
+        &self,
+        actor: &AuthenticatedSession,
+        target: AccountKey,
+        after: Option<ProfileSource>,
+        deadline: OperationDeadline,
+    ) -> Result<ProfileSourcePage, AuthorityError> {
+        self.require_runtime()?;
+        let reader = Reader::new(actor)?;
+        if target.tenant != reader.key.tenant {
+            return Err(AuthorityError::Rejected);
+        }
+        let policy = self.policy.clone();
+        let instance = self.instance;
+        self.read_sql(target.tenant,deadline,move|c|Box::pin(async move {
+            let loaded=reader.recheck(c).await?;
+            crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadLatestProfile,Some(target),c).await?;
+            if !load(c,target).await?.state.active(){return Err(reject().into());}
+            let rows:Vec<String>=sqlx::query_scalar("SELECT source FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND principal_id=$2 AND ($3::text IS NULL OR source>$3) ORDER BY source LIMIT 101")
+                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(after.map(ProfileSource::key)).fetch_all(c).await?;
+            let more=rows.len()>100;
+            let sources=rows.into_iter().take(100).map(|source| if source=="local" {Ok(ProfileSource::IdentityLocal)} else {ProviderId::parse(&source).map(|provider|ProfileSource::Idp{provider}).map_err(|_|corrupt())}).collect::<Result<Vec<_>,_>>()?;
+            let next_cursor=if more {sources.last().copied()} else {None};
+            Ok(ProfileSourcePage{sources,next_cursor})
+        })).await
     }
     async fn read_profile(
         &self,

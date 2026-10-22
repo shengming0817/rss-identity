@@ -1240,3 +1240,62 @@ async fn malformed_extension_replaces_old_values_without_rejecting_login() -> an
     f.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn latest_source_discovery_is_target_bound_and_policy_checked() -> anyhow::Result<()> {
+    use federation_support::*;
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let local = f.login().await?;
+    let manager = proof(&f.store, &f, &local).await?;
+    let oidc = service(&f, ScriptedOidc::new());
+    let provider = enabled(&f, &oidc).await?;
+    let federated =
+        issued(finish(&oidc, begin(&f, &oidc, &provider).await?, "source-target").await?);
+    let target = proof(&f.store, &f, &federated).await?.account();
+    let page = f
+        .store
+        .latest_profile_sources(&manager, target, None, deadline())
+        .await?;
+    assert_eq!(
+        page.sources,
+        vec![ProfileSource::Idp {
+            provider: provider.id
+        }]
+    );
+    assert!(page.next_cursor.is_none());
+    assert!(
+        f.store
+            .latest_profile_sources(&manager, target, page.sources.last().copied(), deadline())
+            .await?
+            .sources
+            .is_empty()
+    );
+    assert_eq!(
+        f.store
+            .latest_profile_sources(&manager, f.key, None, deadline())
+            .await?
+            .sources,
+        vec![ProfileSource::IdentityLocal]
+    );
+    let peer = rss_identity_core::account::AccountKey {
+        tenant: rss_request_context::TenantId::parse(B)?,
+        principal: target.principal,
+    };
+    assert!(
+        f.store
+            .latest_profile_sources(&manager, peer, None, deadline())
+            .await
+            .is_err()
+    );
+    f.policy.revoke(f.key);
+    assert!(
+        f.store
+            .latest_profile_sources(&manager, target, None, deadline())
+            .await
+            .is_err()
+    );
+    f.close().await;
+    Ok(())
+}

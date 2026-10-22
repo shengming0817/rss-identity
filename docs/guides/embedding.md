@@ -186,3 +186,8 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 不授予完整 Runtime 或 Provisioning 权限。该接口只读取来源发布元数据，不授予用户资料或管理权限。
 锁顺序为 Audit/可选 Ledger → Identity tenant guard → 宿主授权锁 → 业务定义/回执；
 调用方保持同一事务直至提交或回滚，不能在已持有宿主授权锁后调用该接口。
+
+
+聚合某个账户的 latest 资料时，先用 `latest_profile_sources` 按目标账户分页发现观察来源，再调用 `latest_profile`。
+来源发现与值读取均执行 `ReadLatestProfile` 策略；不从查看者登录来源、业务字段映射或邮箱猜测目标来源。
+来源定位符不是认证证明，也不保证观察仍有效；值读取继续执行当前来源、账户和有效期限复核。

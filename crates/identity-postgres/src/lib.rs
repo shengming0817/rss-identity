@@ -20,8 +20,8 @@ mod operations;
 pub mod platform;
 mod profiles;
 pub use profiles::{
-    LocalProfileView, ProfileChange, ProfileReceipt, ProfileSource, ProfileSourceView,
-    ProfileStatus, ProfileView, TrustedProfile,
+    LocalProfileView, ProfileChange, ProfileReceipt, ProfileSource, ProfileSourcePage,
+    ProfileSourceView, ProfileStatus, ProfileView, TrustedProfile,
 };
 mod runtime;
 mod schema;
