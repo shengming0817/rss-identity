@@ -117,7 +117,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
     let second = f.login().await?;
     let second_proof = proof(&f.store, &f, &second).await?;
     assert_eq!(
-        personnel_session(&f.store, &f.actor().await?, second.view().id.as_uuid()).await?,
+        personnel_session(&f.store, &second_proof, second.view().id.as_uuid()).await?,
         Some((false, None))
     );
     assert_eq!(
@@ -585,6 +585,10 @@ async fn older_oidc_completion_cannot_replace_a_newer_observation() -> anyhow::R
     let second_attempt = begin(&f, &second_service, &p).await?;
     let second = issued(finish(&second_service, second_attempt, "alice").await?);
     let second_proof = proof(&f.store, &f, &second).await?;
+    assert_eq!(
+        personnel_session(&f.store, &second_proof, second.view().id.as_uuid()).await?,
+        Some((false, None))
+    );
     let current = f.store.current_profile(&second_proof, deadline()).await?;
     let snapshot = current.view()?.snapshot_id;
     assert_eq!(

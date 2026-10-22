@@ -215,12 +215,13 @@ mod tests {
                 .validate()
                 .is_err()
         );
-        for a in [
+        for mut a in [
             serde_json::json!({"mode":"enabled","user":"identity_runtime","passwordFile":"p","pollMillis":100,"batch":1}),
             serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1,"batch":1}),
             serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":100,"batch":65}),
         ] {
             let mut bad = baseline.clone();
+            a["recoveryKeys"] = serde_json::json!({"activeKeyId":"audit","keys":[{"keyId":"audit","path":"audit.key"}]});
             bad["audit"] = a;
             assert!(
                 serde_json::from_value::<RuntimeConfig>(bad)

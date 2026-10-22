@@ -341,7 +341,7 @@ async fn relay_quarantines_bad_events_and_recovers_lost_source_lease() -> anyhow
             |e| Err(anyhow::anyhow!(e)),
             |_| Err(anyhow::anyhow!("fenced")),
         )?;
-    let limit = RelayBatchLimit::new(std::num::NonZeroUsize::new(8).unwrap())?;
+    let limit = RelayBatchLimit::new(std::num::NonZeroUsize::MIN)?;
     let mut lock = s.f.owner.begin().await?;
     sqlx::raw_sql("LOCK TABLE rss_audit.heads IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *lock)

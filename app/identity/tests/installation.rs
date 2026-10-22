@@ -119,7 +119,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         ),
         (
             "DELETE FROM identity_authority.schema_version",
-            "INSERT INTO identity_authority.schema_version VALUES(14)",
+            "INSERT INTO identity_authority.schema_version VALUES(15)",
         ),
         (
             "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2",

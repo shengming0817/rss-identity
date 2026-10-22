@@ -9,14 +9,14 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 
 RSS_FEATURES = {
-    'rss-data-protection': set(), 'rss-redact-derive': set(),
+    'rss-data-protection': {'default'}, 'rss-redact-derive': {'default'},
     'rss-transactional-messaging-recovery': set(),
     'rss-audit-core': set(), 'rss-audit-postgres': {'default','messaging'},
     'rss-ledger': {'default'}, 'rss-ledger-postgres': {'messaging'},
     'rss-transactional-messaging-runtime': {'consumer','producer'},
     'rss-runtime': {'default'}, 'rss-axum': {'http1','managed-server'},
     'rss-contract': {'default'}, 'rss-request-context': {'default'},
-    'rss-redact': {'default'}, 'rss-diag-context': {'default'},
+    'rss-redact': {'default','derive'}, 'rss-diag-context': {'default'},
     'rss-transactional-messaging': {'consumer', 'default', 'producer'},
     'rss-transactional-messaging-postgres': {'default', 'integration', 'test-support', 'recovery'},
 }
