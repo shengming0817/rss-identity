@@ -278,6 +278,7 @@ struct Verifier {
     binding: PlatformBinding,
     key: Ed25519KeyPair,
     local: bool,
+    evidence: std::sync::Mutex<(bool, bool, Option<i64>)>,
     idp: std::sync::Mutex<
         Option<(
             rss_identity_core::federation::ProviderId,
@@ -325,12 +326,14 @@ impl PlatformVerifier for Verifier {
             if let Some(fault) = self.fault.lock().unwrap().take() {
                 self.runtime.inject_next_transaction_fault(fault);
             }
+            let (key_possession, user_verification, authenticated_at) =
+                *self.evidence.lock().unwrap();
             Ok(PlatformEvidence {
-                key_possession: true,
+                key_possession,
                 hardware_key: true,
                 user_presence: false,
-                user_verification: false,
-                authenticated_at: None,
+                user_verification,
+                authenticated_at,
                 profile: if let Some((provider, claims)) = self.idp.lock().unwrap().clone() {
                     PlatformProfile::Idp {
                         provider,
@@ -402,6 +405,7 @@ async fn platform_host_for(
         binding: binding.clone(),
         key: Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap(),
         local,
+        evidence: std::sync::Mutex::new((true, false, None)),
         idp: std::sync::Mutex::new(None),
         unavailable: std::sync::atomic::AtomicBool::new(false),
         runtime: f.runtime.clone(),
@@ -1296,6 +1300,154 @@ async fn latest_source_discovery_is_target_bound_and_policy_checked() -> anyhow:
             .await
             .is_err()
     );
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn platform_evidence_admission_preserves_authentication_time() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let (store, verifier) = platform_host(&f, true).await?;
+    let browser = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    for (possession, verification, offset) in [
+        (false, false, None),
+        (true, false, Some(0)),
+        (true, true, Some(-120)),
+        (true, true, Some(120)),
+        (true, true, Some(0)),
+    ] {
+        let challenge = store
+            .begin_platform_login(
+                f.key.tenant,
+                verifier.binding.binding_id,
+                browser.into(),
+                source(),
+                deadline(),
+            )
+            .await?;
+        let now: i64 =
+            sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+                .fetch_one(&f.owner)
+                .await?;
+        let auth_time = offset.map(|offset| now + offset);
+        *verifier.evidence.lock().unwrap() = (possession, verification, auth_time);
+        let counts = async {
+            sqlx::query_as::<_,(i64,i64,i64)>("SELECT (SELECT count(*) FROM identity_authority.sessions),(SELECT count(*) FROM identity_authority.profile_observations),(SELECT count(*) FROM rss_transactional_messaging.outbox)").fetch_one(&f.owner).await
+        };
+        let before = counts.await?;
+        let signature = verifier
+            .key
+            .sign(challenge.nonce.as_bytes())
+            .as_ref()
+            .to_vec();
+        let result = store
+            .complete_platform_login(
+                f.key.tenant,
+                challenge.id,
+                challenge.nonce,
+                browser.into(),
+                signature,
+                deadline(),
+            )
+            .await;
+        if possession && verification && offset == Some(0) {
+            let issued = result?;
+            let actor = proof(&store, &f, &issued).await?;
+            assert_eq!(actor.assurance()?.auth_time(), auth_time);
+            assert_eq!(actor.assurance()?.acr(), Acr::Unspecified);
+            assert_eq!(
+                actor.authentication_source()?,
+                AuthenticationSource::Platform
+            );
+        } else {
+            assert!(matches!(result, Err(AuthorityError::Rejected)));
+            let after=sqlx::query_as::<_,(i64,i64,i64)>("SELECT (SELECT count(*) FROM identity_authority.sessions),(SELECT count(*) FROM identity_authority.profile_observations),(SELECT count(*) FROM rss_transactional_messaging.outbox)").fetch_one(&f.owner).await?;
+            assert_eq!(before, after);
+        }
+    }
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let issued = f.login().await?;
+    // Fill only the receipt resource, preserving normal account/session preparation.
+    sqlx::query("INSERT INTO identity_authority.profile_operations(tenant_id,operation_id,principal_id,actor,digest,revision) SELECT $1::uuid,gen_random_uuid(),$2,$2,decode(repeat('00',32),'hex'),n FROM generate_series(1,4095) n")
+        .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).execute(&f.owner).await?;
+    let change = ProfileChange {
+        operation_id: Uuid::new_v4(),
+        expected_revision: 0,
+        value: Some(local("last")),
+    };
+    let receipt = f
+        .store
+        .update_local_profile(
+            proof(&f.store, &f, &issued).await?,
+            f.key,
+            change.clone(),
+            deadline(),
+        )
+        .await?;
+    assert_eq!(receipt.revision, 1);
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox")
+        .fetch_one(&f.owner)
+        .await?;
+    let result = f
+        .store
+        .update_local_profile(
+            proof(&f.store, &f, &issued).await?,
+            f.key,
+            ProfileChange {
+                operation_id: Uuid::new_v4(),
+                expected_revision: 1,
+                value: None,
+            },
+            deadline(),
+        )
+        .await;
+    assert!(matches!(result, Err(AuthorityError::Rejected)));
+    let actor = proof(&f.store, &f, &issued).await?;
+    let current = f
+        .store
+        .read_local_profile(&actor, f.key, deadline())
+        .await?;
+    assert_eq!(current.revision, 1);
+    assert!(current.value.is_some());
+    assert_eq!(
+        f.store
+            .local_profile_receipt(&actor, f.key, change.operation_id, deadline())
+            .await?
+            .unwrap()
+            .revision,
+        1
+    );
+    assert_eq!(
+        f.store
+            .update_local_profile(
+                proof(&f.store, &f, &issued).await?,
+                f.key,
+                change,
+                deadline()
+            )
+            .await?
+            .revision,
+        1
+    );
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox")
+        .fetch_one(&f.owner)
+        .await?;
+    assert_eq!(before, after);
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity_authority.profile_operations")
+            .fetch_one(&f.owner)
+            .await?;
+    assert_eq!(count, 4096);
     f.close().await;
     Ok(())
 }

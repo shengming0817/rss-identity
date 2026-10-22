@@ -83,6 +83,7 @@ pub struct LocalProfileView {
 pub struct ProfileChange {
     pub operation_id: Uuid,
     pub expected_revision: i64,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub value: Option<LocalProfile>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -507,6 +508,10 @@ impl Authority {
                 if row.try_get::<Uuid,_>("principal_id")?!=target.principal.as_uuid() || row.try_get::<Uuid,_>("actor")?!=actor.key.principal.as_uuid() || row.try_get::<Vec<u8>,_>("digest")?!=digest {return Err(transaction::MutationError::OperationConflict);}
                 return Ok((ProfileReceipt{operation_id:change.operation_id,revision:row.try_get("revision")?},vec![]));
             }
+            // The tenant guard serializes admission with insertion; replay above remains available.
+            let operations:i64=sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND principal_id=$2 LIMIT 4096) AS bounded")
+                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).fetch_one(&mut *c).await?;
+            if operations>=4096{return Err(reject().into());}
             let old=local_view(c,target).await?;
             if old.revision!=change.expected_revision{return Err(transaction::MutationError::RevisionConflict);}
             let revision=old.revision.checked_add(1).ok_or_else(corrupt)?;

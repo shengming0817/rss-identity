@@ -1305,6 +1305,22 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
         body(saved).await?,
         json!({"revision":1,"value":input["value"]})
     );
+    let missing = json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":1});
+    assert_eq!(
+        app.clone()
+            .oneshot(request("PUT", &path, Some(&cookie), Some(&csrf), missing))
+            .await?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let unchanged = app
+        .clone()
+        .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+        .await?;
+    assert_eq!(
+        body(unchanged).await?,
+        json!({"revision":1,"value":input["value"]})
+    );
     let mut invalid = input.clone();
     invalid["value"]["emailVerified"] = json!(true);
     assert_eq!(
@@ -1341,6 +1357,19 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
         .await?;
     assert_eq!(result.status(), StatusCode::CONFLICT);
     assert_eq!(body(result).await?["code"], "revision_conflict");
+    let deletion = json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":1,"value":null});
+    assert_eq!(
+        app.clone()
+            .oneshot(request("PUT", &path, Some(&cookie), Some(&csrf), deletion))
+            .await?
+            .status(),
+        StatusCode::OK
+    );
+    let deleted = app
+        .clone()
+        .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+        .await?;
+    assert_eq!(body(deleted).await?, json!({"revision":2,"value":null}));
     f.policy.revoke(f.key);
     assert_eq!(
         app.clone()

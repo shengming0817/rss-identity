@@ -154,8 +154,10 @@ refresh、idle 和 GET 不重新采集。组与部门的独立短期合同不变
 本地资料管理使用 `ReadLocalProfile/UpdateLocalProfile`，来源目录使用 `ReadProfileSources`，
 必须由宿主明确授权，不能默认把字段配置写权限映射为这些权限。
 HTTP 本地资料位于 `/api/v1/identity/tenants/{tenant}/accounts/{principal}/profile`，
-PUT 使用 operationId、expectedRevision、value（null 删除），GET 返回 revision 与 value。
+PUT 使用 operationId、expectedRevision、value（必须出现，显式 null 删除），GET 返回 revision 与 value。
 响应丢失时查询其 `/operations/{operationId}`；409 后重新读取，不自动重放写。
+每账户最多保留 4096 条本地资料操作回执；达到容量后新操作拒绝（Rejected），原回执仍可查询和精确重放。
+回执不按时间删除，不重用 operationId；账户删除时随账户清理。
 本地修改只更新本地 authority，下次成功登录才产生新观察；首期没有本地邮箱验证声明。
 
 ## 平台会话接缝

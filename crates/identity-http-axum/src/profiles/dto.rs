@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub(super) struct Change {
     operation_id: Uuid,
     expected_revision: i64,
+    #[serde(deserialize_with = "Option::deserialize")]
     value: Option<LocalValue>,
 }
 #[derive(Serialize, Deserialize)]
