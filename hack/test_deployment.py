@@ -214,7 +214,8 @@ class AuditDeployment(unittest.TestCase):
         import json
         with fixture() as (root, data, images):
             password=root/'audit-password';password.write_text('fixture-audit');password.chmod(0o600)
-            data['runtime']['audit']={'mode':'enabled','user':'identity_audit','passwordFile':str(password),'pollMillis':1000,'batch':16}
+            key=root/'audit-key';key.write_text('07'*32);key.chmod(0o600)
+            data['runtime']['audit']={'recoveryKeys':{'activeKeyId':'audit','keys':[{'keyId':'audit','path':str(key)}]},'mode':'enabled','user':'identity_audit','passwordFile':str(password),'pollMillis':1000,'batch':16}
             with patch('os.geteuid',return_value=0),patch('os.chown'),patch.object(deploy,'preflight'):
                 deploy.render(data,root/'audit-output',images)
             runtime=json.loads((root/'audit-output/runtime.json').read_text())

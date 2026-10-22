@@ -45,6 +45,15 @@ impl AuditDeliveryError {
             K::Invariant | K::Conflict => Self::Invariant,
         }
     }
+    pub(super) fn recovery(error: rss_transactional_messaging_recovery::Error) -> Self {
+        use rss_transactional_messaging_recovery::{Error, StoreFailureKind};
+        match error {
+            Error::Deadline | Error::Store(StoreFailureKind::Transient) => Self::Transient,
+            Error::Store(StoreFailureKind::OwnershipLost) => Self::OwnershipLost,
+            Error::Store(StoreFailureKind::Invariant) => Self::Invariant,
+            _ => Self::Permanent,
+        }
+    }
     pub(super) fn pg(error: rss_transactional_messaging_postgres::PgError) -> Self {
         Self::messaging(error.kind())
     }

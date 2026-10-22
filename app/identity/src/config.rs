@@ -102,13 +102,13 @@ pub struct AssuranceProfileConfig {
     pub client_id: String,
     pub keycloak_totp: bool,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialKeyFile {
     pub key_id: String,
     pub path: String,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialKeyringConfig {
     pub active_key_id: String,
@@ -350,6 +350,8 @@ pub enum AuditConfig {
         #[serde(rename = "pollMillis")]
         poll_millis: u64,
         batch: usize,
+        #[serde(rename = "recoveryKeys")]
+        recovery_keys: CredentialKeyringConfig,
     },
 }
 impl AuditConfig {
@@ -359,12 +361,15 @@ impl AuditConfig {
             password_file,
             poll_millis,
             batch,
+            recovery_keys,
         } = self
             && (user.is_empty()
                 || user.len() > 63
                 || user.contains('\0')
                 || user == producer
                 || password_file.is_empty()
+                || recovery_keys.active_key_id.is_empty()
+                || recovery_keys.keys.is_empty()
                 || !(100..=300000).contains(poll_millis)
                 || !(1..=64).contains(batch))
         {

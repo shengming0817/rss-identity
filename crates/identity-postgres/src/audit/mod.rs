@@ -5,39 +5,27 @@ mod profile;
 pub use error::AuditDeliveryError;
 pub use profile::{grant_worker, verify_worker};
 mod mapping;
-mod observations;
 use mapping::{accepted_contract, map_event, record_identity};
 use rss_audit_postgres::PgAudit;
+use rss_data_protection::Aead;
 use rss_identity_core::InstanceId;
-use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
+use rss_request_context::{Clock, Deadline, TenantId};
 use rss_transactional_messaging::{
-    error::{MessagingError, MessagingErrorKind},
     inbox::ConsumerGroup,
-    message::{MessageEnvelope, MessagingDomain, SubscriptionIdentity},
-    observability::{TransactionalMessagingEmitter, TransactionalMessagingObservation},
-    policy::{
-        ConsumerExecutionPolicy, DeliveryBudget, ExecutionBudget, LeaseRenewalPolicy,
-        OperationDeadline, RetryPolicy,
-    },
+    message::{MessageEnvelope, MessagingDomain},
+    policy::{DeliveryBudget, LeaseRenewalPolicy, OperationDeadline},
     transaction::{
         EnvelopeValidationFailure, IngressChallenge, IngressValidator, RejectKind,
-        SettlementDecision, SettlementKind, TerminalDisposition, VerifiedIngress,
-    },
-    transport::{
-        Delivery, DeliverySettlement, PublishFailure, PublishFailureKind, PublishFailureReason,
-        PublishFailureStage, PublishOutcome, Publisher,
+        TerminalDisposition, VerifiedIngress,
     },
 };
 use rss_transactional_messaging_postgres::{
-    OutboxWakeup, PgConsumerEffect, PgConsumerEffectFailure, PgConsumerTx, PgInboxStore,
-    PgOutboxStore, PgRuntime, PgTransaction,
+    OutboxWakeup, PgConsumerEffect, PgConsumerEffectFailure, PgLocalProjection,
+    PgProjectionFailure, PgProjectionOutcome, PgProjectionRecovery, PgRecoveryCapture, PgRuntime,
+    PgTransaction,
 };
-use rss_transactional_messaging_runtime::{
-    consumer::{ConsumerExecution, consume_once},
-    relay::{RelayBatchLimit, RelayReport, relay_once},
-};
+use rss_transactional_messaging_runtime::relay::RelayBatchLimit;
 use std::{
-    num::NonZeroU32,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
@@ -63,15 +51,10 @@ impl Clock for Timer {
         Instant::now()
     }
 }
-impl ExecutionTimer for Timer {
+#[cfg(test)]
+impl rss_request_context::ExecutionTimer for Timer {
     async fn sleep_until(&self, d: Deadline) {
         tokio::time::sleep(d.remaining(self.now()).unwrap_or_default()).await;
-    }
-}
-struct Observations;
-impl TransactionalMessagingEmitter for Observations {
-    fn emit(&self, event: TransactionalMessagingObservation) {
-        observations::record(event, std::io::stderr().lock());
     }
 }
 enum ProjectionError {
@@ -163,156 +146,62 @@ impl IngressValidator<Vec<u8>> for Validator {
         if m.domain().as_str() != "identity.security" || route != Some(m.route().as_str()) {
             return Err(EnvelopeValidationFailure::UnsupportedContract);
         }
-        Ok(c.verified()) // Private publisher receives only the bound PG outbox's envelopes.
+        Ok(c.verified()) // Projection receives only the domain-bound PG source envelopes.
     }
 }
-struct LocalSettlement(Arc<OnceLock<SettlementKind>>);
-impl DeliverySettlement for LocalSettlement {
-    async fn settle(
-        self,
-        decision: SettlementDecision,
-        _: OperationDeadline,
-    ) -> Result<(), MessagingError> {
-        self.0.set(decision.kind()).map_err(|_| invalid())
-    }
-    async fn abandon(self, _: OperationDeadline) -> Result<(), MessagingError> {
-        Ok(())
-    }
+/// Bounded projection progress. Counts only acknowledged or durably resolved commits.
+#[derive(Default, Debug)]
+pub struct AuditProjectionReport {
+    projected: usize,
+    deferred: usize,
 }
-fn invalid() -> MessagingError {
-    MessagingError::new(
-        MessagingErrorKind::Invariant,
-        std::io::Error::other("audit delivery contract"),
-    )
-}
-fn outcome(decision: Option<SettlementKind>) -> PublishOutcome<()> {
-    let failure = PublishFailure::new(
-        PublishFailureKind::Permanent,
-        PublishFailureStage::Confirm,
-        PublishFailureReason::InvalidMessage,
-    );
-    match decision {
-        Some(SettlementKind::Acknowledge) => PublishOutcome::Confirmed(()),
-        Some(SettlementKind::Reject) => PublishOutcome::DefinitelyNotPublished(failure),
-        _ => PublishOutcome::Ambiguous(PublishFailure::new(
-            PublishFailureKind::Transient,
-            PublishFailureStage::Confirm,
-            PublishFailureReason::TransportUnavailable,
-        )),
+impl AuditProjectionReport {
+    pub const fn projected(&self) -> usize {
+        self.projected
+    }
+    pub const fn deferred(&self) -> usize {
+        self.deferred
     }
 }
-struct LocalPublisher {
-    fatal: Arc<OnceLock<AuditDeliveryError>>,
-    inbox: PgInboxStore,
-    tx: PgConsumerTx<Effect>,
+/// Caller-driven same-database projection. The host owns pools, protection keys and lifetime.
+pub struct AuditDelivery<K> {
+    projection: PgLocalProjection<Effect, K>,
     validator: Validator,
-    group: ConsumerGroup,
-}
-impl Publisher<Vec<u8>> for LocalPublisher {
-    type Receipt = ();
-    async fn publish(
-        &self,
-        message: &MessageEnvelope<Vec<u8>>,
-        deadline: OperationDeadline,
-    ) -> PublishOutcome<()> {
-        let total = deadline.timeout();
-        let Ok(budget) = ExecutionBudget::new(total, total / 4) else {
-            return outcome(None);
-        };
-        let retry = RetryPolicy::new(
-            NonZeroU32::MIN,
-            Duration::from_millis(10),
-            Duration::from_millis(10),
-        )
-        .expect("constant retry policy");
-        let meta = message.metadata();
-        let subscription = SubscriptionIdentity::new(
-            meta.domain().clone(),
-            meta.route().clone(),
-            meta.contract().clone(),
-        );
-        let execution = ConsumerExecution::new(
-            self.group.clone(),
-            &self.validator,
-            &subscription,
-            &Timer,
-            ConsumerExecutionPolicy::new(retry, budget),
-            &Observations,
-        );
-        let decision = Arc::new(OnceLock::new());
-        let copy = MessageEnvelope::new(
-            message.id().clone(),
-            meta.clone(),
-            message.payload().clone(),
-        );
-        // consume_once owns the absolute execution/settlement budget; do not drop its transaction future.
-        let result = consume_once(
-            &self.inbox,
-            &self.tx,
-            &execution,
-            Delivery::new(copy, LocalSettlement(decision.clone())),
-        )
-        .await;
-        match result {
-            Ok(_) => outcome(decision.get().copied()),
-            Err(e) if e.kind() == MessagingErrorKind::Conflict => {
-                outcome(Some(SettlementKind::Reject))
-            }
-            Err(e) => {
-                if matches!(
-                    e.kind(),
-                    MessagingErrorKind::Invariant
-                        | MessagingErrorKind::OwnershipLost
-                        | MessagingErrorKind::Permanent
-                ) {
-                    let _ = self.fatal.set(AuditDeliveryError::messaging(e.kind()));
-                }
-                outcome(None)
-            }
-        }
-    }
-}
-/// Caller-driven bounded relay. Construction does not spawn tasks or take ownership of pools.
-/// `runtime` must be the consumer-only worker profile for the Identity database; `audit` must target that
-/// same database. The host binds the actual Identity instance and admitted tenants at startup.
-pub struct AuditDelivery {
-    outbox: PgOutboxStore<()>,
-    publisher: LocalPublisher,
     fatal: Arc<OnceLock<AuditDeliveryError>>,
+    pending: tokio::sync::Mutex<Option<PgProjectionRecovery>>,
+    timeout: Duration,
 }
-impl AuditDelivery {
-    /// Read persistent eligibility using the worker's bound tenants, domain and injected clock.
-    /// Does not claim, publish or prove audit delivery; the host owns waiting and recovery scans.
+impl<K: Aead + Send + Sync> AuditDelivery<K> {
     pub async fn next_wakeup(
         &self,
         deadline: OperationDeadline,
     ) -> Result<OutboxWakeup, AuditDeliveryError> {
-        if let Some(error) = self.fatal.get() {
-            return Err(*error);
-        }
-        self.outbox
+        self.check_fatal()?;
+        self.projection
             .next_wakeup(deadline)
             .await
             .map_err(AuditDeliveryError::pg)
     }
-    /// Bind the existing message mechanisms to Identity's sole audit consumer group.
+    /// Bind a dedicated consumer runtime and host-supplied recovery protector to the existing group.
+    /// The protector must remain available across restarts and joint database restoration.
     pub async fn new(
         runtime: Arc<PgRuntime>,
         audit: Arc<PgAudit>,
         instance: InstanceId,
         tenants: Vec<TenantId>,
         budget: DeliveryBudget,
+        protector: Arc<K>,
     ) -> Result<Self, AuditDeliveryError> {
         if tenants.is_empty() || tenants.len() > 128 {
             return Err(AuditDeliveryError::Configuration);
         }
-        let startup_cutoff = Deadline::from_timeout(&Timer, budget.settle_timeout())
+        let startup = Deadline::from_timeout(&Timer, budget.settle_timeout())
             .map_err(|_| AuditDeliveryError::Configuration)?;
         let validator = audit.clone();
         runtime
             .local_tx(
                 tenants[0],
-                OperationDeadline::from_cutoff(startup_cutoff, &Timer),
+                OperationDeadline::from_cutoff(startup, &Timer),
                 move |tx| {
                     Box::pin(async move { validator.validate_in(tx).await.map_err(Into::into) })
                 },
@@ -320,67 +209,118 @@ impl AuditDelivery {
             .await
             .fold(Ok, Err, Err, Err, Err, Err)
             .map_err(AuditDeliveryError::pg)?;
-        let lease = LeaseRenewalPolicy::from_ttl(budget.lease_ttl())
+        let renewal = LeaseRenewalPolicy::from_ttl(budget.lease_ttl())
             .map_err(|_| AuditDeliveryError::Configuration)?;
+        let capture = PgRecoveryCapture::new(
+            runtime,
+            protector,
+            OperationDeadline::from_cutoff(startup, &Timer),
+        )
+        .await
+        .map_err(AuditDeliveryError::recovery)?;
         let fatal = Arc::new(OnceLock::new());
-        let delivery = Self {
-            fatal: fatal.clone(),
-            outbox: PgOutboxStore::new(
-                runtime.clone(),
-                MessagingDomain::parse("identity.security")
-                    .map_err(|_| AuditDeliveryError::Configuration)?,
-                budget,
-            )
-            .map_err(AuditDeliveryError::pg)?,
-            publisher: LocalPublisher {
+        let projection = PgLocalProjection::new(
+            capture,
+            ConsumerGroup::parse("identity.audit.v1")
+                .map_err(|_| AuditDeliveryError::Configuration)?,
+            MessagingDomain::parse("identity.security")
+                .map_err(|_| AuditDeliveryError::Configuration)?,
+            Effect {
+                instance,
+                audit,
                 fatal: fatal.clone(),
-                inbox: PgInboxStore::new(runtime.clone(), lease).map_err(AuditDeliveryError::pg)?,
-                tx: PgConsumerTx::receipt_only(
-                    runtime,
-                    Effect {
-                        instance,
-                        audit,
-                        fatal,
-                    },
-                ),
-                validator: Validator { tenants },
-                group: ConsumerGroup::parse("identity.audit.v1")
-                    .map_err(|_| AuditDeliveryError::Configuration)?,
             },
-        };
-        if delivery
-            .outbox
-            .has_dead_letters(OperationDeadline::from_cutoff(startup_cutoff, &Timer))
+            budget,
+            renewal,
+            OperationDeadline::from_cutoff(startup, &Timer),
+        )
+        .await
+        .map_err(AuditDeliveryError::pg)?;
+        if projection
+            .has_dead_letters(OperationDeadline::from_cutoff(startup, &Timer))
             .await
             .map_err(AuditDeliveryError::pg)?
         {
             return Err(AuditDeliveryError::RejectedEvent);
         }
-        Ok(delivery)
+        Ok(Self {
+            projection,
+            validator: Validator { tenants },
+            fatal,
+            pending: tokio::sync::Mutex::new(None),
+            timeout: budget.publish_timeout(),
+        })
     }
-    /// Process at most `limit` claimed events. A returned report distinguishes published,
-    /// retried and fenced deliveries. Isolated events terminate with `RejectedEvent`; none is an authentication result.
+    fn check_fatal(&self) -> Result<(), AuditDeliveryError> {
+        self.fatal.get().copied().map_or(Ok(()), Err)
+    }
+    fn deadline(&self) -> Result<OperationDeadline, AuditDeliveryError> {
+        Ok(OperationDeadline::from_cutoff(
+            Deadline::from_timeout(&Timer, self.timeout)
+                .map_err(|_| AuditDeliveryError::Configuration)?,
+            &Timer,
+        ))
+    }
+    fn committed(&self, disposition: TerminalDisposition) -> Result<(), AuditDeliveryError> {
+        if disposition != TerminalDisposition::Succeeded {
+            let _ = self.fatal.set(AuditDeliveryError::RejectedEvent);
+        }
+        self.check_fatal()
+    }
+    /// Resolve any prior uncertainty first. Only provider leases authorize a fresh effect attempt.
     pub async fn run_once(
         &self,
         limit: RelayBatchLimit,
-    ) -> Result<RelayReport, AuditDeliveryError> {
-        if let Some(error) = self.fatal.get() {
-            return Err(*error);
+    ) -> Result<AuditProjectionReport, AuditDeliveryError> {
+        self.check_fatal()?;
+        let mut pending = self.pending.lock().await;
+        let mut report = AuditProjectionReport::default();
+        if let Some(identity) = pending.as_ref() {
+            if let Some(receipt) = self
+                .projection
+                .resolve(identity, self.deadline()?)
+                .await
+                .map_err(AuditDeliveryError::pg)?
+            {
+                self.committed(receipt.disposition())?;
+                report.projected += 1;
+            }
+            // None is not rollback proof: subsequent processing still requires a new durable claim.
+            *pending = None;
         }
-        let result = relay_once(&self.outbox, &self.publisher, &Timer, &Observations, limit).await;
-        if let Some(error) = self.fatal.get() {
-            return Err(*error);
-        }
-        let report = result.map_err(|e| AuditDeliveryError::messaging(e.kind()))?;
-        if report.dead_lettered() > 0 {
-            let _ = self.fatal.set(AuditDeliveryError::RejectedEvent);
-            return Err(AuditDeliveryError::RejectedEvent);
+        for _ in 0..limit.get().get() {
+            let result = self
+                .projection
+                .project_one(&self.validator, self.deadline()?)
+                .await;
+            self.check_fatal()?;
+            match result.map_err(AuditDeliveryError::pg)? {
+                PgProjectionOutcome::Empty => break,
+                PgProjectionOutcome::Committed(receipt) => {
+                    self.committed(receipt.disposition())?;
+                    report.projected += 1;
+                }
+                PgProjectionOutcome::Uncertain(identity) => {
+                    *pending = Some(identity);
+                    return Err(AuditDeliveryError::Transient);
+                }
+                PgProjectionOutcome::Rejected(_)
+                | PgProjectionOutcome::Deferred(PgProjectionFailure::DeliveryExpired) => {
+                    let _ = self.fatal.set(AuditDeliveryError::RejectedEvent);
+                    return Err(AuditDeliveryError::RejectedEvent);
+                }
+                PgProjectionOutcome::Deferred(PgProjectionFailure::Fenced) => {
+                    return Err(AuditDeliveryError::OwnershipLost);
+                }
+                PgProjectionOutcome::Deferred(_) | PgProjectionOutcome::InProgress => {
+                    report.deferred += 1;
+                }
+            }
         }
         Ok(report)
     }
 }
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
 mod pg_tests;
+#[cfg(test)]
+mod tests;

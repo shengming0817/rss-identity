@@ -1,9 +1,11 @@
 //! Reference host ownership of audit worker connections, permissions and lifecycle.
+mod protection;
 use crate::{
     AppError,
     assembly::Timer,
     config::{AuditConfig, AuditInstallation, MigrationConfig, RuntimeConfig},
 };
+use protection::Protection;
 use rss_audit_postgres::{Control, Integrity, PgAudit};
 use rss_identity_postgres::audit::AuditDelivery;
 use rss_request_context::Deadline;
@@ -80,7 +82,7 @@ pub async fn delivery(
     config: &RuntimeConfig,
     runtime: Arc<PgRuntime>,
     pool: PgPool,
-) -> Result<AuditDelivery, AppError> {
+) -> Result<AuditDelivery<Protection>, AppError> {
     // The worker must not acquire credential access through inherited or PUBLIC grants.
     let role: String = sqlx::query_scalar("SELECT current_user::text")
         .fetch_one(&pool)
@@ -98,19 +100,27 @@ pub async fn delivery(
     let audit = PgAudit::new(pool, Integrity::Plain, &control)
         .await
         .map_err(|_| AppError::Provider)?;
+    let AuditConfig::Enabled { recovery_keys, .. } = &config.audit else {
+        return Err(AppError::Configuration);
+    };
+    let protector = Arc::new(Protection::load(
+        &recovery_keys.active_key_id,
+        &recovery_keys.keys,
+    )?);
     AuditDelivery::new(
         runtime,
         Arc::new(audit),
         config.instance()?,
         config.storage.tenants()?,
         crate::assembly::delivery_budget()?,
+        protector,
     )
     .await
     .map_err(|_| AppError::Provider)
 }
 pub fn registration(
     config: &AuditConfig,
-    delivery: AuditDelivery,
+    delivery: AuditDelivery<Protection>,
     drain: Duration,
 ) -> Result<ManagedTaskRegistration, AppError> {
     let AuditConfig::Enabled {
@@ -171,7 +181,7 @@ mod tests {
     fn enabled_worker_requires_enough_time_to_drain_active_batch() {
         let mut value: serde_json::Value =
             serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
-        value["audit"] = serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1000,"batch":16});
+        value["audit"] = serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1000,"batch":16,"recoveryKeys":{"activeKeyId":"audit","keys":[{"keyId":"audit","path":"audit.key"}]}});
         for (resource, drain, valid) in [(29, 60, false), (30, 59, false), (30, 60, true)] {
             value["budgets"]["resourceSeconds"] = serde_json::json!(resource);
             value["budgets"]["drainSeconds"] = serde_json::json!(drain);

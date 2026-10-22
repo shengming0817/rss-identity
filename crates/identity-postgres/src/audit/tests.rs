@@ -182,19 +182,6 @@ fn malformed_and_sensitive_additions_are_rejected() {
         )
         .is_err()
     );
-    assert!(matches!(outcome(None), PublishOutcome::Ambiguous(_)));
-    assert!(matches!(
-        outcome(Some(SettlementKind::Requeue)),
-        PublishOutcome::Ambiguous(_)
-    ));
-    assert!(matches!(
-        outcome(Some(SettlementKind::Reject)),
-        PublishOutcome::DefinitelyNotPublished(_)
-    ));
-    assert!(matches!(
-        outcome(Some(SettlementKind::Acknowledge)),
-        PublishOutcome::Confirmed(())
-    ));
 }
 
 #[test]

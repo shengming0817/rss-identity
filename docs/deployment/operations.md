@@ -52,10 +52,12 @@ DNS 的全部 A/AAAA 必须属于公网基线或该绑定授权的私网；reqwe
 当前配置格式为 5，所有 runtime 配置必须包含 `"audit":{"mode":"disabled"}` 或显式启用配置：
 
 ```json
-"audit": {"mode":"enabled","user":"identity_audit","passwordFile":"/run/input/audit-password","pollMillis":1000,"batch":16}
+"audit": {"mode":"enabled","user":"identity_audit","passwordFile":"/run/input/audit-password","pollMillis":1000,"batch":16,"recoveryKeys":{"activeKeyId":"audit-1","keys":[{"keyId":"audit-1","path":"/run/input/audit-recovery-key"}]}}
 ```
 
 启用审计要求 `budgets.resourceSeconds >= 30`、`budgets.drainSeconds >= 60`，覆盖正在结算的有界批次和连接关闭；收到停止信号后不再领取下一批。
+
+恢复密钥文件为 32 字节密钥的十六进制文本，遵循秘密文件权限规则；使用独立审计密钥，不复用 OIDC 凭据密钥。轮换时保留旧 keyId 与文件直至关联隔离消息按保留策略处置，并将密钥与数据库纳入联合恢复材料。
 
 worker 继承 database 目标和 storage/instance 绑定；凭据文件遵循现有秘密文件规则。部署渲染器为启用配置生成独立 worker 和 NOLOGIN Audit owner，并在 migration 配置中写入 `audit.mode=enabled`、`ownerRole`、`workerRole`。仅支持全新安装，无旧配置解析或旧 schema 自动升级。嵌入宿主应自行预配等价角色。
 

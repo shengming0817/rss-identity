@@ -1,7 +1,7 @@
--- Fresh schema v14 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v15 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=14));
-INSERT INTO identity_authority.schema_version VALUES(14);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=15));
+INSERT INTO identity_authority.schema_version VALUES(15);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000')
@@ -11,7 +11,7 @@ BEGIN
  RAISE EXCEPTION 'immutable authentication instance';
 END $$;
 CREATE TRIGGER protect_deployment BEFORE UPDATE OR DELETE ON identity_authority.deployment FOR EACH ROW EXECUTE FUNCTION identity_authority.protect_deployment();
-CREATE TABLE identity_authority.guard(tenant_id uuid PRIMARY KEY, profile_sequence bigint NOT NULL DEFAULT 0 CHECK(profile_sequence>=0));
+CREATE TABLE identity_authority.guard(tenant_id uuid PRIMARY KEY, profile_sequence bigint NOT NULL DEFAULT 0 CHECK(profile_sequence>=0), personnel_revision bigint NOT NULL DEFAULT 0 CHECK(personnel_revision>=0));
 CREATE TABLE identity_authority.accounts (
  tenant_id uuid NOT NULL,
  principal_id uuid NOT NULL CHECK(principal_id <> '00000000-0000-0000-0000-000000000000'),
@@ -183,3 +183,24 @@ END $$;
 REVOKE ALL ON SCHEMA identity_authority FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA identity_authority FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA identity_authority FROM PUBLIC;
+
+-- Cursor generation follows every personnel/session-visible mutation, including maintenance.
+CREATE FUNCTION identity_authority.advance_personnel_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ UPDATE identity_authority.guard SET personnel_revision=personnel_revision+1 WHERE tenant_id=COALESCE(NEW.tenant_id,OLD.tenant_id);
+ IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+ RETURN NEW;
+END $$;
+DO $$ DECLARE t text; BEGIN
+ FOREACH t IN ARRAY ARRAY['accounts','memberships','local_credentials','providers','external_identities','profile_observations','local_profiles'] LOOP
+ EXECUTE format('CREATE TRIGGER personnel_revision AFTER INSERT OR UPDATE OR DELETE ON identity_authority.%I FOR EACH ROW EXECUTE FUNCTION identity_authority.advance_personnel_revision()',t);
+ END LOOP;
+END $$;
+REVOKE ALL ON FUNCTION identity_authority.advance_personnel_revision() FROM PUBLIC;
+CREATE INDEX personnel_observation_expiry ON identity_authority.profile_observations(tenant_id,expires_at);
+CREATE INDEX personnel_observation_time ON identity_authority.profile_observations(tenant_id,observed_at);
+
+CREATE TRIGGER personnel_revision AFTER INSERT OR DELETE OR UPDATE OF principal_id,authentication_source,local_authenticated_at,platform_authentication,credential_kind,auth_epoch,membership_epoch,absolute_expires_at,revoked_at,external_identity_id,provider_epoch,auth_facts ON identity_authority.sessions FOR EACH ROW EXECUTE FUNCTION identity_authority.advance_personnel_revision();
+
+CREATE INDEX personnel_session_idle ON identity_authority.sessions(tenant_id,idle_expires_at) WHERE revoked_at IS NULL;
+CREATE INDEX personnel_session_absolute ON identity_authority.sessions(tenant_id,absolute_expires_at) WHERE revoked_at IS NULL;

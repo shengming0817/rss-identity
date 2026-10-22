@@ -1451,3 +1451,73 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
     f.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let actor = f.actor().await?;
+    let (before, count)=f.store.with_personnel_read(&actor,deadline(),|mut read|Box::pin(async move {
+        let revision=read.revision()?;
+        let rows=read.query("SELECT count(DISTINCT principal_id)::bigint AS count FROM identity_personnel",Default::default(),1).await?;
+        Ok((revision,rows[0].get::<i64,_>("count")))
+    })).await?;
+    assert!(count > 0);
+    assert!(before.logins);
+    assert_eq!(before.profiles, PersonnelProfileScope::All);
+    f.store
+        .update_local_profile(
+            f.actor().await?,
+            f.key,
+            ProfileChange {
+                operation_id: Uuid::new_v4(),
+                expected_revision: 0,
+                value: Some(local("Personnel")),
+            },
+            deadline(),
+        )
+        .await?;
+    let login = f.login().await?;
+    let actor = proof(&f.store, &f, &login).await?;
+    let expected = f.key.principal.as_uuid();
+    let after=f.store.with_personnel_read(&actor,deadline(),move |mut read|Box::pin(async move {
+        use sqlx::Arguments;
+        let mut args=sqlx::postgres::PgArguments::default();args.add(expected).map_err(|_|AuthorityError::Configuration)?;
+        let rows=read.query("SELECT display_name FROM identity_personnel WHERE principal_id=$1 AND source='local'",args,1).await?;
+        assert_eq!(rows[0].get::<Option<String>,_>("display_name").as_deref(),Some("Personnel"));
+        read.revision()
+    })).await?;
+    assert!(after.generation > before.generation);
+    // A side-effecting SELECT is rejected by PostgreSQL READ ONLY, even though host code installed it.
+    sqlx::raw_sql("CREATE FUNCTION public.personnel_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.guard SET personnel_revision=personnel_revision+1 RETURNING personnel_revision'").execute(&f.owner).await?;
+    assert!(
+        f.store
+            .with_personnel_read(&actor, deadline(), |mut read| Box::pin(async move {
+                read.query("SELECT public.personnel_write()", Default::default(), 1)
+                    .await
+                    .map(|_| ())
+            }))
+            .await
+            .is_err()
+    );
+    f.policy.revoke(f.key);
+    f.store.with_personnel_read(&actor,deadline(),|mut read|Box::pin(async move {
+        assert!(!read.revision()?.logins);
+        assert_eq!(read.revision()?.profiles,PersonnelProfileScope::None);
+        let rows=read.query("SELECT count(*)::bigint AS leaked FROM identity_personnel WHERE login IS NOT NULL OR display_name IS NOT NULL OR username IS NOT NULL",Default::default(),1).await?;
+        assert_eq!(rows[0].get::<i64,_>("leaked"),0);
+        Ok(())
+    })).await?;
+    f.store
+        .revoke_current_session(proof(&f.store, &f, &login).await?, deadline())
+        .await?;
+    assert!(
+        f.store
+            .with_personnel_read(&actor, deadline(), |_| Box::pin(async { Ok(()) }))
+            .await
+            .is_err()
+    );
+    f.close().await;
+    Ok(())
+}
