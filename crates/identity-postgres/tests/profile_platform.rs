@@ -278,6 +278,12 @@ struct Verifier {
     binding: PlatformBinding,
     key: Ed25519KeyPair,
     local: bool,
+    idp: std::sync::Mutex<
+        Option<(
+            rss_identity_core::federation::ProviderId,
+            rss_identity_core::federation::UpstreamClaims,
+        )>,
+    >,
     unavailable: std::sync::atomic::AtomicBool,
     runtime: Arc<rss_transactional_messaging_postgres::PgRuntime>,
     fault: std::sync::Mutex<Option<PgTransactionFault>>,
@@ -325,7 +331,12 @@ impl PlatformVerifier for Verifier {
                 user_presence: false,
                 user_verification: false,
                 authenticated_at: None,
-                profile: if self.local {
+                profile: if let Some((provider, claims)) = self.idp.lock().unwrap().clone() {
+                    PlatformProfile::Idp {
+                        provider,
+                        claims: Box::new(claims),
+                    }
+                } else if self.local {
                     PlatformProfile::IdentityLocal
                 } else {
                     PlatformProfile::Unavailable
@@ -365,15 +376,23 @@ impl PlatformVerifier for Verifier {
     }
 }
 async fn platform_host(f: &Fixture, local: bool) -> anyhow::Result<(Authority, Arc<Verifier>)> {
+    platform_host_for(f, local, f.key, None).await
+}
+async fn platform_host_for(
+    f: &Fixture,
+    local: bool,
+    account: rss_identity_core::account::AccountKey,
+    external: Option<ExternalBinding>,
+) -> anyhow::Result<(Authority, Arc<Verifier>)> {
     sqlx::raw_sql("CREATE TABLE public.platform_binding(id uuid PRIMARY KEY,enabled boolean NOT NULL,epoch bigint NOT NULL); GRANT SELECT,UPDATE ON public.platform_binding TO identity_runtime;").execute(&f.owner).await?;
     let binding = PlatformBinding {
         instance: f.instance,
-        account: f.key,
+        account,
         binding_id: Uuid::new_v4(),
         binding_epoch: 1,
         source_id: Uuid::new_v4(),
         source_version: 1,
-        external_identity: None,
+        external_identity: external,
     };
     sqlx::query("INSERT INTO public.platform_binding VALUES($1,true,1)")
         .bind(binding.binding_id)
@@ -383,6 +402,7 @@ async fn platform_host(f: &Fixture, local: bool) -> anyhow::Result<(Authority, A
         binding: binding.clone(),
         key: Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap(),
         local,
+        idp: std::sync::Mutex::new(None),
         unavailable: std::sync::atomic::AtomicBool::new(false),
         runtime: f.runtime.clone(),
         fault: std::sync::Mutex::new(None),
@@ -749,6 +769,256 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
                 signature,
                 deadline()
             )
+            .await
+            .is_err()
+    );
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() -> anyhow::Result<()>
+{
+    use federation_support::*;
+    use rss_identity_core::{
+        department::UpstreamDepartmentSnapshot, entra::ExternalSubject, federation::*,
+        groups::UpstreamGroups,
+    };
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let oidc = service(&f, ScriptedOidc::new());
+    let provider = enabled(&f, &oidc).await?;
+    let login = issued(finish(&oidc, begin(&f, &oidc, &provider).await?, "platform-user").await?);
+    let account = proof(&f.store, &f, &login).await?.account();
+    let identity: Uuid = sqlx::query_scalar(
+        "SELECT identity_id FROM identity_authority.external_identities WHERE principal_id=$1",
+    )
+    .bind(account.principal.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    let (store, verifier) = platform_host_for(
+        &f,
+        false,
+        account,
+        Some(ExternalBinding {
+            identity_id: identity,
+            provider: provider.id,
+            config_version: provider.version,
+            revocation_epoch: provider.revocation_epoch,
+        }),
+    )
+    .await?;
+    let now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    let claims = UpstreamClaims {
+        issuer: provider.settings.issuer().as_str().into(),
+        subject: ExternalSubject::Oidc("platform-user".into()),
+        profile: local("fresh-platform").observation()?,
+        groups: UpstreamGroups::present(vec![])?,
+        department_snapshot: UpstreamDepartmentSnapshot::NotConfigured,
+        issued_at: now,
+        expires_at: now + 600,
+        assurance: rss_identity_core::assurance::Assurance::new(None, Acr::Unspecified, vec![])?,
+    };
+    let challenge = store
+        .begin_platform_login(
+            f.key.tenant,
+            verifier.binding.binding_id,
+            BROWSER.into(),
+            source(),
+            deadline(),
+        )
+        .await?;
+    let signature = verifier
+        .key
+        .sign(challenge.nonce.as_bytes())
+        .as_ref()
+        .to_vec();
+    // Each rejection must leave the challenge and observation untouched.
+    for bad in 0..4 {
+        let mut value = claims.clone();
+        let mut source = provider.id;
+        match bad {
+            0 => source = ProviderId::parse(&Uuid::new_v4().to_string())?,
+            1 => value.subject = ExternalSubject::Oidc("different-user".into()),
+            2 => value.issuer = "https://other.example.test".into(),
+            _ => value.issued_at = challenge.expires_at - 120 - 31,
+        }
+        *verifier.idp.lock().unwrap() = Some((source, value));
+        assert!(
+            store
+                .complete_platform_login(
+                    f.key.tenant,
+                    challenge.id,
+                    challenge.nonce.clone(),
+                    BROWSER.into(),
+                    signature.clone(),
+                    deadline()
+                )
+                .await
+                .is_err()
+        );
+    }
+    *verifier.idp.lock().unwrap() = Some((provider.id, claims));
+    let platform = store
+        .complete_platform_login(
+            f.key.tenant,
+            challenge.id,
+            challenge.nonce,
+            BROWSER.into(),
+            signature,
+            deadline(),
+        )
+        .await?;
+    let actor = proof(&store, &f, &platform).await?;
+    let current = store.current_profile(&actor, deadline()).await?;
+    assert_eq!(
+        current.view()?.source,
+        Some(ProfileSource::Idp {
+            provider: provider.id
+        })
+    );
+    assert_eq!(
+        current
+            .view()?
+            .profile
+            .as_ref()
+            .unwrap()
+            .display_name
+            .value()
+            .map(String::as_str),
+        Some("fresh-platform")
+    );
+    assert!(actor.assurance()?.auth_time().is_none());
+    let reference = actor.reference()?;
+    f.policy.allow(account);
+    assert!(
+        store
+            .list_sessions(proof(&store, &f, &platform).await?, None, 100, deadline())
+            .await?
+            .sessions
+            .iter()
+            .any(|v| v.id == platform.view().id)
+    );
+    // The host owns association withdrawal. Remove the original OIDC session first,
+    // preserving the platform session so the shared loader must detect the missing link.
+    sqlx::query("DELETE FROM identity_authority.sessions WHERE session_id=$1")
+        .bind(login.view().id.as_uuid())
+        .execute(&f.owner)
+        .await?;
+    let external: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(e) FROM identity_authority.external_identities e WHERE identity_id=$1",
+    )
+    .bind(identity)
+    .fetch_one(&f.owner)
+    .await?;
+    let unlinked = store
+        .begin_platform_login(
+            f.key.tenant,
+            verifier.binding.binding_id,
+            BROWSER.into(),
+            source(),
+            deadline(),
+        )
+        .await?;
+    let signature = verifier
+        .key
+        .sign(unlinked.nonce.as_bytes())
+        .as_ref()
+        .to_vec();
+    sqlx::query("DELETE FROM identity_authority.external_identities WHERE identity_id=$1")
+        .bind(identity)
+        .execute(&f.owner)
+        .await?;
+    assert!(
+        store
+            .complete_platform_login(
+                f.key.tenant,
+                unlinked.id,
+                unlinked.nonce,
+                BROWSER.into(),
+                signature,
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    assert!(proof(&store, &f, &platform).await.is_err());
+    assert!(
+        store
+            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .list_sessions(actor, None, 100, deadline())
+            .await
+            .is_err()
+    );
+    sqlx::query("INSERT INTO identity_authority.external_identities SELECT * FROM jsonb_populate_record(NULL::identity_authority.external_identities,$1)").bind(external).execute(&f.owner).await?;
+    let actor = proof(&store, &f, &platform).await?;
+    let pending = store
+        .begin_platform_login(
+            f.key.tenant,
+            verifier.binding.binding_id,
+            BROWSER.into(),
+            source(),
+            deadline(),
+        )
+        .await?;
+    let signature = verifier
+        .key
+        .sign(pending.nonce.as_bytes())
+        .as_ref()
+        .to_vec();
+    // Provider withdrawal invalidates issuance and every existing session consumer.
+    oidc.enable_provider(
+        f.actor().await?,
+        provider.id,
+        provider.version,
+        false,
+        deadline(),
+    )
+    .await?;
+    assert!(
+        store
+            .complete_platform_login(
+                f.key.tenant,
+                pending.id,
+                pending.nonce,
+                BROWSER.into(),
+                signature,
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    assert!(proof(&store, &f, &platform).await.is_err());
+    assert!(
+        store
+            .refresh_session(f.key.tenant, secret(&platform), deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .read_local_profile(&actor, account, deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .list_sessions(actor, None, 100, deadline())
             .await
             .is_err()
     );

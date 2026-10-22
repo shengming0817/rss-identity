@@ -9,8 +9,9 @@ use axum::{
     routing::get,
 };
 use rss_identity_core::{PrincipalId, account::AccountKey};
-use rss_identity_postgres::{Authority, AuthorityError, ProfileChange};
+use rss_identity_postgres::{Authority, AuthorityError};
 use uuid::Uuid;
+mod dto;
 
 pub(crate) fn router(
     authority: Authority,
@@ -67,7 +68,7 @@ async fn current(
 ) -> Result<Response, Error> {
     let actor = actor(&s, &t, &h, b, false).await?;
     let profile = s.authority.current_profile(&actor, b.remaining()).await?;
-    Ok(Json(profile.view()?).into_response())
+    Ok(Json(dto::Observation::from(profile.view()?)).into_response())
 }
 async fn local(
     State(s): State<AppState>,
@@ -76,11 +77,11 @@ async fn local(
     h: HeaderMap,
 ) -> Result<Response, Error> {
     let actor = actor(&s, &t, &h, b, false).await?;
-    Ok(Json(
+    Ok(Json(dto::Local::from(
         s.authority
             .read_local_profile(&actor, target(&t, &p)?, b.remaining())
             .await?,
-    )
+    ))
     .into_response())
 }
 async fn update(
@@ -97,12 +98,13 @@ async fn update(
     .await
     .map_err(|_| HttpError::request_timeout())?
     .map_err(|_| BAD)?;
-    let change: ProfileChange = serde_json::from_slice(&bytes).map_err(|_| BAD)?;
-    Ok(Json(
+    let change: dto::Change = serde_json::from_slice(&bytes).map_err(|_| BAD)?;
+    let change = change.try_into().map_err(|_| BAD)?;
+    Ok(Json(dto::Receipt::from(
         s.authority
             .update_local_profile(actor, target(&t, &p)?, change, b.remaining())
             .await?,
-    )
+    ))
     .into_response())
 }
 async fn receipt(
@@ -116,7 +118,8 @@ async fn receipt(
     Ok(Json(
         s.authority
             .local_profile_receipt(&actor, target(&t, &p)?, operation, b.remaining())
-            .await?,
+            .await?
+            .map(dto::Receipt::from),
     )
     .into_response())
 }

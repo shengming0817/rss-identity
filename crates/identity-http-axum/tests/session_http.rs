@@ -1293,7 +1293,27 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     assert_eq!(result.status(), StatusCode::OK);
     assert_eq!(result.headers()["cache-control"], "no-store");
     assert!(!result.headers().contains_key("set-cookie"));
-    assert_eq!(body(result).await?["revision"], 1);
+    assert_eq!(
+        body(result).await?,
+        json!({"operationId":operation,"revision":1})
+    );
+    let saved = app
+        .clone()
+        .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+        .await?;
+    assert_eq!(
+        body(saved).await?,
+        json!({"revision":1,"value":input["value"]})
+    );
+    let mut invalid = input.clone();
+    invalid["value"]["emailVerified"] = json!(true);
+    assert_eq!(
+        app.clone()
+            .oneshot(request("PUT", &path, Some(&cookie), Some(&csrf), invalid))
+            .await?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
     let receipt = app
         .clone()
         .oneshot(request(
