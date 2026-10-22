@@ -28,7 +28,7 @@ def require(condition, message):
 def check_features(actual, profile):
     expected = {name: set(features) for name, features in RSS_FEATURES.items()}
     if profile == 'production':
-        expected['rss-transactional-messaging-postgres'] = set()
+        expected['rss-transactional-messaging-postgres'] = {'recovery'}
         expected['rss-ledger'] = set()
         del expected['rss-ledger-postgres']
     require(actual == expected, f'{profile} RSS feature closure drift: {actual}')

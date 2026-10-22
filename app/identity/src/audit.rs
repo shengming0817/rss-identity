@@ -136,9 +136,15 @@ pub fn registration(
     Ok(start.into_registration(move |stop| async move {
         loop {
             if stop.is_cancelled() { return Ok(()); }
-            if let Err(e) = delivery.run_once(limit).await {
-                eprintln!("component=identity-audit event=delivery_failure kind={} retryable={}",e.as_label(),e.is_retryable());
-                if !e.is_retryable() { return Err(ShutdownError::new(e)); }
+            match delivery.run_once(limit).await {
+                Err(e) => {
+                    eprintln!("component=identity-audit event=delivery_failure kind={} retryable={}",e.as_label(),e.is_retryable());
+                    if !e.is_retryable() { return Err(ShutdownError::new(e)); }
+                },
+                Ok(report) if report.projected()>0 || report.deferred()>0 => {
+                    eprintln!("component=identity-audit event=projection_progress projected={} deferred={} reason={}",report.projected(),report.deferred(),report.last_deferral().unwrap_or("none"));
+                },
+                Ok(_) => {},
             }
             tokio::select! { () = stop.cancelled() => return Ok(()), () = tokio::time::sleep(poll) => {} }
         }

@@ -154,10 +154,14 @@ impl IngressValidator<Vec<u8>> for Validator {
 pub struct AuditProjectionReport {
     projected: usize,
     deferred: usize,
+    last_deferral: Option<&'static str>,
 }
 impl AuditProjectionReport {
     pub const fn projected(&self) -> usize {
         self.projected
+    }
+    pub const fn last_deferral(&self) -> Option<&'static str> {
+        self.last_deferral
     }
     pub const fn deferred(&self) -> usize {
         self.deferred
@@ -254,13 +258,6 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
     fn check_fatal(&self) -> Result<(), AuditDeliveryError> {
         self.fatal.get().copied().map_or(Ok(()), Err)
     }
-    fn deadline(&self) -> Result<OperationDeadline, AuditDeliveryError> {
-        Ok(OperationDeadline::from_cutoff(
-            Deadline::from_timeout(&Timer, self.timeout)
-                .map_err(|_| AuditDeliveryError::Configuration)?,
-            &Timer,
-        ))
-    }
     fn committed(&self, disposition: TerminalDisposition) -> Result<(), AuditDeliveryError> {
         if disposition != TerminalDisposition::Succeeded {
             let _ = self.fatal.set(AuditDeliveryError::RejectedEvent);
@@ -273,12 +270,16 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
         limit: RelayBatchLimit,
     ) -> Result<AuditProjectionReport, AuditDeliveryError> {
         self.check_fatal()?;
-        let mut pending = self.pending.lock().await;
+        let cutoff = Deadline::from_timeout(&Timer, self.timeout)
+            .map_err(|_| AuditDeliveryError::Configuration)?;
+        let mut pending = tokio::time::timeout(self.timeout, self.pending.lock())
+            .await
+            .map_err(|_| AuditDeliveryError::Transient)?;
         let mut report = AuditProjectionReport::default();
         if let Some(identity) = pending.as_ref() {
             if let Some(receipt) = self
                 .projection
-                .resolve(identity, self.deadline()?)
+                .resolve(identity, OperationDeadline::from_cutoff(cutoff, &Timer))
                 .await
                 .map_err(AuditDeliveryError::pg)?
             {
@@ -289,9 +290,18 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
             *pending = None;
         }
         for _ in 0..limit.get().get() {
+            if cutoff
+                .remaining(Timer.now())
+                .is_none_or(|remaining| remaining.is_zero())
+            {
+                break;
+            }
             let result = self
                 .projection
-                .project_one(&self.validator, self.deadline()?)
+                .project_one(
+                    &self.validator,
+                    OperationDeadline::from_cutoff(cutoff, &Timer),
+                )
                 .await;
             self.check_fatal()?;
             match result.map_err(AuditDeliveryError::pg)? {
@@ -312,8 +322,20 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
                 PgProjectionOutcome::Deferred(PgProjectionFailure::Fenced) => {
                     return Err(AuditDeliveryError::OwnershipLost);
                 }
-                PgProjectionOutcome::Deferred(_) | PgProjectionOutcome::InProgress => {
+                PgProjectionOutcome::Deferred(reason) => {
+                    use rss_transactional_messaging::transaction::FailureClass;
                     report.deferred += 1;
+                    report.last_deferral = Some(match reason {
+                        PgProjectionFailure::NotStarted(FailureClass::Permanent)
+                        | PgProjectionFailure::RolledBack(FailureClass::Permanent) => "permanent",
+                        PgProjectionFailure::NotStarted(FailureClass::Transient)
+                        | PgProjectionFailure::RolledBack(FailureClass::Transient) => "transient",
+                        _ => "infrastructure",
+                    });
+                }
+                PgProjectionOutcome::InProgress => {
+                    report.deferred += 1;
+                    report.last_deferral = Some("in_progress");
                 }
             }
         }

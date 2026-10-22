@@ -413,7 +413,7 @@ async fn relay_quarantines_bad_events_and_recovers_lost_source_lease() -> anyhow
         Some(&AuditDeliveryError::RejectedEvent)
     );
     assert_eq!(s.count(A).await?, 1);
-    let isolated: i64=sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.inbox i JOIN rss_transactional_messaging.consumer_dead_letter d USING(tenant_id,message_id,consumer_group) JOIN rss_transactional_messaging.outbox o USING(tenant_id,message_id) WHERE i.disposition='rejected' AND o.status='dead_letter'").fetch_one(&s.f.owner).await?;
+    let isolated: i64=sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.inbox i JOIN rss_transactional_messaging.consumer_dead_letter d USING(tenant_id,message_id,consumer_group) JOIN rss_transactional_messaging.outbox o USING(tenant_id,message_id) WHERE i.disposition='rejected_permanent' AND o.status='dead_letter'").fetch_one(&s.f.owner).await?;
     assert_eq!(isolated, 1);
     let restarted = AuditDelivery::new(
         s.runtime.clone(),
@@ -563,6 +563,47 @@ async fn startup_validates_actual_worker_not_audit_pool() -> anyhow::Result<()> 
     )
     .await;
     assert!(matches!(result, Err(AuditDeliveryError::Invariant)));
+    s.runtime.close().await;
+    s.pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires real PG"]
+async fn projection_batch_shares_one_absolute_budget() -> anyhow::Result<()> {
+    let mut s = Setup::new().await?;
+    let base = super::tests::envelope(
+        "session",
+        serde_json::json!({"action":"created","tenant":A,"principal":B,"source":"local_password","session_id":SYSTEM,"replaced_session_id":null,"epoch":1}),
+    );
+    for n in 0..8 {
+        enqueue(
+            &s,
+            MessageEnvelope::new(
+                rss_transactional_messaging::message::MessageId::parse(&format!("batch-{n}"))?,
+                base.metadata().clone(),
+                base.payload().clone(),
+            ),
+        )
+        .await?;
+    }
+    sqlx::raw_sql("CREATE FUNCTION public.slow_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.15); RETURN NEW; END $$; CREATE TRIGGER slow_audit BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.slow_audit()").execute(&s.f.owner).await?;
+    s.worker.timeout = Duration::from_millis(350);
+    let begin = Instant::now();
+    let _ = s
+        .worker
+        .run_once(RelayBatchLimit::new(
+            std::num::NonZeroUsize::new(8).unwrap(),
+        )?)
+        .await;
+    assert!(
+        begin.elapsed() < Duration::from_secs(1),
+        "batch must not renew its budget for each message"
+    );
+    let projected: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_audit.records")
+        .fetch_one(&s.f.owner)
+        .await?;
+    assert!(projected < 8);
     s.runtime.close().await;
     s.pool.close().await;
     Ok(())

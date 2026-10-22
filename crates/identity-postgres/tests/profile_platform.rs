@@ -117,6 +117,10 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
     let second = f.login().await?;
     let second_proof = proof(&f.store, &f, &second).await?;
     assert_eq!(
+        personnel_session(&f.store, &f.actor().await?, second.view().id.as_uuid()).await?,
+        Some((false, None))
+    );
+    assert_eq!(
         f.store
             .current_profile(&second_proof, deadline())
             .await?
@@ -468,6 +472,10 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
     };
     let actor = proof(&store, &f, &issued).await?;
     let reference = actor.reference()?;
+    assert_eq!(
+        personnel_session(&store, &actor, issued.view().id.as_uuid()).await?,
+        Some((true, Some(binding.binding_id.to_string())))
+    );
     assert_eq!(
         actor.authentication_source()?,
         AuthenticationSource::Platform
@@ -878,6 +886,10 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
         )
         .await?;
     let actor = proof(&store, &f, &platform).await?;
+    assert_eq!(
+        personnel_session(&store, &f.actor().await?, platform.view().id.as_uuid()).await?,
+        Some((true, Some(verifier.binding.binding_id.to_string())))
+    );
     let current = store.current_profile(&actor, deadline()).await?;
     assert_eq!(
         current.view()?.source,
@@ -949,6 +961,11 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
             )
             .await
             .is_err()
+    );
+    assert!(
+        personnel_session(&store, &f.actor().await?, platform.view().id.as_uuid())
+            .await?
+            .is_none()
     );
     assert!(proof(&store, &f, &platform).await.is_err());
     assert!(
@@ -1489,6 +1506,49 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
         read.revision()
     })).await?;
     assert!(after.generation > before.generation);
+    assert_eq!(
+        personnel_session(&f.store, &actor, login.view().id.as_uuid()).await?,
+        Some((false, None))
+    );
+    let other = f
+        .store
+        .create_local_account(
+            f.actor().await?,
+            support::login("other-person"),
+            password(),
+            deadline(),
+        )
+        .await?;
+    let _other_session = f
+        .store
+        .login_local(
+            f.key.tenant,
+            support::login("other-person"),
+            password(),
+            source(),
+            None,
+            deadline(),
+        )
+        .await?;
+    let own_store = Authority::connect_runtime(
+        f.runtime.clone(),
+        Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        f.config(),
+        Arc::new(SelfProfiles),
+        deadline(),
+    )
+    .await?;
+    let own_id = f.key.principal.as_uuid();
+    own_store.with_personnel_read(&actor,deadline(),move |mut read|Box::pin(async move {
+        use sqlx::Arguments;
+        assert_eq!(read.revision()?.profiles,PersonnelProfileScope::SelfOnly);
+        let mut args=sqlx::postgres::PgArguments::default();args.add(own_id).map_err(|_|AuthorityError::Configuration)?;
+        let rows=read.query("SELECT count(*)::bigint AS rows,count(source)::bigint AS sources FROM identity_personnel WHERE principal_id<>$1",args,1).await?;
+        assert_eq!(rows[0].get::<i64,_>("sources"),0);
+        assert_eq!(rows[0].get::<i64,_>("rows"),1);
+        Ok(())
+    })).await?;
+    let _ = other;
     // A side-effecting SELECT is rejected by PostgreSQL READ ONLY, even though host code installed it.
     sqlx::raw_sql("CREATE FUNCTION public.personnel_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.guard SET personnel_revision=personnel_revision+1 RETURNING personnel_revision'").execute(&f.owner).await?;
     assert!(
@@ -1505,10 +1565,28 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
     f.store.with_personnel_read(&actor,deadline(),|mut read|Box::pin(async move {
         assert!(!read.revision()?.logins);
         assert_eq!(read.revision()?.profiles,PersonnelProfileScope::None);
-        let rows=read.query("SELECT count(*)::bigint AS leaked FROM identity_personnel WHERE login IS NOT NULL OR display_name IS NOT NULL OR username IS NOT NULL",Default::default(),1).await?;
+        let rows=read.query("SELECT count(*)::bigint AS leaked FROM identity_personnel WHERE login IS NOT NULL OR display_name IS NOT NULL OR username IS NOT NULL OR source IS NOT NULL",Default::default(),1).await?;
         assert_eq!(rows[0].get::<i64,_>("leaked"),0);
         Ok(())
     })).await?;
+    f.policy.allow(f.key);
+    // A relation row expiring before the actor also closes the borrowed context.
+    sqlx::query("UPDATE identity_authority.profile_observations SET observed_at=floor(extract(epoch FROM clock_timestamp()))::bigint-30,expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+1 WHERE tenant_id=$1::uuid").bind(f.key.tenant.to_string()).execute(&f.owner).await?;
+    assert!(
+        f.store
+            .with_personnel_read(&actor, deadline(), |mut read| Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                read.query(
+                    "SELECT principal_id FROM identity_personnel",
+                    Default::default(),
+                    100,
+                )
+                .await
+                .map(|_| ())
+            }))
+            .await
+            .is_err()
+    );
     f.store
         .revoke_current_session(proof(&f.store, &f, &login).await?, deadline())
         .await?;
@@ -1518,6 +1596,42 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
             .await
             .is_err()
     );
+    assert!(
+        personnel_session(&f.store, &f.actor().await?, login.view().id.as_uuid())
+            .await?
+            .is_none()
+    );
     f.close().await;
     Ok(())
+}
+
+async fn personnel_session(
+    store: &Authority,
+    actor: &AuthenticatedSession,
+    id: Uuid,
+) -> anyhow::Result<Option<(bool, Option<String>)>> {
+    Ok(store.with_personnel_read(actor,deadline(),move |mut read|Box::pin(async move {
+        use sqlx::Arguments;
+        let mut args=sqlx::postgres::PgArguments::default(); args.add(id).map_err(|_|AuthorityError::Configuration)?;
+        let rows=read.query("SELECT requires_platform_check,platform_binding_id FROM identity_session_references WHERE session_id=$1",args,1).await?;
+        Ok(rows.first().map(|row|(row.get("requires_platform_check"),row.get("platform_binding_id"))))
+    })).await?)
+}
+struct SelfProfiles;
+impl ManagementPolicy for SelfProfiles {
+    fn authorize<'a>(
+        &'a self,
+        context: &'a ManagementContext<'a>,
+        _: &'a mut sqlx::PgConnection,
+    ) -> futures::future::BoxFuture<'a, Result<ReauthenticationRequirement, ManagementDenied>> {
+        Box::pin(async move {
+            if context.operation() == ManagementOperation::ReadLatestProfile
+                && context.target() == Some(context.actor())
+            {
+                Ok(ReauthenticationRequirement::None)
+            } else {
+                Err(ManagementDenied)
+            }
+        })
+    }
 }

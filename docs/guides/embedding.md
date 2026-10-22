@@ -200,3 +200,5 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 `PersonnelRevision` 包含人员变更 generation、授权形态及有效期；cursor 还须绑定宿主自身的实例、租户、主体、授权范围和查询。关系按来源产生行，宿主使用 EXISTS 或适当聚合，避免多来源把设备重复计数。该接缝不会缓存人员数据，也不提供认证证明。宿主策略和静态 SQL 属于可信嵌入代码；组件不把此接缝作为任意 SQL 服务。
 
 `identity_session_references` 提供同租户、账户/成员 epoch、会话期限及来源当前性已筛选的定位关系，供产品按完整 SessionReference 坐标集合关联；它不是 AuthenticatedSession。平台来源的 `requires_platform_check` 为 true，产品必须再 JOIN 自己持有的当前平台绑定/来源资格关系，核对返回的绑定 ID/epoch 和来源 ID/version，不能仅凭该关系宣称平台资格有效。原请求 actor 的平台检查仍由既有 verifier 执行。
+
+会话关系不公开滑动 idle expiry；它只供按完整定位坐标关联当前会话。普通 touch 延长存活时间不改变关系中的可排序值；cursor 到期上界沿用签发时的保守期限，过期后必须重新查询。人员回调本身也受同一资料/会话最早过期时间限制。

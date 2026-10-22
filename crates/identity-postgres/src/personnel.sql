@@ -20,13 +20,13 @@ identity_personnel AS NOT MATERIALIZED (
  FROM identity_authority.accounts a
  JOIN identity_authority.memberships m USING(tenant_id,principal_id)
  LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_id)
- LEFT JOIN identity_authority.profile_observations o USING(tenant_id,principal_id)
+ LEFT JOIN identity_authority.profile_observations o ON o.tenant_id=a.tenant_id AND o.principal_id=a.principal_id AND ({profiles})
  LEFT JOIN identity_authority.providers p ON p.tenant_id=o.tenant_id AND p.provider_id=o.provider_id
  WHERE a.tenant_id='{tenant}'::uuid
 )
 , identity_session_references AS NOT MATERIALIZED (
  SELECT '{instance}'::uuid AS instance_id,s.tenant_id,s.principal_id,s.session_id,s.credential_kind,
- s.authentication_source,LEAST(s.idle_expires_at,s.absolute_expires_at) AS expires_at,
+ s.authentication_source,
  s.authentication_source='platform' AS requires_platform_check,
  CASE WHEN s.authentication_source='platform' THEN s.platform_authentication->'binding'->>'bindingId' END AS platform_binding_id,
  CASE WHEN s.authentication_source='platform' THEN s.platform_authentication->'binding'->>'bindingEpoch' END AS platform_binding_epoch,
@@ -43,7 +43,12 @@ identity_personnel AS NOT MATERIALIZED (
    SELECT FROM identity_authority.external_identities e JOIN identity_authority.providers p USING(tenant_id,provider_id)
    WHERE e.tenant_id=s.tenant_id AND e.principal_id=s.principal_id AND e.identity_id=s.external_identity_id
    AND p.enabled AND p.revocation_epoch=s.provider_epoch AND p.config_version=(s.auth_facts->>'provider_config_version')::bigint
-  )) OR (s.authentication_source='platform' AND (
+  )) OR (s.authentication_source='platform' AND {platform_enabled}
+   AND s.platform_authentication->>'audience'='{platform_audience}'
+   AND s.platform_authentication->'binding'->>'instance'='{instance}'
+   AND s.platform_authentication->'binding'->'account'->>'tenant'=s.tenant_id::text
+   AND s.platform_authentication->'binding'->'account'->>'principal'=s.principal_id::text
+   AND (
    s.platform_authentication->'binding'->'externalIdentity'='null'::jsonb OR EXISTS (
     SELECT FROM identity_authority.external_identities e JOIN identity_authority.providers p USING(tenant_id,provider_id)
     WHERE e.tenant_id=s.tenant_id AND e.principal_id=s.principal_id
