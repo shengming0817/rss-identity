@@ -16,6 +16,21 @@ use sqlx::{PgConnection, PgPool};
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
+fn recovery_protection(config: &AuditConfig) -> Result<Option<Arc<Protection>>, AppError> {
+    match config {
+        AuditConfig::Disabled => Ok(None),
+        AuditConfig::Enabled { recovery_keys, .. } => {
+            Protection::load(&recovery_keys.active_key_id, &recovery_keys.keys)
+                .map(Arc::new)
+                .map(Some)
+        }
+    }
+}
+/// Offline validation uses the same constructor as runtime; it never opens a database.
+pub(crate) fn preflight(config: &AuditConfig) -> Result<(), AppError> {
+    recovery_protection(config).map(|_| ())
+}
+
 pub fn validate_installation(c: &MigrationConfig) -> Result<(), AppError> {
     if let AuditInstallation::Enabled {
         owner_role,
@@ -83,6 +98,7 @@ pub async fn delivery(
     runtime: Arc<PgRuntime>,
     pool: PgPool,
 ) -> Result<AuditDelivery<Protection>, AppError> {
+    let protector = recovery_protection(&config.audit)?.ok_or(AppError::Configuration)?;
     // The worker must not acquire credential access through inherited or PUBLIC grants.
     let role: String = sqlx::query_scalar("SELECT current_user::text")
         .fetch_one(&pool)
@@ -100,13 +116,6 @@ pub async fn delivery(
     let audit = PgAudit::new(pool, Integrity::Plain, &control)
         .await
         .map_err(|_| AppError::Provider)?;
-    let AuditConfig::Enabled { recovery_keys, .. } = &config.audit else {
-        return Err(AppError::Configuration);
-    };
-    let protector = Arc::new(Protection::load(
-        &recovery_keys.active_key_id,
-        &recovery_keys.keys,
-    )?);
     AuditDelivery::new(
         runtime,
         Arc::new(audit),
