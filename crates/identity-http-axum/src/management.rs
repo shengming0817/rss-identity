@@ -31,6 +31,8 @@ impl From<HttpError> for Error {
 impl From<AuthorityError> for Error {
     fn from(error: AuthorityError) -> Self {
         let (status, code) = match error {
+            AuthorityError::RevisionConflict => (StatusCode::CONFLICT, "revision_conflict"),
+            AuthorityError::OperationConflict => (StatusCode::CONFLICT, "operation_conflict"),
             AuthorityError::Rejected => (StatusCode::UNAUTHORIZED, "invalid_credential"),
             AuthorityError::ReauthenticationFailed => {
                 (StatusCode::FORBIDDEN, "reauthentication_failed")

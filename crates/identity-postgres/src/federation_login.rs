@@ -268,6 +268,7 @@ impl Federation {
         let commit_oidc = self.oidc.clone();
         let group_policy = self.group_policy;
         let session_policy = self.authority.session_policy;
+        let limits = self.authority.profile_limits;
         self.authority.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
@@ -344,7 +345,10 @@ impl Federation {
                         if let Some(origin) = &intent.origin {
                             db::check_origin(c, key, origin).await?;
                         }
-                        (intent.origin, Some(intent.session))
+                        (match intent.origin {
+                            Some(origin) => sessions::SessionAuthentication::Oidc(origin),
+                            None => sessions::SessionAuthentication::LocalPassword(intent.local_authenticated_at.ok_or_else(reject)?),
+                        }, Some(intent.session))
                     } else {
                         if let Some(actor) = actor
                             && actor.state.key() != key
@@ -352,7 +356,7 @@ impl Federation {
                             return Err(reject().into());
                         }
                         (
-                            Some(db::Origin {
+                            sessions::SessionAuthentication::Oidc(db::Origin {
                                 identity: identity_id,
                                 epoch: view.revocation_epoch,
                                 facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, view.settings.claims().department_snapshot.as_ref(), now)?,
@@ -360,10 +364,15 @@ impl Federation {
                             attempt.replacement,
                         )
                     };
+                    let observation = (!linked).then(|| crate::profiles::oidc_observation(&claims,&view,attempt.profile_sequence));
                     let (issued, session_event) = sessions::insert(c, state, replaced, origin, now, session_policy, rss_identity_core::session::CredentialKind::Cookie).await?;
                     if session_storage::now(c).await? >= attempt.expiry {
                         return Err(reject().into());
                     }
+                    let profile_event = match observation {
+                        Some(observation) => crate::profiles::accept(c,key,issued.view().id,issued.view().absolute_expires_at,observation,limits).await?,
+                        None => None,
+                    };
                     db::consume(c, &locator).await?;
                     let action = if linked {
                         if already {
@@ -384,10 +393,7 @@ impl Federation {
                             return_url: attempt.return_url,
                             link_result: if linked {Some(if already {LinkResult::AlreadyLinked}else{LinkResult::Linked})}else{None},
                         },
-                        vec![
-                            event(tenant, action, &view, Some(key.principal)),
-                            session_event,
-                        ],
+                        { let mut events=vec![event(tenant, action, &view, Some(key.principal)),session_event]; events.extend(profile_event); events },
                     ))
                 }) }).await
         }).await

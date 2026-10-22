@@ -137,7 +137,7 @@ async function admin(t = tenant) {
     );
   await sessions(c);
   const session = await current(c);
-  if (Date.now() / 1000 - session.body.session.authTime >= 270) {
+  if (Date.now() / 1000 - session.body.session.issuedAt >= 270) {
     await c.page
       .locator("#reauth-password")
       .fill(
@@ -324,9 +324,9 @@ async function local() {
   const a = await admin();
   const initialSession = (await current(a)).body.session;
   check(
-    initialSession.idleExpiresAt - initialSession.authTime ===
+    initialSession.idleExpiresAt - initialSession.issuedAt ===
       input.policy.session.idleSeconds &&
-      initialSession.absoluteExpiresAt - initialSession.authTime ===
+      initialSession.absoluteExpiresAt - initialSession.issuedAt ===
         input.policy.session.absoluteSeconds,
     "authoritative-session-policy",
   );
@@ -374,7 +374,7 @@ async function local() {
             clientId: "reference",
             redirectUri: origin + "/api/v1/identity/oidc/callback",
             scopes: ["openid"],
-            claims: { email: null, groups: null },
+            claims: { subject: { kind: "oidc" }, profile: { extensionsClaim: null, maxAgeSeconds: 14400 }, groups: null, departmentSnapshot: null },
             jit: true,
           },
           clientSecret: input.clientSecret,
@@ -446,7 +446,7 @@ async function local() {
   const refreshed = await write(c, "POST", "session/refresh", {});
   check(
     refreshed.status === 200 &&
-      refreshed.body.session.authTime === before.body.session.authTime &&
+      refreshed.body.session.issuedAt === before.body.session.issuedAt &&
       refreshed.body.session.absoluteExpiresAt ===
         before.body.session.absoluteExpiresAt,
     "refresh-lifetimes",

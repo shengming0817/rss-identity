@@ -89,7 +89,7 @@ fn all_actions_have_explicit_safe_facts() {
     for action in ["created", "refreshed", "revoked", "all_revoked"] {
         let event = mapped(
             "session",
-            json!({"action":action,"tenant":TENANT,"principal":PRINCIPAL,"session_id":SESSION,"replaced_session_id":null,"epoch":1}),
+            json!({"action":action,"tenant":TENANT,"principal":PRINCIPAL,"source":"local_password","session_id":SESSION,"replaced_session_id":null,"epoch":1}),
         );
         assert_eq!(
             event.facts().resource().id().as_str(),
@@ -141,7 +141,7 @@ fn all_actions_have_explicit_safe_facts() {
 }
 #[test]
 fn malformed_and_sensitive_additions_are_rejected() {
-    let body = json!({"action":"created","tenant":TENANT,"principal":PRINCIPAL,"session_id":SESSION,"replaced_session_id":null,"epoch":1});
+    let body = json!({"action":"created","tenant":TENANT,"principal":PRINCIPAL,"source":"local_password","session_id":SESSION,"replaced_session_id":null,"epoch":1});
     for (key, value) in [
         ("token", json!("secret")),
         ("tenant", json!(PRINCIPAL)),
@@ -233,7 +233,7 @@ fn known_contracts_require_exact_version_and_schema() {
 fn unadmitted_envelope_tenant_never_receives_ingress_authority() {
     let message = envelope(
         "session",
-        json!({"action":"created","tenant":TENANT,"principal":PRINCIPAL,"session_id":SESSION,"replaced_session_id":null,"epoch":1}),
+        json!({"action":"created","tenant":TENANT,"principal":PRINCIPAL,"source":"local_password","session_id":SESSION,"replaced_session_id":null,"epoch":1}),
     );
     let m = message.metadata();
     let subscription =
@@ -281,23 +281,23 @@ fn complete_forensic_facts_cover_special_actor_and_resource_cases() {
         ),
         (
             "session",
-            json!({"action":"created","tenant":TENANT,"principal":PRINCIPAL,"session_id":SESSION,"replaced_session_id":TENANT,"epoch":2}),
+            json!({"action":"created","tenant":TENANT,"principal":PRINCIPAL,"source":"local_password","session_id":SESSION,"replaced_session_id":TENANT,"epoch":2}),
             "principal",
             PRINCIPAL,
             "identity.session.created",
             "session",
             SESSION,
-            json!({"epoch":2,"session_id":SESSION,"replaced_session_id":TENANT}),
+            json!({"epoch":2,"source":"local_password","session_id":SESSION,"replaced_session_id":TENANT}),
         ),
         (
             "session",
-            json!({"action":"all_revoked","tenant":TENANT,"principal":PRINCIPAL,"session_id":SESSION,"replaced_session_id":null,"epoch":3}),
+            json!({"action":"all_revoked","tenant":TENANT,"principal":PRINCIPAL,"source":"local_password","session_id":SESSION,"replaced_session_id":null,"epoch":3}),
             "principal",
             PRINCIPAL,
             "identity.session.all_revoked",
             "account_sessions",
             PRINCIPAL,
-            json!({"epoch":3,"session_id":SESSION,"replaced_session_id":null}),
+            json!({"epoch":3,"source":"local_password","session_id":SESSION,"replaced_session_id":null}),
         ),
         (
             "federation",

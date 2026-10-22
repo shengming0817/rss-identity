@@ -56,7 +56,7 @@ impl<'de> Deserialize<'de> for ProviderId {
 #[serde(deny_unknown_fields)]
 pub struct ClaimMapping {
     pub subject: crate::entra::SubjectMapping,
-    pub email: Option<String>,
+    pub profile: crate::profile::ProfileSettings,
     pub groups: Option<String>,
     pub department_snapshot: Option<crate::department::DepartmentSnapshotClaim>,
 }
@@ -111,6 +111,10 @@ impl ProviderSettingsInput {
             return Err(FederationError::Configuration);
         }
 
+        self.claims
+            .profile
+            .validate()
+            .map_err(|_| FederationError::Configuration)?;
         let mut seen = std::collections::BTreeSet::new();
 
         for s in &self.scopes {
@@ -127,7 +131,7 @@ impl ProviderSettingsInput {
         }
 
         if let Some(department) = &self.claims.department_snapshot
-            && [&self.claims.email, &self.claims.groups]
+            && [&self.claims.profile.extensions_claim, &self.claims.groups]
                 .into_iter()
                 .flatten()
                 .any(|claim| claim == department.claim())
@@ -135,7 +139,7 @@ impl ProviderSettingsInput {
             return Err(FederationError::Configuration);
         }
 
-        for s in [&self.claims.email, &self.claims.groups]
+        for s in [&self.claims.profile.extensions_claim, &self.claims.groups]
             .into_iter()
             .flatten()
         {
@@ -397,8 +401,7 @@ impl ProtocolMaterial {
 pub struct UpstreamClaims {
     pub issuer: String,
     pub subject: crate::entra::ExternalSubject,
-    pub email: Option<String>,
-    pub email_verified: bool,
+    pub profile: crate::profile::Profile,
     pub groups: crate::groups::UpstreamGroups,
     pub department_snapshot: crate::department::UpstreamDepartmentSnapshot,
     pub issued_at: i64,
@@ -413,13 +416,9 @@ impl UpstreamClaims {
         if self.issued_at <= 0 || self.expires_at <= self.issued_at {
             return Err(FederationError::Claims);
         }
-        if self
-            .email
-            .as_ref()
-            .is_some_and(|s| s.len() > 320 || s.chars().any(char::is_control))
-        {
-            return Err(FederationError::Claims);
-        }
+        self.profile
+            .validate()
+            .map_err(|_| FederationError::Claims)?;
 
         Ok(())
     }

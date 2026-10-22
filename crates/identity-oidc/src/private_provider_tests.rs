@@ -47,7 +47,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
         scopes: vec!["openid".into()],
         claims: ClaimMapping {
             subject: rss_identity_core::entra::SubjectMapping::Oidc,
-            email: None,
+            profile: rss_identity_core::profile::ProfileSettings::default(),
             groups: None,
             department_snapshot: None,
         },

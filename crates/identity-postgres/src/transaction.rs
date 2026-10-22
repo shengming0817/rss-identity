@@ -57,6 +57,7 @@ pub(crate) struct ProvisioningEvent {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub(crate) enum SecurityEvent {
+    Profile(crate::profiles::ProfileEvent),
     Account(AccountEvent),
     Provisioned(ProvisioningEvent),
     Session(crate::sessions::SessionEvent),
@@ -80,6 +81,7 @@ impl SecurityEvent {
     }
     fn tenant(&self) -> &str {
         match self {
+            Self::Profile(v) => &v.tenant,
             Self::Account(v) => &v.tenant,
             Self::Provisioned(v) => &v.account.tenant,
             Self::Session(v) => &v.tenant,
@@ -88,6 +90,12 @@ impl SecurityEvent {
     }
     fn contract(&self) -> (&'static str, &'static str, u32, &'static str) {
         match self {
+            Self::Profile(_) => (
+                "profile.changed",
+                "identity.profile.security",
+                1,
+                include_str!("profile-security-event-v1.json"),
+            ),
             Self::Provisioned(_) => (
                 "account.provisioned",
                 "identity.account.provisioning",
@@ -121,6 +129,10 @@ pub(crate) enum MutationError {
     Storage(#[from] PgError),
     #[error(transparent)]
     Rule(#[from] AccountRuleError),
+    #[error("profile revision conflict")]
+    RevisionConflict,
+    #[error("profile operation conflict")]
+    OperationConflict,
     #[error(transparent)]
     Federation(#[from] rss_identity_core::federation::FederationError),
 }
@@ -371,6 +383,14 @@ where
 
 fn sql_failure(error: MutationError, reason: &std::sync::OnceLock<AuthorityError>) -> PgError {
     match error {
+        MutationError::RevisionConflict => {
+            let _ = reason.set(AuthorityError::RevisionConflict);
+            reject()
+        }
+        MutationError::OperationConflict => {
+            let _ = reason.set(AuthorityError::OperationConflict);
+            reject()
+        }
         MutationError::Storage(e) => e,
         MutationError::Rule(e) => {
             let _ = reason.set(AuthorityError::RuleRejected(e));

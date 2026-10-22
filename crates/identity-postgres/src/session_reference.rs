@@ -121,7 +121,7 @@ impl Authority {
         };
         let session = SessionId::parse(&reference.session.to_string())
             .map_err(|_| AuthorityError::Rejected)?;
-        let fact_time = self.fact_time.clone();
+        let session_checks = self.session_checks.clone();
         self.read(tenant, budget.remaining(), move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
@@ -130,7 +130,7 @@ impl Authority {
                         if authority_id(c).await? != reference.instance {
                             return Err(reject());
                         }
-                        let loaded = db::by_id(c, key, session, &fact_time).await?;
+                        let loaded = db::by_id(c, key, session, &session_checks).await?;
                         if loaded.view.credential_kind != reference.credential_kind {
                             return Err(reject());
                         }

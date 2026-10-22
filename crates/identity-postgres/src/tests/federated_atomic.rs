@@ -111,7 +111,7 @@ async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()>
     assert_eq!(snapshot.session_id, local.view().id);
     assert_eq!(
         snapshot.assurance.auth_time().unwrap(),
-        local.view().auth_time
+        local.view().issued_at
     );
     assert_eq!(snapshot.assurance.acr(), Acr::Unspecified);
     assert_eq!(snapshot.assurance.amr(), [Amr::Pwd]);
@@ -705,14 +705,16 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
         .store
         .inspect_session(f.key.tenant, secret(&unverified), deadline())
         .await?;
-    let facts: serde_json::Value = sqlx::query_scalar(
-        "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1::uuid",
-    )
-    .bind(unverified_proof.view().id.to_string())
-    .fetch_one(&f.owner)
-    .await?;
-    assert_eq!(facts["email_verified"], false);
-    assert_eq!(facts["email"], "same@example.test");
+    let profile = f
+        .store
+        .current_profile(&unverified_proof, deadline())
+        .await?;
+    let value = profile.view()?.profile.as_ref().unwrap();
+    assert_eq!(value.email_verified.value(), Some(&false));
+    assert_eq!(
+        value.email.value().map(String::as_str),
+        Some("same@example.test")
+    );
     let fed_proof = f
         .store
         .inspect_session(f.key.tenant, secret(&fed), deadline())

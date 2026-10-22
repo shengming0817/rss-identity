@@ -13,7 +13,7 @@ fn input() -> ProviderSettingsInput {
         claims: ClaimMapping {
             subject: rss_identity_core::entra::SubjectMapping::Oidc,
             department_snapshot: None,
-            email: None,
+            profile: rss_identity_core::profile::ProfileSettings::default(),
             groups: None,
         },
         jit: false,

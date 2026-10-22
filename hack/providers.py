@@ -130,6 +130,11 @@ SUITES[("rss-identity-oidc", "entra")] = {"signed_entra_resource_tokens"}
 
 SUITES[('rss-identity-postgres', 'provisioning')] = {'provisioned_account_and_event_share_host_commit_and_revalidate_source'}
 
+SUITES[("rss-identity-http-axum","federated_http")].add("profile_lifecycle::real_profile_login_updates_and_removes_values")
+SUITES[("rss-identity-postgres","profile_platform")] = {"local_profile_observation_receipts_and_revocation","platform_challenges_are_one_use_and_all_session_paths_recheck","older_oidc_completion_cannot_replace_a_newer_observation","platform_binding_errors_and_uncertain_commit_never_issue_a_secret"}
+
+SUITES[("rss-identity-http-axum","session_http")].add("profile_http_requires_policy_csrf_and_exact_receipts")
+
 def cargo(package, test, env, features=()):
     expected = SUITES[(package,test)]
     internal = (package=="rss-identity-postgres" and test in {"atomic","session_atomic","federated_atomic","audit::pg_tests"}) or (package=="rss-identity-oidc" and test=="private_provider_tests")
@@ -172,6 +177,7 @@ def pg():
         cargo("rss-identity-postgres", "federated_atomic", env)
         cargo("rss-identity-postgres", "atomic", env)
         cargo("rss-identity-postgres", "embedded", env)
+        cargo("rss-identity-postgres", "profile_platform", env)
         cargo("rss-identity-postgres", "provisioning", env)
         cargo("rss-identity-postgres", "audit::pg_tests", env)
         cargo("rss-identity-postgres", "session_atomic", env)
@@ -191,6 +197,8 @@ DEPARTMENT_ASSERTION = {"version":1,"sourceRevision":"fixture-r1","nodes":[
     {"id":"dept-02","displayName":"Sales","parentId":"root"}],"memberships":["dept-01"]}
 DEPARTMENT_MAPPER = {"name":"organization-snapshot", "protocol":"openid-connect", "protocolMapper":"oidc-usermodel-attribute-mapper",
     "config":{"user.attribute":"organization_snapshot", "claim.name":"organization_snapshot", "jsonType.label":"JSON", "multivalued":"false", "aggregate.attrs":"false", "id.token.claim":"true", "access.token.claim":"false", "userinfo.token.claim":"false"}}
+
+PROFILE_MAPPER = {"name":"profile-attributes", "protocol":"openid-connect", "protocolMapper":"oidc-usermodel-attribute-mapper", "config":{"user.attribute":"profile_attributes", "claim.name":"attributes", "jsonType.label":"JSON", "multivalued":"false", "aggregate.attrs":"false", "id.token.claim":"true", "access.token.claim":"false", "userinfo.token.claim":"false"}}
 
 def configure_department_profile(issuer, context=None):
     """Only realm administrators can edit the single JSON assertion; built-in mapper only.
@@ -212,12 +220,15 @@ def configure_department_profile(issuer, context=None):
     profile['attributes'].append({'name':'organization_snapshot','displayName':'Organization snapshot',
         'multivalued':False,'permissions':{'view':['admin'],'edit':['admin']},
         'validations':{'length':{'max':32768}}})
+    profile['attributes']=[a for a in profile['attributes'] if a['name']!='profile_attributes']
+    profile['attributes'].append({'name':'profile_attributes','displayName':'Profile attributes','multivalued':False,'permissions':{'view':['admin'],'edit':['admin']},'validations':{'length':{'max':65536}}})
     admin('PUT','/users/profile',profile)
     installed=admin('GET','/users/profile')
     attribute=next(a for a in installed['attributes'] if a['name']=='organization_snapshot')
     if attribute['permissions']!={'view':['admin'],'edit':['admin']}: raise RuntimeError('department attribute is not administrator-only')
     user=admin('GET','/users?username=alice&exact=true')[0]
     user.setdefault('attributes',{})['organization_snapshot']=[json.dumps(DEPARTMENT_ASSERTION)]
+    user.setdefault('attributes',{})['profile_attributes']=[json.dumps({'employeeNumber':'E1001','remote':False,'employment':{'costCenter':'CC-42'}})]
     admin('PUT','/users/'+user['id'],user)
     if admin('GET','/users/'+user['id'])['attributes']['organization_snapshot']!=[json.dumps(DEPARTMENT_ASSERTION)]:
         raise RuntimeError('department assertion read-back failed')
@@ -238,7 +249,7 @@ def oidc():
              "clients": [{"clientId": "identity-test", "secret": "fixture-secret", "publicClient": False,
                           "standardFlowEnabled": True, "directAccessGrantsEnabled": False,
                           "redirectUris": ["http://127.0.0.1:19999/auth/callback"],
-                          "attributes": {"pkce.code.challenge.method": "S256"}, "protocolMappers":[DEPARTMENT_MAPPER]}],
+                          "attributes": {"pkce.code.challenge.method": "S256"}, "protocolMappers":[DEPARTMENT_MAPPER, PROFILE_MAPPER]}],
              "users": [{"username": "alice", "enabled": True, "email": "alice@example.test", "emailVerified": True,
                         "firstName": "Alice", "lastName": "Fixture", "attributes":{},
                         "credentials": [{"type": "password", "value": "fixture-password", "temporary": False}]}]}
@@ -271,7 +282,7 @@ def keycloak(redirect_uri="https://identity.example.test/api/v1/identity/oidc/ca
                          "redirectUris":[redirect_uri],
                          "attributes":{"pkce.code.challenge.method":"S256"},
                          "protocolMappers":[{"name":"groups","protocol":"openid-connect","protocolMapper":"oidc-group-membership-mapper",
-                         "config":{"claim.name":"groups","full.path":"true","id.token.claim":"true","access.token.claim":"false"}}, DEPARTMENT_MAPPER]}],
+                         "config":{"claim.name":"groups","full.path":"true","id.token.claim":"true","access.token.claim":"false"}}, DEPARTMENT_MAPPER, PROFILE_MAPPER]}],
              "users":[{"username":name,"enabled":True,"email":"same@example.test","emailVerified":True,
                        "firstName":name,"lastName":"Fixture","groups":["staff"],
                        "attributes":{} if name == "alice" else {},

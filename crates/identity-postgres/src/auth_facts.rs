@@ -19,8 +19,6 @@ use uuid::Uuid;
 pub(crate) struct AuthenticationFacts {
     format_version: u32,
     pub provider_config_version: i64,
-    email: Option<String>,
-    email_verified: bool,
     pub assurance: Assurance,
     groups: Snapshot,
     pub(crate) department_snapshot: Box<DepartmentObservation>,
@@ -141,21 +139,13 @@ impl AuthenticationFacts {
                 now,
             )?),
             provider_config_version: version,
-            email: claims.email.clone(),
-            email_verified: claims.email_verified,
             assurance: claims.assurance.clone(),
             groups,
         })
     }
     pub fn decode(value: serde_json::Value) -> Result<Self, PgError> {
         let facts: Self = serde_json::from_value(value).map_err(|_| corrupt())?;
-        if facts.format_version != 3
-            || facts.provider_config_version < 1
-            || facts
-                .email
-                .as_ref()
-                .is_some_and(|v| v.len() > 320 || v.chars().any(char::is_control))
-        {
+        if facts.format_version != 3 || facts.provider_config_version < 1 {
             return Err(corrupt());
         }
         facts.department_snapshot.validate()?;
@@ -253,8 +243,8 @@ mod tests {
                 rss_identity_core::department::UpstreamDepartmentSnapshot::NotConfigured,
             issuer: "https://idp.test".into(),
             subject: rss_identity_core::entra::ExternalSubject::Oidc("subject".into()),
-            email: None,
-            email_verified: false,
+            profile: rss_identity_core::profile::Profile::missing(),
+
             issued_at: 1000,
             expires_at: 1600,
             groups,

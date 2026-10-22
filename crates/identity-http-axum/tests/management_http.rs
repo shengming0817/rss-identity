@@ -15,7 +15,7 @@ use std::{sync::atomic::Ordering, time::Duration};
 use support::*;
 use tower::ServiceExt;
 fn settings_wire(v: &rss_identity_core::federation::ProviderSettingsInput) -> Value {
-    json!({"issuer":v.issuer,"clientId":v.client_id,"redirectUri":v.redirect_uri,"scopes":v.scopes,"claims":{"subject":v.claims.subject,"email":v.claims.email,"groups":v.claims.groups},"jit":v.jit})
+    json!({"issuer":v.issuer,"clientId":v.client_id,"redirectUri":v.redirect_uri,"scopes":v.scopes,"claims":{"subject":v.claims.subject,"profile":v.claims.profile,"groups":v.claims.groups},"jit":v.jit})
 }
 const ORIGIN: &str = "https://identity.example.test";
 fn app(

@@ -17,3 +17,7 @@ GRANT SELECT ON rss_transactional_messaging.policy TO {role};
 GRANT SELECT ON rss_transactional_messaging.outbox TO {role};
 GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb), rss_transactional_messaging.append_outbox(bytea,jsonb) TO {role};
 GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.local_profiles TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.profile_observations TO {role};
+GRANT SELECT,INSERT ON identity_authority.profile_operations TO {role};
+GRANT SELECT,INSERT,DELETE ON identity_authority.platform_challenges TO {role};

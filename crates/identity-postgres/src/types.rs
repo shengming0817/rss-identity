@@ -8,6 +8,7 @@ pub(crate) struct AuthenticationCandidate {
     pub(crate) state: AccountState,
     pub(crate) authority: Uuid,
     pub(crate) expires: Instant,
+    pub(crate) authenticated_at: i64,
 }
 impl AuthenticationCandidate {
     pub fn account(&self) -> AccountKey {
@@ -42,6 +43,10 @@ impl AttemptSource {
 pub enum AuthorityError {
     #[error("invalid authority configuration")]
     Configuration,
+    #[error("profile revision conflict")]
+    RevisionConflict,
+    #[error("operation identifier reused with different input")]
+    OperationConflict,
     #[error("invalid operation input")]
     InvalidInput,
     #[error("operation deadline elapsed")]

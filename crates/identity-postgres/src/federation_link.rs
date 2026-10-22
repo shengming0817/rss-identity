@@ -20,6 +20,7 @@ pub(crate) struct Intent {
     pub epoch: i64,
     pub member_epoch: i64,
     pub origin: Option<db::Origin>,
+    pub local_authenticated_at: Option<i64>,
     pub target: ProviderId,
     pub version: i64,
     pub stage: LinkStage,
@@ -60,6 +61,7 @@ pub(crate) async fn intent(
         epoch: r.try_get("auth_epoch")?,
         member_epoch: r.try_get("membership_epoch")?,
         origin,
+        local_authenticated_at: r.try_get("local_authenticated_at")?,
         target: ProviderId::parse(&r.try_get::<Uuid, _>("target_provider")?.to_string())
             .map_err(|_| corrupt())?,
         version: r.try_get("target_version")?,
@@ -188,6 +190,7 @@ impl Federation {
                     }
                     let target_now = db::provider(c, tenant, target.id).await?;
                     db::exact(&target_now, target.version)?;
+                    let local_authenticated_at = candidate.as_ref().map(|c| c.authenticated_at);
                     let origin = if let Some(candidate) = candidate {
                         current(c, &candidate).await?;
                         None
@@ -198,8 +201,8 @@ impl Federation {
                     let id = Uuid::new_v4();
                     let expiry = now + 300;
                     sqlx::query(concat!(
-                        "INSERT INTO identity_authority.link_intents(tenant_id,intent_id,principal_id,session_id,auth_epoch,membership_epoch,source_identity,source_epoch,source_facts,target_provider,target_version,browser_hash,stage,created_at,expires_at) VALUES($1::uuid,$2,$3,$4::uuid,$5,$6",
-                        ",$7,$8,$9,$10::uuid,$11,$12,$13,$14,$15)"
+                        "INSERT INTO identity_authority.link_intents(tenant_id,intent_id,principal_id,session_id,auth_epoch,membership_epoch,source_identity,source_epoch,source_facts,target_provider,target_version,browser_hash,stage,created_at,expires_at,local_authenticated_at) VALUES($1::uuid,$2,$3,$4::uuid,$5,$6",
+                        ",$7,$8,$9,$10::uuid,$11,$12,$13,$14,$15,$16)"
                     ))
                     .bind(tenant.to_string())
                     .bind(id)
@@ -220,6 +223,7 @@ impl Federation {
                     })
                     .bind(now)
                     .bind(expiry)
+                    .bind(local_authenticated_at)
                     .execute(&mut *c)
                     .await?;
                     db::insert_attempt(

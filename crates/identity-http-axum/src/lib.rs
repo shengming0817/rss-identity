@@ -7,6 +7,7 @@ mod dto;
 mod federation;
 mod handlers;
 mod management;
+mod profiles;
 mod provider_management;
 use axum::{
     Router, middleware,
@@ -29,6 +30,7 @@ struct AppState {
 pub fn router(authority: Authority, config: HttpConfig) -> Result<Router, AuthorityError> {
     authority.require_runtime()?;
     let management = management::management_router(authority.clone(), config.clone())?;
+    let profiles = profiles::router(authority.clone(), config.clone())?;
     let state = AppState { authority, config };
     Ok(mount(
         Router::new()
@@ -51,7 +53,8 @@ pub fn router(authority: Authority, config: HttpConfig) -> Result<Router, Author
                 boundary::request_boundary,
             ))
             .with_state(state)
-            .merge(management),
+            .merge(management)
+            .merge(profiles),
     ))
 }
 
@@ -220,4 +223,26 @@ pub async fn authenticate_request(
         );
         response
     })
+}
+
+/// Project a committed Cookie session using the same cookie/CSRF format as local and OIDC login.
+/// The host must bind its platform challenge to the browser and enforce same-origin requests.
+/// An IssuedSession cannot be constructed from a caller DTO.
+pub fn issued_session_response(
+    session: rss_identity_postgres::IssuedSession,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut response = match handlers::issued(session) {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    };
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    response
 }

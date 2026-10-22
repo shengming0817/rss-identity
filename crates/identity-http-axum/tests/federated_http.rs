@@ -5,6 +5,7 @@ mod federation_support;
 #[path = "group_lifecycle/mod.rs"]
 mod group_lifecycle;
 mod keycloak_support;
+mod profile_lifecycle;
 #[path = "../../identity-postgres/tests/support/mod.rs"]
 mod support;
 use axum::{
@@ -63,7 +64,7 @@ fn config() -> anyhow::Result<ProviderSettings> {
                 "organization_snapshot".into(),
                 60,
             )?),
-            email: Some("email".into()),
+            profile: rss_identity_core::profile::ProfileSettings::default(),
             groups: Some("groups".into()),
         },
         jit: true,
@@ -485,8 +486,28 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
 
     let principal = a.account();
     let facts:Value=sqlx::query_scalar("SELECT auth_facts FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid").bind(A).bind(a.view().id.to_string()).fetch_one(&f.owner).await?;
-    assert_eq!(facts["email"], "same@example.test");
-    assert_eq!(facts["email_verified"], true);
+    let profile = f.store.current_profile(&a, deadline()).await?;
+    assert_eq!(
+        profile
+            .view()?
+            .profile
+            .as_ref()
+            .unwrap()
+            .email
+            .value()
+            .map(String::as_str),
+        Some("same@example.test")
+    );
+    assert_eq!(
+        profile
+            .view()?
+            .profile
+            .as_ref()
+            .unwrap()
+            .email_verified
+            .value(),
+        Some(&true)
+    );
     assert_eq!(facts["groups"]["values"], json!(["/staff"]));
     assert_eq!(facts["provider_config_version"], p.version);
     let local = federation_support::session(&f).await?;

@@ -569,7 +569,7 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
     );
     let (cookie, csrf, value) = successful_login(&app).await?;
     let id = value["session"]["id"].as_str().unwrap();
-    sqlx::query("UPDATE identity_authority.sessions SET auth_time=auth_time-100, absolute_expires_at=absolute_expires_at-100, idle_expires_at=auth_time+20 WHERE session_id=$1::uuid").bind(id).execute(&f.owner).await?;
+    sqlx::query("UPDATE identity_authority.sessions SET issued_at=issued_at-100, absolute_expires_at=absolute_expires_at-100, idle_expires_at=issued_at+20 WHERE session_id=$1::uuid").bind(id).execute(&f.owner).await?;
     let idle: i64 = sqlx::query_scalar(
         "SELECT idle_expires_at FROM identity_authority.sessions WHERE session_id=$1::uuid",
     )
@@ -1259,6 +1259,82 @@ async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Re
         .fetch_one(&f.owner)
         .await?;
     assert_eq!(count, 0);
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let app = app(&f);
+    let (cookie, csrf, _) = successful_login(&app).await?;
+    let path = format!("accounts/{}/profile", f.key.principal.as_uuid());
+    let operation = uuid::Uuid::new_v4();
+    let input = json!({"operationId":operation,"expectedRevision":0,"value":{"displayName":"Name","username":null,"email":null,"extensions":{"remote":false},"maxAgeSeconds":60}});
+    assert_eq!(
+        app.clone()
+            .oneshot(request("PUT", &path, Some(&cookie), None, input.clone()))
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let result = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            &path,
+            Some(&cookie),
+            Some(&csrf),
+            input.clone(),
+        ))
+        .await?;
+    assert_eq!(result.status(), StatusCode::OK);
+    assert_eq!(result.headers()["cache-control"], "no-store");
+    assert!(!result.headers().contains_key("set-cookie"));
+    assert_eq!(body(result).await?["revision"], 1);
+    let receipt = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("{path}/operations/{operation}"),
+            Some(&cookie),
+            None,
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(body(receipt).await?["revision"], 1);
+    let mut conflict = input.clone();
+    conflict["value"]["displayName"] = json!("Other");
+    let result = app
+        .clone()
+        .oneshot(request("PUT", &path, Some(&cookie), Some(&csrf), conflict))
+        .await?;
+    assert_eq!(result.status(), StatusCode::CONFLICT);
+    assert_eq!(body(result).await?["code"], "operation_conflict");
+    let mut conflict = input.clone();
+    conflict["operationId"] = json!(uuid::Uuid::new_v4());
+    let result = app
+        .clone()
+        .oneshot(request("PUT", &path, Some(&cookie), Some(&csrf), conflict))
+        .await?;
+    assert_eq!(result.status(), StatusCode::CONFLICT);
+    assert_eq!(body(result).await?["code"], "revision_conflict");
+    f.policy.revoke(f.key);
+    assert_eq!(
+        app.clone()
+            .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.oneshot(request("GET", "profile", Some(&cookie), None, json!(null)))
+            .await?
+            .status(),
+        StatusCode::OK
+    );
     f.close().await;
     Ok(())
 }

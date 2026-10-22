@@ -6,9 +6,9 @@ mod credentials;
 mod department;
 mod entra;
 pub use entra::{EntraAuthority, RevalidatedAccount, VerifiedExternalSubject};
-mod fact_time;
+mod session_checks;
 #[cfg(feature = "test-support")]
-pub use fact_time::ControlledFactTime;
+pub use session_checks::ControlledFactTime;
 mod federation;
 mod federation_link;
 mod federation_login;
@@ -17,6 +17,12 @@ mod groups;
 mod maintenance;
 mod management;
 mod operations;
+pub mod platform;
+mod profiles;
+pub use profiles::{
+    LocalProfileView, ProfileChange, ProfileReceipt, ProfileSource, ProfileSourceView,
+    ProfileStatus, ProfileView, TrustedProfile,
+};
 mod runtime;
 mod schema;
 mod session_reference;
@@ -68,8 +74,22 @@ pub struct AuthorityConfig {
     tenants: Vec<TenantId>,
     sessions: SessionPolicy,
     events: DeliveryBudget,
+    platform: Option<Arc<dyn platform::PlatformVerifier>>,
+    profile_limits: rss_identity_core::profile::ProfileLimits,
 }
 impl AuthorityConfig {
+    pub fn with_profile_limits(
+        mut self,
+        limits: rss_identity_core::profile::ProfileLimits,
+    ) -> Self {
+        self.profile_limits = limits;
+        self
+    }
+    /// Install only a deployment-trusted verifier; replacing it is a host trust decision.
+    pub fn with_platform(mut self, verifier: Arc<dyn platform::PlatformVerifier>) -> Self {
+        self.platform = Some(verifier);
+        self
+    }
     pub fn new(
         instance: InstanceId,
         mut tenants: Vec<TenantId>,
@@ -88,18 +108,21 @@ impl AuthorityConfig {
             tenants,
             sessions,
             events,
+            platform: None,
+            profile_limits: Default::default(),
         })
     }
 }
 #[derive(Clone)]
 pub struct Authority {
-    fact_time: fact_time::FactTime,
+    session_checks: session_checks::SessionChecks,
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
     runtimes: Arc<runtime::RuntimeState>,
     profile: AuthorityProfile,
     instance: InstanceId,
     session_policy: SessionPolicy,
     policy: Arc<dyn ManagementPolicy>,
+    profile_limits: rss_identity_core::profile::ProfileLimits,
 }
 impl Authority {
     pub async fn connect_runtime(
@@ -147,7 +170,10 @@ impl Authority {
         let tenant = config.tenants[0];
         let instance = config.instance;
         let authority = Self {
-            fact_time: Default::default(),
+            session_checks: session_checks::SessionChecks {
+                platform: config.platform,
+                ..Default::default()
+            },
             kdf,
             runtimes: Arc::new(runtime::RuntimeState::new(
                 runtime,
@@ -159,6 +185,7 @@ impl Authority {
             instance,
             session_policy: config.sessions,
             policy,
+            profile_limits: config.profile_limits,
         };
         let valid = Self::read_bundle(
             authority.runtimes.snapshot()?,

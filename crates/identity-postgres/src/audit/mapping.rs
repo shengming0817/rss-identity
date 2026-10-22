@@ -13,6 +13,11 @@ pub(super) struct InvalidEvent;
 
 pub(super) fn accepted_contract(id: &str, version: &str, digest: &str) -> Option<&'static str> {
     let (expected, schema, route) = match id {
+        "identity.profile.security" => (
+            "v1",
+            include_str!("../profile-security-event-v1.json"),
+            "profile.changed",
+        ),
         "identity.account.provisioning" => (
             "v1",
             include_str!("../account-provisioning-v1.json"),
@@ -37,6 +42,18 @@ pub(super) fn accepted_contract(id: &str, version: &str, digest: &str) -> Option
     };
     (version == expected && digest == format!("sha256:{:x}", Sha256::digest(schema)))
         .then_some(route)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileChange {
+    changed_fields: Vec<String>,
+    tenant: Uuid,
+    principal: Uuid,
+    actor: Option<Uuid>,
+    action: String,
+    source: crate::profiles::ProfileSource,
+    snapshot_id: Option<Uuid>,
+    revision: Option<i64>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +87,7 @@ struct State {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Session {
+    source: rss_identity_core::session::AuthenticationSource,
     action: String,
     tenant: Uuid,
     principal: Uuid,
@@ -130,6 +148,42 @@ pub(super) fn map_event(
     require(message.payload().len() <= 4096 && meta.occurred_at() <= recorded)?;
     let tenant = meta.tenant_id().to_string();
     let (action, actor_kind, actor_id, resource_kind, resource_id, outcome, payload) = match route {
+        "profile.changed" => {
+            let e: ProfileChange = parse(message.payload(), &["actor", "snapshot_id", "revision"])?;
+            require(
+                e.changed_fields.len() <= 6
+                    && e.changed_fields.iter().all(|v| {
+                        matches!(
+                            v.as_str(),
+                            "displayName"
+                                | "username"
+                                | "email"
+                                | "emailVerified"
+                                | "extensions"
+                                | "maxAgeSeconds"
+                        )
+                    }),
+            )?;
+            require(
+                e.tenant.to_string() == tenant
+                    && !e.principal.is_nil()
+                    && matches!(e.action.as_str(), "observed" | "local_updated")
+                    && e.revision.is_none_or(|v| v > 0),
+            )?;
+            require(
+                (e.action == "observed") == e.snapshot_id.is_some()
+                    && (e.action == "local_updated") == e.actor.is_some(),
+            )?;
+            (
+                format!("identity.profile.{}", e.action),
+                "principal",
+                e.actor.unwrap_or(e.principal).to_string(),
+                "profile",
+                e.principal.to_string(),
+                Outcome::Succeeded,
+                json!({"source":e.source,"snapshot_id":e.snapshot_id,"revision":e.revision,"changed_fields":e.changed_fields}),
+            )
+        }
         "account.provisioned" => {
             let e: Provisioned = parse(message.payload(), &[])?;
             require(
@@ -208,7 +262,7 @@ pub(super) fn map_event(
                 kind,
                 id.to_string(),
                 Outcome::Succeeded,
-                json!({"epoch":e.epoch,"session_id":e.session_id,"replaced_session_id":e.replaced_session_id}),
+                json!({"epoch":e.epoch,"session_id":e.session_id,"replaced_session_id":e.replaced_session_id,"source":e.source}),
             )
         }
         _ => {
