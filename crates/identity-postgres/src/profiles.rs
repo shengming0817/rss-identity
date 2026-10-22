@@ -268,6 +268,22 @@ pub(crate) async fn accept(
     )))
 }
 
+/// Linking changes a credential association, not the accepted login observation. Copy only
+/// its locator; current reads still enforce snapshot replacement, source revocation and expiry.
+pub(crate) async fn retain_binding(
+    c: &mut PgConnection,
+    key: AccountKey,
+    old: SessionId,
+    new: SessionId,
+) -> Result<(), transaction::MutationError> {
+    let rows=sqlx::query("UPDATE identity_authority.sessions n SET profile_source=o.profile_source,profile_snapshot=o.profile_snapshot FROM identity_authority.sessions o WHERE n.tenant_id=$1::uuid AND n.principal_id=$2 AND n.session_id=$3 AND o.tenant_id=n.tenant_id AND o.principal_id=n.principal_id AND o.session_id=$4")
+        .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(new.as_uuid()).bind(old.as_uuid()).execute(c).await?.rows_affected();
+    if rows != 1 {
+        return Err(corrupt().into());
+    }
+    Ok(())
+}
+
 struct Reader {
     key: AccountKey,
     digest: [u8; 32],

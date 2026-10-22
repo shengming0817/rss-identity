@@ -366,6 +366,7 @@ impl Federation {
                     };
                     let observation = (!linked).then(|| crate::profiles::oidc_observation(&claims,&view,attempt.profile_sequence));
                     let (issued, session_event) = sessions::insert(c, state, replaced, origin, now, session_policy, rss_identity_core::session::CredentialKind::Cookie).await?;
+                    if linked {crate::profiles::retain_binding(c,key,replaced.ok_or_else(reject)?,issued.view().id).await?;}
                     if session_storage::now(c).await? >= attempt.expiry {
                         return Err(reject().into());
                     }

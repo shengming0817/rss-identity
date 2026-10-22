@@ -91,3 +91,23 @@ fn local_profile_has_no_verified_email_or_authority_override() {
     input["emailVerified"] = json!(true);
     assert!(serde_json::from_value::<LocalProfile>(input).is_err());
 }
+
+#[test]
+fn jsonb_unrepresentable_strings_are_invalid_at_every_depth() {
+    for value in [
+        json!({"note":"\u{0}"}),
+        json!({"nested":{"note":"a\u{0}b"}}),
+        json!({"list":["ok","\u{0}"]}),
+    ] {
+        assert!(Extensions::try_from(value.clone()).is_err());
+        let profile = Profile::from_claims(
+            json!({"attributes":value}).as_object().unwrap(),
+            &ProfileSettings {
+                extensions_claim: Some("attributes".into()),
+                max_age_seconds: 60,
+            },
+        );
+        assert!(matches!(profile.extensions, Attribute::Invalid));
+    }
+    assert!(Extensions::try_from(json!({"text":"line\nnormal Unicode 中文"})).is_ok());
+}

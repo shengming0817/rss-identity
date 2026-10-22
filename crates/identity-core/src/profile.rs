@@ -145,6 +145,7 @@ fn check_value(
                 check_value(value, depth + 1, members, limits)?;
             }
         }
+        Value::String(value) if value.contains('\0') => return Err(ProfileError),
         Value::Number(number) => {
             let number = number.as_f64().ok_or(ProfileError)?;
             if !number.is_finite() || (number.fract() == 0.0 && number.abs() > MAX_SAFE_INTEGER) {

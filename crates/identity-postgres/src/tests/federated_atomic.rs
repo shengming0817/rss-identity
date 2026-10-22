@@ -888,6 +888,7 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
     let s = service(&f, upstream.clone());
     let p = enabled_department(&f, &s, 60).await?;
     let local = session(&f).await?;
+    let local_profile = linked_profile(&f, &local).await?;
     let proof = f
         .store
         .inspect_session(f.key.tenant, secret(&local), deadline())
@@ -938,9 +939,13 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         local_facts.is_none(),
         "target groups must not become local origin"
     );
+    assert_eq!(linked_profile(&f, &linked).await?, local_profile);
+    let linked = link_again(&f, &s, &linked, p.id, "local-link", None).await?;
+    assert_eq!(linked_profile(&f, &linked).await?, local_profile);
     let other = enabled_department(&f, &s, 60).await?;
     let fed = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
     let original = stored_facts(&f, &fed).await?;
+    let original_profile = linked_profile(&f, &fed).await?;
     let fed = f
         .store
         .refresh_session(f.key.tenant, secret(&fed), deadline())
@@ -1039,6 +1044,26 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         stored_facts(&f, &linked).await?,
         source_facts,
         "link must copy the source snapshot unchanged"
+    );
+    assert_eq!(linked_profile(&f, &linked).await?, original_profile);
+    let linked = link_again(&f, &s, &linked, other.id, "new-subject", Some("alice")).await?;
+    assert_eq!(linked_profile(&f, &linked).await?, original_profile);
+    let snapshot = original_profile["snapshotId"].as_str().unwrap();
+    sqlx::query("UPDATE identity_authority.profile_observations SET observed_at=observed_at-1000,expires_at=expires_at-1000 WHERE snapshot_id=$1::uuid").bind(snapshot).execute(&f.owner).await?;
+    let expired = link_again(&f, &s, &linked, other.id, "new-subject", Some("alice")).await?;
+    let view = linked_profile(&f, &expired).await?;
+    assert_eq!(view["status"], "expired");
+    assert!(view["profile"].is_null());
+    assert_eq!(view["snapshotId"], original_profile["snapshotId"]);
+    let fresh = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
+    assert_ne!(
+        linked_profile(&f, &fresh).await?["snapshotId"],
+        original_profile["snapshotId"]
+    );
+    let superseded = link_again(&f, &s, &expired, other.id, "new-subject", Some("alice")).await?;
+    assert_eq!(
+        linked_profile(&f, &superseded).await?["status"],
+        "unavailable"
     );
     f.close().await;
     Ok(())
@@ -1795,4 +1820,76 @@ async fn federation_signed_time_skew_preserves_identity() -> anyhow::Result<()> 
     assert_eq!(count, 0);
     f.close().await;
     Ok(())
+}
+
+async fn linked_profile(f: &Fixture, issued: &IssuedSession) -> anyhow::Result<serde_json::Value> {
+    let actor = f
+        .store
+        .inspect_session(f.key.tenant, secret(issued), deadline())
+        .await?;
+    Ok(serde_json::to_value(
+        f.store.current_profile(&actor, deadline()).await?.view()?,
+    )?)
+}
+async fn link_again(
+    f: &Fixture,
+    s: &Federation,
+    old: &IssuedSession,
+    target: ProviderId,
+    subject: &str,
+    source_subject: Option<&str>,
+) -> anyhow::Result<IssuedSession> {
+    f.reset_attempts().await?;
+    let actor = f
+        .store
+        .inspect_session(f.key.tenant, secret(old), deadline())
+        .await?;
+    let mut token = state(
+        s.begin_link(
+            LinkRequest {
+                actor,
+                target_provider: target,
+                password: source_subject.is_none().then(password),
+                browser: BROWSER.into(),
+                target: "home".into(),
+                source: source(),
+            },
+            deadline(),
+        )
+        .await?,
+    );
+    if let Some(subject) = source_subject {
+        token = match s
+            .complete(
+                token,
+                BROWSER.into(),
+                Zeroizing::new(subject.into()),
+                "https://idp.example.test".into(),
+                Some(secret(old)),
+                deadline(),
+            )
+            .await?
+        {
+            FederatedOutcome::Redirect(v) => state(v),
+            _ => panic!("source reauthentication must continue to target"),
+        };
+    }
+    let result = s
+        .complete(
+            token,
+            BROWSER.into(),
+            Zeroizing::new(subject.into()),
+            "https://idp.example.test".into(),
+            Some(secret(old)),
+            deadline(),
+        )
+        .await?;
+    assert!(matches!(
+        &result,
+        FederatedOutcome::Session {
+            link_result: Some(LinkResult::AlreadyLinked),
+            ..
+        }
+    ));
+    Ok(issued(result))
 }

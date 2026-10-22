@@ -1171,3 +1171,72 @@ async fn source_admission_borrows_transaction_with_no_credential_privileges() ->
     f.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn malformed_extension_replaces_old_values_without_rejecting_login() -> anyhow::Result<()> {
+    use federation_support::*;
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    *upstream.profile.lock().unwrap() = Some(local("before").observation()?);
+    let service = service(&f, upstream.clone());
+    let provider = enabled(&f, &service).await?;
+    let first = issued(
+        finish(
+            &service,
+            begin(&f, &service, &provider).await?,
+            "nul-profile",
+        )
+        .await?,
+    );
+    let old = proof(&f.store, &f, &first).await?;
+    let invalid = Profile::from_claims(
+        json!({"name":"valid name","attributes":{"nested":["\u{0}"]}})
+            .as_object()
+            .unwrap(),
+        &ProfileSettings {
+            extensions_claim: Some("attributes".into()),
+            max_age_seconds: 60,
+        },
+    );
+    *upstream.profile.lock().unwrap() = Some(invalid);
+    let next = issued(
+        finish(
+            &service,
+            begin(&f, &service, &provider).await?,
+            "nul-profile",
+        )
+        .await?,
+    );
+    let current = f
+        .store
+        .current_profile(&proof(&f.store, &f, &next).await?, deadline())
+        .await?;
+    assert_eq!(current.view()?.status, ProfileStatus::Available);
+    assert!(matches!(
+        current.view()?.profile.as_ref().unwrap().extensions,
+        Attribute::Invalid
+    ));
+    assert_eq!(
+        current
+            .view()?
+            .profile
+            .as_ref()
+            .unwrap()
+            .display_name
+            .value()
+            .map(String::as_str),
+        Some("valid name")
+    );
+    assert_eq!(
+        f.store
+            .current_profile(&old, deadline())
+            .await?
+            .view()?
+            .status,
+        ProfileStatus::Unavailable
+    );
+    f.close().await;
+    Ok(())
+}
