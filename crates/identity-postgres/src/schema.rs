@@ -125,3 +125,41 @@ pub(crate) async fn probe(
     }
     Ok(Some("ok".into()))
 }
+
+/// Narrow metadata admission grants for a host business transaction role. In particular this
+/// does not grant password, provider credential, session or profile-observation access.
+pub async fn grant_profile_source_admission(
+    c: &mut PgConnection,
+    role: &str,
+) -> Result<(), sqlx::Error> {
+    if role.is_empty() || role.len() > 63 || role.contains('\0') {
+        return Err(sqlx::Error::Protocol("invalid role identifier".into()));
+    }
+    let role = format!("\"{}\"", role.replace('"', "\"\""));
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("GRANT USAGE ON SCHEMA identity_authority TO {role}; GRANT SELECT ON identity_authority.schema_version,identity_authority.deployment TO {role}; GRANT SELECT(tenant_id),UPDATE(tenant_id) ON identity_authority.guard TO {role}; GRANT SELECT(tenant_id,provider_id,enabled,config_version,settings) ON identity_authority.providers TO {role};"))).execute(c).await?;
+    Ok(())
+}
+/// Verify only this narrow Identity profile; unrelated host schema privileges are unaffected.
+pub async fn verify_profile_source_admission(
+    c: &mut PgConnection,
+    instance: InstanceId,
+) -> Result<(), AuthorityError> {
+    let result=async {
+        // SET reachability includes NOINHERIT membership; effective privileges alone are insufficient.
+        let reachable_safe:bool=sqlx::query_scalar("WITH reachable AS (SELECT oid,rolsuper,rolbypassrls,rolcreaterole FROM pg_roles WHERE pg_has_role(current_user,oid,'SET')) SELECT NOT EXISTS(SELECT FROM reachable r WHERE r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR has_schema_privilege(r.oid,'identity_authority','CREATE')) AND NOT EXISTS(SELECT FROM reachable r CROSS JOIN pg_attribute a JOIN pg_class cl ON cl.oid=a.attrelid JOIN pg_namespace n ON n.oid=cl.relnamespace WHERE n.nspname='identity_authority' AND cl.relkind='r' AND a.attnum>0 AND NOT a.attisdropped AND ((has_column_privilege(r.oid,a.attrelid,a.attnum,'SELECT') AND NOT (cl.relname IN ('schema_version','deployment') OR (cl.relname='guard' AND a.attname='tenant_id') OR (cl.relname='providers' AND a.attname IN ('tenant_id','provider_id','enabled','config_version','settings')))) OR (has_column_privilege(r.oid,a.attrelid,a.attnum,'UPDATE') AND NOT (cl.relname='guard' AND a.attname='tenant_id')) OR has_column_privilege(r.oid,a.attrelid,a.attnum,'INSERT,REFERENCES') OR has_table_privilege(r.oid,a.attrelid,'DELETE,TRUNCATE,TRIGGER')))").fetch_one(&mut *c).await?;
+        if !reachable_safe {return Ok::<_,sqlx::Error>(false);}
+        let valid:bool=sqlx::query_scalar("SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT has_schema_privilege(current_user,'identity_authority','CREATE') AND has_schema_privilege(current_user,'identity_authority','USAGE') FROM pg_roles WHERE rolname=current_user").fetch_one(&mut *c).await?;
+        if !valid {return Ok::<_,sqlx::Error>(false);}
+        let valid:bool=sqlx::query_scalar("SELECT bool_and(has_column_privilege(current_user,a.attrelid,a.attnum,'SELECT') = (cl.relname IN ('schema_version','deployment') OR (cl.relname='guard' AND a.attname='tenant_id') OR (cl.relname='providers' AND a.attname IN ('tenant_id','provider_id','enabled','config_version','settings'))) AND has_column_privilege(current_user,a.attrelid,a.attnum,'UPDATE') = (cl.relname='guard' AND a.attname='tenant_id') AND NOT has_column_privilege(current_user,a.attrelid,a.attnum,'INSERT') AND NOT has_column_privilege(current_user,a.attrelid,a.attnum,'REFERENCES') AND NOT has_table_privilege(current_user,a.attrelid,'DELETE,TRUNCATE,TRIGGER')) FROM pg_attribute a JOIN pg_class cl ON cl.oid=a.attrelid JOIN pg_namespace n ON n.oid=cl.relnamespace WHERE n.nspname='identity_authority' AND cl.relkind='r' AND a.attnum>0 AND NOT a.attisdropped").fetch_one(&mut *c).await?;
+        if !valid {return Ok(false);}
+        let actual:uuid::Uuid=sqlx::query_scalar("SELECT authority_id FROM identity_authority.deployment").fetch_one(&mut *c).await?;
+        let versions:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *c).await?;
+        let signature:Option<String>=sqlx::query_scalar(SCHEMA_SIGNATURE_SQL).fetch_one(c).await?;
+        Ok(actual==instance.as_uuid() && versions==[SCHEMA_VERSION] && signature.as_deref()==Some(SCHEMA_SIGNATURE.trim()))
+    }.await.map_err(|_|AuthorityError::Unavailable)?;
+    if result {
+        Ok(())
+    } else {
+        Err(AuthorityError::Configuration)
+    }
+}

@@ -179,3 +179,10 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 
 会话 `issuedAt` 仅表示签发时间；敏感操作必须使用受信 assurance.auth_time 检查近期认证。
 本次替换不提供旧 authTime 会话字段、旧配置解码或旧库升级路径。
+
+
+宿主将字段定义写入与来源准入组合时，使用 `admit_profile_source_on` 借用已打开 READ COMMITTED 事务、已设置租户 fence 的 PG 连接。
+部署使用 `grant_profile_source_admission` 为该业务角色授权，并在启动时用 `verify_profile_source_admission` 验证；
+不授予完整 Runtime 或 Provisioning 权限。该接口只读取来源发布元数据，不授予用户资料或管理权限。
+锁顺序为 Audit/可选 Ledger → Identity tenant guard → 宿主授权锁 → 业务定义/回执；
+调用方保持同一事务直至提交或回滚，不能在已持有宿主授权锁后调用该接口。

@@ -1025,3 +1025,149 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
     f.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn source_admission_borrows_transaction_with_no_credential_privileges() -> anyhow::Result<()>
+{
+    use federation_support::*;
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let federation = service(&f, ScriptedOidc::new());
+    let provider = enabled(&f, &federation).await?;
+    let role = format!("profile_reader_{}", Uuid::new_v4().simple());
+    let actor = f.actor().await?;
+    let mut owner = f.owner.acquire().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} NOLOGIN")))
+        .execute(&mut *owner)
+        .await?;
+    grant_profile_source_admission(&mut owner, &role).await?;
+    assert!(
+        admit_profile_source_on(
+            &mut owner,
+            f.instance,
+            f.key.tenant,
+            ProfileSource::IdentityLocal
+        )
+        .await
+        .is_err()
+    );
+    use sqlx::Connection;
+    let mut stale = owner.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *stale)
+        .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(f.key.tenant.to_string())
+        .execute(&mut *stale)
+        .await?;
+    assert!(
+        admit_profile_source_on(
+            &mut stale,
+            f.instance,
+            f.key.tenant,
+            ProfileSource::IdentityLocal
+        )
+        .await
+        .is_err()
+    );
+    stale.rollback().await?;
+
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "GRANT identity_runtime TO {role} WITH INHERIT FALSE, SET TRUE"
+    )))
+    .execute(&mut *owner)
+    .await?;
+    let mut unsafe_tx = owner.begin().await?;
+    sqlx::query("SELECT set_config('role',$1,true)")
+        .bind(&role)
+        .execute(&mut *unsafe_tx)
+        .await?;
+    assert!(
+        verify_profile_source_admission(&mut unsafe_tx, f.instance)
+            .await
+            .is_err()
+    );
+    unsafe_tx.rollback().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "REVOKE identity_runtime FROM {role}"
+    )))
+    .execute(&mut *owner)
+    .await?;
+
+    let mut tx = owner.begin().await?;
+    sqlx::query("SELECT set_config('role',$1,true)")
+        .bind(&role)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(f.key.tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    verify_profile_source_admission(&mut tx, f.instance).await?;
+    assert!(
+        admit_profile_source_on(
+            &mut tx,
+            f.instance,
+            rss_request_context::TenantId::parse(B)?,
+            ProfileSource::IdentityLocal
+        )
+        .await
+        .is_err()
+    );
+    let source = ProfileSource::Idp {
+        provider: provider.id,
+    };
+    let view = admit_profile_source_on(&mut tx, f.instance, f.key.tenant, source).await?;
+    assert_eq!(view.provider_config_version, Some(provider.version));
+    assert_eq!(view.max_age_seconds, 14400);
+    // No second connection can change provider configuration until the host settles its write.
+    let mut disable = Box::pin(federation.enable_provider(
+        actor,
+        provider.id,
+        provider.version,
+        false,
+        deadline(),
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut disable)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    disable.await?;
+    let mut tx = owner.begin().await?;
+    sqlx::query("SELECT set_config('role',$1,true)")
+        .bind(&role)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(f.key.tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    assert!(
+        admit_profile_source_on(&mut tx, f.instance, f.key.tenant, source)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        admit_profile_source_on(
+            &mut tx,
+            f.instance,
+            f.key.tenant,
+            ProfileSource::IdentityLocal
+        )
+        .await?
+        .source,
+        ProfileSource::IdentityLocal
+    );
+    tx.rollback().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(&mut *owner)
+    .await?;
+    drop(owner);
+    f.close().await;
+    Ok(())
+}

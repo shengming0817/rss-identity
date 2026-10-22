@@ -131,7 +131,7 @@ SUITES[("rss-identity-oidc", "entra")] = {"signed_entra_resource_tokens"}
 SUITES[('rss-identity-postgres', 'provisioning')] = {'provisioned_account_and_event_share_host_commit_and_revalidate_source'}
 
 SUITES[("rss-identity-http-axum","federated_http")].add("profile_lifecycle::real_profile_login_updates_and_removes_values")
-SUITES[("rss-identity-postgres","profile_platform")] = {"local_profile_observation_receipts_and_revocation","platform_challenges_are_one_use_and_all_session_paths_recheck","older_oidc_completion_cannot_replace_a_newer_observation","platform_binding_errors_and_uncertain_commit_never_issue_a_secret","platform_external_identity_and_fresh_profile_are_bound_and_revocable"}
+SUITES[("rss-identity-postgres","profile_platform")] = {"local_profile_observation_receipts_and_revocation","platform_challenges_are_one_use_and_all_session_paths_recheck","older_oidc_completion_cannot_replace_a_newer_observation","platform_binding_errors_and_uncertain_commit_never_issue_a_secret","platform_external_identity_and_fresh_profile_are_bound_and_revocable","source_admission_borrows_transaction_with_no_credential_privileges"}
 
 SUITES[("rss-identity-http-axum","session_http")].add("profile_http_requires_policy_csrf_and_exact_receipts")
 
