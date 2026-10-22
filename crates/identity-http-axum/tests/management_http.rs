@@ -797,7 +797,7 @@ async fn management_rejects_password_for_federated_only_account() -> anyhow::Res
     assert_eq!(security.headers()["cache-control"], "no-store");
     assert_eq!(
         json_body(security).await?["authentication"],
-        json!({"authTime":null,"acr":"unspecified","amr":[]})
+        json!({"source":"oidc","authTime":null,"acr":"unspecified","amr":[]})
     );
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let response = app

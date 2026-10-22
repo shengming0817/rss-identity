@@ -553,11 +553,11 @@ async fn refresh_rejects_expiry_during_writes_without_rotating_or_emitting() -> 
     // Cover both blocking writes and both session limits. Only the selected write sleeps.
     for (column, idle, absolute) in [("idle_expires_at", 2, 120), ("token_hash", 120, 120)] {
         let session = f.login().await?;
-        sqlx::query("UPDATE identity_authority.sessions SET issued_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2 - $3, idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2, idle_timeout=$2, absolute_timeout=$3 WHERE session_id=$1")
+        sqlx::query("UPDATE identity_authority.sessions SET issued_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2 - $3,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN floor(extract(epoch FROM clock_timestamp()))::bigint + 2 - $3 ELSE local_authenticated_at END, idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2, idle_timeout=$2, absolute_timeout=$3 WHERE session_id=$1")
             .bind(session.view().id.as_uuid()).bind(idle).bind(absolute).execute(&f.owner).await?;
         // The idle case keeps ample absolute lifetime, isolating the renewed idle cutoff.
         if idle == 2 {
-            sqlx::query("UPDATE identity_authority.sessions SET issued_at=floor(extract(epoch FROM clock_timestamp()))::bigint, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 120 WHERE session_id=$1")
+            sqlx::query("UPDATE identity_authority.sessions SET issued_at=floor(extract(epoch FROM clock_timestamp()))::bigint,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN floor(extract(epoch FROM clock_timestamp()))::bigint ELSE local_authenticated_at END, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 120 WHERE session_id=$1")
                 .bind(session.view().id.as_uuid()).execute(&f.owner).await?;
         }
         let before: (Vec<u8>, i64) = sqlx::query_as("SELECT token_hash,idle_expires_at FROM identity_authority.sessions WHERE session_id=$1")

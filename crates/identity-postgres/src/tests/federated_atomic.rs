@@ -853,9 +853,15 @@ async fn federation_atomic_events_and_unknown_commit() -> anyhow::Result<()> {
     let persisted:(i64,i64,i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM identity_authority.accounts),(SELECT count(*) FROM identity_authority.memberships),(SELECT count(*) FROM identity_authority.external_identities),(SELECT count(*) FROM identity_authority.sessions),(SELECT count(*) FROM identity_authority.local_credentials)").fetch_one(&f.owner).await?;
     assert_eq!(persisted, (3, 3, 1, management_sessions + 1, 2));
     let committed = events(&f).await?;
-    let pair = &committed[committed.len() - 2..];
+    let pair = &committed[committed.len() - 3..];
     assert_eq!(pair[0]["action"], "jit_created");
     assert_eq!(pair[1]["action"], "created");
+    assert_eq!(pair[2]["action"], "observed");
+    assert_eq!(pair[2]["principal"], pair[0]["principal"]);
+    assert_eq!(
+        pair[2]["source"],
+        serde_json::json!({"kind":"idp","provider":p.id.to_string()})
+    );
     assert_eq!(pair[0]["principal"], pair[1]["principal"]);
     assert_eq!(pair[0]["provider_id"], p.id.to_string());
     assert_eq!(pair[0]["config_version"], p.version);
@@ -1311,6 +1317,12 @@ pub async fn events(f: &Fixture) -> anyhow::Result<Vec<serde_json::Value>> {
                 2,
                 include_str!("../federation-security-event-v2.json"),
             ),
+            "profile.changed" => (
+                "profile.changed",
+                "identity.profile.security",
+                1,
+                include_str!("../profile-security-event-v1.json"),
+            ),
             "session.changed" => (
                 "session.changed",
                 "identity.session.security",
@@ -1513,7 +1525,7 @@ async fn federation_step_up_unknown_commit_and_event_rollback() -> anyhow::Resul
     .await?;
     assert_eq!(remaining, 0);
     let committed_events = events(&f).await?;
-    assert_eq!(committed_events.len(), events_before + 2);
+    assert_eq!(committed_events.len(), events_before + 3);
     assert_eq!(committed_events[events_before]["action"], "stepped_up");
     assert_eq!(committed_events[events_before + 1]["action"], "created");
     assert!(step_finish(&s, token, &upgraded, "alice").await.is_err());

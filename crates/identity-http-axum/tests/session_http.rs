@@ -569,7 +569,7 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
     );
     let (cookie, csrf, value) = successful_login(&app).await?;
     let id = value["session"]["id"].as_str().unwrap();
-    sqlx::query("UPDATE identity_authority.sessions SET issued_at=issued_at-100, absolute_expires_at=absolute_expires_at-100, idle_expires_at=issued_at+20 WHERE session_id=$1::uuid").bind(id).execute(&f.owner).await?;
+    sqlx::query("UPDATE identity_authority.sessions SET issued_at=issued_at-100,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN issued_at-100 ELSE local_authenticated_at END, absolute_expires_at=absolute_expires_at-100, idle_expires_at=issued_at+20 WHERE session_id=$1::uuid").bind(id).execute(&f.owner).await?;
     let idle: i64 = sqlx::query_scalar(
         "SELECT idle_expires_at FROM identity_authority.sessions WHERE session_id=$1::uuid",
     )
