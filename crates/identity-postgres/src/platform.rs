@@ -134,16 +134,15 @@ impl PlatformAuthentication {
         Assurance::new(self.authenticated_at, Acr::Unspecified, vec![]).map_err(|_| corrupt())
     }
 }
-fn failure(error: PlatformError) -> transaction::MutationError {
+fn failure(error: PlatformError) -> rss_transactional_messaging_postgres::PgError {
     match error {
-        PlatformError::Rejected => reject().into(),
+        PlatformError::Rejected => reject(),
         PlatformError::Unavailable => rss_transactional_messaging_postgres::PgError::from(
             rss_transactional_messaging::error::MessagingError::new(
-                rss_transactional_messaging::error::MessagingErrorKind::Invariant,
+                rss_transactional_messaging::error::MessagingErrorKind::Transient,
                 std::io::Error::other("platform verifier unavailable"),
             ),
-        )
-        .into(),
+        ),
     }
 }
 pub(crate) async fn recheck(
@@ -163,7 +162,7 @@ pub(crate) async fn recheck(
     verifier
         .recheck(&stored.binding, c)
         .await
-        .map_err(|_| reject())?;
+        .map_err(failure)?;
     external(c, &stored.binding).await?;
     stored.assurance()?;
     Ok(())

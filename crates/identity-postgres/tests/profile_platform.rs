@@ -75,6 +75,24 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
             .revision,
         1
     );
+    let events:Vec<serde_json::Value>=sqlx::query_scalar("SELECT envelope FROM rss_transactional_messaging.outbox WHERE envelope->>'route'='profile.changed'").fetch_all(&f.owner).await?;
+    let mut updates = 0;
+    for event in events {
+        let bytes: Vec<u8> = serde_json::from_value(event["payload"].clone())?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if value["action"] == "local_updated" {
+            updates += 1;
+            assert_eq!(value["revision"], 1);
+            assert!(
+                value["changed_fields"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("extensions"))
+            );
+        }
+        assert!(!String::from_utf8(bytes)?.contains("E1001"));
+    }
+    assert_eq!(updates, 1);
     let mut different = change.clone();
     different.value = Some(local("changed"));
     assert!(matches!(
@@ -191,6 +209,39 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
             .revision,
         3
     );
+    let rollback = ProfileChange {
+        operation_id: Uuid::new_v4(),
+        expected_revision: 3,
+        value: Some(local("must-rollback")),
+    };
+    sqlx::raw_sql("CREATE FUNCTION public.reject_profile_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.envelope->>'route'='profile.changed' THEN RAISE EXCEPTION 'fixture reject'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_profile_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_profile_event();").execute(&f.owner).await?;
+    assert!(
+        f.store
+            .update_local_profile(
+                proof(&f.store, &f, &third).await?,
+                f.key,
+                rollback.clone(),
+                deadline()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        f.store
+            .read_local_profile(&third_proof, f.key, deadline())
+            .await?
+            .revision,
+        3
+    );
+    assert!(
+        f.store
+            .local_profile_receipt(&third_proof, f.key, rollback.operation_id, deadline())
+            .await?
+            .is_none()
+    );
+    sqlx::raw_sql("DROP TRIGGER reject_profile_event ON rss_transactional_messaging.outbox")
+        .execute(&f.owner)
+        .await?;
     f.policy.revoke(f.key);
     assert!(
         f.store
@@ -227,6 +278,7 @@ struct Verifier {
     binding: PlatformBinding,
     key: Ed25519KeyPair,
     local: bool,
+    unavailable: std::sync::atomic::AtomicBool,
     runtime: Arc<rss_transactional_messaging_postgres::PgRuntime>,
     fault: std::sync::Mutex<Option<PgTransactionFault>>,
 }
@@ -287,6 +339,9 @@ impl PlatformVerifier for Verifier {
         c: &'a mut sqlx::PgConnection,
     ) -> futures::future::BoxFuture<'a, Result<(), PlatformError>> {
         Box::pin(async move {
+            if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(PlatformError::Unavailable);
+            }
             let row = sqlx::query(
                 "SELECT enabled,epoch FROM public.platform_binding WHERE id=$1 FOR UPDATE",
             )
@@ -328,6 +383,7 @@ async fn platform_host(f: &Fixture, local: bool) -> anyhow::Result<(Authority, A
         binding: binding.clone(),
         key: Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap(),
         local,
+        unavailable: std::sync::atomic::AtomicBool::new(false),
         runtime: f.runtime.clone(),
         fault: std::sync::Mutex::new(None),
     });
@@ -412,6 +468,28 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
             .await
             .is_err()
     );
+    verifier
+        .unavailable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        store
+            .inspect_session(
+                f.key.tenant,
+                rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
+                deadline()
+            )
+            .await,
+        Err(AuthorityError::RolledBack(StorageFailure::Transient))
+    ));
+    assert!(matches!(
+        store
+            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .await,
+        Err(AuthorityError::RolledBack(StorageFailure::Transient))
+    ));
+    verifier
+        .unavailable
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     sqlx::query("UPDATE public.platform_binding SET enabled=false,epoch=2 WHERE id=$1")
         .bind(binding.binding_id)
         .execute(&f.owner)

@@ -119,6 +119,7 @@ mod tests {
         use axum::{body::to_bytes, response::IntoResponse};
         use rss_identity_postgres::{AuthorityError, StorageFailure};
         for error in [
+            AuthorityError::RolledBack(StorageFailure::Transient),
             AuthorityError::CommitUnknown(StorageFailure::Transient),
             AuthorityError::RollbackFailed(StorageFailure::Transient),
             AuthorityError::Fenced,

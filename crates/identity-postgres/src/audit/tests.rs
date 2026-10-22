@@ -33,6 +33,7 @@ pub(super) fn envelope(kind: &str, body: Value) -> MessageEnvelope<Vec<u8>> {
     let (version, schema) = match kind {
         "account" => (3, include_str!("../security-event-v3.json")),
         "session" => (1, include_str!("../session-security-event-v1.json")),
+        "profile" => (1, include_str!("../profile-security-event-v1.json")),
         _ => (2, include_str!("../federation-security-event-v2.json")),
     };
     MessageEnvelope::new(
@@ -396,6 +397,33 @@ fn nested_event_objects_do_not_accept_sequence_encoding() {
             map_event(
                 InstanceId::generate(),
                 &envelope(kind, body),
+                Timepoint::try_from(101).unwrap()
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn profile_events_project_only_source_and_changed_field_identifiers() {
+    for action in ["observed", "local_updated"] {
+        let mut body = json!({"action":action,"tenant":TENANT,"principal":PRINCIPAL,"actor":null,"source":{"kind":"identity_local"},"snapshot_id":null,"revision":1,"changed_fields":["displayName","extensions"]});
+        if action == "observed" {
+            body["snapshot_id"] = json!(SESSION);
+        } else {
+            body["actor"] = json!(PRINCIPAL);
+        }
+        let event = mapped("profile", body.clone());
+        let projected: Value =
+            serde_json::from_slice(event.context().payload().as_bytes()).unwrap();
+        assert_eq!(projected["source"], body["source"]);
+        assert_eq!(projected["changed_fields"], body["changed_fields"]);
+        assert_eq!(event.facts().actor().id().as_str(), PRINCIPAL);
+        body["value"] = json!({"email":"private@example.test"});
+        assert!(
+            map_event(
+                InstanceId::generate(),
+                &envelope("profile", body),
                 Timepoint::try_from(101).unwrap()
             )
             .is_err()
