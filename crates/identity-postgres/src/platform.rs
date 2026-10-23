@@ -1,6 +1,11 @@
 //! Trusted host platform adapter and Identity-owned one-use browser challenges.
 //! The host verifies devices and platform cryptography; Identity alone issues sessions.
 //! ref: webauthn-rs 0.5.3 src/lib.rs (server-owned, one-use ceremony state).
+mod admission;
+pub use admission::{
+    PlatformSubjectAdmissionError, PlatformSubjectVersion, admit_platform_subject_on,
+};
+
 use crate::{
     storage::*,
     transaction::{corrupt, reject},
@@ -171,14 +176,21 @@ async fn external(
     c: &mut PgConnection,
     binding: &PlatformBinding,
 ) -> Result<(), rss_transactional_messaging_postgres::PgError> {
+    if !external_valid(c, binding).await? {
+        return Err(reject());
+    }
+    Ok(())
+}
+async fn external_valid(
+    c: &mut PgConnection,
+    binding: &PlatformBinding,
+) -> Result<bool, rss_transactional_messaging_postgres::PgError> {
     if let Some(external) = &binding.external_identity {
         let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.external_identities e JOIN identity_authority.providers p USING(tenant_id,provider_id) WHERE e.tenant_id=$1::uuid AND e.principal_id=$2 AND e.identity_id=$3 AND e.provider_id=$4::uuid AND p.enabled AND p.config_version=$5 AND p.revocation_epoch=$6)")
             .bind(binding.account.tenant.to_string()).bind(binding.account.principal.as_uuid()).bind(external.identity_id).bind(external.provider.to_string()).bind(external.config_version).bind(external.revocation_epoch).fetch_one(c).await?;
-        if !valid {
-            return Err(reject());
-        }
+        return Ok(valid);
     }
-    Ok(())
+    Ok(true)
 }
 impl Authority {
     pub async fn begin_platform_login(

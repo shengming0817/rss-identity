@@ -172,6 +172,15 @@ PUT 使用 operationId、expectedRevision、value（必须出现，显式 null �
 
 ## 平台会话接缝
 
+宿主持有的原生平台协议在签发或接受令牌前，调用 `platform::admit_platform_subject_on`，借用同实例、同租户的显式 READ COMMITTED 事务。
+该接口只复核账户、成员资格、外部身份关联和 provider 当前代际，不签发 Cookie，也不读取密码。
+首次受控注册保存返回的 `PlatformSubjectVersion`，后续使用必须传回该版本；禁用再启用不能恢复旧注册。
+锁顺序为 Audit/可选 Ledger → Identity tenant guard → 宿主设备、绑定与业务锁，保持同一事务直到原生操作提交或回滚。
+宿主仍须校验平台签名、用途、挑战、设备、绑定和业务授权；返回版本不是认证凭据或 assurance。
+部署使用 `grant_platform_subject_admission` 并在启动时调用 `verify_platform_subject_admission`。
+此组合权限包含来源发布元数据准入，替代该角色原来的 profile-source-only 权限校验；不授予完整 Runtime 权限。
+
+
 宿主实现 `platform::PlatformVerifier` 并通过 `AuthorityConfig::with_platform` 在启动时安装。
 `resolve/recheck` 必须借传入 PG connection 锁定 MDM 当前绑定与资格；不得另取连接、提交、切租户或在事务内调用网络。
 绑定必须由受控注册／人员关联流程建立，设备本地账号名、邮箱或浏览器 principal 均不构成绑定证明。
