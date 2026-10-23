@@ -1767,3 +1767,270 @@ async fn trusted_reference(
             Ok((revision, rows[0].get("valid")))
     })).await
 }
+
+async fn subject_transaction<'a>(
+    c: &'a mut sqlx::PgConnection,
+    role: &str,
+    tenant: rss_request_context::TenantId,
+) -> anyhow::Result<sqlx::Transaction<'a, sqlx::Postgres>> {
+    use sqlx::Connection;
+    let mut tx = c.begin().await?;
+    sqlx::query("SELECT set_config('role',$1,true),set_config('rss.tenant_id',$2,true)")
+        .bind(role)
+        .bind(tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn platform_subject_admission_fences_native_settlement() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let role = format!("subject_reader_{}", Uuid::new_v4().simple());
+    let mut owner = f.owner.acquire().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} NOLOGIN")))
+        .execute(&mut *owner)
+        .await?;
+    grant_platform_subject_admission(&mut owner, &role).await?;
+    let binding = PlatformBinding {
+        instance: f.instance,
+        account: f.key,
+        binding_id: Uuid::new_v4(),
+        binding_epoch: 1,
+        source_id: Uuid::new_v4(),
+        source_version: 1,
+        external_identity: None,
+    };
+    assert!(
+        admit_platform_subject_on(&mut owner, f.instance, &binding, None)
+            .await
+            .is_err()
+    );
+    let mut tx = subject_transaction(&mut owner, &role, f.key.tenant).await?;
+    verify_platform_subject_admission(&mut tx, f.instance).await?;
+    assert!(
+        verify_profile_source_admission(&mut tx, f.instance)
+            .await
+            .is_err()
+    );
+    let version = admit_platform_subject_on(&mut tx, f.instance, &binding, None).await?;
+    let mut wrong = binding.clone();
+    wrong.account.tenant = rss_request_context::TenantId::parse(B)?;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &wrong, None)
+            .await
+            .is_err()
+    );
+    wrong = binding.clone();
+    wrong.source_id = Uuid::nil();
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &wrong, None)
+            .await
+            .is_err()
+    );
+    // A real account writer must wait until the host has committed its native issuance.
+    let mut writer = f.owner.begin().await?;
+    let mut guard = Box::pin(
+        sqlx::query(
+            "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+        )
+        .bind(f.key.tenant.to_string())
+        .execute(&mut *writer),
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut guard)
+            .await
+            .is_err()
+    );
+    tx.commit().await?;
+    guard.await?;
+    sqlx::query("UPDATE identity_authority.accounts SET enabled=false,auth_epoch=auth_epoch+1 WHERE tenant_id=$1::uuid AND principal_id=$2")
+        .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).execute(&mut *writer).await?;
+    writer.commit().await?;
+    let mut tx = subject_transaction(&mut owner, &role, f.key.tenant).await?;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &binding, Some(version))
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    sqlx::query("UPDATE identity_authority.accounts SET enabled=true,auth_epoch=auth_epoch+1 WHERE tenant_id=$1::uuid AND principal_id=$2")
+        .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).execute(&mut *owner).await?;
+    let mut tx = subject_transaction(&mut owner, &role, f.key.tenant).await?;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &binding, Some(version))
+            .await
+            .is_err()
+    );
+    let renewed = admit_platform_subject_on(&mut tx, f.instance, &binding, None).await?;
+    assert_ne!(version, renewed);
+    tx.rollback().await?;
+    sqlx::query("UPDATE identity_authority.memberships SET active=false,epoch=epoch+1 WHERE tenant_id=$1::uuid AND principal_id=$2")
+        .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).execute(&mut *owner).await?;
+    let mut tx = subject_transaction(&mut owner, &role, f.key.tenant).await?;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &binding, None)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    sqlx::query("UPDATE identity_authority.memberships SET active=true,epoch=epoch+1 WHERE tenant_id=$1::uuid AND principal_id=$2")
+        .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).execute(&mut *owner).await?;
+    let mut tx = subject_transaction(&mut owner, &role, f.key.tenant).await?;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &binding, Some(renewed))
+            .await
+            .is_err()
+    );
+    admit_platform_subject_on(&mut tx, f.instance, &binding, None).await?;
+    tx.rollback().await?;
+    // A reachable broad role must invalidate startup even when it is NOINHERIT.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "GRANT identity_runtime TO {role} WITH INHERIT FALSE, SET TRUE"
+    )))
+    .execute(&mut *owner)
+    .await?;
+    let mut tx = subject_transaction(&mut owner, &role, f.key.tenant).await?;
+    assert!(
+        verify_platform_subject_admission(&mut tx, f.instance)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(&mut *owner)
+    .await?;
+    drop(owner);
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn platform_subject_admission_requires_current_external_identity() -> anyhow::Result<()> {
+    use federation_support::*;
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let oidc = service(&f, ScriptedOidc::new());
+    let provider = enabled(&f, &oidc).await?;
+    let login = issued(finish(&oidc, begin(&f, &oidc, &provider).await?, "native-user").await?);
+    let account = proof(&f.store, &f, &login).await?.account();
+    let identity: Uuid = sqlx::query_scalar(
+        "SELECT identity_id FROM identity_authority.external_identities WHERE principal_id=$1",
+    )
+    .bind(account.principal.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    let role = format!("native_reader_{}", Uuid::new_v4().simple());
+    let mut owner = f.owner.acquire().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} NOLOGIN")))
+        .execute(&mut *owner)
+        .await?;
+    grant_platform_subject_admission(&mut owner, &role).await?;
+    let binding = PlatformBinding {
+        instance: f.instance,
+        account,
+        binding_id: Uuid::new_v4(),
+        binding_epoch: 1,
+        source_id: Uuid::new_v4(),
+        source_version: 1,
+        external_identity: Some(ExternalBinding {
+            identity_id: identity,
+            provider: provider.id,
+            config_version: provider.version,
+            revocation_epoch: provider.revocation_epoch,
+        }),
+    };
+    let mut tx = subject_transaction(&mut owner, &role, account.tenant).await?;
+    verify_platform_subject_admission(&mut tx, f.instance).await?;
+    let version = admit_platform_subject_on(&mut tx, f.instance, &binding, None).await?;
+    let mut wrong = binding.clone();
+    wrong.account = f.key;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &wrong, None)
+            .await
+            .is_err()
+    );
+    wrong = binding.clone();
+    wrong.external_identity.as_mut().unwrap().config_version += 1;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &wrong, None)
+            .await
+            .is_err()
+    );
+    wrong = binding.clone();
+    wrong.external_identity.as_mut().unwrap().revocation_epoch += 1;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &wrong, None)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    use sqlx::Connection;
+    let mut tx = owner.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT set_config('role',$1,true),set_config('rss.tenant_id',$2,true)")
+        .bind(&role)
+        .bind(account.tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &binding, None)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    let actor = f.actor().await?;
+    let mut tx = subject_transaction(&mut owner, &role, account.tenant).await?;
+    admit_platform_subject_on(&mut tx, f.instance, &binding, Some(version)).await?;
+    let mut revoke = Box::pin(
+        f.store
+            .set_account_membership(actor, account, false, deadline()),
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut revoke)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    revoke.await?;
+    let mut tx = subject_transaction(&mut owner, &role, account.tenant).await?;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &binding, Some(version))
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    f.store
+        .set_account_membership(f.actor().await?, account, true, deadline())
+        .await?;
+    oidc.enable_provider(
+        f.actor().await?,
+        provider.id,
+        provider.version,
+        false,
+        deadline(),
+    )
+    .await?;
+    let mut tx = subject_transaction(&mut owner, &role, account.tenant).await?;
+    assert!(
+        admit_platform_subject_on(&mut tx, f.instance, &binding, None)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(&mut *owner)
+    .await?;
+    drop(owner);
+    f.close().await;
+    Ok(())
+}

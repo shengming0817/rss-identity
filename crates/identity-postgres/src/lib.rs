@@ -61,8 +61,9 @@ use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::{DeliveryBudget, OperationDeadline};
 use rss_transactional_messaging_postgres::PgRuntime;
 pub use schema::{
-    MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_SIGNATURE_SQL, SCHEMA_VERSION, grant_profile,
-    grant_profile_source_admission, install, verify_profile, verify_profile_source_admission,
+    MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_SIGNATURE_SQL, SCHEMA_VERSION,
+    grant_platform_subject_admission, grant_profile, grant_profile_source_admission, install,
+    verify_platform_subject_admission, verify_profile, verify_profile_source_admission,
 };
 pub use session_reference::{RevalidatedSession, SessionReference};
 pub use sessions::{
