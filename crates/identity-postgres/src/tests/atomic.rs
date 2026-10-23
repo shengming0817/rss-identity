@@ -433,27 +433,75 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     f.reset_attempts().await?;
-    let mut jobs = Vec::new();
-    for _ in 0..12 {
-        let s = f.store.clone();
-        let t = f.key.tenant;
-        jobs.push(tokio::spawn(async move {
-            s.verify_password(t, login("unknown"), password(), source(), deadline())
-                .await
-        }));
+    // Successful verification never consumes the account failure allowance.
+    for _ in 0..7 {
+        f.login().await?;
     }
-    let mut limited = 0;
-    for j in jobs {
-        if matches!(j.await?, Err(AuthorityError::RateLimited)) {
-            limited += 1;
-        }
-    }
-    assert_eq!(limited, 7);
-    let count: i32 =
-        sqlx::query_scalar("SELECT count FROM identity_authority.attempts WHERE key='p:unknown'")
+    let failures: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity_authority.password_attempts")
             .fetch_one(&f.owner)
             .await?;
-    assert_eq!(count, 5);
+    assert_eq!(failures, 0);
+    let mut first_window = None;
+    for _ in 0..5 {
+        assert!(matches!(
+            f.store
+                .verify_password(
+                    f.key.tenant,
+                    login("unknown"),
+                    password(),
+                    source(),
+                    deadline()
+                )
+                .await,
+            Err(AuthorityError::Rejected)
+        ));
+        let until:f64=sqlx::query_scalar("SELECT extract(epoch FROM window_until)::float8 FROM identity_authority.password_attempts").fetch_one(&f.owner).await?;
+        assert_eq!(
+            *first_window.get_or_insert(until),
+            until,
+            "later failures cannot extend the window"
+        );
+    }
+    let before:(i32,f64)=sqlx::query_as("SELECT failures,extract(epoch FROM window_until)::float8 FROM identity_authority.password_attempts").fetch_one(&f.owner).await?;
+    assert_eq!(before.0, 5);
+    let denied = f
+        .store
+        .verify_password(
+            f.key.tenant,
+            login("unknown"),
+            password(),
+            AttemptSource::parse("another-source")?,
+            deadline(),
+        )
+        .await;
+    assert!(
+        matches!(denied,Err(AuthorityError::RateLimited {retry_after_seconds}) if retry_after_seconds.get()<=600 && retry_after_seconds.get()>590)
+    );
+    let after: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM window_until)::float8 FROM identity_authority.password_attempts",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(before.1, after, "rejection cannot extend a fixed window");
+    let tenant_b = TenantId::parse(B)?;
+    let other_key = AccountKey {
+        tenant: tenant_b,
+        principal: PrincipalId::generate(),
+    };
+    f.maintenance
+        .initialize(other_key, login("unknown"), password(), deadline())
+        .await?;
+    f.store
+        .login_local(
+            tenant_b,
+            login("unknown"),
+            password(),
+            source(),
+            None,
+            deadline(),
+        )
+        .await?;
     f.reset_attempts().await?;
     sqlx::query("INSERT INTO identity_authority.attempts SELECT $1::uuid,'full:'||i,1,clock_timestamp()+interval '1 hour' FROM generate_series(1,10000) i").bind(A).execute(&f.owner).await?;
     assert!(matches!(
@@ -466,7 +514,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
                 deadline()
             )
             .await,
-        Err(AuthorityError::RateLimited)
+        Err(AuthorityError::Busy)
     ));
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.attempts")
         .fetch_one(&f.owner)
@@ -806,7 +854,7 @@ async fn source_budgets_are_shared() -> anyhow::Result<()> {
     }
     let mut limited = 0;
     for t in tasks {
-        if matches!(t.await?, Err(AuthorityError::RateLimited)) {
+        if matches!(t.await?, Err(AuthorityError::RateLimited { .. })) {
             limited += 1;
         }
     }
@@ -1328,7 +1376,7 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
             StorageMismatch::SchemaVersion
         ))
     ));
-    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=15; ALTER TABLE identity_authority.schema_version ADD CHECK(version=15)").execute(&f.owner).await?;
+    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=16; ALTER TABLE identity_authority.schema_version ADD CHECK(version=16)").execute(&f.owner).await?;
     assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
     for (remove, restore, expected) in [
         (
@@ -1508,6 +1556,229 @@ async fn maintenance_runbook_respects_forced_rls() -> anyhow::Result<()> {
     .fetch_one(&f.owner)
     .await?;
     assert_eq!(untouched, 1);
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn password_failures_reset_and_claims_are_fenced() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    f.reset_attempts().await?;
+    let other_runtime = f.additional_runtime().await?;
+    let other = Authority::connect_runtime(
+        other_runtime.clone(),
+        std::sync::Arc::new(PasswordKdf::new()),
+        f.config(),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
+    // Different Authority instances share one in-flight claim, but not a tenant-wide KDF lock.
+    let claim = f
+        .store
+        .claim_password(f.key.tenant, &login("admin"), &source(), deadline())
+        .await?;
+    assert!(matches!(
+        other
+            .claim_password(f.key.tenant, &login("admin"), &source(), deadline())
+            .await,
+        Err(AuthorityError::Busy)
+    ));
+    let independent = other
+        .claim_password(f.key.tenant, &login("unknown"), &source(), deadline())
+        .await?;
+    assert_eq!(
+        other
+            .settle_password(independent, Err(AuthorityError::Rejected), deadline())
+            .await
+            .err(),
+        Some(AuthorityError::Rejected)
+    );
+    // Expiry/replacement fences late completion: the old owner cannot clear the new claim.
+    sqlx::query("UPDATE identity_authority.password_attempts SET claim_until=clock_timestamp()-interval '1 second' WHERE claim_token IS NOT NULL").execute(&f.owner).await?;
+    let replacement = other
+        .claim_password(f.key.tenant, &login("admin"), &source(), deadline())
+        .await?;
+    assert_eq!(
+        f.store
+            .settle_password(claim, Err(AuthorityError::Rejected), deadline())
+            .await
+            .err(),
+        Some(AuthorityError::Rejected)
+    );
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.password_attempts WHERE claim_token IS NOT NULL",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(pending, 1);
+    // Infrastructure failures release ownership without recording a password rejection.
+    assert_eq!(
+        other
+            .settle_password(replacement, Err(AuthorityError::Busy), deadline())
+            .await
+            .err(),
+        Some(AuthorityError::Busy)
+    );
+    for _ in 0..4 {
+        assert_eq!(
+            f.store
+                .verify_password(
+                    f.key.tenant,
+                    login("admin"),
+                    Password::new("incorrect password value".into())?,
+                    source(),
+                    deadline()
+                )
+                .await
+                .err(),
+            Some(AuthorityError::Rejected)
+        );
+    }
+    f.login().await?;
+    let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.password_attempts WHERE login_digest=sha256(convert_to('admin','UTF8'))").fetch_one(&f.owner).await?;
+    assert_eq!(count, 0, "success clears earlier failures");
+    for _ in 0..5 {
+        assert_eq!(
+            other
+                .verify_password(
+                    f.key.tenant,
+                    login("admin"),
+                    Password::new("incorrect password value".into())?,
+                    source(),
+                    deadline()
+                )
+                .await
+                .err(),
+            Some(AuthorityError::Rejected)
+        );
+    }
+    // Both source and account blocking use the latest active deadline, with ceiling rounding.
+    sqlx::raw_sql("UPDATE identity_authority.password_attempts SET window_until=clock_timestamp()+interval '1.5 seconds' WHERE login_digest=sha256(convert_to('admin','UTF8')); UPDATE identity_authority.attempts SET count=30,expires_at=clock_timestamp()+interval '2.5 seconds' WHERE key='s:local-test'").execute(&f.owner).await?;
+    assert!(
+        matches!(f.store.verify_password(f.key.tenant,login("admin"),password(),source(),deadline()).await,Err(AuthorityError::RateLimited {retry_after_seconds}) if retry_after_seconds.get()==3)
+    );
+    sqlx::raw_sql("UPDATE identity_authority.password_attempts SET window_until=clock_timestamp()-interval '1 second'; UPDATE identity_authority.attempts SET expires_at=clock_timestamp()-interval '1 second'").execute(&f.owner).await?;
+    f.login().await?;
+    // Controlled recovery invalidates in-flight work and clears the failed-password window.
+    let claim = f
+        .store
+        .claim_password(f.key.tenant, &login("admin"), &source(), deadline())
+        .await?;
+    f.maintenance
+        .recover_local_password(f.key, password(), deadline())
+        .await?;
+    assert_eq!(
+        f.store
+            .settle_password(claim, Err(AuthorityError::Rejected), deadline())
+            .await
+            .err(),
+        Some(AuthorityError::Rejected)
+    );
+    f.login().await?;
+    other_runtime.close().await;
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn password_claim_cancellation_and_unknown_settlement() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    f.reset_attempts().await?;
+    // Force cancellation after durable claim admission, before credential lookup finishes.
+    let mut lock = f.owner.acquire().await?;
+    sqlx::raw_sql("BEGIN; LOCK identity_authority.local_credentials IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await?;
+    let store = f.store.clone();
+    let tenant = f.key.tenant;
+    let task = tokio::spawn(async move {
+        store
+            .verify_password(tenant, login("admin"), password(), source(), deadline())
+            .await
+    });
+    let observed=tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.password_attempts WHERE claim_token IS NOT NULL)").fetch_one(&f.owner).await?;
+            if pending {return Ok::<_,sqlx::Error>(());}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await;
+    task.abort();
+    let cancelled = task.await;
+    sqlx::raw_sql("ROLLBACK").execute(&mut *lock).await?;
+    drop(lock);
+    observed??;
+    assert!(cancelled.unwrap_err().is_cancelled());
+    assert!(matches!(
+        f.store
+            .claim_password(tenant, &login("admin"), &source(), deadline())
+            .await,
+        Err(AuthorityError::Busy)
+    ));
+    let failures: i32 =
+        sqlx::query_scalar("SELECT failures FROM identity_authority.password_attempts")
+            .fetch_one(&f.owner)
+            .await?;
+    assert_eq!(
+        failures, 0,
+        "cancellation does not invent a password rejection"
+    );
+    sqlx::query("UPDATE identity_authority.password_attempts SET claim_until=clock_timestamp()-interval '1 second'").execute(&f.owner).await?;
+    f.login().await?;
+    // An uncertain admission cannot produce a usable claim or an authentication result.
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    assert!(matches!(
+        f.store
+            .verify_password(tenant, login("admin"), password(), source(), deadline())
+            .await,
+        Err(AuthorityError::CommitUnknown(_))
+    ));
+    assert!(matches!(
+        f.store
+            .claim_password(tenant, &login("admin"), &source(), deadline())
+            .await,
+        Err(AuthorityError::Busy)
+    ));
+    sqlx::query("UPDATE identity_authority.password_attempts SET claim_until=clock_timestamp()-interval '1 second'").execute(&f.owner).await?;
+    let claim = f
+        .store
+        .claim_password(tenant, &login("admin"), &source(), deadline())
+        .await?;
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    assert!(matches!(
+        f.store
+            .settle_password(claim, Err(AuthorityError::Rejected), deadline())
+            .await,
+        Err(AuthorityError::CommitUnknown(_))
+    ));
+    let failures: i32 =
+        sqlx::query_scalar("SELECT failures FROM identity_authority.password_attempts")
+            .fetch_one(&f.owner)
+            .await?;
+    assert_eq!(
+        failures, 1,
+        "an acknowledged but uncertain settlement is not replayed"
+    );
+    let candidate = f.candidate().await?;
+    let claim = f
+        .store
+        .claim_password(tenant, &login("admin"), &source(), deadline())
+        .await?;
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    assert!(matches!(
+        f.store
+            .settle_password(claim, Ok(candidate), deadline())
+            .await,
+        Err(AuthorityError::CommitUnknown(_))
+    ));
     f.close().await;
     Ok(())
 }

@@ -65,7 +65,8 @@ impl Authority {
                         .bind(next.epoch())
                         .execute(&mut *c)
                         .await?;
-                        sqlx::query(concat!("UPDATE identity_authority.local_credentials SET password_hash=$3 WHERE tenant_id","=$1::uuid AND principal_id=$2::uuid")).bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).bind(hash.as_str()).execute(c).await?;
+                        sqlx::query(concat!("UPDATE identity_authority.local_credentials SET password_hash=$3 WHERE tenant_id","=$1::uuid AND principal_id=$2::uuid")).bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).bind(hash.as_str()).execute(&mut *c).await?;
+                        crate::password_attempts::clear(c, key).await?;
                         Ok((next, SecurityEvent::account(action, next, None)))
                     })
                 })

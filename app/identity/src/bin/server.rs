@@ -31,7 +31,9 @@ fn main() {
                         "sourceLimit": rss_identity_postgres::ATTEMPT_SOURCE_LIMIT,
                         "sourceSeconds": rss_identity_postgres::ATTEMPT_SOURCE_SECONDS,
                         "scopeLimit": rss_identity_postgres::ATTEMPT_SCOPE_LIMIT,
-                        "scopeSeconds": rss_identity_postgres::ATTEMPT_SCOPE_SECONDS
+                        "scopeSeconds": rss_identity_postgres::ATTEMPT_SCOPE_SECONDS,
+                        "passwordFailureLimit": rss_identity_postgres::PASSWORD_FAILURE_LIMIT,
+                        "passwordFailureSeconds": rss_identity_postgres::PASSWORD_FAILURE_SECONDS
                     },
                     "kdfConcurrency": rss_identity_core::account::PasswordKdf::MAX_CONCURRENCY,
                     "mfaMaxAgeSeconds": rss_identity_app::context::MFA_MAX_AGE_SECONDS

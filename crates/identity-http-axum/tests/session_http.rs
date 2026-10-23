@@ -1243,10 +1243,11 @@ async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Re
             .await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
-    assert_eq!(
-        app.clone().oneshot(bearer_login()).await?.status(),
-        StatusCode::TOO_MANY_REQUESTS
-    );
+    let limited = app.clone().oneshot(bearer_login()).await?;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry: u32 = limited.headers()["retry-after"].to_str()?.parse()?;
+    assert!((590..=600).contains(&retry));
+    assert_eq!(body(limited).await?, json!({"code":"rate_limited"}));
     f.reset_attempts().await?;
     sqlx::raw_sql("CREATE FUNCTION public.reject_programmatic_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private-event-marker'; END $$; CREATE TRIGGER reject_programmatic_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_programmatic_event();").execute(&f.owner).await?;
     let response = app.clone().oneshot(bearer_login()).await?;
@@ -1259,6 +1260,26 @@ async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Re
         .fetch_one(&f.owner)
         .await?;
     assert_eq!(count, 0);
+    sqlx::raw_sql("DROP TRIGGER reject_programmatic_event ON rss_transactional_messaging.outbox; DROP FUNCTION public.reject_programmatic_event()").execute(&f.owner).await?;
+    for i in 0..7 {
+        let path = if i % 2 == 0 { "login" } else { "bearer/login" };
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                path,
+                None,
+                None,
+                json!({"login":"admin","password":PASSWORD}),
+            ))
+            .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "correct passwords share no failure quota"
+        );
+        assert!(!response.headers().contains_key("retry-after"));
+    }
     f.close().await;
     Ok(())
 }

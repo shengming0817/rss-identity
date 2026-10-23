@@ -1,5 +1,7 @@
 //! Embeddable account/session services over a host-owned PostgreSQL runtime.
 mod attempts;
+mod password_attempts;
+pub use password_attempts::{PASSWORD_FAILURE_LIMIT, PASSWORD_FAILURE_SECONDS};
 pub mod audit;
 mod auth_facts;
 mod credentials;

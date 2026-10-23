@@ -1,7 +1,7 @@
--- Fresh schema v15 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v16 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=15));
-INSERT INTO identity_authority.schema_version VALUES(15);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=16));
+INSERT INTO identity_authority.schema_version VALUES(16);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000')
@@ -39,6 +39,18 @@ CREATE TABLE identity_authority.attempts (
  PRIMARY KEY(tenant_id,key)
 );
 CREATE INDEX attempts_expiry ON identity_authority.attempts(tenant_id,expires_at);
+CREATE TABLE identity_authority.password_attempts (
+ tenant_id uuid NOT NULL,
+ login_digest bytea NOT NULL CHECK(octet_length(login_digest)=32),
+ failures integer NOT NULL DEFAULT 0 CHECK(failures BETWEEN 0 AND 5),
+ window_until timestamptz,
+ claim_token uuid CHECK(claim_token <> '00000000-0000-0000-0000-000000000000'),
+ claim_until timestamptz,
+ PRIMARY KEY(tenant_id,login_digest),
+ CHECK((failures=0) = (window_until IS NULL)),
+ CHECK((claim_token IS NULL) = (claim_until IS NULL))
+);
+CREATE INDEX password_attempts_expiry ON identity_authority.password_attempts(tenant_id,window_until,claim_until);
 CREATE TABLE identity_authority.providers (
  tenant_id uuid NOT NULL REFERENCES identity_authority.guard,
  provider_id uuid NOT NULL CHECK(provider_id <> '00000000-0000-0000-0000-000000000000'),
@@ -174,7 +186,7 @@ CREATE TABLE identity_authority.profile_operations (
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
 );
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','guard','local_credentials','accounts','memberships','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
+ FOREACH t IN ARRAY ARRAY['platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','guard','local_credentials','accounts','memberships','password_attempts','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
  EXECUTE format('ALTER TABLE identity_authority.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE identity_authority.%I FORCE ROW LEVEL SECURITY',t);
  EXECUTE format('CREATE POLICY tenant ON identity_authority.%I USING (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',t);

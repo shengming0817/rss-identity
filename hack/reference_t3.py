@@ -315,6 +315,7 @@ TABLES = {
     "externalIdentities",
     "sessions",
     "attempts",
+    "passwordAttempts",
     "linkIntents",
     "oidcTransactions",
     "outbox",
@@ -827,6 +828,7 @@ class Run:
                 ("externalIdentities", "external_identities", "tenant_id,identity_id"),
                 ("sessions", "sessions", "tenant_id,session_id"),
                 ("attempts", "attempts", "tenant_id,key"),
+                ("passwordAttempts", "password_attempts", "tenant_id,login_digest"),
                 ("linkIntents", "link_intents", "tenant_id,intent_id"),
                 ("oidcTransactions", "oidc_transactions", "tenant_id,attempt_id"),
             ]
@@ -1112,9 +1114,9 @@ class Run:
     def events(self):
         self.browser("pg-ready")
         budget_query = (
-            "SELECT coalesce(max(count),0) FROM identity_authority.attempts WHERE tenant_id='"
+            "SELECT coalesce(max(failures),0) FROM identity_authority.password_attempts WHERE tenant_id='"
             + TENANTS[0]
-            + "' AND key='p:linked' AND expires_at>clock_timestamp();"
+            + "' AND login_digest=sha256(convert_to('linked','UTF8')) AND window_until>clock_timestamp();"
         )
         budget_before = int(self.sql(budget_query))
         before = self.snapshot()

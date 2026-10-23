@@ -60,7 +60,9 @@ pub enum AuthorityError {
     #[error("transaction rolled back: {0}")]
     RuleRejected(rss_identity_core::account::AccountRuleError),
     #[error("attempt budget exhausted")]
-    RateLimited,
+    RateLimited {
+        retry_after_seconds: std::num::NonZeroU32,
+    },
     #[error("password computation capacity exhausted")]
     Busy,
     #[error("authority unavailable")]
