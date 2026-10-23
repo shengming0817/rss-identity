@@ -1682,3 +1682,103 @@ async fn password_failures_reset_and_claims_are_fenced() -> anyhow::Result<()> {
     f.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn password_claim_cancellation_and_unknown_settlement() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    f.reset_attempts().await?;
+    // Force cancellation after durable claim admission, before credential lookup finishes.
+    let mut lock = f.owner.acquire().await?;
+    sqlx::raw_sql("BEGIN; LOCK identity_authority.local_credentials IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await?;
+    let store = f.store.clone();
+    let tenant = f.key.tenant;
+    let task = tokio::spawn(async move {
+        store
+            .verify_password(tenant, login("admin"), password(), source(), deadline())
+            .await
+    });
+    let observed=tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.password_attempts WHERE claim_token IS NOT NULL)").fetch_one(&f.owner).await?;
+            if pending {return Ok::<_,sqlx::Error>(());}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await;
+    task.abort();
+    let cancelled = task.await;
+    sqlx::raw_sql("ROLLBACK").execute(&mut *lock).await?;
+    drop(lock);
+    observed??;
+    assert!(cancelled.unwrap_err().is_cancelled());
+    assert!(matches!(
+        f.store
+            .claim_password(tenant, &login("admin"), &source(), deadline())
+            .await,
+        Err(AuthorityError::Busy)
+    ));
+    let failures: i32 =
+        sqlx::query_scalar("SELECT failures FROM identity_authority.password_attempts")
+            .fetch_one(&f.owner)
+            .await?;
+    assert_eq!(
+        failures, 0,
+        "cancellation does not invent a password rejection"
+    );
+    sqlx::query("UPDATE identity_authority.password_attempts SET claim_until=clock_timestamp()-interval '1 second'").execute(&f.owner).await?;
+    f.login().await?;
+    // An uncertain admission cannot produce a usable claim or an authentication result.
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    assert!(matches!(
+        f.store
+            .verify_password(tenant, login("admin"), password(), source(), deadline())
+            .await,
+        Err(AuthorityError::CommitUnknown(_))
+    ));
+    assert!(matches!(
+        f.store
+            .claim_password(tenant, &login("admin"), &source(), deadline())
+            .await,
+        Err(AuthorityError::Busy)
+    ));
+    sqlx::query("UPDATE identity_authority.password_attempts SET claim_until=clock_timestamp()-interval '1 second'").execute(&f.owner).await?;
+    let claim = f
+        .store
+        .claim_password(tenant, &login("admin"), &source(), deadline())
+        .await?;
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    assert!(matches!(
+        f.store
+            .settle_password(claim, Err(AuthorityError::Rejected), deadline())
+            .await,
+        Err(AuthorityError::CommitUnknown(_))
+    ));
+    let failures: i32 =
+        sqlx::query_scalar("SELECT failures FROM identity_authority.password_attempts")
+            .fetch_one(&f.owner)
+            .await?;
+    assert_eq!(
+        failures, 1,
+        "an acknowledged but uncertain settlement is not replayed"
+    );
+    let candidate = f.candidate().await?;
+    let claim = f
+        .store
+        .claim_password(tenant, &login("admin"), &source(), deadline())
+        .await?;
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    assert!(matches!(
+        f.store
+            .settle_password(claim, Ok(candidate), deadline())
+            .await,
+        Err(AuthorityError::CommitUnknown(_))
+    ));
+    f.close().await;
+    Ok(())
+}
