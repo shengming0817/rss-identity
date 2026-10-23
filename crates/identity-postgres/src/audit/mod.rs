@@ -1,5 +1,6 @@
 //! Identity-owned audit projection. Hosts supply same-database worker resources and own their lifetime.
 //! ref: sqlx sqlx-core/src/transaction.rs@v0.9.0 (only the message owner settles).
+mod diagnostics;
 mod error;
 mod profile;
 pub use error::AuditDeliveryError;
@@ -109,23 +110,22 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
                 | rss_audit_postgres::Error::ScopeMismatch
                 | rss_audit_postgres::Error::Protocol(_),
             )) => Ok(TerminalDisposition::Rejected(RejectKind::Invariant)),
-            Err(ProjectionError::Audit(e)) => {
-                if matches!(
-                    e,
-                    rss_audit_postgres::Error::Admission(_)
-                        | rss_audit_postgres::Error::StorageContract
-                        | rss_audit_postgres::Error::Storage {
-                            kind: rss_audit_postgres::StorageFailure::Permanent,
-                            ..
-                        }
-                ) {
-                    let _ = self.fatal.set(AuditDeliveryError::Permanent);
-                }
-                Err(PgConsumerEffectFailure::infrastructure(e))
-            }
+            Err(ProjectionError::Audit(e)) => Err(infrastructure_failure(&self.fatal, e)),
         }
     }
 }
+fn infrastructure_failure(
+    fatal: &OnceLock<AuditDeliveryError>,
+    error: rss_audit_postgres::Error,
+) -> PgConsumerEffectFailure {
+    let error = rss_transactional_messaging_postgres::PgError::from(error);
+    let class = AuditDeliveryError::messaging(error.kind());
+    if !class.is_retryable() {
+        let _ = fatal.set(class);
+    }
+    PgConsumerEffectFailure::infrastructure(error)
+}
+
 struct Validator {
     tenants: Vec<TenantId>,
 }
@@ -284,12 +284,17 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
     ) -> Result<(), AuditDeliveryError> {
         use rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus as Status;
         let (outcome, identity) = attempt.into_parts();
+        diagnostics::record(
+            diagnostics::Event::Transaction(outcome.status()),
+            std::io::stderr().lock(),
+        );
         if matches!(
             outcome.status(),
             Status::RollbackFailed | Status::CommitUnknown
         ) {
             *pending = Some(identity);
         }
+        self.check_fatal()?;
         let progress = outcome.fold(
             |committed| {
                 self.committed(committed.into_parts().1.disposition())?;
@@ -324,12 +329,17 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
             .map_err(|_| AuditDeliveryError::Transient)?;
         let mut report = AuditProjectionReport::default();
         if let Some(identity) = pending.as_ref() {
-            if let Some(receipt) = self
+            let result = self
                 .projection
                 .resolve(identity, OperationDeadline::from_cutoff(cutoff, &Timer))
-                .await
-                .map_err(AuditDeliveryError::pg)?
-            {
+                .await;
+            let event = match &result {
+                Ok(Some(_)) => diagnostics::Event::ResolutionConfirmed,
+                Ok(None) => diagnostics::Event::ResolutionUnresolved,
+                Err(_) => diagnostics::Event::ResolutionFailed,
+            };
+            diagnostics::record(event, std::io::stderr().lock());
+            if let Some(receipt) = result.map_err(AuditDeliveryError::pg)? {
                 self.committed(receipt.disposition())?;
                 report.projected += 1;
             }
@@ -350,8 +360,13 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
                     OperationDeadline::from_cutoff(cutoff, &Timer),
                 )
                 .await;
-            self.check_fatal()?;
-            match result.map_err(AuditDeliveryError::pg)? {
+            let result = result.map_err(|error| {
+                self.fatal
+                    .get()
+                    .copied()
+                    .unwrap_or_else(|| AuditDeliveryError::pg(error))
+            })?;
+            match result {
                 PgProjectionOutcome::Empty => break,
                 PgProjectionOutcome::Attempt(attempt) => {
                     self.consume_attempt(*attempt, &mut pending, &mut report)?;

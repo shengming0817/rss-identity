@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RSS_FEATURES = {
     'rss-data-protection': {'default'}, 'rss-redact-derive': {'default'},
     'rss-transactional-messaging-recovery': set(),
-    'rss-audit-core': set(), 'rss-audit-postgres': {'default','messaging'},
+    'rss-audit-core': set(), 'rss-audit-postgres': {'default','messaging','ledger'},
     'rss-ledger': {'default'}, 'rss-ledger-postgres': {'messaging'},
     'rss-transactional-messaging-runtime': {'consumer','producer'},
     'rss-runtime': {'default'}, 'rss-axum': {'http1','managed-server'},
@@ -28,6 +28,7 @@ def require(condition, message):
 def check_features(actual, profile):
     expected = {name: set(features) for name, features in RSS_FEATURES.items()}
     if profile == 'production':
+        expected['rss-audit-postgres'].remove('ledger')
         expected['rss-transactional-messaging-postgres'] = {'recovery'}
         expected['rss-ledger'] = set()
         del expected['rss-ledger-postgres']

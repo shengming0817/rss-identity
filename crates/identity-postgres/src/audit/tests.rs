@@ -417,3 +417,25 @@ fn profile_events_project_only_source_and_changed_field_identifiers() {
         );
     }
 }
+
+#[test]
+fn wrapped_storage_errors_keep_the_owner_classification() {
+    use rss_transactional_messaging_postgres::{PgError, PgStorageContractFailure};
+    let fatal = OnceLock::new();
+    let wrapped = rss_audit_postgres::Error::Ledger(
+        PgError::IncompatibleStorageContract(PgStorageContractFailure::RuntimeAcl).into(),
+    );
+    let _ = infrastructure_failure(&fatal, wrapped);
+    assert_eq!(fatal.get(), Some(&AuditDeliveryError::Invariant));
+    let fatal = OnceLock::new();
+    let wrapped = rss_audit_postgres::Error::Messaging(PgError::from(sqlx::Error::PoolClosed));
+    let _ = infrastructure_failure(&fatal, wrapped);
+    assert_eq!(fatal.get(), Some(&AuditDeliveryError::Permanent));
+    let fatal = OnceLock::new();
+    let wrapped = rss_audit_postgres::Error::Ledger(sqlx::Error::PoolTimedOut.into());
+    let _ = infrastructure_failure(&fatal, wrapped);
+    assert!(
+        fatal.get().is_none(),
+        "transient dependency failure must remain recoverable"
+    );
+}

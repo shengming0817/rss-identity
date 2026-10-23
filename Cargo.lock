@@ -2225,6 +2225,7 @@ dependencies = [
  "futures",
  "rss-audit-core",
  "rss-contract",
+ "rss-ledger",
  "rss-ledger-postgres",
  "rss-redact",
  "rss-request-context",
