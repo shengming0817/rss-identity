@@ -35,13 +35,24 @@ impl Authority {
     ) -> Result<AuthenticationCandidate, AuthorityError> {
         self.require_runtime()?;
         let budget = Budget::new(deadline)?;
-        self.reserve(
-            tenant,
-            format!("p:{}", login.as_str()),
-            &source,
-            budget.remaining(),
-        )
-        .await?;
+        let claim = self
+            .claim_password(tenant, &login, &source, budget.remaining())
+            .await?;
+        let outcome = self
+            .check_password(tenant, login, password, budget.remaining())
+            .await;
+        self.settle_password(claim, outcome, budget.remaining())
+            .await
+    }
+
+    async fn check_password(
+        &self,
+        tenant: TenantId,
+        login: LoginKey,
+        password: Password,
+        deadline: OperationDeadline,
+    ) -> Result<AuthenticationCandidate, AuthorityError> {
+        let budget = Budget::new(deadline)?;
         let snapshot=self.read(tenant,budget.remaining(),move|tx|Box::pin(async move {
             crate::transaction::connection(tx,move|c|Box::pin(async move {
                 let id:Option<String>=sqlx::query_scalar(concat!("SELECT principal_id::text FROM identity_authority.local_credentials WHERE tenant","_id=$1::uuid AND login_key=$2")).bind(tenant.to_string()).bind(login.as_str()).fetch_optional(&mut *c).await?;
@@ -303,6 +314,7 @@ impl Authority {
             if let Some(hash) = hash {
                 sqlx::query("UPDATE identity_authority.local_credentials SET password_hash=$3 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
                     .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(hash.as_str()).execute(&mut *c).await?;
+                crate::password_attempts::clear(c, target).await?;
             }
             sqlx::query("UPDATE identity_authority.memberships SET active=$3,epoch=$4 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(next.member_active()).bind(next.membership_epoch()).execute(&mut *c).await?;

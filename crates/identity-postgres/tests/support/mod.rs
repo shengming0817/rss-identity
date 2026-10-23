@@ -287,7 +287,7 @@ impl Fixture {
             .await?)
     }
     pub async fn reset_attempts(&self) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM identity_authority.attempts")
+        sqlx::raw_sql("DELETE FROM identity_authority.attempts; DELETE FROM identity_authority.password_attempts")
             .execute(&self.owner)
             .await?;
         Ok(())

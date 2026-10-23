@@ -80,6 +80,15 @@ impl HttpError {
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let mut response = (self.0, Json(serde_json::json!({"code":self.1}))).into_response();
+        if let Some(HttpFailure::Authority(AuthorityError::RateLimited {
+            retry_after_seconds,
+        })) = self.2
+        {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                axum::http::HeaderValue::from(retry_after_seconds.get()),
+            );
+        }
         if let Some(class) = self.2 {
             response.extensions_mut().insert(class);
         }
@@ -120,7 +129,7 @@ impl From<AuthorityError> for HttpError {
                 _ => UNAUTH,
             },
             AuthorityError::Rejected | AuthorityError::RuleRejected(_) => UNAUTH,
-            AuthorityError::RateLimited => {
+            AuthorityError::RateLimited { .. } => {
                 Self(StatusCode::TOO_MANY_REQUESTS, "rate_limited", None)
             }
             _ => Self(
@@ -262,4 +271,33 @@ pub(crate) async fn request_boundary(
         header::HeaderValue::from_static("no-store"),
     );
     response
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+    #[tokio::test]
+    async fn login_and_management_preserve_the_same_retry_contract() {
+        let error = AuthorityError::RateLimited {
+            retry_after_seconds: std::num::NonZeroU32::new(600).unwrap(),
+        };
+        for response in [
+            HttpError::from(error).into_response(),
+            crate::management::Error::from(error).into_response(),
+        ] {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(response.headers()[header::RETRY_AFTER], "600");
+            assert_eq!(
+                response.extensions().get::<HttpFailure>(),
+                Some(&HttpFailure::Authority(error))
+            );
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"code":"rate_limited"})
+            );
+        }
+    }
 }

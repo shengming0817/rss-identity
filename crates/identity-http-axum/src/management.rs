@@ -60,7 +60,7 @@ impl From<AuthorityError> for Error {
             AuthorityError::Federation(FederationError::Conflict) => {
                 (StatusCode::CONFLICT, "identity_link_conflict")
             }
-            AuthorityError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            AuthorityError::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             _ => (StatusCode::SERVICE_UNAVAILABLE, "identity_unavailable"),
         };
         Self(HttpError(
