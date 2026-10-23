@@ -1639,3 +1639,131 @@ impl ManagementPolicy for SelfProfiles {
         })
     }
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let issued = f.login().await?;
+    let actor = proof(&f.store, &f, &issued).await?;
+    let reference = serde_json::to_value(actor.reference()?)?;
+    // The host can retain a locator without possessing a management-capable actor.
+    f.policy.revoke(f.key);
+    let (before, valid) = trusted_reference(&f.store, f.key.tenant, reference.clone()).await?;
+    assert!(valid);
+    let mut wrong = reference.clone();
+    wrong["principal"] = json!(Uuid::new_v4());
+    assert!(!trusted_reference(&f.store, f.key.tenant, wrong).await?.1);
+    assert!(
+        f.store
+            .with_session_references_read(f.key.tenant, deadline(), |mut read| Box::pin(
+                async move {
+                    read.query(
+                        "SELECT login FROM identity_personnel",
+                        Default::default(),
+                        1,
+                    )
+                    .await
+                    .map(|_| ())
+                }
+            ))
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql("CREATE FUNCTION public.reference_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.guard SET personnel_revision=personnel_revision+1 RETURNING personnel_revision'").execute(&f.owner).await?;
+    assert!(
+        f.store
+            .with_session_references_read(f.key.tenant, deadline(), |mut read| Box::pin(
+                async move {
+                    read.query("SELECT public.reference_write()", Default::default(), 1)
+                        .await
+                        .map(|_| ())
+                }
+            ))
+            .await
+            .is_err()
+    );
+    let other = rss_request_context::TenantId::parse(&Uuid::new_v4().to_string())?;
+    assert!(
+        f.store
+            .with_session_references_read(other, deadline(), |_| Box::pin(async { Ok(()) }))
+            .await
+            .is_err()
+    );
+    assert!(
+        f.store
+            .with_session_references_read(f.key.tenant, deadline(), |mut read| Box::pin(
+                async move {
+                    read.query(
+                        "SELECT n FROM generate_series(1,2) n",
+                        Default::default(),
+                        1,
+                    )
+                    .await
+                    .map(|_| ())
+                }
+            ))
+            .await
+            .is_err()
+    );
+    // Session-only reads do not take profile expiry into their relation lifetime.
+    f.policy.allow(f.key);
+    f.store
+        .update_local_profile(
+            f.actor().await?,
+            f.key,
+            ProfileChange {
+                operation_id: Uuid::new_v4(),
+                expected_revision: 0,
+                value: Some(local("Profile")),
+            },
+            deadline(),
+        )
+        .await?;
+    let _fresh_profile = f.login().await?;
+    let changed = sqlx::query("UPDATE identity_authority.profile_observations SET expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+1 WHERE tenant_id=$1::uuid")
+        .bind(f.key.tenant.to_string()).execute(&f.owner).await?;
+    assert!(changed.rows_affected() > 0);
+    f.store
+        .with_session_references_read(f.key.tenant, deadline(), |read| {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                read.revision().map(|_| ())
+            })
+        })
+        .await?;
+    sqlx::query("UPDATE identity_authority.sessions SET idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+1 WHERE tenant_id=$1::uuid AND session_id=$2")
+        .bind(f.key.tenant.to_string()).bind(issued.view().id.as_uuid()).execute(&f.owner).await?;
+    assert!(
+        f.store
+            .with_session_references_read(f.key.tenant, deadline(), |read| Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                read.revision().map(|_| ())
+            }))
+            .await
+            .is_err()
+    );
+    let (after, valid) = trusted_reference(&f.store, f.key.tenant, reference).await?;
+    assert!(!valid);
+    assert!(after.generation > before.generation);
+    f.close().await;
+    Ok(())
+}
+
+async fn trusted_reference(
+    store: &Authority,
+    tenant: rss_request_context::TenantId,
+    reference: serde_json::Value,
+) -> Result<(PersonnelRevision, bool), AuthorityError> {
+    store.with_session_references_read(tenant, deadline(), move |mut read| Box::pin(async move {
+            use sqlx::Arguments;
+            let revision = read.revision()?;
+            assert!(!revision.logins);
+            assert_eq!(revision.profiles, PersonnelProfileScope::None);
+            let mut args = sqlx::postgres::PgArguments::default();
+            args.add(reference).map_err(|_| AuthorityError::Configuration)?;
+            let rows = read.query("SELECT EXISTS(SELECT FROM identity_session_references s WHERE s.instance_id=($1->>'instance')::uuid AND s.tenant_id=($1->>'tenant')::uuid AND s.principal_id=($1->>'principal')::uuid AND s.session_id=($1->>'session')::uuid AND s.credential_kind=$1->>'credentialKind') AS valid", args, 1).await?;
+            Ok((revision, rows[0].get("valid")))
+    })).await
+}

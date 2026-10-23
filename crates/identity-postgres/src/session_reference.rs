@@ -152,3 +152,72 @@ impl Authority {
         .await
     }
 }
+
+impl Authority {
+    /// Join host-owned durable session references before filtering, counting and paginating.
+    /// This trusted embedded-host seam accepts no authentication credential or management actor.
+    /// The host must read reference coordinates from its trusted storage and apply its own resource
+    /// authorization in the same SELECT. Never expose the SQL or accept HTTP-provided locators as identity.
+    /// Only `identity_session_references` is installed: no login/profile relation or authentication proof.
+    /// Platform rows additionally require the host's current binding/credential qualification.
+    pub async fn with_session_references_read<T: Send + 'static, F>(
+        &self,
+        tenant: TenantId,
+        deadline: OperationDeadline,
+        query: F,
+    ) -> Result<T, AuthorityError>
+    where
+        F: for<'a> FnOnce(
+                crate::PersonnelRead<'a>,
+            ) -> futures::future::BoxFuture<'a, Result<T, AuthorityError>>
+            + Send
+            + 'static,
+    {
+        self.require_runtime()?;
+        let budget = Budget::new(deadline)?;
+        let instance = self.instance;
+        let platform = self
+            .session_checks
+            .platform
+            .as_ref()
+            .map(|v| v.audience().to_owned());
+        let failure = std::sync::Arc::new(std::sync::OnceLock::new());
+        let capture = failure.clone();
+        let result = self
+            .read_sql(tenant, budget.remaining(), move |c| {
+                Box::pin(async move {
+                    lock_guard(c, tenant).await?;
+                    let window =
+                        crate::personnel::read_window(c, tenant, None, budget.0, None).await?;
+                    let expires = window.expires;
+                    let relation = crate::personnel::session_relation(
+                        instance,
+                        tenant,
+                        window.now,
+                        platform.as_deref(),
+                    );
+                    sqlx::query("SET TRANSACTION READ ONLY")
+                        .execute(&mut *c)
+                        .await?;
+                    let result = query(crate::PersonnelRead::session_references(
+                        c, relation, window,
+                    ))
+                    .await;
+                    if Instant::now() >= expires {
+                        return Err(reject().into());
+                    }
+                    result.map_err(|error| {
+                        let _ = capture.set(error);
+                        crate::transaction::MutationError::from(reject())
+                    })
+                })
+            })
+            .await;
+        match result {
+            Err(AuthorityError::Rejected) => {
+                Err(failure.get().copied().unwrap_or(AuthorityError::Rejected))
+            }
+            result => result,
+        }
+    }
+}
