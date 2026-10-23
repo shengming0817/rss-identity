@@ -7,6 +7,8 @@ publish.workspace = true
 [features]
 test-support = []
 [dependencies]
+rss-transactional-messaging-recovery.workspace = true
+rss-data-protection.workspace = true
 rss-audit-core.workspace = true
 rss-audit-postgres.workspace = true
 rss-transactional-messaging-runtime.workspace = true
@@ -22,12 +24,13 @@ tokio.workspace = true
 sqlx = { workspace = true, features = ["uuid", "json"] }
 rss-request-context.workspace = true
 rss-transactional-messaging.workspace = true
-rss-transactional-messaging-postgres.workspace = true
+rss-transactional-messaging-postgres = { workspace = true, features = ["recovery"] }
 futures = "0.3"
 zeroize.workspace = true
 url = "2.5"
 thiserror.workspace = true
 [dev-dependencies]
+rss-audit-postgres = { workspace = true, features = ["ledger"] }
 rss-identity-postgres = { path = ".", features = ["test-support"] }
 tokio-util.workspace = true
 syn = { version = "2", features = ["full", "visit"] }

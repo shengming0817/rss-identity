@@ -9,14 +9,16 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 
 RSS_FEATURES = {
-    'rss-audit-core': set(), 'rss-audit-postgres': {'default','messaging'},
+    'rss-data-protection': {'default'}, 'rss-redact-derive': {'default'},
+    'rss-transactional-messaging-recovery': set(),
+    'rss-audit-core': set(), 'rss-audit-postgres': {'default','messaging','ledger'},
     'rss-ledger': {'default'}, 'rss-ledger-postgres': {'messaging'},
     'rss-transactional-messaging-runtime': {'consumer','producer'},
     'rss-runtime': {'default'}, 'rss-axum': {'http1','managed-server'},
     'rss-contract': {'default'}, 'rss-request-context': {'default'},
-    'rss-redact': {'default'}, 'rss-diag-context': {'default'},
+    'rss-redact': {'default','derive'}, 'rss-diag-context': {'default'},
     'rss-transactional-messaging': {'consumer', 'default', 'producer'},
-    'rss-transactional-messaging-postgres': {'default', 'integration', 'test-support'},
+    'rss-transactional-messaging-postgres': {'default', 'integration', 'test-support', 'recovery'},
 }
 
 def require(condition, message):
@@ -26,7 +28,8 @@ def require(condition, message):
 def check_features(actual, profile):
     expected = {name: set(features) for name, features in RSS_FEATURES.items()}
     if profile == 'production':
-        expected['rss-transactional-messaging-postgres'] = set()
+        expected['rss-audit-postgres'].remove('ledger')
+        expected['rss-transactional-messaging-postgres'] = {'recovery'}
         expected['rss-ledger'] = set()
         del expected['rss-ledger-postgres']
     require(actual == expected, f'{profile} RSS feature closure drift: {actual}')

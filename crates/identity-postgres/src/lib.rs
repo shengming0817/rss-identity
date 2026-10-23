@@ -17,8 +17,10 @@ mod groups;
 mod maintenance;
 mod management;
 mod operations;
+mod personnel;
 pub mod platform;
 mod profiles;
+pub use personnel::{PersonnelProfileScope, PersonnelRead, PersonnelRevision};
 pub use profiles::{
     LocalProfileView, ProfileChange, ProfileReceipt, ProfileSource, ProfileSourcePage,
     ProfileSourceView, ProfileStatus, ProfileView, TrustedProfile,

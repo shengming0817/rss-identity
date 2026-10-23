@@ -102,12 +102,24 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             "ALTER ROLE host_audit_owner NOREPLICATION",
         ),
         (
+            "REVOKE INSERT ON rss_transactional_messaging.consumer_dead_letter FROM host_audit",
+            "GRANT INSERT ON rss_transactional_messaging.consumer_dead_letter TO host_audit",
+        ),
+        (
+            "GRANT UPDATE ON rss_transactional_messaging.consumer_dead_letter TO host_audit",
+            "REVOKE UPDATE ON rss_transactional_messaging.consumer_dead_letter FROM host_audit",
+        ),
+        (
+            "UPDATE rss_transactional_messaging.consumer_scope SET domain='other' WHERE login_role='host_audit'",
+            "UPDATE rss_transactional_messaging.consumer_scope SET domain='identity.security' WHERE login_role='host_audit'",
+        ),
+        (
             "REVOKE EXECUTE ON FUNCTION rss_audit.reserve(uuid) FROM host_audit",
             "GRANT EXECUTE ON FUNCTION rss_audit.reserve(uuid) TO host_audit",
         ),
         (
             "DELETE FROM identity_authority.schema_version",
-            "INSERT INTO identity_authority.schema_version VALUES(14)",
+            "INSERT INTO identity_authority.schema_version VALUES(15)",
         ),
         (
             "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2",
@@ -168,7 +180,15 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     }
     value["database"]["user"] = json!("host_runtime");
     value["database"]["passwordFile"] = json!(root.join("runtime"));
-    value["audit"] = json!({"mode":"enabled","user":"host_audit","passwordFile":root.join("runtime"),"pollMillis":100,"batch":8});
+    std::fs::write(root.join("audit-key"), "07".repeat(32))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            root.join("audit-key"),
+            std::fs::Permissions::from_mode(0o600),
+        )?;
+    }
+    value["audit"] = json!({"recoveryKeys":{"activeKeyId":"audit","keys":[{"keyId":"audit","path":root.join("audit-key")}]},"mode":"enabled","user":"host_audit","passwordFile":root.join("runtime"),"pollMillis":100,"batch":8});
     value["budgets"] = json!({"requestSeconds":1,"drainSeconds":60,"resourceSeconds":30});
     value["publicGateway"] = json!("127.0.0.1");
     let runtime_config = || serde_json::from_value::<RuntimeConfig>(value.clone()).unwrap();
@@ -493,6 +513,18 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         (
             "GRANT USAGE ON SCHEMA identity_authority TO host_audit; GRANT SELECT ON identity_authority.local_credentials TO host_audit",
             "REVOKE SELECT ON identity_authority.local_credentials FROM host_audit; REVOKE USAGE ON SCHEMA identity_authority FROM host_audit",
+        ),
+        (
+            "REVOKE INSERT ON rss_transactional_messaging.consumer_dead_letter FROM host_audit",
+            "GRANT INSERT ON rss_transactional_messaging.consumer_dead_letter TO host_audit",
+        ),
+        (
+            "GRANT UPDATE ON rss_transactional_messaging.consumer_dead_letter TO host_audit",
+            "REVOKE UPDATE ON rss_transactional_messaging.consumer_dead_letter FROM host_audit",
+        ),
+        (
+            "UPDATE rss_transactional_messaging.consumer_scope SET domain='other' WHERE login_role='host_audit'",
+            "UPDATE rss_transactional_messaging.consumer_scope SET domain='identity.security' WHERE login_role='host_audit'",
         ),
         (
             "REVOKE EXECUTE ON FUNCTION rss_audit.reserve(uuid) FROM host_audit",

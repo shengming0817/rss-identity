@@ -16,6 +16,8 @@ name = "identity-migrate"
 path = "src/bin/migrate.rs"
 
 [dependencies]
+rss-data-protection.workspace = true
+ring.workspace = true
 rss-audit-postgres.workspace = true
 rss-transactional-messaging-runtime.workspace = true
 tokio-util.workspace = true

@@ -291,17 +291,17 @@ pub(crate) async fn retain_binding(
     Ok(())
 }
 
-struct Reader {
-    key: AccountKey,
+pub(crate) struct Reader {
+    pub(crate) key: AccountKey,
     digest: [u8; 32],
     session: SessionId,
     kind: rss_identity_core::session::CredentialKind,
     instance: Uuid,
-    expires: Instant,
+    pub(crate) expires: Instant,
     checks: crate::session_checks::SessionChecks,
 }
 impl Reader {
-    fn new(actor: &AuthenticatedSession) -> Result<Self, AuthorityError> {
+    pub(crate) fn new(actor: &AuthenticatedSession) -> Result<Self, AuthorityError> {
         actor.assurance()?;
         Ok(Self {
             key: actor.key,
@@ -313,7 +313,7 @@ impl Reader {
             checks: actor.session_checks.clone(),
         })
     }
-    async fn recheck(
+    pub(crate) async fn recheck(
         &self,
         c: &mut PgConnection,
     ) -> Result<crate::session_storage::Loaded, transaction::MutationError> {

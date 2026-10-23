@@ -1,9 +1,11 @@
 //! Reference host ownership of audit worker connections, permissions and lifecycle.
+mod protection;
 use crate::{
     AppError,
     assembly::Timer,
     config::{AuditConfig, AuditInstallation, MigrationConfig, RuntimeConfig},
 };
+use protection::Protection;
 use rss_audit_postgres::{Control, Integrity, PgAudit};
 use rss_identity_postgres::audit::AuditDelivery;
 use rss_request_context::Deadline;
@@ -13,6 +15,21 @@ use rss_transactional_messaging_runtime::relay::RelayBatchLimit;
 use sqlx::{PgConnection, PgPool};
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+
+fn recovery_protection(config: &AuditConfig) -> Result<Option<Arc<Protection>>, AppError> {
+    match config {
+        AuditConfig::Disabled => Ok(None),
+        AuditConfig::Enabled { recovery_keys, .. } => {
+            Protection::load(&recovery_keys.active_key_id, &recovery_keys.keys)
+                .map(Arc::new)
+                .map(Some)
+        }
+    }
+}
+/// Offline validation uses the same constructor as runtime; it never opens a database.
+pub(crate) fn preflight(config: &AuditConfig) -> Result<(), AppError> {
+    recovery_protection(config).map(|_| ())
+}
 
 pub fn validate_installation(c: &MigrationConfig) -> Result<(), AppError> {
     if let AuditInstallation::Enabled {
@@ -80,7 +97,8 @@ pub async fn delivery(
     config: &RuntimeConfig,
     runtime: Arc<PgRuntime>,
     pool: PgPool,
-) -> Result<AuditDelivery, AppError> {
+) -> Result<AuditDelivery<Protection>, AppError> {
+    let protector = recovery_protection(&config.audit)?.ok_or(AppError::Configuration)?;
     // The worker must not acquire credential access through inherited or PUBLIC grants.
     let role: String = sqlx::query_scalar("SELECT current_user::text")
         .fetch_one(&pool)
@@ -104,13 +122,14 @@ pub async fn delivery(
         config.instance()?,
         config.storage.tenants()?,
         crate::assembly::delivery_budget()?,
+        protector,
     )
     .await
     .map_err(|_| AppError::Provider)
 }
 pub fn registration(
     config: &AuditConfig,
-    delivery: AuditDelivery,
+    delivery: AuditDelivery<Protection>,
     drain: Duration,
 ) -> Result<ManagedTaskRegistration, AppError> {
     let AuditConfig::Enabled {
@@ -126,9 +145,15 @@ pub fn registration(
     Ok(start.into_registration(move |stop| async move {
         loop {
             if stop.is_cancelled() { return Ok(()); }
-            if let Err(e) = delivery.run_once(limit).await {
-                eprintln!("component=identity-audit event=delivery_failure kind={} retryable={}",e.as_label(),e.is_retryable());
-                if !e.is_retryable() { return Err(ShutdownError::new(e)); }
+            match delivery.run_once(limit).await {
+                Err(e) => {
+                    eprintln!("component=identity-audit event=delivery_failure kind={} retryable={}",e.as_label(),e.is_retryable());
+                    if !e.is_retryable() { return Err(ShutdownError::new(e)); }
+                },
+                Ok(report) if report.projected()>0 || report.deferred()>0 => {
+                    eprintln!("component=identity-audit event=projection_progress projected={} deferred={} reason={}",report.projected(),report.deferred(),report.last_deferral().unwrap_or("none"));
+                },
+                Ok(_) => {},
             }
             tokio::select! { () = stop.cancelled() => return Ok(()), () = tokio::time::sleep(poll) => {} }
         }
@@ -171,7 +196,7 @@ mod tests {
     fn enabled_worker_requires_enough_time_to_drain_active_batch() {
         let mut value: serde_json::Value =
             serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
-        value["audit"] = serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1000,"batch":16});
+        value["audit"] = serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1000,"batch":16,"recoveryKeys":{"activeKeyId":"audit","keys":[{"keyId":"audit","path":"audit.key"}]}});
         for (resource, drain, valid) in [(29, 60, false), (30, 59, false), (30, 60, true)] {
             value["budgets"]["resourceSeconds"] = serde_json::json!(resource);
             value["budgets"]["drainSeconds"] = serde_json::json!(drain);
@@ -199,12 +224,13 @@ mod tests {
                 .validate()
                 .is_err()
         );
-        for a in [
+        for mut a in [
             serde_json::json!({"mode":"enabled","user":"identity_runtime","passwordFile":"p","pollMillis":100,"batch":1}),
             serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1,"batch":1}),
             serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":100,"batch":65}),
         ] {
             let mut bad = baseline.clone();
+            a["recoveryKeys"] = serde_json::json!({"activeKeyId":"audit","keys":[{"keyId":"audit","path":"audit.key"}]});
             bad["audit"] = a;
             assert!(
                 serde_json::from_value::<RuntimeConfig>(bad)

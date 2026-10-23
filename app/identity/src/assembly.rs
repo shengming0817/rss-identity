@@ -122,6 +122,7 @@ pub fn preflight(config: &RuntimeConfig) -> Result<(), AppError> {
     if let Some(db) = config.audit.database(&config.database) {
         db.pg()?;
     }
+    crate::audit::preflight(&config.audit)?;
     authority_config(config)?;
     federation_inputs(config)?;
     Ok(())

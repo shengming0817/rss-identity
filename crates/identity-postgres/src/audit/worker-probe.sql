@@ -27,3 +27,10 @@ AND NOT EXISTS(
     WHERE n.nspname='rss_transactional_messaging' AND p.proname IN ('append_outbox','prepare_outbox_partitions')
     AND has_function_privilege(r.oid,p.oid,'EXECUTE')
 )
+
+AND has_table_privilege($1,'rss_transactional_messaging.consumer_dead_letter','SELECT')
+AND has_table_privilege($1,'rss_transactional_messaging.consumer_dead_letter','INSERT')
+AND NOT EXISTS (
+ SELECT FROM reachable r WHERE has_table_privilege(r.oid,'rss_transactional_messaging.consumer_dead_letter','UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
+ OR has_any_column_privilege(r.oid,'rss_transactional_messaging.consumer_dead_letter','UPDATE,REFERENCES')
+)

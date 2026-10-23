@@ -98,7 +98,7 @@ JWKS 只从固定 Microsoft tenant 地址经有界、禁重定向的 HTTPS 取�
 
 ## 认证审计交付
 
-`rss_identity_postgres::audit::AuditDelivery` 持有 Identity 事件语义。宿主注入同库的 worker `Arc<PgRuntime>`、`Arc<PgAudit>`、真实实例与租户绑定和 delivery budget，调用有界 `run_once`。异步构造在一个有界预算内使用 worker 实际事务连接完成 Audit（启用 Ledger 时包括 Ledger）启动验证，并检查已有 dead-letter，不创建任务或接管连接关闭；构造和运行统一返回 `AuditDeliveryError`，宿主只对 `is_retryable()` 为真的错误重试。权限通过公开 `audit::grant_worker` / `verify_worker` 接缝装配，不复制参考 app 的 SQL。参考实现见 [审计装配](../../app/identity/src/audit.rs)。
+`rss_identity_postgres::audit::AuditDelivery` 持有 Identity 事件语义。宿主注入同库的 worker `Arc<PgRuntime>`、`Arc<PgAudit>`、真实实例与租户绑定、delivery budget 和独立恢复保护密钥 `Arc<K: Aead + Send + Sync>`，调用有界 `run_once`。异步构造在一个有界预算内使用 worker 实际事务连接完成 Audit（启用 Ledger 时包括 Ledger）启动验证，并检查已有 dead-letter，worker 至少配置两个连接，为 effect 执行期间续租保留连接。Audit、Ledger（启用时）、Inbox 及源 Outbox 终态在唯一事务提交；返回的 `AuditProjectionReport` 区分已确认投影和延期。提交未知先按原恢复凭证核对持久终态，未提交消息仅由租约重新认领；不再进行独立成功确认。不创建任务或接管连接关闭；构造和运行统一返回 `AuditDeliveryError`，宿主只对 `is_retryable()` 为真的错误重试。权限通过公开 `audit::grant_worker` / `verify_worker` 接缝装配，不复制参考 app 的 SQL。参考实现见 [审计装配](../../app/identity/src/audit.rs)。
 
 producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::connect_consumer`，Audit 开启 `messaging`。worker 不读取 Identity 私有表，也不能直接修改 Audit/Outbox；schema owner 和实际权限必须通过 startup probe。宿主负责保证来源实例对应当前 Identity 数据库，不接受请求指定的 source。
 
@@ -193,3 +193,12 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 聚合某个账户的 latest 资料时，先用 `latest_profile_sources` 按目标账户分页发现观察来源，再调用 `latest_profile`。
 来源发现与值读取均执行 `ReadLatestProfile` 策略；不从查看者登录来源、业务字段映射或邮箱猜测目标来源。
 来源定位符不是认证证明，也不保证观察仍有效；值读取继续执行当前来源、账户和有效期限复核。
+
+
+人员目录查询使用 `Authority::with_personnel_read`：必须传入组件签发的会话，组件在原事务复核会话及 `ListAccounts`、`ReadLatestProfile` 的全局/本人授权后切为数据库只读模式。生命周期受限的 `PersonnelRead` 仅运行宿主静态 SELECT 与绑定参数，提供固定 `identity_personnel` 关系；产品 SQL 不引用 Identity 私表，不传入用户 SQL。关系的 login、display_name、username 在授权和来源有效性筛选后才可搜索和返回。宿主在一个 SELECT 中完成设备关联、授权、过滤、统计和 keyset 分页，返回行数有硬上限。
+
+`PersonnelRevision` 包含人员变更 generation、授权形态及有效期；cursor 还须绑定宿主自身的实例、租户、主体、授权范围和查询。关系按来源产生行，宿主使用 EXISTS 或适当聚合，避免多来源把设备重复计数。该接缝不会缓存人员数据，也不提供认证证明。宿主策略和静态 SQL 属于可信嵌入代码；组件不把此接缝作为任意 SQL 服务。
+
+`identity_session_references` 提供同租户、账户/成员 epoch、会话期限及来源当前性已筛选的定位关系，供产品按完整 SessionReference 坐标集合关联；它不是 AuthenticatedSession。平台来源的 `requires_platform_check` 为 true，产品必须再 JOIN 自己持有的当前平台绑定/来源资格关系，核对返回的绑定 ID/epoch 和来源 ID/version，不能仅凭该关系宣称平台资格有效。原请求 actor 的平台检查仍由既有 verifier 执行。
+
+会话关系不公开滑动 idle expiry；它只供按完整定位坐标关联当前会话。普通 touch 延长存活时间不改变关系中的可排序值；cursor 到期上界沿用签发时的保守期限，过期后必须重新查询。人员回调本身也受同一资料/会话最早过期时间限制。

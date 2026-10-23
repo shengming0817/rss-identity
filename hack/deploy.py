@@ -78,11 +78,18 @@ def stage(data,out,images,final):
     audit=c['audit'];audit_install={'mode':'disabled'};audit_roles=[]
     require(isinstance(audit,dict) and audit.get('mode') in ['disabled','enabled'],'explicit audit mode required')
     if audit['mode']=='enabled':
-        fields(audit,{'mode','user','passwordFile','pollMillis','batch'},'audit')
+        fields(audit,{'mode','user','passwordFile','pollMillis','batch','recoveryKeys'},'audit')
         require(audit['user']=='identity_audit','audit worker identity mismatch')
         audit['passwordFile']=mount(audit['passwordFile'],'audit-password',True)
         runtime_files.append('audit-password');audit_roles=[('identity_audit','audit-password')]
-        audit_install={'mode':'enabled','ownerRole':'identity_audit_owner','workerRole':'identity_audit'}
+        recovery=audit['recoveryKeys']
+        fields(recovery,{'activeKeyId','keys'},'audit recovery keys')
+        require(1 <= len(recovery['keys']) <= 8,'audit recovery key count')
+        require(recovery['activeKeyId'] in [k['keyId'] for k in recovery['keys']],'audit active recovery key missing')
+        for n,k in enumerate(recovery['keys']):
+            fields(k,{'keyId','path'},'audit recovery key')
+            name='audit-recovery-key-'+str(n);k['path']=mount(k['path'],name,True);runtime_files.append(name)
+        audit_install={'mode':'enabled' ,'ownerRole':'identity_audit_owner','workerRole':'identity_audit'}
     else:
         fields(audit,{'mode'},'audit')
     if c['oidc'] is not None:
