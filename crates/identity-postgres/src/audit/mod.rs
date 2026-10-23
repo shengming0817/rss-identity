@@ -21,7 +21,7 @@ use rss_transactional_messaging::{
 };
 use rss_transactional_messaging_postgres::{
     OutboxWakeup, PgConsumerEffect, PgConsumerEffectFailure, PgLocalProjection,
-    PgProjectionFailure, PgProjectionOutcome, PgProjectionRecovery, PgRecoveryCapture, PgRuntime,
+    PgProjectionAttempt, PgProjectionOutcome, PgProjectionRecovery, PgRecoveryCapture, PgRuntime,
     PgTransaction,
 };
 use rss_transactional_messaging_runtime::relay::RelayBatchLimit;
@@ -157,6 +157,18 @@ pub struct AuditProjectionReport {
     last_deferral: Option<&'static str>,
 }
 impl AuditProjectionReport {
+    fn deferral(class: rss_transactional_messaging::transaction::FailureClass) -> Self {
+        use rss_transactional_messaging::transaction::FailureClass;
+        Self {
+            projected: 0,
+            deferred: 1,
+            last_deferral: Some(match class {
+                FailureClass::Permanent => "permanent",
+                FailureClass::Transient => "transient",
+                FailureClass::Infrastructure => "infrastructure",
+            }),
+        }
+    }
     pub const fn projected(&self) -> usize {
         self.projected
     }
@@ -264,6 +276,41 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
         }
         self.check_fatal()
     }
+    fn consume_attempt(
+        &self,
+        attempt: PgProjectionAttempt,
+        pending: &mut Option<PgProjectionRecovery>,
+        report: &mut AuditProjectionReport,
+    ) -> Result<(), AuditDeliveryError> {
+        use rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus as Status;
+        let (outcome, identity) = attempt.into_parts();
+        if matches!(
+            outcome.status(),
+            Status::RollbackFailed | Status::CommitUnknown
+        ) {
+            *pending = Some(identity);
+        }
+        let progress = outcome.fold(
+            |committed| {
+                self.committed(committed.into_parts().1.disposition())?;
+                Ok(AuditProjectionReport {
+                    projected: 1,
+                    ..Default::default()
+                })
+            },
+            |class| Ok(AuditProjectionReport::deferral(class)),
+            |class| Ok(AuditProjectionReport::deferral(class)),
+            || Err(AuditDeliveryError::Transient),
+            || Err(AuditDeliveryError::Transient),
+            || Err(AuditDeliveryError::OwnershipLost),
+        )?;
+        report.projected += progress.projected;
+        report.deferred += progress.deferred;
+        if progress.last_deferral.is_some() {
+            report.last_deferral = progress.last_deferral;
+        }
+        Ok(())
+    }
     /// Resolve any prior uncertainty first. Only provider leases authorize a fresh effect attempt.
     pub async fn run_once(
         &self,
@@ -306,32 +353,12 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
             self.check_fatal()?;
             match result.map_err(AuditDeliveryError::pg)? {
                 PgProjectionOutcome::Empty => break,
-                PgProjectionOutcome::Committed(receipt) => {
-                    self.committed(receipt.disposition())?;
-                    report.projected += 1;
+                PgProjectionOutcome::Attempt(attempt) => {
+                    self.consume_attempt(*attempt, &mut pending, &mut report)?;
                 }
-                PgProjectionOutcome::Uncertain(identity) => {
-                    *pending = Some(identity);
-                    return Err(AuditDeliveryError::Transient);
-                }
-                PgProjectionOutcome::Rejected(_)
-                | PgProjectionOutcome::Deferred(PgProjectionFailure::DeliveryExpired) => {
+                PgProjectionOutcome::Rejected(_) | PgProjectionOutcome::DeliveryExpired => {
                     let _ = self.fatal.set(AuditDeliveryError::RejectedEvent);
                     return Err(AuditDeliveryError::RejectedEvent);
-                }
-                PgProjectionOutcome::Deferred(PgProjectionFailure::Fenced) => {
-                    return Err(AuditDeliveryError::OwnershipLost);
-                }
-                PgProjectionOutcome::Deferred(reason) => {
-                    use rss_transactional_messaging::transaction::FailureClass;
-                    report.deferred += 1;
-                    report.last_deferral = Some(match reason {
-                        PgProjectionFailure::NotStarted(FailureClass::Permanent)
-                        | PgProjectionFailure::RolledBack(FailureClass::Permanent) => "permanent",
-                        PgProjectionFailure::NotStarted(FailureClass::Transient)
-                        | PgProjectionFailure::RolledBack(FailureClass::Transient) => "transient",
-                        _ => "infrastructure",
-                    });
                 }
                 PgProjectionOutcome::InProgress => {
                     report.deferred += 1;

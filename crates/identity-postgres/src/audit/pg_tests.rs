@@ -346,6 +346,9 @@ async fn relay_quarantines_bad_events_and_recovers_lost_source_lease() -> anyhow
     sqlx::raw_sql("LOCK TABLE rss_audit.heads IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *lock)
         .await?;
+    s.worker
+        .projection
+        .inject_next_projection_fault(PgTransactionFault::RollbackFailedAfterAck)?;
     let (result, injection) = tokio::join!(s.worker.run_once(limit), async {
         // Wait for the real relay claim, then revoke its source lease while the append is blocked.
         tokio::time::timeout(Duration::from_secs(3),async {
@@ -361,8 +364,9 @@ async fn relay_quarantines_bad_events_and_recovers_lost_source_lease() -> anyhow
         Ok::<_, anyhow::Error>(())
     });
     injection?;
-    // Lease loss can surface as a fenced report or store CAS error, never false source success.
-    let _ = result;
+    // Suppressed rollback ACK must retain the original identity, not release an uncertain claim.
+    assert!(matches!(result, Err(AuditDeliveryError::Transient)));
+    assert!(s.worker.pending.lock().await.is_some());
     let published: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM rss_transactional_messaging.outbox WHERE status='published'",
     )
