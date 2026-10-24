@@ -94,13 +94,13 @@ class EvidenceTests(unittest.TestCase):
 
         profile = {"formatVersion": 1, "schemaVersion": 999,
                    "session": {"idleSeconds": 60, "absoluteSeconds": 120},
-                   "mfaMaxAgeSeconds": 30}
+                   "operationProofSeconds": 30}
         with patch.object(t3, "docker", return_value=json.dumps(profile).encode()) as docker:
             self.assertEqual(t3.binary_profile("sha256:fixed", "owned-prefix"), {
-                "session": profile["session"], "mfaMaxAgeSeconds": 30})
+                "session": profile["session"], "operationProofSeconds": 30})
         self.assertEqual(docker.call_args.args[-3:],
                          ("identity-server", "sha256:fixed", "--acceptance-profile"))
-        for extra in [{"session": {}}, {"mfaMaxAgeSeconds": 0},
+        for extra in [{"session": {}}, {"operationProofSeconds": 0},
                       {"session": {"idleSeconds": 3, "absoluteSeconds": 2}},
                       {"formatVersion": 2}]:
             with self.subTest(extra=extra), self.assertRaises(ValueError):
@@ -206,7 +206,7 @@ class EvidenceTests(unittest.TestCase):
             "images": {"identity": {"id": "sha256:" + "1" * 64}},
             "resources": {"daemonId": "fixture"},
             "runtimeProfile": t3.runtime_profile(t3.runtime_template()),
-            "policy": {"session": {"idleSeconds": 900, "absoluteSeconds": 14400}, "mfaMaxAgeSeconds": 300},
+            "policy": {"session": {"idleSeconds": 900, "absoluteSeconds": 14400}, "operationProofSeconds": 300},
         }
         record = t3.new_record(subject)
         sha = "a" * 64
@@ -238,8 +238,10 @@ class EvidenceTests(unittest.TestCase):
             },
             "mfa": {
                 "freshMfaConsumed": True,
-                "realExpiryRejected": True,
-                "oldSessionRejected": True,
+                "realProofExpiryRejected": True,
+                "originalSessionPreserved": True,
+                "operationReplayRejected": True,
+                "virtualAuthenticatorRegistered": True,
                 "wrongSubjectAndDowngradeRejected": True,
                 "wrongTotpRejected": True,
                 "federatedAccountRevocation": True,

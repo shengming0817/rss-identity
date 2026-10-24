@@ -140,6 +140,7 @@ pub(crate) async fn identity(
     ))
 }
 pub(crate) struct Attempt {
+    pub context: Option<rss_identity_core::step_up::StepUpContext>,
     pub profile_sequence: i64,
     pub mode: AuthenticationMode,
     pub browser: [u8; 32],
@@ -186,6 +187,11 @@ pub(crate) async fn attempt(
     };
     Ok((
         Attempt {
+            context: r
+                .try_get::<Option<serde_json::Value>, _>("operation_context")?
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| corrupt())?,
             profile_sequence: r.try_get("profile_sequence")?,
             mode: AuthenticationMode::from_storage(r.try_get("authentication_mode")?)
                 .map_err(|_| corrupt())?,
@@ -209,6 +215,7 @@ pub(crate) async fn attempt(
     ))
 }
 pub(crate) struct NewAttempt {
+    pub context: Option<rss_identity_core::step_up::StepUpContext>,
     pub mode: AuthenticationMode,
     pub locator: StateLocator,
     pub material: ProtocolMaterial,
@@ -227,7 +234,10 @@ pub(crate) async fn insert_attempt(
     let current = provider(c, tenant, input.provider.id).await?;
     exact(&current, input.provider.version)?;
     let now = crate::session_storage::now(c).await?;
-    let expiry = input.expiry.unwrap_or(now + 300);
+    let expiry = input.expiry.unwrap_or(now + 120).min(now + 120);
+    if (input.mode == AuthenticationMode::StepUp) != input.context.is_some() {
+        return Err(reject().into());
+    }
     if now >= expiry {
         return Err(reject().into());
     }
@@ -264,8 +274,8 @@ pub(crate) async fn insert_attempt(
     sqlx::query(concat!(
         "INSERT INTO identity_authority.oidc_transactions(tenant_id,attempt_id,provider_i",
         "d,config_version,state_hash,browser_hash,purpose,nonce,verifier,created_at,expir",
-        "es_at,return_url,link_intent,replacement_session,authentication_mode,profile_sequence) VALUES($1::uuid,",
-        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::uuid,$15,$16)"
+        "es_at,return_url,link_intent,replacement_session,authentication_mode,profile_sequence,operation_context) VALUES($1::uuid,",
+        "$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::uuid,$15,$16,$17)"
     ))
     .bind(tenant.to_string())
     .bind(input.locator.id().as_slice())
@@ -283,6 +293,7 @@ pub(crate) async fn insert_attempt(
     .bind(input.replacement.map(|v| v.to_string()))
     .bind(input.mode as i16)
     .bind(profile_sequence)
+    .bind(input.context.map(serde_json::to_value).transpose().map_err(|_|corrupt())?)
     .execute(c)
     .await?;
     Ok(())

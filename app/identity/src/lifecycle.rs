@@ -215,7 +215,35 @@ pub async fn serve(
                         .map_err(|_| AppError::Configuration)?;
                     let gate = Arc::new(OnceLock::new());
                     let context = crate::context::router(authority.clone(), &config, http.clone())?;
-                    let mut app = router(authority, http.clone())?.merge(context);
+                    let origin = url::Url::parse(&config.public_origin)
+                        .map_err(|_| AppError::Configuration)?;
+                    let rp = origin.host_str().ok_or(AppError::Configuration)?.to_owned();
+                    let webauthn = rss_identity_postgres::WebauthnAuthority::new(
+                        authority.clone(),
+                        rp,
+                        origin,
+                    )?;
+                    let mut app = router(authority, http.clone())?
+                        .merge(context)
+                        .merge(rss_identity_http_axum::webauthn_router(
+                            webauthn,
+                            http.clone(),
+                        )?)
+                        .route(
+                            "/identity-security",
+                            axum::routing::get(|| async {
+                                axum::response::Html(include_str!("security.html"))
+                            }),
+                        )
+                        .route(
+                            "/identity-security.js",
+                            axum::routing::get(|| async {
+                                (
+                                    [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+                                    include_str!("security.js"),
+                                )
+                            }),
+                        );
                     if let Some(federation) = federation {
                         app = app.merge(federated_router(federation, http)?);
                     }

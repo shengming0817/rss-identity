@@ -186,8 +186,8 @@ PUT 使用 operationId、expectedRevision、value（必须出现，显式 null �
 绑定必须由受控注册／人员关联流程建立，设备本地账号名、邮箱或浏览器 principal 均不构成绑定证明。
 可信装配代码本身属于信任边界；Rust opaque proof 不防止恶意宿主替换 verifier。
 
-`begin_platform_login` 为固定 audience 的浏览器登录生成最长 120 秒的挑战；宿主必须用安全 Cookie 将 browser binding 绑定实际浏览器，
-并实施同源、CSRF／登录替换保护和请求预算。`complete_platform_login` 只接受挑战、nonce、browser binding 和有界证据，
+`begin_platform_login` 显式接收 `PlatformPurpose`，为固定 audience 及用途生成最长 120 秒的挑战；宿主必须用安全 Cookie 将 browser binding 绑定实际浏览器，
+并实施同源、CSRF／登录替换保护和请求预算。`complete_platform_login` 返回 `PlatformLogin`；设备签名必须覆盖 `PlatformChallengeContext::signing_payload()` 的完整字节（包括用途、RP、身份与期限），只接受挑战、nonce、browser binding 和有界证据，
 不接受 principal 或 assurance DTO。`verify` 在事务外验证来源、平台签名、用途、nonce 和用户证据，
 最终签发事务重新检查账户／成员、外部关联和宿主绑定，消费挑战并提交会话及安全事件。
 
@@ -223,3 +223,13 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(tenant, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用 admitted tenant、实例和执行 fencing，锁定现有租户 guard 后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，期限只受会话当前性和原调用预算限制。
 
 会话关系不公开滑动 idle expiry；它只供按完整定位坐标关联当前会话。普通 touch 延长存活时间不改变关系中的可排序值；cursor 到期上界沿用签发时的保守期限，过期后必须重新查询。人员回调本身也受同一资料/会话最早过期时间限制。
+
+## 企业 RP 与 WebAuthn 操作证明
+
+`AuthorityConfig::with_enterprise` 安装固定目标和独立 ES256 signer。每个 RP 使用独立 issuer/Keycloak trust alias，仅对应 confidential client 可以使用该 alias；固定 scope 与 audience，禁止 assertion reuse，最大断言期限 30 秒，限制下游 token 不超过断言期限。预先按稳定 `(issuer,sub)` 关联上游账户，不通过邮箱关联。`PlatformVerifier::authorize_purpose` 在挑战创建和最终结算事务中复核该 RP 的宿主授权。
+
+只有提交确认后才返回后端专用 `EnterpriseAssertion`。宿主使用 `HttpOidc::exchange_enterprise`，沿用现有 TLS、地址限制及有界传输，核验固定 Keycloak issuer/client/audience/subject 后自行建立 RP 会话。不得序列化断言到浏览器或自动重试未知结果。RP 保存可信 `SessionReference` 并按受保护请求重新检查；本地撤销与已签发外部 token 的剩余期限分别处理。
+
+`WebauthnAuthority` 绑定实例级 HTTPS origin 与 RP ID，支持 UV passkey，包括同步凭据；不证明企业硬件或设备合规。宿主策略允许本人首次登记，组件检查近期主认证；后续管理使用 WebAuthn 或 OIDC MFA 生成的用途绑定证明。`RegistrationAuthorization::HostRecovery` 只供可信宿主调用，必须独立实现 `AuthorizeWebauthnRecovery` 策略并在事务中核对恢复授权，参考宿主默认拒绝；普通浏览器不能选择此路径。恢复完成不重置“曾登记”状态。
+
+新候选直接替换旧 step-up 签名与会话升级行为，仅接受当前全新 schema。旧 revision 的消费者继续使用其固定闭包；升级时同步适配新请求、结果和消费接口，不使用 alias、旧 DTO 或运行时降级。

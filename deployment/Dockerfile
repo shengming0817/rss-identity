@@ -19,6 +19,7 @@ RUN --network=none cargo build --offline --locked --release -p rss-identity-app 
 RUN --network=none cargo metadata --offline --locked --format-version=1 > /build/metadata.json
 RUN --network=none python3 hack/check_dependencies.py --metadata /build/metadata.json --artifacts /build/artifacts.json
 FROM ${RUNTIME_IMAGE} AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3 && rm -rf /var/lib/apt/lists/*
 COPY --from=build /build/target/release/identity-server /usr/local/bin/identity-server
 COPY --from=build /build/target/release/identity-admin /usr/local/bin/identity-admin
 COPY --from=build /build/target/release/identity-migrate /usr/local/bin/identity-migrate

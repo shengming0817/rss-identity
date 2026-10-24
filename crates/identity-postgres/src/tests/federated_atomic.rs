@@ -248,6 +248,8 @@ async fn step_begin(
                 ),
                 source: source(),
             },
+            rss_identity_core::step_up::StepUpContext::new("test.operation".into(), [7; 32])
+                .unwrap(),
             deadline(),
         )
         .await?,
@@ -323,41 +325,32 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
         rss_identity_core::department::UpstreamDepartmentSnapshot::Present(department_snapshot(
             None,
         ));
-    let upgraded = issued(step_finish(&s, token.clone(), &old, "alice").await?);
-    let after_groups = stored_facts(&f, &upgraded).await?;
+    let FederatedOutcome::StepUp { grant, .. } =
+        step_finish(&s, token.clone(), &old, "alice").await?
+    else {
+        anyhow::bail!("expected operation proof")
+    };
     assert_eq!(
-        after_groups["department_snapshot"]["snapshot"]["memberships"],
-        serde_json::json!([])
+        before_groups,
+        stored_facts(&f, &old).await?,
+        "step-up does not mutate session facts"
     );
-    assert_ne!(
-        before_groups["department_snapshot"]["snapshot_id"],
-        after_groups["department_snapshot"]["snapshot_id"]
-    );
-    assert_ne!(
-        before_groups["groups"]["snapshot_id"],
-        after_groups["groups"]["snapshot_id"]
-    );
-    assert_eq!(
-        after_groups["groups"]["values"],
-        serde_json::json!(["/step-up"])
-    );
-    assert!(
-        f.store
-            .inspect_session(f.key.tenant, secret(&old), deadline())
-            .await
-            .is_err()
-    );
-    assert!(step_finish(&s, token, &upgraded, "alice").await.is_err());
-    let facts: serde_json::Value = sqlx::query_scalar(
-        "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1::uuid",
-    )
-    .bind(upgraded.view().id.to_string())
-    .fetch_one(&f.owner)
-    .await?;
-    assert_eq!(facts["assurance"]["acr"], "mfa");
-    assert_eq!(facts["assurance"]["auth_time"], now);
+    assert!(step_finish(&s, token, &old, "alice").await.is_err());
+    let proof = f
+        .store
+        .inspect_session(f.key.tenant, secret(&old), deadline())
+        .await?;
+    let context =
+        rss_identity_core::step_up::StepUpContext::new("test.operation".into(), [7; 32]).unwrap();
+    let mut tx = f.owner.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(f.key.tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    rss_identity_postgres::consume_step_up_on(&mut tx, &proof, &context, grant.expose()).await?;
+    tx.rollback().await?;
     // A config edit after beginning the flow invalidates the exact persisted binding.
-    let token = step_begin(&f, &s, &p, &upgraded).await?;
+    let token = step_begin(&f, &s, &p, &old).await?;
     let p = s
         .update_provider(
             actor(&f).await?,
@@ -369,7 +362,7 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
             deadline(),
         )
         .await?;
-    assert!(step_finish(&s, token, &upgraded, "alice").await.is_err());
+    assert!(step_finish(&s, token, &old, "alice").await.is_err());
     // Recreate a usable session; revocation between begin and callback rejects before exchange.
     let current = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
     let token = step_begin(&f, &s, &p, &current).await?;
@@ -1530,18 +1523,17 @@ async fn federation_step_up_unknown_commit_and_event_rollback() -> anyhow::Resul
         sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
             .fetch_one(&f.owner)
             .await?;
-    assert_eq!(sessions_after, sessions_before + 1);
-    assert!(
-        f.store
-            .inspect_session(f.key.tenant, secret(&upgraded), deadline())
-            .await
-            .is_err()
+    assert_eq!(sessions_after, sessions_before);
+    f.store
+        .inspect_session(f.key.tenant, secret(&upgraded), deadline())
+        .await?;
+    let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.step_up_grants")
+        .fetch_one(&f.owner)
+        .await?;
+    assert_eq!(
+        grants, 1,
+        "unknown commit may have consumed the challenge, but must not release its secret"
     );
-    let committed: (i64,serde_json::Value) = sqlx::query_as("SELECT count(*) OVER(), auth_facts FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND principal_id=(SELECT principal_id FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid) AND revoked_at IS NULL")
-        .bind(A).bind(upgraded.view().id.to_string()).fetch_one(&f.owner).await?;
-    assert_eq!(committed.0, 1);
-    assert_eq!(committed.1["assurance"]["acr"], "mfa");
-    assert_eq!(committed.1["assurance"]["auth_time"], now);
     let remaining: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM identity_authority.oidc_transactions WHERE state_hash=$1",
     )
@@ -1550,9 +1542,8 @@ async fn federation_step_up_unknown_commit_and_event_rollback() -> anyhow::Resul
     .await?;
     assert_eq!(remaining, 0);
     let committed_events = events(&f).await?;
-    assert_eq!(committed_events.len(), events_before + 3);
-    assert_eq!(committed_events[events_before]["action"], "stepped_up");
-    assert_eq!(committed_events[events_before + 1]["action"], "created");
+    assert_eq!(committed_events.len(), events_before + 1);
+    assert_eq!(committed_events[events_before]["action"], "verified");
     assert!(step_finish(&s, token, &upgraded, "alice").await.is_err());
     let current = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
     let rollback_attempt = step_begin(&f, &s, &p, &current).await?;

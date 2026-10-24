@@ -1,0 +1,8 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>账户认证器</title>
+<style>body{font:16px system-ui;max-width:750px;margin:40px auto;padding:0 20px}input,button{font:inherit;margin:6px;padding:8px}li{margin:12px 0}#status{white-space:pre-wrap}</style>
+<h1>账户认证器</h1><p>使用当前账户自助管理认证器。首次登记无需管理员审批；已有认证器的变更需要验证。</p>
+<label>租户 <input id="tenant" autocomplete="off"></label><button id="load">读取账户</button>
+<section><h2>登记认证器</h2><input id="label" value="我的认证器" maxlength="128"><button id="register">首次登记</button><button id="add">验证并新增</button><button id="recover">验证并替换丢失的认证器</button></section>
+<section><h2>使用企业 MFA</h2><select id="providers"></select><select id="intent"><option value="register">新增认证器</option><option value="recover">恢复认证器</option></select><button id="oidc">前往验证</button><button id="complete">验证后继续登记</button></section>
+<ul id="credentials"></ul><button id="cancel">取消当前验证</button><p id="status" role="status"></p>
+<script src="/identity-security.js"></script></html>

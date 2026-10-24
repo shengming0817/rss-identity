@@ -41,6 +41,10 @@ impl AttemptSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorityError {
+    #[error("user interaction required")]
+    InteractionRequired,
+    #[error("authentication cancelled")]
+    Cancelled,
     #[error("invalid authority configuration")]
     Configuration,
     #[error("profile revision conflict")]

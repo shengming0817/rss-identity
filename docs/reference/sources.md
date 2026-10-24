@@ -144,3 +144,6 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 - [Keycloak 26.7.3 OIDCAttributeMapperHelper.java](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/protocol/oidc/mappers/OIDCAttributeMapperHelper.java)：读取 JSON 类型转换和 ID Token 投影，完整对象由已签名 token 携带。
 - [Keycloak 26.7.3 DeclarativeUserProfileProvider.java](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/userprofile/DeclarativeUserProfileProvider.java)：读取管理员/用户编辑权限语义；真实夹具通过 Admin API 配置 admin-only 属性并验证普通用户不能修改。
 - 本仓只验证签名来源、结构和期限，组织完整性与各用户属性同步由部署来源 owner 负责；不是原生目录同步能力或 AAD 部门集成证明。
+
+- #2917：Keycloak `26.7.3` 的 `services/src/main/java/org/keycloak/protocol/oidc/grants/JWTAuthorizationGrantType.java`、`DefaultJWTAuthorizationGrantValidator.java` 与 `authentication/authenticators/client/AbstractBaseJWTValidator.java`，用于固定 confidential client、issuer/sub、单受众、签名与 jti 防重放合同；以真实 provider 测试补充源码证据。
+- #2921：[webauthn-rs 高层入口固定源码](https://github.com/kanidm/webauthn-rs/blob/d2c10d53ca5ef033d37ee6462e936e9eb72ad98c/webauthn-rs/src/lib.rs)，版本 0.5.5，使用高层 UV-required passkey API；MPL-2.0 依赖通过逐包固定版本例外准入，不复制上游源码。测试软件认证器只证明协议/事务，不代表真实硬件验收。

@@ -16,5 +16,5 @@ class ReferenceAccessTests(unittest.TestCase):
             for name in ['runtime', 'maintenance', 'migration']:
                 self.assertEqual(json.loads((root/'v5'/f'{name}.json').read_text())['formatVersion'], 5)
             gateway = (root/'v5'/'gateway.conf').read_text()
-            self.assertIn('mfa-example', gateway)
+            self.assertIn('context', gateway)
             self.assertIn('proxy_next_upstream off', gateway)

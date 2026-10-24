@@ -18,25 +18,27 @@ impl Federation {
         request: LoginRequest,
         deadline: OperationDeadline,
     ) -> Result<FederatedRedirect, AuthorityError> {
-        self.begin_authentication(request, AuthenticationMode::Login, deadline)
+        self.begin_authentication(request, AuthenticationMode::Login, None, deadline)
             .await
     }
-    /// Upgrade only an existing session for the same already-linked principal.
+    /// Prove one host-selected operation for the same already-linked principal.
     pub async fn begin_step_up(
         &self,
         request: LoginRequest,
+        context: rss_identity_core::step_up::StepUpContext,
         deadline: OperationDeadline,
     ) -> Result<FederatedRedirect, AuthorityError> {
         if request.replacement.is_none() {
             return Err(FederationError::Rejected.into());
         }
-        self.begin_authentication(request, AuthenticationMode::StepUp, deadline)
+        self.begin_authentication(request, AuthenticationMode::StepUp, Some(context), deadline)
             .await
     }
     pub(crate) async fn begin_authentication(
         &self,
         request: LoginRequest,
         mode: AuthenticationMode,
+        context: Option<rss_identity_core::step_up::StepUpContext>,
         deadline: OperationDeadline,
     ) -> Result<FederatedRedirect, AuthorityError> {
         let LoginRequest {
@@ -133,6 +135,7 @@ impl Federation {
                     db::insert_attempt(
                         c,
                         db::NewAttempt {
+                            context,
                             locator,
                             material,
                             provider: view,
@@ -325,6 +328,16 @@ impl Federation {
                     }
                     let now = session_storage::now(c).await?;
                     claims.assurance.check(attempt.mode, attempt.created, now)?;
+                    if attempt.mode == AuthenticationMode::StepUp {
+                        let actor = actor.as_ref().ok_or_else(reject)?;
+                        if actor.state.key()!=key {return Err(reject().into());}
+                        let context=attempt.context.as_ref().ok_or_else(corrupt)?;
+                        let grant=crate::step_up::issue(c,actor,context,crate::step_up::GrantSource::Oidc {
+                            identity:identity_id,provider:Uuid::parse_str(&view.id.to_string()).map_err(|_|corrupt())?,version:view.version,epoch:view.revocation_epoch,
+                        },claims.assurance.auth_time().ok_or_else(reject)?).await?;
+                        db::consume(c,&locator).await?;
+                        return Ok((FederatedOutcome::StepUp{grant,return_url:attempt.return_url},vec![crate::step_up::event(key,crate::step_up::AuthenticationAction::Verified)]));
+                    }
                     let (origin, replaced) = if linked {
                         let intent =
                             crate::federation_link::intent(c, tenant, attempt.link.ok_or_else(reject)?).await?;

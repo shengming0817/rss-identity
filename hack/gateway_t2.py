@@ -153,7 +153,7 @@ http {
             rows = []
             paths = [
                 "/api/v1/identity/probe",
-                "/api/v1/identity-host/tenants/00000000-0000-0000-0000-000000000001/mfa-example",
+                "/api/v1/identity-host/tenants/00000000-0000-0000-0000-000000000001/context",
             ]
             for i in range(64):
                 client.request(
@@ -182,7 +182,7 @@ http {
                 "/api/v2/oidc/callback",
                 "/api/v1/tenants/00000000-0000-0000-0000-000000000001/session",
                 "/api/identity-host/v1/config.json",
-                "/api/identity-host/v1/tenants/00000000-0000-0000-0000-000000000001/mfa-example",
+                "/api/identity-host/v1/tenants/00000000-0000-0000-0000-000000000001/context",
             ]:
                 client.request("GET", path, headers={"Host": "identity.example.test"})
                 response = client.getresponse()

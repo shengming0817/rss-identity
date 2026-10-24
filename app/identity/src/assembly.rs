@@ -58,6 +58,19 @@ impl ManagementPolicy for BootstrapPolicy {
         >,
     > {
         Box::pin(async move {
+            if matches!(
+                context.operation(),
+                ManagementOperation::RegisterWebauthn
+                    | ManagementOperation::RemoveWebauthn
+                    | ManagementOperation::RecoverWebauthn
+            ) && context.target() == Some(context.actor())
+            {
+                // The component checks first-enrollment freshness or consumes the exact MFA proof.
+                return Ok(ReauthenticationRequirement::None);
+            }
+            if context.operation() == ManagementOperation::AuthorizeWebauthnRecovery {
+                return Err(ManagementDenied);
+            }
             if context.operation() == ManagementOperation::ChangeOwnPassword
                 && context.target() == Some(context.actor())
             {
@@ -169,7 +182,14 @@ fn federation_inputs(config: &RuntimeConfig) -> Result<Option<FederationInputs>,
     let options = FederationConfig {
         callback: format!("{}/api/v1/identity/oidc/callback", config.public_origin),
         credential_keys: c.credential_keyring.load()?,
-        targets: c.return_targets.clone(),
+        targets: {
+            let mut targets = c.return_targets.clone();
+            targets.insert(
+                "security".into(),
+                format!("{}/identity-security", config.public_origin),
+            );
+            targets
+        },
     };
     options.validate()?;
     Ok(Some(FederationInputs {

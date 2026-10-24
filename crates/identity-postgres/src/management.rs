@@ -9,6 +9,10 @@ use rss_identity_core::{
 use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagementOperation {
+    RegisterWebauthn,
+    RemoveWebauthn,
+    RecoverWebauthn,
+    AuthorizeWebauthnRecovery,
     ReadProfileSources,
     ReadLocalProfile,
     UpdateLocalProfile,

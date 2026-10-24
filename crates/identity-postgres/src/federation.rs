@@ -58,6 +58,10 @@ impl LinkResult {
     }
 }
 pub enum FederatedOutcome {
+    StepUp {
+        grant: crate::StepUpGrant,
+        return_url: String,
+    },
     Redirect(FederatedRedirect),
     Session {
         issued: IssuedSession,

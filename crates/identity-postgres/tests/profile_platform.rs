@@ -294,6 +294,20 @@ struct Verifier {
     fault: std::sync::Mutex<Option<PgTransactionFault>>,
 }
 impl PlatformVerifier for Verifier {
+    fn authorize_purpose<'a>(
+        &'a self,
+        _binding: &'a PlatformBinding,
+        purpose: &'a PlatformPurpose,
+        _c: &'a mut sqlx::PgConnection,
+    ) -> futures::future::BoxFuture<'a, Result<(), PlatformError>> {
+        Box::pin(async move {
+            if *purpose == PlatformPurpose::BrowserLogin {
+                Ok(())
+            } else {
+                Err(PlatformError::Rejected)
+            }
+        })
+    }
     fn audience(&self) -> &str {
         "rss-mdm-browser"
     }
@@ -325,7 +339,7 @@ impl PlatformVerifier for Verifier {
                 return Err(PlatformError::Rejected);
             }
             UnparsedPublicKey::new(&ED25519, self.key.public_key().as_ref())
-                .verify(context.nonce.as_bytes(), evidence)
+                .verify(&context.signing_payload()?, evidence)
                 .map_err(|_| PlatformError::Rejected)?;
             if let Some(fault) = self.fault.lock().unwrap().take() {
                 self.runtime.inject_next_transaction_fault(fault);
@@ -437,6 +451,7 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
         .begin_platform_login(
             f.key.tenant,
             binding.binding_id,
+            PlatformPurpose::BrowserLogin,
             browser.into(),
             source(),
             deadline(),
@@ -444,7 +459,7 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
         .await?;
     let signature = verifier
         .key
-        .sign(challenge.nonce.as_bytes())
+        .sign(&challenge.signing_payload)
         .as_ref()
         .to_vec();
     let (a, b) = tokio::join!(
@@ -467,7 +482,7 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
     );
     assert_ne!(a.is_ok(), b.is_ok());
     let issued = match (a, b) {
-        (Ok(v), _) | (_, Ok(v)) => v,
+        (Ok(v), _) | (_, Ok(v)) => v.session,
         _ => unreachable!(),
     };
     let actor = proof(&store, &f, &issued).await?;
@@ -642,6 +657,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
         .begin_platform_login(
             f.key.tenant,
             verifier.binding.binding_id,
+            PlatformPurpose::BrowserLogin,
             browser.into(),
             source(),
             deadline(),
@@ -659,6 +675,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
                 deadline()
             )
             .await
+            .map(|outcome| outcome.session)
             .is_err()
     );
     assert!(
@@ -672,6 +689,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
                 deadline()
             )
             .await
+            .map(|outcome| outcome.session)
             .is_err()
     );
     assert!(
@@ -685,6 +703,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
                 deadline()
             )
             .await
+            .map(|outcome| outcome.session)
             .is_err()
     );
     assert!(
@@ -698,6 +717,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
                 deadline()
             )
             .await
+            .map(|outcome| outcome.session)
             .is_err()
     );
     *verifier.fault.lock().unwrap() = Some(PgTransactionFault::CommitUnknownAfterAck);
@@ -711,7 +731,8 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
                 signature.clone(),
                 deadline()
             )
-            .await,
+            .await
+            .map(|outcome| outcome.session),
         Err(AuthorityError::CommitUnknown(_))
     ));
     assert!(
@@ -725,6 +746,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
                 deadline()
             )
             .await
+            .map(|outcome| outcome.session)
             .is_err()
     );
     let count: i64 = sqlx::query_scalar(
@@ -742,6 +764,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
         .begin_platform_login(
             f.key.tenant,
             verifier.binding.binding_id,
+            PlatformPurpose::BrowserLogin,
             browser.into(),
             source(),
             deadline(),
@@ -760,6 +783,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
                 deadline()
             )
             .await
+            .map(|outcome| outcome.session)
             .is_err()
     );
     let after: i64 = sqlx::query_scalar(
@@ -786,6 +810,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
                 deadline()
             )
             .await
+            .map(|outcome| outcome.session)
             .is_err()
     );
     f.close().await;
@@ -843,6 +868,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
         .begin_platform_login(
             f.key.tenant,
             verifier.binding.binding_id,
+            PlatformPurpose::BrowserLogin,
             BROWSER.into(),
             source(),
             deadline(),
@@ -850,7 +876,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
         .await?;
     let signature = verifier
         .key
-        .sign(challenge.nonce.as_bytes())
+        .sign(&challenge.signing_payload)
         .as_ref()
         .to_vec();
     // Each rejection must leave the challenge and observation untouched.
@@ -875,6 +901,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
                     deadline()
                 )
                 .await
+                .map(|outcome| outcome.session)
                 .is_err()
         );
     }
@@ -888,7 +915,8 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
             signature,
             deadline(),
         )
-        .await?;
+        .await
+        .map(|outcome| outcome.session)?;
     let actor = proof(&store, &f, &platform).await?;
     assert_eq!(
         personnel_session(&store, &f.actor().await?, platform.view().id.as_uuid()).await?,
@@ -939,6 +967,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
         .begin_platform_login(
             f.key.tenant,
             verifier.binding.binding_id,
+            PlatformPurpose::BrowserLogin,
             BROWSER.into(),
             source(),
             deadline(),
@@ -964,6 +993,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
                 deadline()
             )
             .await
+            .map(|outcome| outcome.session)
             .is_err()
     );
     assert!(
@@ -990,6 +1020,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
         .begin_platform_login(
             f.key.tenant,
             verifier.binding.binding_id,
+            PlatformPurpose::BrowserLogin,
             BROWSER.into(),
             source(),
             deadline(),
@@ -1020,6 +1051,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
                 deadline()
             )
             .await
+            .map(|outcome| outcome.session)
             .is_err()
     );
     assert!(proof(&store, &f, &platform).await.is_err());
@@ -1343,6 +1375,7 @@ async fn platform_evidence_admission_preserves_authentication_time() -> anyhow::
             .begin_platform_login(
                 f.key.tenant,
                 verifier.binding.binding_id,
+                PlatformPurpose::BrowserLogin,
                 browser.into(),
                 source(),
                 deadline(),
@@ -1360,7 +1393,7 @@ async fn platform_evidence_admission_preserves_authentication_time() -> anyhow::
         let before = counts.await?;
         let signature = verifier
             .key
-            .sign(challenge.nonce.as_bytes())
+            .sign(&challenge.signing_payload)
             .as_ref()
             .to_vec();
         let result = store
@@ -1372,7 +1405,8 @@ async fn platform_evidence_admission_preserves_authentication_time() -> anyhow::
                 signature,
                 deadline(),
             )
-            .await;
+            .await
+            .map(|outcome| outcome.session);
         if possession && verification && offset == Some(0) {
             let issued = result?;
             let actor = proof(&store, &f, &issued).await?;
