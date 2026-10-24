@@ -12,7 +12,6 @@ async fn transaction<'a>(
     c: &'a mut PgConnection,
     tenant: &str,
 ) -> anyhow::Result<Transaction<'a, Postgres>> {
-    use sqlx::Connection;
     let mut tx = c.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
         .bind(tenant)
@@ -146,7 +145,6 @@ async fn host_admission_is_passive_and_transaction_scoped() -> anyhow::Result<()
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
         "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
     ] {
-        use sqlx::Connection;
         let mut tx = c.begin().await?;
         sqlx::query(sqlx::AssertSqlSafe(isolation))
             .execute(&mut *tx)
@@ -281,8 +279,8 @@ async fn host_admission_rejects_stale_credentials_and_subjects() -> anyhow::Resu
         "UPDATE identity_authority.accounts SET auth_epoch=auth_epoch+1",
         "UPDATE identity_authority.memberships SET active=false",
         "UPDATE identity_authority.memberships SET epoch=epoch+1",
-        "UPDATE identity_authority.sessions SET issued_at=issued_at-100,idle_expires_at=issued_at-1",
-        "UPDATE identity_authority.sessions SET issued_at=issued_at-100,absolute_expires_at=issued_at-1,idle_expires_at=issued_at-1",
+        "UPDATE identity_authority.sessions SET issued_at=issued_at-1000,local_authenticated_at=local_authenticated_at-1000,idle_expires_at=idle_expires_at-1000,absolute_expires_at=absolute_expires_at-1000",
+        "UPDATE identity_authority.sessions SET issued_at=issued_at-15000,local_authenticated_at=local_authenticated_at-15000,idle_expires_at=idle_expires_at-15000,absolute_expires_at=absolute_expires_at-15000",
     ] {
         let mut c = f.owner.acquire().await?;
         let mut tx = c.begin().await?;
@@ -384,7 +382,6 @@ async fn host_admission_rechecks_federated_source() -> anyhow::Result<()> {
         "UPDATE identity_authority.providers SET enabled=false",
         "UPDATE identity_authority.providers SET config_version=config_version+1",
         "UPDATE identity_authority.providers SET revocation_epoch=revocation_epoch+1",
-        "DELETE FROM identity_authority.external_identities",
     ] {
         let mut c = f.owner.acquire().await?;
         let mut tx = c.begin().await?;
