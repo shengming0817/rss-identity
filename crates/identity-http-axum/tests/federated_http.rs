@@ -223,7 +223,7 @@ async fn successful(app: &Router, p: &ProviderView, user: &str) -> anyhow::Resul
 
 #[tokio::test]
 #[ignore = "requires make test-federated"]
-async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
+async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let s = service(&f, Arc::new(fixture_transport(true)?));
@@ -234,7 +234,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
     let path = format!("/api/v1/identity/tenants/{A}/oidc/{}/step-up", p.id);
     let browser = format!("{BROWSER}; {original}");
     let csrf = secret(&original).csrf();
-    let input = json!({"returnTarget":"home"});
+    let input = json!({"returnTarget":"home","operation":{"kind":"register"}});
     for (cookies, token) in [(BROWSER, None), (browser.as_str(), None)] {
         let r = app
             .clone()
@@ -300,24 +300,29 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
     let cb = authorize_factor(&url, "step-up", true).await?;
     let r = callback(&app, &cb, &browser).await?;
     assert_eq!(r.headers()["location"], format!("{ORIGIN}/done"));
-    let upgraded = cookie(&r);
+    let operation_cookie = r.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap();
+    let handle = operation_cookie
+        .strip_prefix("__Host-identity-operation=")
+        .ok_or_else(|| anyhow::anyhow!("missing operation proof"))?;
     let current = f
         .store
-        .inspect_session(f.key.tenant, secret(&upgraded), deadline())
+        .inspect_session(f.key.tenant, secret(&original), deadline())
         .await?;
-    assert!(
-        f.store
-            .inspect_session(f.key.tenant, secret(&original), deadline())
-            .await
-            .is_err()
-    );
-    let facts: Value = sqlx::query_scalar("SELECT auth_facts FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
-        .bind(A).bind(current.view().id.to_string()).fetch_one(&f.owner).await?;
-    assert_eq!(facts["assurance"]["acr"], "mfa");
-    assert!(facts["assurance"]["auth_time"].as_i64().unwrap() > 0);
-    let replay = callback(&app, &cb, &format!("{BROWSER}; {upgraded}")).await?;
+    let context = webauthn_management_context(current.account(), "register", None)?;
+    let mut tx = f.owner.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(A)
+        .execute(&mut *tx)
+        .await?;
+    consume_step_up_on(&mut tx, &current, &context, handle).await?;
+    tx.rollback().await?;
+    let replay = callback(&app, &cb, &browser).await?;
     assert!(!replay.headers().contains_key("set-cookie"));
-    let envelopes: Vec<Value> = sqlx::query_scalar("SELECT envelope FROM rss_transactional_messaging.outbox WHERE envelope->>'route'='federation.changed'").fetch_all(&f.owner).await?;
+    let envelopes: Vec<Value> = sqlx::query_scalar("SELECT envelope FROM rss_transactional_messaging.outbox WHERE envelope->>'route'='authentication.changed'").fetch_all(&f.owner).await?;
     let audit: Vec<Value> = envelopes
         .into_iter()
         .map(|v| {
@@ -326,7 +331,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         })
         .collect();
     assert_eq!(
-        audit.iter().filter(|v| v["action"] == "stepped_up").count(),
+        audit.iter().filter(|v| v["action"] == "verified").count(),
         1
     );
     // A real adapter profile withdrawal is applied before startup opens HTTP admission.
@@ -336,7 +341,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         .await?;
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&upgraded), deadline())
+            .inspect_session(f.key.tenant, secret(&original), deadline())
             .await
             .is_err()
     );
@@ -348,7 +353,7 @@ async fn real_step_up_rotates_only_the_bound_session() -> anyhow::Result<()> {
         .await?;
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&upgraded), deadline())
+            .inspect_session(f.key.tenant, secret(&original), deadline())
             .await
             .is_err(),
         "restoring the assurance profile must not revive MFA"

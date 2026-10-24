@@ -247,3 +247,6 @@ pub fn issued_session_response(
     );
     response
 }
+
+mod webauthn;
+pub use webauthn::webauthn_router;

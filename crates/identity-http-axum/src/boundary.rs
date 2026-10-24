@@ -98,6 +98,12 @@ impl IntoResponse for HttpError {
 impl From<AuthorityError> for HttpError {
     fn from(error: AuthorityError) -> Self {
         let mut response = match error {
+            AuthorityError::InteractionRequired => {
+                Self(StatusCode::FORBIDDEN, "interaction_required", None)
+            }
+            AuthorityError::Cancelled => {
+                Self(StatusCode::CONFLICT, "authentication_cancelled", None)
+            }
             AuthorityError::InvalidInput => BAD,
             AuthorityError::Federation(error) => match error {
                 rss_identity_core::federation::FederationError::Configuration => BAD,

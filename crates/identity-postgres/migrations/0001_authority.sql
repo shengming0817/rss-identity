@@ -1,7 +1,7 @@
--- Fresh schema v16 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v17 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=16));
-INSERT INTO identity_authority.schema_version VALUES(16);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=17));
+INSERT INTO identity_authority.schema_version VALUES(17);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000')
@@ -128,6 +128,7 @@ CREATE TABLE identity_authority.link_intents (
  CHECK((source_identity IS NULL AND source_epoch IS NULL AND source_facts IS NULL) OR (source_identity IS NOT NULL AND source_epoch IS NOT NULL AND source_epoch>0 AND source_facts IS NOT NULL AND jsonb_typeof(source_facts)='object' AND octet_length(source_facts::text)<=32768 AND (source_facts->'format_version'='3'::jsonb AND jsonb_typeof(source_facts->'department_snapshot')='object') IS TRUE))
 );
 CREATE TABLE identity_authority.oidc_transactions (
+ operation_context jsonb,
  tenant_id uuid NOT NULL, attempt_id bytea NOT NULL CHECK(octet_length(attempt_id)=32),
  provider_id uuid NOT NULL, config_version bigint NOT NULL CHECK(config_version>0),
  state_hash bytea NOT NULL CHECK(octet_length(state_hash)=32), browser_hash bytea NOT NULL CHECK(octet_length(browser_hash)=32),
@@ -149,6 +150,8 @@ CREATE TABLE identity_authority.oidc_transactions (
 CREATE INDEX oidc_expiry ON identity_authority.oidc_transactions(tenant_id,expires_at);
 CREATE INDEX link_expiry ON identity_authority.link_intents(tenant_id,expires_at);
 CREATE TABLE identity_authority.platform_challenges (
+ purpose jsonb NOT NULL CHECK(jsonb_typeof(purpose)='object' AND octet_length(purpose::text)<=512),
+ target jsonb CHECK(target IS NULL OR (jsonb_typeof(target)='object' AND octet_length(target::text)<=8192)),
  tenant_id uuid NOT NULL, challenge_id uuid NOT NULL, principal_id uuid NOT NULL,
  binding jsonb NOT NULL CHECK(jsonb_typeof(binding)='object' AND octet_length(binding::text)<=4096),
  audience text NOT NULL CHECK(octet_length(audience) BETWEEN 1 AND 256),
@@ -185,8 +188,49 @@ CREATE TABLE identity_authority.profile_operations (
  PRIMARY KEY(tenant_id,operation_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
 );
+CREATE TABLE identity_authority.webauthn_rp (
+ tenant_id uuid NOT NULL, rp text NOT NULL CHECK(octet_length(rp) BETWEEN 1 AND 253),
+ fingerprint bytea NOT NULL CHECK(octet_length(fingerprint)=32), generation bigint NOT NULL CHECK(generation>0),
+ PRIMARY KEY(tenant_id,rp)
+);
+CREATE TABLE identity_authority.webauthn_accounts (
+ tenant_id uuid NOT NULL, principal_id uuid NOT NULL, user_handle uuid NOT NULL DEFAULT gen_random_uuid(),
+ enrolled boolean NOT NULL DEFAULT false, epoch bigint NOT NULL DEFAULT 1 CHECK(epoch>0),
+ PRIMARY KEY(tenant_id,principal_id), UNIQUE(user_handle),
+ FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
+);
+CREATE TABLE identity_authority.webauthn_credentials (
+ tenant_id uuid NOT NULL, principal_id uuid NOT NULL, id uuid NOT NULL,
+ rp text NOT NULL CHECK(octet_length(rp)<=253), rp_config bytea NOT NULL CHECK(octet_length(rp_config)=32),
+ credential_hash bytea NOT NULL CHECK(octet_length(credential_hash)=32),
+ value jsonb NOT NULL CHECK(jsonb_typeof(value)='object' AND octet_length(value::text)<=16384),
+ label text NOT NULL CHECK(octet_length(label) BETWEEN 1 AND 128),
+ epoch bigint NOT NULL DEFAULT 1 CHECK(epoch>0), version bigint NOT NULL DEFAULT 1 CHECK(version>0), revoked boolean NOT NULL DEFAULT false,
+ PRIMARY KEY(tenant_id,id), UNIQUE(rp,credential_hash),
+ FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
+);
+CREATE TABLE identity_authority.webauthn_ceremonies (
+ tenant_id uuid NOT NULL, id uuid NOT NULL, principal_id uuid NOT NULL, session_id uuid NOT NULL,
+ auth_epoch bigint NOT NULL CHECK(auth_epoch>0), membership_epoch bigint NOT NULL CHECK(membership_epoch>0), credential_epoch bigint NOT NULL CHECK(credential_epoch>0),
+ rp_config bytea NOT NULL CHECK(octet_length(rp_config)=32), state jsonb NOT NULL CHECK(jsonb_typeof(state)='object' AND octet_length(state::text)<=131072),
+ created_at bigint NOT NULL CHECK(created_at>0), expires_at bigint NOT NULL CHECK(expires_at>created_at AND expires_at-created_at<=120),
+ PRIMARY KEY(tenant_id,id), FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
+);
+CREATE TABLE identity_authority.step_up_grants (
+ tenant_id uuid NOT NULL, token_hash bytea NOT NULL CHECK(octet_length(token_hash)=32), principal_id uuid NOT NULL, session_id uuid NOT NULL,
+ auth_epoch bigint NOT NULL CHECK(auth_epoch>0), membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
+ context jsonb NOT NULL CHECK(jsonb_typeof(context)='object' AND octet_length(context::text)<=2048),
+ source jsonb NOT NULL CHECK(jsonb_typeof(source)='object' AND octet_length(source::text)<=2048),
+ authenticated_at bigint NOT NULL CHECK(authenticated_at>0), expires_at bigint NOT NULL CHECK(expires_at>authenticated_at AND expires_at-authenticated_at<=300),
+ PRIMARY KEY(tenant_id,token_hash), FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
+);
+CREATE INDEX webauthn_ceremony_expiry ON identity_authority.webauthn_ceremonies(tenant_id,expires_at);
+CREATE INDEX step_up_subject ON identity_authority.step_up_grants(tenant_id,principal_id);
+CREATE INDEX webauthn_ceremony_subject ON identity_authority.webauthn_ceremonies(tenant_id,principal_id);
+CREATE INDEX step_up_expiry ON identity_authority.step_up_grants(tenant_id,expires_at);
+CREATE INDEX webauthn_account_credentials ON identity_authority.webauthn_credentials(tenant_id,principal_id);
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','guard','local_credentials','accounts','memberships','password_attempts','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
+ FOREACH t IN ARRAY ARRAY['webauthn_rp','webauthn_accounts','webauthn_credentials','webauthn_ceremonies','step_up_grants','platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','guard','local_credentials','accounts','memberships','password_attempts','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
  EXECUTE format('ALTER TABLE identity_authority.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE identity_authority.%I FORCE ROW LEVEL SECURITY',t);
  EXECUTE format('CREATE POLICY tenant ON identity_authority.%I USING (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',t);

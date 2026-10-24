@@ -297,8 +297,7 @@ async function keycloak(
     check((await current(c)).status === 200, "oidc-session");
   } else
     check(
-      (await read(c, `/api/v1/identity-host/tenants/${c.t}/mfa-example`))
-        .status !== 200,
+      !(await c.context.cookies(origin)).some(cookie => cookie.name === "__Host-identity-operation"),
       "failed-mfa-not-authorized",
     );
   await store(c);
@@ -313,13 +312,13 @@ async function sso(role, user, t = tenant, options = {}) {
 }
 async function stepUp(c, user = "bob", options = {}) {
   await c.context.clearCookies({ domain: new URL(input.issuer).hostname });
-  await sessions(c);
-  diagnostic = "step-up-button";
-  await c.page
-    .getByRole("button", { name: /Step up authentication|增强认证/ })
-    .click();
-  await keycloak(c, user, { otp: true, ...options });
+  await c.context.clearCookies({ name: "__Host-identity-operation" });
+  const result=await write(c,"POST",`oidc/${data.providers[c.t]}/step-up`,{returnTarget:"resume",operation:{kind:"register"}});
+  check(result.status===200,"operation-step-up-started");
+  await c.page.goto(result.body.authorizationUrl);
+  await keycloak(c,user,{otp:true,...options});
 }
+
 async function local() {
   const a = await admin();
   const initialSession = (await current(a)).body.session;
@@ -544,11 +543,7 @@ async function oidc() {
     "explicit-link-subject",
   );
   check(data.accounts.linked !== data.alicePrincipal, "no-email-auto-link");
-  const weak = await read(
-    linked,
-    `/api/v1/identity-host/tenants/${tenant}/mfa-example`,
-  );
-  check(weak.status === 403, "ordinary-login-is-not-mfa");
+  check(!(await linked.context.cookies(origin)).some(cookie=>cookie.name === "__Host-identity-operation"),"ordinary-login-has-no-operation-proof");
   await store(linked);
   // Capture a real callback and deliver it without the originating browser cookie first.
   const bound = await open("bound", tenant, true);
@@ -642,51 +637,26 @@ async function mfa() {
       } else await route.continue();
     },
   );
-  await sessions(c);
-  await c.page
-    .getByRole("button", { name: /Step up authentication|增强认证/ })
-    .click();
-  await keycloak(c, "bob", { success: false });
+  await stepUp(c,"bob",{success:false,otp:false});
   await c.page.unroute(input.issuer.split("/realms")[0] + "/**");
   check(downgraded, "browser-assurance-downgrade-exercised");
   journey = "mfa-fresh";
   await stepUp(c, "bob", { badOtp: true });
-  await expectOldCookie(c, before);
-  let resource = await read(
-    c,
-    `/api/v1/identity-host/tenants/${tenant}/mfa-example`,
-  );
-  check(
-    resource.status === 200 && resource.body.authentication.acr === "mfa",
-    "fresh-mfa-resource",
-  );
-  check(resource.body.principalId === data.accounts.linked, "mfa-subject");
-  const authTime = resource.body.authentication.authTime;
-  const refresh = await write(c, "POST", "session/refresh", {});
-  check(refresh.status === 200, "mfa-refresh");
-  resource = await read(
-    c,
-    `/api/v1/identity-host/tenants/${tenant}/mfa-example`,
-  );
-  check(
-    resource.body.authentication.authTime === authTime,
-    "refresh-does-not-refresh-mfa",
-  );
-  await new Promise((r) =>
-    setTimeout(r, Math.max(0, (authTime + input.policy.mfaMaxAgeSeconds + 1) * 1000 - Date.now())),
-  );
-  check(
-    (await read(c, `/api/v1/identity-host/tenants/${tenant}/mfa-example`))
-      .status === 403,
-    "mfa-real-expiry",
-  );
-  journey = "mfa-after-expiry";
+  const sessionCookie = cookies=>cookies.find(cookie=>cookie.name==="__Host-identity-session")?.value;
+  check(sessionCookie(before)===sessionCookie(await c.context.cookies()),"operation-proof-preserves-session");
+  const proofCookie=(await c.context.cookies(origin)).find(cookie=>cookie.name==="__Host-identity-operation");
+  check(Boolean(proofCookie),"operation-proof-cookie");
+  const start=await write(c,"POST","webauthn/register/begin",{label:"pending enrollment",recover:false});
+  check(start.status===200,"fresh-mfa-enrollment-authorized");
+  check((await write(c,"POST",`webauthn/${start.body.id}/cancel`,{})).status===200,"pending-enrollment-cancelled");
+  await c.context.addCookies([{...proofCookie,expires:-1}]);
+  check((await write(c,"POST","webauthn/register/begin",{label:"replay",recover:false})).status!==200,"operation-proof-single-use");
   await stepUp(c);
-  check(
-    (await read(c, `/api/v1/identity-host/tenants/${tenant}/mfa-example`))
-      .status === 200,
-    "repeat-step-up",
-  );
+  const expiring=(await c.context.cookies(origin)).find(cookie=>cookie.name==="__Host-identity-operation");
+  await new Promise(resolve=>setTimeout(resolve,(input.policy.operationProofSeconds+1)*1000));
+  await c.context.addCookies([{...expiring,expires:-1}]);
+  check((await write(c,"POST","webauthn/register/begin",{label:"expired",recover:false})).status!==200,"real-operation-proof-expiry");
+
   const a = await admin();
   const p = await provider(a);
   const disabled = await write(a, "POST", `providers/${p.id}/enabled`, {
@@ -743,8 +713,9 @@ async function mfa() {
   await store(a);
   return {
     freshMfaConsumed: true,
-    realExpiryRejected: true,
-    oldSessionRejected: true,
+    realProofExpiryRejected: true,
+    originalSessionPreserved: true,
+    operationReplayRejected: true,
     wrongSubjectAndDowngradeRejected: true,
     wrongTotpRejected: true,
     federatedAccountRevocation: true,

@@ -57,6 +57,7 @@ pub(crate) struct ProvisioningEvent {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub(crate) enum SecurityEvent {
+    Authentication(crate::step_up::AuthenticationEvent),
     Profile(crate::profiles::ProfileEvent),
     Account(AccountEvent),
     Provisioned(ProvisioningEvent),
@@ -81,6 +82,7 @@ impl SecurityEvent {
     }
     fn tenant(&self) -> &str {
         match self {
+            Self::Authentication(v) => &v.tenant,
             Self::Profile(v) => &v.tenant,
             Self::Account(v) => &v.tenant,
             Self::Provisioned(v) => &v.account.tenant,
@@ -90,6 +92,12 @@ impl SecurityEvent {
     }
     fn contract(&self) -> (&'static str, &'static str, u32, &'static str) {
         match self {
+            Self::Authentication(_) => (
+                "authentication.changed",
+                "identity.authentication.security",
+                1,
+                include_str!("authentication-security-event-v1.json"),
+            ),
             Self::Profile(_) => (
                 "profile.changed",
                 "identity.profile.security",

@@ -95,6 +95,13 @@ struct Begin {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BeginStepUp {
+    return_target: String,
+    operation: crate::webauthn::Operation,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Link {
     return_target: String,
     password: Option<String>,
@@ -243,14 +250,20 @@ async fn step_up(
 
     let source = source(&request)?;
 
+    let host = request
+        .extensions()
+        .get::<rss_identity_core::step_up::StepUpContext>()
+        .cloned();
     let Json(input) = tokio::time::timeout_at(
         budget.cutoff(),
-        Json::<Begin>::from_request(request, &state),
+        Json::<BeginStepUp>::from_request(request, &state),
     )
     .await
     .map_err(|_| HttpError::request_timeout())?
     .map_err(|_| BAD)?;
 
+    let actor = actor.ok_or(UNAUTH)?;
+    let context = input.operation.context(&actor, host)?;
     let redirect = state
         .federation
         .begin_step_up(
@@ -259,9 +272,10 @@ async fn step_up(
                 provider,
                 browser: browser.clone(),
                 target: input.return_target,
-                replacement: actor,
+                replacement: Some(actor),
                 source,
             },
+            context,
             budget.remaining(),
         )
         .await?;
@@ -401,6 +415,9 @@ async fn callback_result(
 
     let (location, cookie) = match outcome {
         FederatedOutcome::Redirect(redirect) => (redirect.url, None),
+        FederatedOutcome::StepUp { grant, return_url } => {
+            (return_url, Some(crate::webauthn::grant_cookie(&grant)))
+        }
         FederatedOutcome::Session {
             issued,
             return_url,

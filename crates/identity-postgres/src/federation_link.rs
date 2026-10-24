@@ -229,6 +229,7 @@ impl Federation {
                     db::insert_attempt(
                         c,
                         db::NewAttempt {
+                        context: None,
                             mode: if purpose == Purpose::Reauthenticate { AuthenticationMode::Reauthenticate } else { AuthenticationMode::Login },
                             locator,
                             material,
@@ -356,6 +357,7 @@ impl Federation {
                     db::insert_attempt(
                         c,
                         db::NewAttempt {
+                            context: None,
                             mode: AuthenticationMode::Login,
                             locator: new_locator,
                             material,

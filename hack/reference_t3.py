@@ -284,7 +284,7 @@ TRUE_FACTS = {
     "install": "initializationReplayRejected",
     "local": "cookieAttributes tenantAndPrivilegeDenied sessionRotationAndRevocation authoritativePolicyMatched",
     "oidc": "jitAndExplicitLink tenantIdentityIsolated wrongPasswordRejected browserBindingAndReplay federatedLogout",
-    "mfa": "freshMfaConsumed realExpiryRejected oldSessionRejected wrongSubjectAndDowngradeRejected wrongTotpRejected federatedAccountRevocation",
+    "mfa": "freshMfaConsumed realProofExpiryRejected originalSessionPreserved operationReplayRejected wrongSubjectAndDowngradeRejected wrongTotpRejected federatedAccountRevocation",
     "events": "rollbackPreserved failedAttemptBudgetCommitted responseLossObservedCommitted",
     "availability": "localSurvivesIdpFailure storageFailureClosed",
     "credential-rotation": "oldCiphertextRejectedWithoutKey retiredKeyRejected singleNewKeyVerified",
@@ -454,7 +454,7 @@ def validate_binary_profile(profile):
     session = profile.get("session", {})
     require(isinstance(session, dict), "binary-session-policy")
     idle, absolute = session.get("idleSeconds"), session.get("absoluteSeconds")
-    mfa = profile.get("mfaMaxAgeSeconds")
+    mfa = profile.get("operationProofSeconds")
     require(
         type(idle) is int
         and type(absolute) is int
@@ -465,7 +465,7 @@ def validate_binary_profile(profile):
     )
     return {
         "session": {"idleSeconds": idle, "absoluteSeconds": absolute},
-        "mfaMaxAgeSeconds": mfa,
+        "operationProofSeconds": mfa,
     }
 
 

@@ -13,6 +13,11 @@ pub(super) struct InvalidEvent;
 
 pub(super) fn accepted_contract(id: &str, version: &str, digest: &str) -> Option<&'static str> {
     let (expected, schema, route) = match id {
+        "identity.authentication.security" => (
+            "v1",
+            include_str!("../authentication-security-event-v1.json"),
+            "authentication.changed",
+        ),
         "identity.profile.security" => (
             "v1",
             include_str!("../profile-security-event-v1.json"),
@@ -148,6 +153,25 @@ pub(super) fn map_event(
     require(message.payload().len() <= 4096 && meta.occurred_at() <= recorded)?;
     let tenant = meta.tenant_id().to_string();
     let (action, actor_kind, actor_id, resource_kind, resource_id, outcome, payload) = match route {
+        "authentication.changed" => {
+            let e: crate::step_up::AuthenticationEvent = parse(message.payload(), &[])?;
+            require(e.tenant == tenant && !e.principal.is_nil())?;
+            let action = match e.action {
+                crate::step_up::AuthenticationAction::Registered => "registered",
+                crate::step_up::AuthenticationAction::Removed => "removed",
+                crate::step_up::AuthenticationAction::Recovered => "recovered",
+                crate::step_up::AuthenticationAction::Verified => "verified",
+            };
+            (
+                format!("identity.authentication.{action}"),
+                "principal",
+                e.principal.to_string(),
+                "authentication",
+                e.principal.to_string(),
+                Outcome::Succeeded,
+                json!({}),
+            )
+        }
         "profile.changed" => {
             let e: ProfileChange = parse(message.payload(), &["actor", "snapshot_id", "revision"])?;
             require(

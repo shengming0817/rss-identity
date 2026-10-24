@@ -43,7 +43,7 @@ OIDC 存在时必须显式提供 `privateProviders`，空数组表示仅公网�
 
 DNS 的全部 A/AAAA 必须属于公网基线或该绑定授权的私网；reqwest 直接消费已检查地址。HTTPS、证书校验、精确协议 origin、禁止代理/重定向保持有效；loopback、link-local/metadata、保留及转换地址不可授权。测试 loopback 仅由 test-support 显式构造，不由生产配置开启。私有 CA 仍通过既有 provider `caPem` 提供，网络许可不授予 MFA，也不修改已有 session 的撤销 epoch；撤销已有联合会话使用 provider 停用。
 
-网关同时提供 `GET /api/v1/identity-host/tenants/{tenant}/mfa-example`：同租户权威会话必须具有可信 `acr=mfa` 且认证年龄在宿主规定的有效窗口内，否则要求重新认证。此资源不续期、无业务副作用并返回 no-store；普通管理与预建本地账户策略不变。
+参考宿主的 `/identity-security` 提供认证器自助登记、验证、删除及使用企业 MFA 恢复。首次登记使用近期主认证与宿主策略；已有认证器的变更必须消费绑定该操作的一次性证明。原会话不因 step-up 被替换或提升，普通资料和 Cookie 不能兑换任意 RP Token。
 
 仅更新前端时，保持 --identity-image 和宿主配置不变，以新 --web-image 渲染新目录。通过原部署 close 后在新目录 verify/open；后端不需重建，备份只绑定后端版本。前端管理导航请求的网络、超时或合法 503 暂不可用保留已接受会话，隐藏提示依赖的入口并提供手动重试；401、协议错误与身份不匹配继续拒绝。
 

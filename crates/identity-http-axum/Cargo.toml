@@ -21,6 +21,9 @@ thiserror.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
 [dev-dependencies]
+openssl = "0.10"
+ring.workspace = true
+webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = ["softpasskey"] }
 hmac = "0.13"
 sha1 = { version = "0.11", default-features = false }
 rss-identity-oidc = { path = "../identity-oidc", features = ["test-support"] }

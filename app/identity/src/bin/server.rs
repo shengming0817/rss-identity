@@ -36,7 +36,7 @@ fn main() {
                         "passwordFailureSeconds": rss_identity_postgres::PASSWORD_FAILURE_SECONDS
                     },
                     "kdfConcurrency": rss_identity_core::account::PasswordKdf::MAX_CONCURRENCY,
-                    "mfaMaxAgeSeconds": rss_identity_app::context::MFA_MAX_AGE_SECONDS
+                    "operationProofSeconds": rss_identity_core::step_up::OPERATION_PROOF_SECONDS
                 })
             );
             return Ok(());

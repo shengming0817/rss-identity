@@ -2,9 +2,11 @@
 //! The host verifies devices and platform cryptography; Identity alone issues sessions.
 //! ref: webauthn-rs 0.5.3 src/lib.rs (server-owned, one-use ceremony state).
 mod admission;
+mod enterprise;
 pub use admission::{
     PlatformSubjectAdmissionError, PlatformSubjectVersion, admit_platform_subject_on,
 };
+pub use enterprise::{EnterpriseAssertion, EnterpriseConfig, PlatformLogin, PlatformPurpose};
 
 use crate::{
     storage::*,
@@ -54,12 +56,20 @@ impl PlatformBinding {
     }
 }
 /// Only supplied to the verifier installed by trusted composition, never accepted from HTTP JSON.
+#[derive(Serialize)]
 pub struct PlatformChallengeContext {
+    pub purpose: PlatformPurpose,
     pub binding: PlatformBinding,
     pub audience: String,
     pub nonce: String,
     pub created_at: i64,
     pub expires_at: i64,
+}
+impl PlatformChallengeContext {
+    /// Canonical JSON bytes signed by the device; binds purpose/RP as well as the nonce.
+    pub fn signing_payload(&self) -> Result<Vec<u8>, PlatformError> {
+        serde_json::to_vec(self).map_err(|_| PlatformError::Rejected)
+    }
 }
 /// Intermediate adapter output, not a transferable proof or session-issuance input.
 pub struct PlatformEvidence {
@@ -85,12 +95,23 @@ pub enum PlatformError {
     Rejected,
     #[error("platform verifier unavailable")]
     Unavailable,
+    #[error("user interaction required")]
+    InteractionRequired,
+    #[error("authentication cancelled")]
+    Cancelled,
 }
 /// Installed once by trusted composition, like UpstreamOidc. This does not distrust host code.
 /// Resolve/recheck borrow the caller's transaction: never commit, change tenant, take another
 /// connection, perform network calls or release the authoritative binding locks.
 pub trait PlatformVerifier: Send + Sync {
     fn audience(&self) -> &str;
+    /// Approve this RP and current binding in the same settlement transaction.
+    fn authorize_purpose<'a>(
+        &'a self,
+        binding: &'a PlatformBinding,
+        purpose: &'a PlatformPurpose,
+        c: &'a mut PgConnection,
+    ) -> BoxFuture<'a, Result<(), PlatformError>>;
     fn challenge_seconds(&self) -> u32 {
         120
     }
@@ -115,6 +136,7 @@ pub trait PlatformVerifier: Send + Sync {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformChallenge {
+    pub signing_payload: Vec<u8>,
     pub id: Uuid,
     pub nonce: String,
     pub expires_at: i64,
@@ -141,7 +163,9 @@ impl PlatformAuthentication {
 }
 fn failure(error: PlatformError) -> rss_transactional_messaging_postgres::PgError {
     match error {
-        PlatformError::Rejected => reject(),
+        PlatformError::Rejected | PlatformError::Cancelled | PlatformError::InteractionRequired => {
+            reject()
+        }
         PlatformError::Unavailable => rss_transactional_messaging_postgres::PgError::from(
             rss_transactional_messaging::error::MessagingError::new(
                 rss_transactional_messaging::error::MessagingErrorKind::Transient,
@@ -197,6 +221,7 @@ impl Authority {
         &self,
         tenant: TenantId,
         binding: Uuid,
+        purpose: PlatformPurpose,
         browser: String,
         source: AttemptSource,
         deadline: OperationDeadline,
@@ -223,12 +248,18 @@ impl Authority {
             budget.remaining(),
         )
         .await?;
+        let target = match &self.enterprise {
+            Some(config) => config.target(&purpose)?,
+            None if purpose == PlatformPurpose::BrowserLogin => None,
+            None => return Err(AuthorityError::Configuration),
+        };
         let instance = self.instance;
         self.read_sql(tenant,budget.remaining(),move|c|Box::pin(async move{
             lock_guard(c,tenant).await?;
             let resolved=verifier.resolve(instance,tenant,binding,c).await.map_err(failure)?;
             if !resolved.valid() || resolved.instance!=instance || resolved.account.tenant!=tenant || resolved.binding_id!=binding || !load(c,resolved.account).await?.state.active(){return Err(reject().into());}
             external(c,&resolved).await?;
+            verifier.authorize_purpose(&resolved,&purpose,c).await.map_err(failure)?;
             let state=load(c,resolved.account).await?.state;
             let now=crate::session_storage::now(c).await?;
             sqlx::query("DELETE FROM identity_authority.platform_challenges WHERE tenant_id=$1::uuid AND challenge_id IN (SELECT challenge_id FROM identity_authority.platform_challenges WHERE tenant_id=$1::uuid AND expires_at<=$2 LIMIT 128)")
@@ -237,9 +268,10 @@ impl Authority {
             if count>=10000{return Err(reject().into());}
             let id=Uuid::new_v4();let nonce=random_secret()?;let expires=now+i64::from(verifier.challenge_seconds());
             let sequence=crate::profiles::sequence(c,tenant).await?;
-            sqlx::query("INSERT INTO identity_authority.platform_challenges(tenant_id,challenge_id,principal_id,binding,audience,nonce_hash,browser_hash,auth_epoch,membership_epoch,created_at,expires_at,profile_sequence) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
-                .bind(tenant.to_string()).bind(id).bind(resolved.account.principal.as_uuid()).bind(serde_json::to_value(&resolved).map_err(|_|corrupt())?).bind(verifier.audience()).bind(digest(&nonce).as_slice()).bind(digest(&browser).as_slice()).bind(state.epoch()).bind(state.membership_epoch()).bind(now).bind(expires).bind(sequence).execute(c).await?;
-            Ok(PlatformChallenge{id,nonce:nonce.to_string(),expires_at:expires})
+            sqlx::query("INSERT INTO identity_authority.platform_challenges(tenant_id,challenge_id,principal_id,binding,audience,nonce_hash,browser_hash,auth_epoch,membership_epoch,created_at,expires_at,profile_sequence,purpose,target) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)")
+                .bind(tenant.to_string()).bind(id).bind(resolved.account.principal.as_uuid()).bind(serde_json::to_value(&resolved).map_err(|_|corrupt())?).bind(verifier.audience()).bind(digest(&nonce).as_slice()).bind(digest(&browser).as_slice()).bind(state.epoch()).bind(state.membership_epoch()).bind(now).bind(expires).bind(sequence).bind(serde_json::to_value(&purpose).map_err(|_|corrupt())?).bind(target.map(serde_json::to_value).transpose().map_err(|_|corrupt())?).execute(c).await?;
+            let payload=PlatformChallengeContext{binding:resolved,audience:verifier.audience().to_owned(),purpose,nonce:nonce.to_string(),created_at:now,expires_at:expires}.signing_payload().map_err(failure)?;
+            Ok(PlatformChallenge{id,nonce:nonce.to_string(),expires_at:expires,signing_payload:payload})
         })).await
     }
     /// No principal/assurance DTO is accepted. Only the installed verifier can supply evidence.
@@ -251,7 +283,7 @@ impl Authority {
         browser: String,
         evidence: Vec<u8>,
         deadline: OperationDeadline,
-    ) -> Result<IssuedSession, AuthorityError> {
+    ) -> Result<PlatformLogin, AuthorityError> {
         self.require_runtime()?;
         crate::federation_login::check_browser(&browser)?;
         if nonce.len() != 43 || evidence.is_empty() || evidence.len() > 65_536 || id.is_nil() {
@@ -271,6 +303,8 @@ impl Authority {
                     lock_guard(c, tenant).await?;
                     let row = challenge(c, tenant, id, &expected_nonce, &expected_browser).await?;
                     Ok(PlatformChallengeContext {
+                        purpose: serde_json::from_value(row.try_get("purpose")?)
+                            .map_err(|_| corrupt())?,
                         binding: serde_json::from_value(row.try_get("binding")?)
                             .map_err(|_| corrupt())?,
                         audience: row.try_get("audience")?,
@@ -290,6 +324,8 @@ impl Authority {
         .map_err(|e| match e {
             PlatformError::Rejected => AuthorityError::Rejected,
             PlatformError::Unavailable => AuthorityError::Unavailable,
+            PlatformError::InteractionRequired => AuthorityError::InteractionRequired,
+            PlatformError::Cancelled => AuthorityError::Cancelled,
         })?;
         if !verified.key_possession
             || verified.authenticated_at.is_some() && !verified.user_verification
@@ -304,6 +340,7 @@ impl Authority {
             user_presence: verified.user_presence,
             user_verification: verified.user_verification,
         };
+        let enterprise = self.enterprise.clone();
         let checks = self.session_checks.clone();
         let policy = self.session_policy;
         let limits = self.profile_limits;
@@ -315,6 +352,15 @@ impl Authority {
             let key=actual.account;let state=load(c,key).await?.state;
             if !state.active() || state.epoch()!=row.try_get::<i64,_>("auth_epoch")? || state.membership_epoch()!=row.try_get::<i64,_>("membership_epoch")? {return Err(reject().into());}
             recheck(c,key,&stored,&checks).await?;
+            let purpose:PlatformPurpose=serde_json::from_value(row.try_get("purpose")?).map_err(|_|corrupt())?;
+            if purpose != context.purpose {return Err(reject().into());}
+            verifier.authorize_purpose(&actual,&purpose,c).await.map_err(failure)?;
+            let target = match &enterprise {
+                Some(config)=>config.target(&purpose).map_err(|_|reject())?,
+                None if purpose==PlatformPurpose::BrowserLogin=>None,
+                None=>return Err(reject().into()),
+            };
+            if row.try_get::<Option<serde_json::Value>,_>("target")? != target.as_ref().map(serde_json::to_value).transpose().map_err(|_|corrupt())? {return Err(reject().into());}
             let now=crate::session_storage::now(c).await?;
             if stored.authenticated_at.is_some_and(|t| t< context.created_at.saturating_sub(30) || t>now) {return Err(reject().into());}
             let sequence=row.try_get("profile_sequence")?;
@@ -330,12 +376,16 @@ impl Authority {
                     Some(crate::profiles::oidc_observation(&claims,&view,sequence))
                 }
             };
-            let (issued,event)=crate::sessions::insert(c,state,None,crate::sessions::SessionAuthentication::Platform(stored),now,policy,CredentialKind::Cookie).await?;
+            let (issued,event)=crate::sessions::insert(c,state,None,crate::sessions::SessionAuthentication::Platform(stored.clone()),now,policy,CredentialKind::Cookie).await?;
+            let assertion = match target {
+                Some(target)=>Some(enterprise::issue(enterprise.as_ref().ok_or_else(reject)?,target,&stored,now,issued.view().absolute_expires_at.min(issued.view().idle_expires_at))?),
+                None=>None,
+            };
             let mut events=vec![event];
             if let Some(observation)=observation {events.extend(crate::profiles::accept(c,key,issued.view().id,issued.view().absolute_expires_at,observation,limits).await?);}
             if crate::session_storage::now(c).await?>=row.try_get::<i64,_>("expires_at")? {return Err(reject().into());}
             sqlx::query("DELETE FROM identity_authority.platform_challenges WHERE tenant_id=$1::uuid AND challenge_id=$2").bind(tenant.to_string()).bind(id).execute(c).await?;
-            Ok((issued,events))
+            Ok((PlatformLogin{session:issued,assertion},events))
         })).await
     }
 }

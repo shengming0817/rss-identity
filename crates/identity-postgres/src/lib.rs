@@ -80,9 +80,14 @@ pub struct AuthorityConfig {
     sessions: SessionPolicy,
     events: DeliveryBudget,
     platform: Option<Arc<dyn platform::PlatformVerifier>>,
+    enterprise: Option<platform::EnterpriseConfig>,
     profile_limits: rss_identity_core::profile::ProfileLimits,
 }
 impl AuthorityConfig {
+    pub fn with_enterprise(mut self, config: platform::EnterpriseConfig) -> Self {
+        self.enterprise = Some(config);
+        self
+    }
     pub fn with_profile_limits(
         mut self,
         limits: rss_identity_core::profile::ProfileLimits,
@@ -114,12 +119,14 @@ impl AuthorityConfig {
             sessions,
             events,
             platform: None,
+            enterprise: None,
             profile_limits: Default::default(),
         })
     }
 }
 #[derive(Clone)]
 pub struct Authority {
+    enterprise: Option<platform::EnterpriseConfig>,
     session_checks: session_checks::SessionChecks,
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
     runtimes: Arc<runtime::RuntimeState>,
@@ -175,6 +182,7 @@ impl Authority {
         let tenant = config.tenants[0];
         let instance = config.instance;
         let authority = Self {
+            enterprise: config.enterprise,
             session_checks: session_checks::SessionChecks {
                 platform: config.platform,
                 ..Default::default()
@@ -360,3 +368,11 @@ pub use bearer::IssuedBearer;
 
 mod profile_admission;
 pub use profile_admission::{ProfileSourceAdmissionError, admit_profile_source_on};
+
+mod step_up;
+pub use step_up::{ConsumedStepUp, StepUpGrant, consume_step_up_on};
+mod webauthn;
+pub use webauthn::{
+    RegistrationAuthorization, WebauthnAuthority, WebauthnChallenge, WebauthnCredentialView,
+    activate_webauthn_rp_on, webauthn_management_context,
+};

@@ -28,7 +28,7 @@ bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpO
 
 ## 可选 OIDC Router
 
-仅合并 `federated_router` 后可用。同一 tenant 前缀：GET `/login-options`；POST `/oidc/{provider}/login`（`{returnTarget}`）、`/link`（重新认证与受控目标）、`/step-up`（受控目标）；GET `/session/security`。后者提供 `authentication:{authTime,acr,amr}` 和 `eligibleStepUpProviders:[{providerId,label}]`；普通 OIDC 未提供认证时间时 `authTime:null`，不回填 iat。它只提供认证事实，不返回管理角色。
+仅合并 `federated_router` 后可用。同一 tenant 前缀：GET `/login-options`；POST `/oidc/{provider}/login`（`{returnTarget}`）、`/link`（重新认证与受控目标）、`/step-up`（`{returnTarget,operation}`）；GET `/session/security`。后者提供 `authentication:{authTime,acr,amr}` 和 `eligibleStepUpProviders:[{providerId,label}]`；普通 OIDC 未提供认证时间时 `authTime:null`，不回填 iat。它只提供认证事实，不返回管理角色。
 
 唯一回调 GET `/api/v1/identity/oidc/callback`：state/code/iss 与独立 HttpOnly browser cookie 绑定；拒绝重放、过期、不匹配和不确定结算，不释放 cookie。returnTarget 是宿主白名单键，不接受任意 URL；不再接受中央 clientId。
 
@@ -63,3 +63,11 @@ HTTP 宿主资源请求统一调用 `authenticate_request`：用户活动选择 
 账户资料 GET/PUT 和 operation receipt 入口及期限语义见[嵌入指南](../guides/embedding.md#登录资料与属性)。
 资料请求体单独限制 96 KiB，普通身份请求保持原有边界；成功及失败响应沿用 no-store、Cookie／CSRF 与错误投影。
 资料 CAS 与 operationId 冲突分别为 409 revision_conflict / operation_conflict；未知提交仍为既有不可判定结果，须查询回执。
+
+## WebAuthn 与操作证明
+
+显式挂载 `webauthn_router`；当前 tenant 前缀下提供 `/webauthn/credentials` 查询、`register/begin` 与 `register/finish`、`authenticate/begin` 与 `authenticate/finish`、`credentials/{id}/remove` 和 `{ceremony}/cancel`。写操作沿用 Origin、请求标记、CSRF 和当前 Cookie 检查；不接受 assurance 或 RP 配置。
+
+`operation` 使用 `register`、`remove`（带 credential）、`recover` 或 `host` 的类型标记。前三项由服务端派生本人管理上下文；`host` 必须由可信宿主中间件注入 `StepUpContext`，不能从浏览器复制任意 context。OIDC step-up 和 WebAuthn 完成都设置短期 HttpOnly `__Host-identity-operation` Cookie，原会话保持不变。该 Cookie 不是身份凭据，消费必须匹配原会话和精确操作；产品业务使用同事务 `consume_step_up_on`，禁止验证后另起事务写业务。
+
+注册 begin 接受 `{label,recover}`；finish 接受 `{id,response}`。首次开通使用近期主认证，后续注册/恢复消费操作证明；HTTP 不暴露无因子宿主恢复授权。服务端 ceremony state 从不发送到浏览器。取消与超时不生成成功证明；未知提交不自动重放。
