@@ -1,6 +1,7 @@
 //! Fixed ES256 assertion signing for Keycloak's supported JWT authorization grant.
 //! ref: keycloak 26.7.3 JWTAuthorizationGrantType.java and AbstractBaseJWTValidator.java.
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use openidconnect::AsyncHttpClient;
 use rss_identity_core::enterprise::{EnterpriseClaims, EnterpriseSigner};
 use zeroize::Zeroizing;
 
@@ -66,21 +67,40 @@ struct AccessClaims {
     azp: String,
     exp: i64,
 }
+/// Fixed backend exchange inputs. No field is taken from an untrusted browser request.
+pub struct EnterpriseExchange<'a> {
+    /// Host-admitted tenant.
+    pub tenant: rss_request_context::TenantId,
+    /// Installed provider settings.
+    pub provider: &'a rss_identity_core::federation::ProviderSettings,
+    /// Confidential client credentials.
+    pub credentials: &'a rss_identity_core::federation::ProviderCredentials,
+    /// Fixed registered RP target.
+    pub target: &'a rss_identity_core::enterprise::EnterpriseTarget,
+    /// Authority-issued, one-use JWT assertion.
+    pub assertion: &'a str,
+    /// Original authority-issued deadline, never extended by the exchange.
+    pub assertion_expires_at: i64,
+    /// Stable provisioned Keycloak subject.
+    pub expected_subject: &'a str,
+}
 impl crate::HttpOidc {
     /// Exchange a one-use backend assertion through the existing bounded, vetted transport.
     /// `expected_subject` comes from the host's provisioned stable IdP mapping, never browser JSON.
     /// No retries: a network failure may follow successful upstream assertion consumption.
     pub async fn exchange_enterprise(
         &self,
-        tenant: rss_request_context::TenantId,
-        provider: &rss_identity_core::federation::ProviderSettings,
-        credentials: &rss_identity_core::federation::ProviderCredentials,
-        target: &rss_identity_core::enterprise::EnterpriseTarget,
-        assertion: &str,
-        assertion_expires_at: i64,
-        expected_subject: &str,
+        input: EnterpriseExchange<'_>,
     ) -> Result<EnterpriseAccess, rss_identity_core::federation::FederationError> {
-        use openidconnect::AsyncHttpClient;
+        let EnterpriseExchange {
+            tenant,
+            provider,
+            credentials,
+            target,
+            assertion,
+            assertion_expires_at,
+            expected_subject,
+        } = input;
         use rss_identity_core::federation::FederationError;
         target
             .validate()

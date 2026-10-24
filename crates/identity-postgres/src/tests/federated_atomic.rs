@@ -1329,6 +1329,12 @@ pub async fn events(f: &Fixture) -> anyhow::Result<Vec<serde_json::Value>> {
         let bytes: Vec<u8> = serde_json::from_value(envelope["payload"].clone())?;
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
         let (route, contract, version, schema) = match envelope["route"].as_str().unwrap() {
+            "authentication.changed" => (
+                "authentication.changed",
+                "identity.authentication.security",
+                1,
+                include_str!("../authentication-security-event-v1.json"),
+            ),
             "federation.changed" => (
                 "federation.changed",
                 "identity.federation.security",

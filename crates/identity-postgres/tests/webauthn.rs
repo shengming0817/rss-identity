@@ -313,86 +313,79 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     )
     .await?;
     let mut first = WebauthnAuthenticator::new(SoftPasskey::new(true));
-    let start = w
-        .begin_registration(
-            actor(&f, &s).await?,
-            "first".into(),
-            false,
-            RegistrationAuthorization::First,
-            deadline(),
-        )
-        .await?;
+    let start = Box::pin(w.begin_registration(
+        actor(&f, &s).await?,
+        "first".into(),
+        false,
+        RegistrationAuthorization::First,
+        deadline(),
+    ))
+    .await?;
     let response = first.do_registration(Url::parse(ORIGIN)?, start.options)?;
-    w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())
-        .await?;
+    Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())).await?;
     let grant = management_grant(&f, &w, &s, &mut first, "register").await?;
     assert!(
-        w.begin_registration(
+        Box::pin(w.begin_registration(
             actor(&f, &s).await?,
             "wrong purpose".into(),
             true,
             RegistrationAuthorization::StepUp(grant.expose().into()),
             deadline()
-        )
+        ))
         .await
         .is_err()
     );
-    let start = w
-        .begin_registration(
-            actor(&f, &s).await?,
-            "second".into(),
-            false,
-            RegistrationAuthorization::StepUp(grant.expose().into()),
-            deadline(),
-        )
-        .await?;
+    let start = Box::pin(w.begin_registration(
+        actor(&f, &s).await?,
+        "second".into(),
+        false,
+        RegistrationAuthorization::StepUp(grant.expose().into()),
+        deadline(),
+    ))
+    .await?;
     assert!(
-        w.begin_registration(
+        Box::pin(w.begin_registration(
             actor(&f, &s).await?,
             "replay".into(),
             false,
             RegistrationAuthorization::StepUp(grant.expose().into()),
             deadline()
-        )
+        ))
         .await
         .is_err()
     );
     let mut second = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let response = second.do_registration(Url::parse(ORIGIN)?, start.options)?;
-    w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())
-        .await?;
+    Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())).await?;
     let old = management_grant(&f, &w, &s, &mut first, "register").await?;
-    let pending = w
-        .begin_authentication(
-            actor(&f, &s).await?,
-            StepUpContext::new("pending".into(), [4; 32]).unwrap(),
-            deadline(),
-        )
-        .await?;
+    let pending = Box::pin(w.begin_authentication(
+        actor(&f, &s).await?,
+        StepUpContext::new("pending".into(), [4; 32]).unwrap(),
+        deadline(),
+    ))
+    .await?;
     let pending_response = first.do_authentication(Url::parse(ORIGIN)?, pending.options)?;
     let recovery = management_grant(&f, &w, &s, &mut second, "recover").await?;
-    let start = w
-        .begin_registration(
-            actor(&f, &s).await?,
-            "recovered".into(),
-            true,
-            RegistrationAuthorization::StepUp(recovery.expose().into()),
-            deadline(),
-        )
-        .await?;
+    let start = Box::pin(w.begin_registration(
+        actor(&f, &s).await?,
+        "recovered".into(),
+        true,
+        RegistrationAuthorization::StepUp(recovery.expose().into()),
+        deadline(),
+    ))
+    .await?;
     let mut new_key = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let response = new_key.do_registration(Url::parse(ORIGIN)?, start.options)?;
     let copy = serde_json::from_value(serde_json::to_value(&response)?)?;
     sqlx::raw_sql("CREATE FUNCTION public.fail_recovery_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_recovery_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.fail_recovery_event();").execute(&f.owner).await?;
     assert!(
-        w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())
+        Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline()))
             .await
             .is_err()
     );
     assert_eq!(w.list(actor(&f, &s).await?, deadline()).await?.len(), 2);
     sqlx::raw_sql("DROP TRIGGER fail_recovery_event ON rss_transactional_messaging.outbox;DROP FUNCTION public.fail_recovery_event();").execute(&f.owner).await?;
-    w.finish_registration(actor(&f, &s).await?, start.id, copy, deadline())
-        .await?;
+    Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, copy, deadline())).await?;
     assert_eq!(w.list(actor(&f, &s).await?, deadline()).await?.len(), 1);
     assert!(
         !consume(
@@ -405,61 +398,59 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
         .await?
     );
     assert!(
-        w.finish_authentication(
+        Box::pin(w.finish_authentication(
             actor(&f, &s).await?,
             pending.id,
             pending_response,
             deadline()
-        )
+        ))
         .await
         .is_err()
     );
     assert!(
-        w.begin_registration(
+        Box::pin(w.begin_registration(
             actor(&f, &s).await?,
             "first bypass".into(),
             false,
             RegistrationAuthorization::First,
             deadline()
-        )
+        ))
         .await
         .is_err()
     );
     // The host's recovery policy is checked at begin and final settlement.
     f.policy.revoke(f.key);
     assert!(
-        w.begin_registration(
+        Box::pin(w.begin_registration(
             actor(&f, &s).await?,
             "host recovery".into(),
             true,
             RegistrationAuthorization::HostRecovery,
             deadline()
-        )
+        ))
         .await
         .is_err()
     );
     f.policy.allow(f.key);
-    let start = w
-        .begin_registration(
-            actor(&f, &s).await?,
-            "host recovery".into(),
-            true,
-            RegistrationAuthorization::HostRecovery,
-            deadline(),
-        )
-        .await?;
+    let start = Box::pin(w.begin_registration(
+        actor(&f, &s).await?,
+        "host recovery".into(),
+        true,
+        RegistrationAuthorization::HostRecovery,
+        deadline(),
+    ))
+    .await?;
     let mut host_key = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let response = host_key.do_registration(Url::parse(ORIGIN)?, start.options)?;
     f.policy.revoke(f.key);
     let copy = serde_json::from_value(serde_json::to_value(&response)?)?;
     assert!(
-        w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())
+        Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline()))
             .await
             .is_err()
     );
     f.policy.allow(f.key);
-    w.finish_registration(actor(&f, &s).await?, start.id, copy, deadline())
-        .await?;
+    Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, copy, deadline())).await?;
     assert_eq!(w.list(actor(&f, &s).await?, deadline()).await?.len(), 1);
     f.close().await;
     Ok(())
@@ -651,6 +642,77 @@ async fn expired_other_subject_backlog_does_not_lock_out_self_service() -> anyho
         sqlx::query("INSERT INTO identity_authority.step_up_grants(tenant_id,token_hash,principal_id,session_id,auth_epoch,membership_epoch,context,source,authenticated_at,expires_at) SELECT tenant_id,decode(md5(random()::text)||md5(random()::text),'hex'),$2,session_id,auth_epoch,membership_epoch,context,source,authenticated_at-$4,expires_at-$4 FROM identity_authority.step_up_grants CROSS JOIN generate_series(1,$3) WHERE token_hash=$1").bind(rss_identity_core::federation::digest(grant.expose()).as_slice()).bind(principal).bind(count).bind(age).execute(&f.owner).await?;
     }
     management_grant(&f, &w, &session, &mut key, "register").await?;
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn same_configuration_rotation_invalidates_pending_first_enrollment() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let session = f.login().await?;
+    let origin = Url::parse(ORIGIN)?;
+    let w = WebauthnAuthority::connect(
+        f.store.clone(),
+        "example.test".into(),
+        origin.clone(),
+        deadline(),
+    )
+    .await?;
+    let start = w
+        .begin_registration(
+            actor(&f, &session).await?,
+            "pending".into(),
+            false,
+            RegistrationAuthorization::First,
+            deadline(),
+        )
+        .await?;
+    let mut key = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    let response = key.do_registration(origin.clone(), start.options)?;
+    let mut tx = f.owner.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(A)
+        .execute(&mut *tx)
+        .await?;
+    assert_eq!(
+        activate_webauthn_rp_on(
+            &mut tx,
+            f.instance,
+            f.key.tenant,
+            "example.test",
+            &origin,
+            1
+        )
+        .await?,
+        2
+    );
+    tx.commit().await?;
+    let current =
+        WebauthnAuthority::connect(f.store.clone(), "example.test".into(), origin, deadline())
+            .await?;
+    assert!(
+        current
+            .finish_registration(actor(&f, &session).await?, start.id, response, deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        current
+            .list(actor(&f, &session).await?, deadline())
+            .await?
+            .is_empty()
+    );
+    current
+        .begin_registration(
+            actor(&f, &session).await?,
+            "fresh".into(),
+            false,
+            RegistrationAuthorization::First,
+            deadline(),
+        )
+        .await?;
     f.close().await;
     Ok(())
 }

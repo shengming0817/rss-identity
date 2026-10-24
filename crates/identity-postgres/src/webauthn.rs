@@ -640,7 +640,17 @@ pub async fn activate_webauthn_rp_on(
     }
     let (_, fingerprint) = rp_configuration(rp, origin)?;
     storage::lock_guard(c, tenant).await?;
+    let previous: Vec<u8> = sqlx::query_scalar(
+        "SELECT fingerprint FROM identity_authority.webauthn_rp WHERE tenant_id=$1::uuid AND rp=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(rp)
+    .fetch_one(&mut *c)
+    .await?;
     let next=sqlx::query_scalar("UPDATE identity_authority.webauthn_rp SET fingerprint=$3,generation=generation+1 WHERE tenant_id=$1::uuid AND rp=$2 AND generation=$4 RETURNING generation").bind(tenant.to_string()).bind(rp).bind(fingerprint.as_slice()).bind(expected_generation).fetch_optional(&mut *c).await?.ok_or_else(reject)?;
+    // Also invalidate same-config rotations and A→B→A transitions under the tenant guard.
+    sqlx::query("DELETE FROM identity_authority.webauthn_ceremonies WHERE tenant_id=$1::uuid AND rp_config=$2")
+        .bind(tenant.to_string()).bind(previous).execute(&mut *c).await?;
     sqlx::query("UPDATE identity_authority.webauthn_credentials SET revoked=true,epoch=epoch+1 WHERE tenant_id=$1::uuid AND rp=$2 AND NOT revoked").bind(tenant.to_string()).bind(rp).execute(c).await?;
     Ok(next)
 }

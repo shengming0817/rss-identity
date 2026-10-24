@@ -127,15 +127,15 @@ async fn login(State(rp): State<Arc<Rp>>, Json(input): Json<Value>) -> axum::res
             return Err(());
         }
         rp.oidc
-            .exchange_enterprise(
-                rp.tenant,
-                &rp.provider,
-                &rp.credentials,
-                &rp.target,
-                assertion.expose(),
-                assertion.expires_at,
-                &rp.subject,
-            )
+            .exchange_enterprise(rss_identity_oidc::enterprise::EnterpriseExchange {
+                tenant: rp.tenant,
+                provider: &rp.provider,
+                credentials: &rp.credentials,
+                target: &rp.target,
+                assertion: assertion.expose(),
+                assertion_expires_at: assertion.expires_at,
+                expected_subject: &rp.subject,
+            })
             .await
             .map_err(|_| ())?;
         let proof = rp
@@ -459,15 +459,15 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
     let provider = rp_settings(&target, &issuer)?;
     assert!(
         transport
-            .exchange_enterprise(
-                f.key.tenant,
-                &provider,
-                &credentials,
-                &target,
-                stale.assertion.as_ref().unwrap().expose(),
-                stale.assertion.as_ref().unwrap().expires_at,
-                &user
-            )
+            .exchange_enterprise(rss_identity_oidc::enterprise::EnterpriseExchange {
+                tenant: f.key.tenant,
+                provider: &provider,
+                credentials: &credentials,
+                target: &target,
+                assertion: stale.assertion.as_ref().unwrap().expose(),
+                assertion_expires_at: stale.assertion.as_ref().unwrap().expires_at,
+                expected_subject: &user
+            })
             .await
             .is_err()
     );
@@ -492,42 +492,42 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
     // A different confidential RP cannot exchange this issuer's assertion.
     assert!(
         transport
-            .exchange_enterprise(
-                f.key.tenant,
-                &rp_settings(&targets[1], &issuer)?,
-                &credentials,
-                &targets[1],
-                signed,
-                fresh.assertion.as_ref().unwrap().expires_at,
-                &user
-            )
+            .exchange_enterprise(rss_identity_oidc::enterprise::EnterpriseExchange {
+                tenant: f.key.tenant,
+                provider: &rp_settings(&targets[1], &issuer)?,
+                credentials: &credentials,
+                target: &targets[1],
+                assertion: signed,
+                assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
+                expected_subject: &user
+            })
             .await
             .is_err()
     );
     let fresh = assertion(&rotated, &device, &f, &target).await?;
     let signed = fresh.assertion.as_ref().unwrap().expose();
     transport
-        .exchange_enterprise(
-            f.key.tenant,
-            &provider,
-            &credentials,
-            &target,
-            signed,
-            fresh.assertion.as_ref().unwrap().expires_at,
-            &user,
-        )
+        .exchange_enterprise(rss_identity_oidc::enterprise::EnterpriseExchange {
+            tenant: f.key.tenant,
+            provider: &provider,
+            credentials: &credentials,
+            target: &target,
+            assertion: signed,
+            assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
+            expected_subject: &user,
+        })
         .await?;
     assert!(
         transport
-            .exchange_enterprise(
-                f.key.tenant,
-                &provider,
-                &credentials,
-                &target,
-                signed,
-                fresh.assertion.as_ref().unwrap().expires_at,
-                &user
-            )
+            .exchange_enterprise(rss_identity_oidc::enterprise::EnterpriseExchange {
+                tenant: f.key.tenant,
+                provider: &provider,
+                credentials: &credentials,
+                target: &target,
+                assertion: signed,
+                assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
+                expected_subject: &user
+            })
             .await
             .is_err()
     );

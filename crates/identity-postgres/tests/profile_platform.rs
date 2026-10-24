@@ -663,7 +663,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
             deadline(),
         )
         .await?;
-    let signature = verifier.key.sign(begin.nonce.as_bytes()).as_ref().to_vec();
+    let signature = verifier.key.sign(&begin.signing_payload).as_ref().to_vec();
     assert!(
         store
             .complete_platform_login(
@@ -770,7 +770,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
             deadline(),
         )
         .await?;
-    let signature = verifier.key.sign(begin.nonce.as_bytes()).as_ref().to_vec();
+    let signature = verifier.key.sign(&begin.signing_payload).as_ref().to_vec();
     sqlx::raw_sql("CREATE FUNCTION public.reject_profile() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture rejection'; END $$; CREATE TRIGGER reject_profile BEFORE INSERT OR UPDATE ON identity_authority.profile_observations FOR EACH ROW EXECUTE FUNCTION public.reject_profile();").execute(&f.owner).await?;
     assert!(
         store
@@ -975,7 +975,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
         .await?;
     let signature = verifier
         .key
-        .sign(unlinked.nonce.as_bytes())
+        .sign(&unlinked.signing_payload)
         .as_ref()
         .to_vec();
     sqlx::query("DELETE FROM identity_authority.external_identities WHERE identity_id=$1")
@@ -1028,7 +1028,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
         .await?;
     let signature = verifier
         .key
-        .sign(pending.nonce.as_bytes())
+        .sign(&pending.signing_payload)
         .as_ref()
         .to_vec();
     // Provider withdrawal invalidates issuance and every existing session consumer.
