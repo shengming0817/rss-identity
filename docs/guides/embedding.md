@@ -31,6 +31,8 @@ Cookie 登录、Bearer 登录、密码重认证及本人改密共用密码防护
 
 宿主业务写入需要与会话撤销串行化时，在自己已有的、绑定 actor 租户的 READ COMMITTED 事务内调用 `recheck_authenticated_session_on(connection, &actor)`。它复用当前凭据与会话来源复核，Identity guard 保持至宿主提交或回滚；不消费 step-up、不续期、不产生新身份事实。调用顺序为已有 Audit/Ledger 锁 → Identity guard → 平台 verifier 权威锁及宿主授权/业务锁。平台 binding/source 写入必须遵守 verifier 使用同一连接取得的权威锁，不能仅依赖 Identity guard。不要在已持有这些锁时调用自开事务的引用复核接口。
 
+通过 `PgRuntime::local_tx` 组合时，`with_connection` 回调的外层错误类型是 SQLx；使用 `tx.with_connection(|c| Box::pin(async move { Ok(recheck_authenticated_session_on(c, &actor).await) })).await??` 将内部 `PgError` 原样传播到宿主事务，不能吞掉内层错误后继续提交。
+
 任何复核错误都要求宿主回滚；宿主继续负责 fencing、操作预算、资源授权和最终结算。复核成功不等于业务已提交，`CommitUnknown` 与回滚失败必须保留原结算语义。guard 串行化状态变更，不冻结自然时间或延长 actor 的原期限，不得跨事务缓存成功结果。该接口只接受当前请求的 `AuthenticatedSession`；异步保存的 `SessionReference` 不含当前凭据摘要，其独立复核用途不变。
 
 参考宿主为每个配置租户指定唯一 bootstrap 账户，并阻止其自我禁用；这是示范宿主策略，不成为其它产品的默认授权。密码恢复与 IdP 故障都不能自动提升权限或复活禁用状态。

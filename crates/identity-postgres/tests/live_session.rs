@@ -326,21 +326,27 @@ async fn host_admission_preserves_unknown_and_failed_settlement() -> anyhow::Res
             .local_tx(f.key.tenant, deadline(), move |tx| {
                 Box::pin(async move {
                     tx.with_connection(move |c| {
+                        Box::pin(
+                            async move { Ok(recheck_authenticated_session_on(c, &proof).await) },
+                        )
+                    })
+                    .await??;
+                    tx.with_connection(move |c| {
                         Box::pin(async move {
-                            recheck_authenticated_session_on(c, &proof).await?;
                             sqlx::query("INSERT INTO public.host_binding VALUES($1)")
                                 .bind(id)
                                 .execute(c)
                                 .await?;
-                            if id == 2 {
-                                return Err(PgError::from(sqlx::Error::Protocol(
-                                    "host rejected effect".into(),
-                                )));
-                            }
                             Ok(())
                         })
                     })
-                    .await
+                    .await?;
+                    if id == 2 {
+                        return Err(PgError::from(sqlx::Error::Protocol(
+                            "host rejected effect".into(),
+                        )));
+                    }
+                    Ok(())
                 })
             })
             .await;
@@ -376,7 +382,7 @@ async fn host_admission_rechecks_federated_source() -> anyhow::Result<()> {
     let oidc = service(&f, ScriptedOidc::new());
     let provider = enabled(&f, &oidc).await?;
     let login = issued(finish(&oidc, begin(&f, &oidc, &provider).await?, "host-user").await?);
-    let proof = actor(&f, &login).await?;
+    let proof = self::actor(&f, &login).await?;
     assert!(accepted(&f, &proof).await?);
     for mutation in [
         "UPDATE identity_authority.providers SET enabled=false",

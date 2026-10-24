@@ -9,7 +9,6 @@ test-support = []
 [dependencies]
 url = "2.5"
 oauth2 = { version = "5.0", default-features = false }
-openidconnect.workspace = true
 uuid.workspace = true
 jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 reqwest.workspace = true

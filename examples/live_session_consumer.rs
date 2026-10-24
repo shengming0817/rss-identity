@@ -61,7 +61,7 @@ async fn runtime(port: u16, role: &str, tenant: TenantId) -> anyhow::Result<Arc<
             Timer,
             ExecutionBinding::new(
                 StorageIdentity::new([1; 16], [2; 16])?,
-                [(tenant, Epoch::new(1)?)],
+                vec![(tenant, Epoch::new(1)?)],
             )?,
         )
         .await?,
@@ -117,7 +117,7 @@ pub async fn run() -> anyhow::Result<()> {
     let maintenance_runtime = self::runtime(port, "identity_maintenance", tenant).await?;
     let config = AuthorityConfig::new(
         instance,
-        [tenant],
+        vec![tenant],
         SessionPolicy::new(900, 14400)?,
         DeliveryBudget::new(
             Duration::from_secs(60),
@@ -178,19 +178,25 @@ pub async fn run() -> anyhow::Result<()> {
             .local_tx(tenant, deadline(), move |tx| {
                 Box::pin(async move {
                     tx.with_connection(move |c| {
+                        Box::pin(
+                            async move { Ok(recheck_authenticated_session_on(c, &actor).await) },
+                        )
+                    })
+                    .await??;
+                    tx.with_connection(move |c| {
                         Box::pin(async move {
-                            recheck_authenticated_session_on(c, &actor).await?;
                             sqlx::query("INSERT INTO public.host_binding VALUES($1)")
                                 .bind(i32::from(commit))
                                 .execute(c)
                                 .await?;
-                            if !commit {
-                                return Err(sqlx::Error::Protocol("host rolled back".into()).into());
-                            }
                             Ok(())
                         })
                     })
-                    .await
+                    .await?;
+                    if !commit {
+                        return Err(sqlx::Error::Protocol("host rolled back".into()).into());
+                    }
+                    Ok(())
                 })
             })
             .await;
@@ -218,8 +224,11 @@ pub async fn run() -> anyhow::Result<()> {
         .local_tx(tenant, deadline(), move |tx| {
             Box::pin(async move {
                 tx.with_connection(move |c| {
+                    Box::pin(async move { Ok(recheck_authenticated_session_on(c, &actor).await) })
+                })
+                .await??;
+                tx.with_connection(move |c| {
                     Box::pin(async move {
-                        recheck_authenticated_session_on(c, &actor).await?;
                         sqlx::query("INSERT INTO public.host_binding VALUES(2)")
                             .execute(c)
                             .await?;

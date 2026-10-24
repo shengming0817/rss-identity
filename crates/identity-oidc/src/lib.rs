@@ -1,22 +1,22 @@
 //! Tenant-bound OIDC adapter with versioned credentials and independent trusted MFA profiles.
-//! ref: openidconnect-rs src/verification/mod.rs @ b639b5d39eac6903238867aeb2b29326502e6b26.
+//! ref: oauth2-rs src/code.rs @ 5.0.0 (code flow, state and PKCE).
 #![deny(missing_docs)]
 mod assurance;
+mod discovery;
+use discovery::Metadata;
 mod egress;
 #[cfg(test)]
 mod private_provider_tests;
 mod profile_token;
 pub use ipnet::IpNet;
 pub mod entra;
-use openidconnect::{
-    AsyncHttpClient, AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
-    HttpRequest, HttpResponse, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
-    Scope, core::*,
+use oauth2::{
+    AsyncHttpClient, AuthorizationCode, ClientId, ClientSecret, CsrfToken, HttpRequest,
+    HttpResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
 };
 use reqwest::Url;
 use rss_identity_core::{assurance::AuthenticationMode, federation::*};
 use rss_request_context::TenantId;
-use serde::{Deserialize, Serialize};
 use std::{
     sync::atomic::{AtomicU8, Ordering},
     time::Duration,
@@ -187,27 +187,16 @@ impl HttpOidc {
         credentials: &ProviderCredentials,
     ) -> Result<(Metadata, Transport), FederationError> {
         let transport = self.transport(tenant, c, credentials)?;
-        let metadata = Metadata::discover_async(
-            IssuerUrl::new(c.issuer().as_str().into())
-                .map_err(|_| FederationError::Configuration)?,
-            &transport,
-        )
-        .await
-        .map_err(|error| match error {
-            openidconnect::DiscoveryError::Request(error) => error,
-            openidconnect::DiscoveryError::Validation(_) => {
-                failure(ProviderStage::Discovery, ProviderReason::IssuerMismatch)
-            }
-            _ => failure(transport.stage(), ProviderReason::InvalidResponse),
-        })?;
+        let metadata = discovery::discover(&transport, c.issuer().as_str()).await?;
         if metadata
-            .authorization_endpoint()
+            .authorization_endpoint
             .url()
             .origin()
             .ascii_serialization()
             != transport.origin
             || metadata
-                .token_endpoint()
+                .token_endpoint
+                .as_ref()
                 .is_none_or(|u| u.url().origin().ascii_serialization() != transport.origin)
         {
             return Err(failure(
@@ -311,7 +300,7 @@ impl<'a> AsyncHttpClient<'a> for Transport {
         Box::pin(async move {
             let previous = self.requests.fetch_add(1, Ordering::Relaxed);
             self.phase.store(
-                if request.method() == openidconnect::http::Method::POST {
+                if request.method() == oauth2::http::Method::POST {
                     2
                 } else if previous == 0 {
                     0
@@ -356,26 +345,6 @@ impl<'a> AsyncHttpClient<'a> for Transport {
         })
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct DiscoveryExtra {
-    #[serde(default)]
-    authorization_response_iss_parameter_supported: bool,
-}
-impl openidconnect::AdditionalProviderMetadata for DiscoveryExtra {}
-type Metadata = openidconnect::ProviderMetadata<
-    DiscoveryExtra,
-    CoreAuthDisplay,
-    CoreClientAuthMethod,
-    CoreClaimName,
-    CoreClaimType,
-    CoreGrantType,
-    CoreJweContentEncryptionAlgorithm,
-    CoreJweKeyManagementAlgorithm,
-    CoreJsonWebKey,
-    CoreResponseMode,
-    CoreResponseType,
-    CoreSubjectIdentifierType,
->;
 impl UpstreamOidc for HttpOidc {
     fn assurance_profile(&self, tenant: TenantId, c: &ProviderSettings) -> AssuranceProfile {
         let approved = self.trusted(tenant, c);
@@ -424,26 +393,22 @@ impl UpstreamOidc for HttpOidc {
             }
             let (metadata, _) = self.discover(tenant, c, credentials).await?;
 
-            let client = CoreClient::from_provider_metadata(
-                metadata,
-                ClientId::new(c.client_id().as_str().to_owned()),
-                Some(ClientSecret::new(credentials.client_secret().to_string())),
-            )
-            .set_redirect_uri(
-                RedirectUrl::new(c.redirect_uri().to_owned())
-                    .map_err(|_| FederationError::Configuration)?,
-            );
+            let client =
+                oauth2::basic::BasicClient::new(ClientId::new(c.client_id().as_str().to_owned()))
+                    .set_auth_uri(metadata.authorization_endpoint)
+                    .set_redirect_uri(
+                        RedirectUrl::new(c.redirect_uri().to_owned())
+                            .map_err(|_| FederationError::Configuration)?,
+                    );
 
             let state = m.state.to_string();
 
             let nonce = m.nonce.to_string();
 
             let mut request = client
-                .authorize_url(
-                    AuthenticationFlow::<openidconnect::core::CoreResponseType>::AuthorizationCode,
-                    move || CsrfToken::new(state),
-                    move || Nonce::new(nonce),
-                )
+                .authorize_url(move || CsrfToken::new(state))
+                .add_scope(Scope::new("openid".into()))
+                .add_extra_param("nonce", nonce)
                 .set_pkce_challenge(PkceCodeChallenge::from_code_verifier_sha256(
                     &PkceCodeVerifier::new(m.verifier.to_string()),
                 ));
@@ -456,14 +421,11 @@ impl UpstreamOidc for HttpOidc {
 
             if mode != AuthenticationMode::Login {
                 request = request
-                    .add_prompt(CoreAuthPrompt::Login)
-                    .set_max_age(Duration::ZERO);
+                    .add_extra_param("prompt", "login")
+                    .add_extra_param("max_age", "0");
             }
             if mode == AuthenticationMode::StepUp {
-                request =
-                    request.add_auth_context_value(openidconnect::AuthenticationContextClass::new(
-                        assurance::KEYCLOAK_TOTP_ACR.into(),
-                    ));
+                request = request.add_extra_param("acr_values", assurance::KEYCLOAK_TOTP_ACR);
             }
 
             Ok(request.url().0.to_string())
@@ -491,7 +453,8 @@ impl UpstreamOidc for HttpOidc {
                 .set_client_secret(ClientSecret::new(credentials.client_secret().to_string()))
                 .set_token_uri(
                     metadata
-                        .token_endpoint()
+                        .token_endpoint
+                        .as_ref()
                         .ok_or(FederationError::Configuration)?
                         .clone(),
                 )
@@ -506,8 +469,8 @@ impl UpstreamOidc for HttpOidc {
                 .request_async(&transport)
                 .await
                 .map_err(|e| match e {
-                    openidconnect::RequestTokenError::Request(error) => error,
-                    openidconnect::RequestTokenError::ServerResponse(_) => {
+                    oauth2::RequestTokenError::Request(error) => error,
+                    oauth2::RequestTokenError::ServerResponse(_) => {
                         failure(ProviderStage::Exchange, ProviderReason::CodeRejected)
                     }
                     _ => failure(ProviderStage::Exchange, ProviderReason::InvalidResponse),
@@ -516,7 +479,7 @@ impl UpstreamOidc for HttpOidc {
             let claims = profile_token::verify(
                 &token.extra_fields().id_token,
                 &metadata,
-                &Nonce::new(m.nonce.to_string()),
+                m.nonce.as_str(),
                 client_id.as_str(),
                 credentials.client_secret(),
             )?;
@@ -560,10 +523,7 @@ impl UpstreamOidc for HttpOidc {
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
             let (metadata, _) = self.discover(tenant, c, credentials).await?;
-            if !metadata
-                .additional_metadata()
-                .authorization_response_iss_parameter_supported
-            {
+            if !metadata.authorization_response_iss_parameter_supported {
                 return Err(failure(
                     ProviderStage::Discovery,
                     ProviderReason::IssuerResponseUnsupported,

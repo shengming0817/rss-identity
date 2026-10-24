@@ -32,7 +32,8 @@ def main():
         (directory/'Cargo.toml').write_text(manifest)
         (directory/'src/main.rs').write_text((ROOT/'examples/identity_consumer.rs').read_text())
         (directory/'src/live_session_consumer.rs').write_text((ROOT/'examples/live_session_consumer.rs').read_text())
-        env={**os.environ,'CARGO_TARGET_DIR':str(ROOT/'target/independent-consumer')}
+        env={**os.environ,'CARGO_TARGET_DIR':str(ROOT/'target/independent-consumer'),
+             'CARGO_NET_GIT_FETCH_WITH_CLI':'true','PATH':'/usr/bin:'+os.environ.get('PATH','')}
         subprocess.run(['cargo','generate-lockfile'],cwd=directory,env=env,check=True)
         with postgres() as (_, ports):
             subprocess.run(['cargo','run','--locked'],cwd=directory,env={**env,'IDENTITY_TEST_PG_PORT':str(ports[5432])},check=True)
