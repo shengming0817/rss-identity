@@ -92,16 +92,6 @@ class Gates(unittest.TestCase):
         del actual['rss-ledger-postgres']
         deps.check_features(actual,'production')
 
-    def test_advisory_acceptance_revoked_on_version_or_path_drift(self):
-        for change in ['version','path']:
-            data=copy.deepcopy(self.metadata)
-            rsa=next(p for p in data['packages'] if p['name']=='rsa')
-            if change=='version': rsa['version']='0.9.11'
-            else:
-                node=next(n for n in data['resolve']['nodes'] if n['id'] in data['workspace_members'])
-                node['deps'].append({'pkg':rsa['id']})
-            with self.subTest(change=change),self.assertRaises(ValueError): deps.check_advisory_path(data)
-
     def test_other_advisories_cannot_be_ignored(self):
         policy=tomllib.loads(Path('deny.toml').read_text())
         policy['advisories']['ignore'].append('RUSTSEC-2099-0001')

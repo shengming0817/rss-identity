@@ -6,8 +6,9 @@ use std::{
 };
 
 fn token_metadata() -> Metadata {
-    let metadata:Metadata=serde_json::from_value(json!({"issuer":"https://issuer.test","authorization_endpoint":"https://issuer.test/auth","jwks_uri":"https://issuer.test/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})).unwrap();
-    metadata.set_jwks(serde_json::from_value(json!({"keys":[serde_json::from_str::<serde_json::Value>(include_str!("../tests/fixtures/entra-a.json")).unwrap()]})).unwrap())
+    let mut metadata:Metadata=serde_json::from_value(json!({"issuer":"https://issuer.test","authorization_endpoint":"https://issuer.test/auth","jwks_uri":"https://issuer.test/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})).unwrap();
+    metadata.jwks = serde_json::from_value(json!({"keys":[serde_json::from_str::<serde_json::Value>(include_str!("../tests/fixtures/entra-a.json")).unwrap()]})).unwrap();
+    metadata
 }
 fn signed_token(claims: &serde_json::Value, valid_key: bool) -> String {
     let key = if valid_key {
@@ -45,7 +46,7 @@ fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
                 profile_token::verify(
                     &signed_token(&claims, key),
                     &metadata,
-                    &Nonce::new("nonce".into()),
+                    "nonce",
                     "client",
                     "fixture-secret"
                 )
@@ -136,7 +137,7 @@ fn transport(origin: &str) -> Transport {
 }
 async fn get(t: &Transport, url: &str) -> Result<HttpResponse, FederationError> {
     t.call(
-        openidconnect::http::Request::builder()
+        oauth2::http::Request::builder()
             .uri(url)
             .body(vec![])
             .unwrap(),
@@ -412,7 +413,7 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
                 let verified = profile_token::verify(
                     &signed_token(&raw, key),
                     &metadata,
-                    &Nonce::new("nonce".into()),
+                    "nonce",
                     "client",
                     "fixture-secret",
                 );
@@ -440,7 +441,7 @@ fn malformed_profile_is_independent_of_verified_security_claims() {
     let claims = profile_token::verify(
         &signed_token(&raw, true),
         &metadata,
-        &Nonce::new("nonce".into()),
+        "nonce",
         "client",
         "fixture-secret",
     )
@@ -466,7 +467,7 @@ fn malformed_profile_is_independent_of_verified_security_claims() {
         profile_token::verify(
             &signed_token(&raw, false),
             &metadata,
-            &Nonce::new("nonce".into()),
+            "nonce",
             "client",
             "fixture-secret"
         )
@@ -498,4 +499,190 @@ fn entra_browser_requires_canonical_subject_without_fallback() {
     ] {
         assert!(super::mapped_subject(&mapping, "valid-pairwise-sub", &invalid).is_err());
     }
+}
+
+// Every fixture serves discovery under a realm path, catching accidental URL::join truncation.
+async fn discovery_server(case: &str) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::{Router, routing::get};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let issuer = format!("{origin}/realms/host");
+    let mut document = json!({
+        "issuer": issuer,
+        "authorization_endpoint": format!("{origin}/auth"),
+        "token_endpoint": format!("{origin}/token"),
+        "jwks_uri": format!("{origin}/keys"),
+        "response_types_supported": ["code"], "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["RS256", "future-alg"],
+        "authorization_response_iss_parameter_supported": true
+    });
+    match case {
+        "issuer" => document["issuer"] = json!(format!("{issuer}/")),
+        "missing" => {
+            document
+                .as_object_mut()
+                .unwrap()
+                .remove("id_token_signing_alg_values_supported");
+        }
+        "jwks-origin" => document["jwks_uri"] = json!("https://unapproved.test/keys"),
+        "auth-origin" => document["authorization_endpoint"] = json!("https://unapproved.test/auth"),
+        "no-token" => {
+            document.as_object_mut().unwrap().remove("token_endpoint");
+        }
+        _ => {}
+    }
+    let media = if case == "media" {
+        "text/html"
+    } else {
+        "application/json; charset=utf-8"
+    };
+    let keys = if case == "keys" {
+        json!({"keys": "bad"})
+    } else {
+        json!({"keys": []})
+    };
+    let app = Router::new()
+        .route(
+            "/realms/host/.well-known/openid-configuration",
+            get(move || {
+                let body = document.to_string();
+                async move { ([("content-type", media)], body) }
+            }),
+        )
+        .route(
+            "/keys",
+            get(move || {
+                let body = keys.to_string();
+                async move { ([("content-type", "application/jwk-set+json")], body) }
+            }),
+        );
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (issuer, task)
+}
+
+#[tokio::test]
+async fn discovery_preserves_required_metadata_and_transport_boundaries() {
+    for (case, valid) in [
+        ("valid", true),
+        ("issuer", false),
+        ("missing", false),
+        ("media", false),
+        ("keys", false),
+        ("jwks-origin", false),
+        ("auth-origin", false),
+        ("no-token", false),
+    ] {
+        let (issuer, task) = discovery_server(case).await;
+        let result = adapter(&issuer)
+            .test(
+                tenant(),
+                &config(&issuer),
+                &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
+            )
+            .await;
+        task.abort();
+        let _ = task.await;
+        assert_eq!(result.is_ok(), valid, "{case}: {result:?}");
+        if case == "issuer" {
+            assert!(matches!(
+                result,
+                Err(FederationError::Provider(ProviderFailure {
+                    stage: ProviderStage::Discovery,
+                    reason: ProviderReason::IssuerMismatch
+                }))
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
+    let (issuer, task) = discovery_server("valid").await;
+    let adapter = HttpOidc::for_loopback_test(vec![TrustedAssuranceProfile {
+        tenant: tenant(),
+        issuer: issuer.clone(),
+        client_id: "client".into(),
+        keycloak_totp: true,
+    }])
+    .unwrap();
+    let material = ProtocolMaterial::new(random_secret().unwrap().to_string()).unwrap();
+    for mode in [
+        AuthenticationMode::Login,
+        AuthenticationMode::Reauthenticate,
+        AuthenticationMode::StepUp,
+    ] {
+        let url = adapter
+            .prepare(
+                tenant(),
+                &config(&issuer),
+                &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
+                &material,
+                mode,
+            )
+            .await
+            .unwrap();
+        let url = Url::parse(&url).unwrap();
+        let pairs: Vec<_> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let query = |key: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(query("response_type"), Some("code"));
+        assert_eq!(query("scope"), Some("openid"));
+        assert_eq!(query("nonce"), Some(material.nonce.as_str()));
+        assert_eq!(query("state"), Some(material.state.as_str()));
+        assert_eq!(query("code_challenge_method"), Some("S256"));
+        let expected = PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(
+            material.verifier.to_string(),
+        ));
+        assert_eq!(query("code_challenge"), Some(expected.as_str()));
+        assert_eq!(
+            query("prompt"),
+            if mode == AuthenticationMode::Login {
+                None
+            } else {
+                Some("login")
+            }
+        );
+        assert_eq!(
+            query("max_age"),
+            if mode == AuthenticationMode::Login {
+                None
+            } else {
+                Some("0")
+            }
+        );
+        assert_eq!(
+            query("acr_values"),
+            if mode == AuthenticationMode::StepUp {
+                Some(assurance::KEYCLOAK_TOTP_ACR)
+            } else {
+                None
+            }
+        );
+        for key in ["scope", "nonce", "state", "code_challenge"] {
+            assert_eq!(pairs.iter().filter(|(k, _)| k == key).count(), 1);
+        }
+    }
+    task.abort();
+    let _ = task.await;
+}
+
+#[test]
+fn id_token_rejects_unadvertised_algorithm_and_ambiguous_key() {
+    let claims = json!({"iss":"https://issuer.test","sub":"subject","aud":"client","iat":1,"exp":4102444800_i64,"nonce":"nonce"});
+    let raw = signed_token(&claims, true);
+    let mut metadata = token_metadata();
+    metadata.id_token_signing_alg_values_supported = vec!["HS256".into()];
+    assert!(profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret").is_err());
+    let mut metadata = token_metadata();
+    metadata.jwks.keys.push(metadata.jwks.keys[0].clone());
+    assert!(profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret").is_err());
 }

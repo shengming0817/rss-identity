@@ -30,7 +30,7 @@ pub(super) enum Audiences {
 pub(super) fn verify(
     raw: &str,
     metadata: &super::Metadata,
-    nonce: &openidconnect::Nonce,
+    nonce: &str,
     client: &str,
     client_secret: &str,
 ) -> Result<Claims, FederationError> {
@@ -47,7 +47,7 @@ pub(super) fn verify(
         return Err(FederationError::Claims);
     }
     let algorithm = serde_json::to_value(header.alg).map_err(|_| FederationError::Claims)?;
-    let approved = serde_json::to_value(metadata.id_token_signing_alg_values_supported())
+    let approved = serde_json::to_value(&metadata.id_token_signing_alg_values_supported)
         .map_err(|_| FederationError::Claims)?;
     if !approved
         .as_array()
@@ -61,7 +61,7 @@ pub(super) fn verify(
     ) {
         DecodingKey::from_secret(client_secret.as_bytes())
     } else {
-        let keys = serde_json::to_value(metadata.jwks()).map_err(|_| FederationError::Claims)?;
+        let keys = serde_json::to_value(&metadata.jwks).map_err(|_| FederationError::Claims)?;
         let keys = keys
             .get("keys")
             .and_then(|v| v.as_array())
@@ -107,7 +107,7 @@ pub(super) fn verify(
 
     validation.set_required_spec_claims(&["iss", "sub", "aud", "exp"]);
     validation.set_audience(&[client]);
-    validation.set_issuer(&[metadata.issuer().as_str()]);
+    validation.set_issuer(&[metadata.issuer.as_str()]);
     validation.leeway = 0;
     validation.validate_nbf = true;
     let claims = decode::<Claims>(raw, &key, &validation)
@@ -128,11 +128,8 @@ pub(super) fn verify(
         || claims.exp <= now
         || claims.azp.as_ref().is_some_and(|v| v != client)
         || matches!(&claims.aud,Audiences::Many(values) if values.len()>1 && claims.azp.as_deref()!=Some(client))
-        || openidconnect::NonceVerifier::verify(
-            nonce,
-            Some(&openidconnect::Nonce::new(claims.nonce.clone())),
-        )
-        .is_err()
+        || rss_identity_core::federation::digest(nonce)
+            != rss_identity_core::federation::digest(&claims.nonce)
     {
         return Err(FederationError::Claims);
     }

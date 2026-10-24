@@ -34,23 +34,8 @@ def check_features(actual, profile):
         del expected['rss-ledger-postgres']
     require(actual == expected, f'{profile} RSS feature closure drift: {actual}')
 
-def check_advisory_path(metadata):
-    # #2357: owner shengming; public verification only. Any graph drift revokes acceptance.
-    packages = {p['id']: p for p in metadata['packages']}
-    expected = {'rsa': '0.9.10', 'openidconnect': '4.0.1', 'rss-identity-oidc': '0.1.0'}
-    ids = {}
-    for name, version in expected.items():
-        matches = [p for p in packages.values() if p['name'] == name]
-        require(len(matches) == 1 and matches[0]['version'] == version, f'RSA exception version drift: {name}')
-        p = matches[0]
-        require(p['source'] == (None if name == 'rss-identity-oidc' else 'registry+https://github.com/rust-lang/crates.io-index'), 'RSA exception source drift')
-        ids[name] = p['id']
-    for child, parent in [('rsa', 'openidconnect'), ('openidconnect', 'rss-identity-oidc')]:
-        parents = {n['id'] for n in metadata['resolve']['nodes'] if any(d['pkg'] == ids[child] for d in n['deps'])}
-        require(parents == {ids[parent]}, f'RSA exception dependency path drift: {child}')
-
 def check_advisory_policy(policy):
-    require(policy.get('advisories', {}).get('ignore') == ['RUSTSEC-2023-0071'], 'unreviewed advisory exception')
+    require(policy.get('advisories', {}).get('ignore') == [], 'unreviewed advisory exception')
     require(policy['advisories'].get('unused-ignored-advisory') == 'deny', 'stale exception must fail')
 
 def check(metadata, manifest):
@@ -84,7 +69,6 @@ def check(metadata, manifest):
     packages = {p['id']: p for p in metadata['packages']}
     actual = {packages[n['id']]['name']: set(n['features']) for n in metadata['resolve']['nodes'] if packages[n['id']]['name'].startswith('rss-') and n['id'] not in members}
     check_features(actual, 'test')
-    check_advisory_path(metadata)
     return {"sources":source_pins,"packages":found}
 
 def check_artifacts(data, output):

@@ -13,6 +13,21 @@ use serde::Serialize;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// Recheck the current credential in the host's tenant-bound READ COMMITTED transaction.
+/// Call after Audit/Ledger locks and before host authorization/business locks. Identity's
+/// guard and any platform verifier locks remain held until the host settles this transaction.
+/// Platform source writers must honor the verifier's authoritative locks on this same connection.
+/// On any error the host MUST roll back. The host owns fencing, budgets, resource authorization
+/// and commit/rollback outcomes; successful admission is not a successful business commit.
+/// Does not renew the session, consume step-up, or extend the actor's original lifetime.
+/// Natural expiry still applies: do not cache this result or treat it as a transferable permit.
+pub async fn recheck_authenticated_session_on(
+    connection: &mut sqlx::PgConnection,
+    actor: &AuthenticatedSession,
+) -> Result<(), rss_transactional_messaging_postgres::PgError> {
+    db::recheck_on(connection, actor).await.map(|_| ())
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionView {
     pub credential_kind: CredentialKind,

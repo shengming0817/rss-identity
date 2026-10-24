@@ -68,6 +68,7 @@ pub use schema::{
 pub use session_reference::{RevalidatedSession, SessionReference};
 pub use sessions::{
     AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
+    recheck_authenticated_session_on,
 };
 use std::sync::Arc;
 pub use types::*;

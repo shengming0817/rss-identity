@@ -1,7 +1,7 @@
 //! Fixed ES256 assertion signing for Keycloak's supported JWT authorization grant.
 //! ref: keycloak 26.7.3 JWTAuthorizationGrantType.java and AbstractBaseJWTValidator.java.
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
-use openidconnect::AsyncHttpClient;
+use oauth2::AsyncHttpClient;
 use rss_identity_core::enterprise::{EnterpriseClaims, EnterpriseSigner};
 use zeroize::Zeroizing;
 
@@ -115,7 +115,8 @@ impl crate::HttpOidc {
         }
         let (metadata, transport) = self.discover(tenant, provider, credentials).await?;
         if metadata
-            .token_endpoint()
+            .token_endpoint
+            .as_ref()
             .is_none_or(|u| u.as_str() != target.token_endpoint)
         {
             return Err(FederationError::Configuration);
@@ -130,7 +131,7 @@ impl crate::HttpOidc {
             )
             .append_pair("assertion", assertion)
             .finish();
-        let request = openidconnect::http::Request::builder()
+        let request = oauth2::http::Request::builder()
             .method("POST")
             .uri(&target.token_endpoint)
             .header("content-type", "application/x-www-form-urlencoded")
@@ -155,7 +156,7 @@ impl crate::HttpOidc {
         }
         let kid = header.kid.ok_or(FederationError::Claims)?;
         let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_value(
-            serde_json::to_value(metadata.jwks()).map_err(|_| FederationError::Claims)?,
+            serde_json::to_value(&metadata.jwks).map_err(|_| FederationError::Claims)?,
         )
         .map_err(|_| FederationError::Claims)?;
         let key =

@@ -147,3 +147,9 @@ aaaff24fb3b59357bd7667e0c0bfbc6b8320fb54563eb3d44c4f642c85667c02  internal/api/h
 
 - #2917：Keycloak `26.7.3` 的 `services/src/main/java/org/keycloak/protocol/oidc/grants/JWTAuthorizationGrantType.java`、`DefaultJWTAuthorizationGrantValidator.java` 与 `authentication/authenticators/client/AbstractBaseJWTValidator.java`，用于固定 confidential client、issuer/sub、单受众、签名与 jti 防重放合同；以真实 provider 测试补充源码证据。
 - #2921：[webauthn-rs 高层入口固定源码](https://github.com/kanidm/webauthn-rs/blob/d2c10d53ca5ef033d37ee6462e936e9eb72ad98c/webauthn-rs/src/lib.rs)，版本 0.5.5，使用高层 UV-required passkey API；MPL-2.0 依赖通过逐包固定版本例外准入，不复制上游源码。测试软件认证器只证明协议/事务，不代表真实硬件验收。
+
+## #2984 OIDC 依赖收敛
+
+- [oauth2-rs 5.0.0 code flow](https://github.com/ramosbugs/oauth2-rs/blob/5.0.0/src/code.rs)：复用标准授权 URL、state、PKCE 与既有 token exchange；显式保留 openid scope、nonce、prompt/max_age/acr_values。
+- [openidconnect 4.0.1 discovery 源码](https://github.com/ramosbugs/openidconnect-rs/blob/b639b5d39eac6903238867aeb2b29326502e6b26/src/discovery/mod.rs)：参考 discovery 必需字段、issuer 精确匹配、realm 路径追加与 JWKS 读取合同。当前窄 DTO 通过原有受控 Transport 读取，不再依赖 openidconnect crate。
+- JWT 验签继续复用已有 jsonwebtoken 11.1.0 的 AWS-LC 后端；移除旧椭圆曲线/RSA 依赖闭包及已失去依赖对象的 RSA 豁免，实际供应链验收归 PR。

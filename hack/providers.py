@@ -142,6 +142,17 @@ SUITES[("rss-identity-postgres","profile_platform")] = {"trusted_reference_join_
 
 SUITES[("rss-identity-http-axum","session_http")].add("profile_http_requires_policy_csrf_and_exact_receipts")
 
+SUITES[("rss-identity-postgres", "live_session")] = {
+    "host_admission_is_passive_and_transaction_scoped",
+    "host_admission_serializes_commit_rollback_and_revocation",
+    "host_admission_rejects_stale_credentials_and_subjects",
+    "host_admission_preserves_unknown_and_failed_settlement",
+    "host_admission_rechecks_federated_source",
+    "host_admission_checks_expiry_after_guard_wait",
+}
+
+SUITES[("rss-identity-postgres", "profile_platform")].add("live_session_admission_retains_platform_source_locks")
+
 def cargo(package, test, env, features=()):
     expected = SUITES[(package,test)]
     internal = (package=="rss-identity-postgres" and test in {"atomic","session_atomic","federated_atomic","audit::pg_tests"}) or (package=="rss-identity-oidc" and test=="private_provider_tests")
@@ -185,6 +196,7 @@ def pg():
         cargo("rss-identity-postgres", "atomic", env)
         cargo("rss-identity-postgres", "embedded", env)
         cargo("rss-identity-postgres", "profile_platform", env)
+        cargo("rss-identity-postgres", "live_session", env)
         cargo("rss-identity-postgres", "webauthn", env)
         cargo("rss-identity-http-axum", "webauthn_http", env)
         cargo("rss-identity-postgres", "provisioning", env)

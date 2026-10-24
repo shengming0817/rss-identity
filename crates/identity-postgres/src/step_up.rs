@@ -1,6 +1,5 @@
 //! One-use operation proofs. Host business effects and consumption share one transaction.
 use crate::{
-    storage::lock_guard,
     transaction::{MutationError, corrupt, reject},
     *,
 };
@@ -9,7 +8,7 @@ use rss_identity_core::{
     step_up::StepUpContext,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{Connection, PgConnection, Row};
+use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -105,21 +104,10 @@ pub async fn consume_step_up_on(
     expected: &StepUpContext,
     handle: &str,
 ) -> Result<ConsumedStepUp, rss_transactional_messaging_postgres::PgError> {
-    if !c.is_in_transaction() || handle.len() != 43 {
+    if handle.len() != 43 {
         return Err(reject());
     }
-    let (scope, isolation): (Option<String>, String) = sqlx::query_as(
-        "SELECT current_setting('rss.tenant_id',true),current_setting('transaction_isolation')",
-    )
-    .fetch_one(&mut *c)
-    .await?;
-    if scope.as_deref() != Some(actor.key.tenant.to_string().as_str())
-        || isolation != "read committed"
-    {
-        return Err(reject());
-    }
-    lock_guard(c, actor.key.tenant).await?;
-    let loaded = session_storage::recheck(c, actor).await?;
+    let loaded = session_storage::recheck_on(c, actor).await?;
     let row=sqlx::query("SELECT * FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND token_hash=$2 FOR UPDATE").bind(actor.key.tenant.to_string()).bind(digest(handle).as_slice()).fetch_optional(&mut *c).await?.ok_or_else(reject)?;
     let context: StepUpContext =
         serde_json::from_value(row.try_get("context")?).map_err(|_| corrupt())?;
