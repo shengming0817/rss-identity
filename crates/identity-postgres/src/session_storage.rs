@@ -245,6 +245,30 @@ pub(crate) async fn by_id(
         now,
     })
 }
+/// Borrowed host transaction admission shared by live-session and step-up operations.
+/// ref: sqlx v0.9.0 sqlx-core/src/connection.rs (transaction detection).
+pub(crate) async fn recheck_on(
+    c: &mut PgConnection,
+    actor: &AuthenticatedSession,
+) -> Result<Loaded, PgError> {
+    use sqlx::Connection;
+    if !c.is_in_transaction() {
+        return Err(reject());
+    }
+    let (scope, isolation): (Option<String>, String) = sqlx::query_as(
+        "SELECT current_setting('rss.tenant_id',true),current_setting('transaction_isolation')",
+    )
+    .fetch_one(&mut *c)
+    .await?;
+    if scope.as_deref() != Some(actor.key.tenant.to_string().as_str())
+        || isolation != "read committed"
+    {
+        return Err(reject());
+    }
+    lock_guard(c, actor.key.tenant).await?;
+    recheck(c, actor).await
+}
+
 pub(crate) async fn recheck(
     c: &mut PgConnection,
     proof: &AuthenticatedSession,
