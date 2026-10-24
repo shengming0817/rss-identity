@@ -133,6 +133,7 @@ async fn login(State(rp): State<Arc<Rp>>, Json(input): Json<Value>) -> axum::res
                 &rp.credentials,
                 &rp.target,
                 assertion.expose(),
+                assertion.expires_at,
                 &rp.subject,
             )
             .await
@@ -464,6 +465,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
                 &credentials,
                 &target,
                 stale.assertion.as_ref().unwrap().expose(),
+                stale.assertion.as_ref().unwrap().expires_at,
                 &user
             )
             .await
@@ -496,6 +498,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
                 &credentials,
                 &targets[1],
                 signed,
+                fresh.assertion.as_ref().unwrap().expires_at,
                 &user
             )
             .await
@@ -510,6 +513,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
             &credentials,
             &target,
             signed,
+            fresh.assertion.as_ref().unwrap().expires_at,
             &user,
         )
         .await?;
@@ -521,6 +525,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
                 &credentials,
                 &target,
                 signed,
+                fresh.assertion.as_ref().unwrap().expires_at,
                 &user
             )
             .await

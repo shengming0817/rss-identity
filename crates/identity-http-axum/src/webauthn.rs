@@ -49,6 +49,10 @@ pub fn webauthn_router(
     };
     Ok(crate::mount(
         Router::new()
+            .route(
+                "/tenants/{tenant}/webauthn/operation/cancel",
+                post(cancel_operation),
+            )
             .route("/tenants/{tenant}/webauthn/credentials", get(list))
             .route(
                 "/tenants/{tenant}/webauthn/register/begin",
@@ -264,4 +268,22 @@ async fn cancel(
     let actor = actor(&s, &t, &headers, b, true).await?;
     s.webauthn.cancel(actor, id, b.remaining()).await?;
     Ok(Json(serde_json::json!({"cancelled":true})).into_response())
+}
+
+async fn cancel_operation(
+    State(s): State<StateData>,
+    Path(t): Path<String>,
+    Extension(b): Extension<RequestBudget>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let actor = actor(&s, &t, &headers, b, true).await?;
+    if let Some(handle) = grant(&headers)? {
+        s.webauthn
+            .authority()
+            .cancel_step_up(actor, handle, b.remaining())
+            .await?;
+    }
+    Ok(clear(
+        Json(serde_json::json!({"cancelled":true})).into_response(),
+    ))
 }

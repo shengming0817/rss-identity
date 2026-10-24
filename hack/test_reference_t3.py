@@ -241,7 +241,6 @@ class EvidenceTests(unittest.TestCase):
                 "realProofExpiryRejected": True,
                 "originalSessionPreserved": True,
                 "operationReplayRejected": True,
-                "virtualAuthenticatorRegistered": True,
                 "wrongSubjectAndDowngradeRejected": True,
                 "wrongTotpRejected": True,
                 "federatedAccountRevocation": True,

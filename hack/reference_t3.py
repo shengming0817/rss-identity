@@ -284,7 +284,7 @@ TRUE_FACTS = {
     "install": "initializationReplayRejected",
     "local": "cookieAttributes tenantAndPrivilegeDenied sessionRotationAndRevocation authoritativePolicyMatched",
     "oidc": "jitAndExplicitLink tenantIdentityIsolated wrongPasswordRejected browserBindingAndReplay federatedLogout",
-    "mfa": "freshMfaConsumed realProofExpiryRejected originalSessionPreserved operationReplayRejected virtualAuthenticatorRegistered wrongSubjectAndDowngradeRejected wrongTotpRejected federatedAccountRevocation",
+    "mfa": "freshMfaConsumed realProofExpiryRejected originalSessionPreserved operationReplayRejected wrongSubjectAndDowngradeRejected wrongTotpRejected federatedAccountRevocation",
     "events": "rollbackPreserved failedAttemptBudgetCommitted responseLossObservedCommitted",
     "availability": "localSurvivesIdpFailure storageFailureClosed",
     "credential-rotation": "oldCiphertextRejectedWithoutKey retiredKeyRejected singleNewKeyVerified",

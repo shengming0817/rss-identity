@@ -1884,3 +1884,42 @@ async fn link_again(
     ));
     Ok(issued(result))
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn federation_step_up_rechecks_expiry_after_settlement_wait() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let service = service(&f, upstream.clone());
+    let provider = enabled(&f, &service).await?;
+    let session = issued(finish(&service, begin(&f, &service, &provider).await?, "alice").await?);
+    let now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    *upstream.assurance.lock().unwrap() = Some(rss_identity_core::assurance::Assurance::new(
+        Some(now),
+        rss_identity_core::assurance::Acr::Mfa,
+        vec![],
+    )?);
+    let token = step_begin(&f, &service, &provider, &session).await?;
+    sqlx::query("UPDATE identity_authority.oidc_transactions SET created_at=$2-1,expires_at=$2+1 WHERE state_hash=$1").bind(digest(&token).as_slice()).bind(now).execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.delay_operation_proof() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(2); RETURN NEW; END $$; CREATE TRIGGER delay_operation_proof BEFORE INSERT ON identity_authority.step_up_grants FOR EACH ROW EXECUTE FUNCTION public.delay_operation_proof();").execute(&f.owner).await?;
+    let before = events(&f).await?.len();
+    assert!(
+        step_finish(&service, token, &session, "alice")
+            .await
+            .is_err()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.step_up_grants")
+        .fetch_one(&f.owner)
+        .await?;
+    assert_eq!(count, 0);
+    assert_eq!(events(&f).await?.len(), before);
+    f.store
+        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .await?;
+    f.close().await;
+    Ok(())
+}

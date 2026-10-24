@@ -335,6 +335,7 @@ impl Federation {
                         let grant=crate::step_up::issue(c,actor,context,crate::step_up::GrantSource::Oidc {
                             identity:identity_id,provider:Uuid::parse_str(&view.id.to_string()).map_err(|_|corrupt())?,version:view.version,epoch:view.revocation_epoch,
                         },claims.assurance.auth_time().ok_or_else(reject)?).await?;
+                        if session_storage::now(c).await?>=attempt.expiry {return Err(reject().into());}
                         db::consume(c,&locator).await?;
                         return Ok((FederatedOutcome::StepUp{grant,return_url:attempt.return_url},vec![crate::step_up::event(key,crate::step_up::AuthenticationAction::Verified)]));
                     }

@@ -374,5 +374,5 @@ pub use step_up::{ConsumedStepUp, StepUpGrant, consume_step_up_on};
 mod webauthn;
 pub use webauthn::{
     RegistrationAuthorization, WebauthnAuthority, WebauthnChallenge, WebauthnCredentialView,
-    webauthn_management_context,
+    activate_webauthn_rp_on, webauthn_management_context,
 };

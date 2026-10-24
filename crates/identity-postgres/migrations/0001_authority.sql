@@ -188,6 +188,11 @@ CREATE TABLE identity_authority.profile_operations (
  PRIMARY KEY(tenant_id,operation_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
 );
+CREATE TABLE identity_authority.webauthn_rp (
+ tenant_id uuid NOT NULL, rp text NOT NULL CHECK(octet_length(rp) BETWEEN 1 AND 253),
+ fingerprint bytea NOT NULL CHECK(octet_length(fingerprint)=32), generation bigint NOT NULL CHECK(generation>0),
+ PRIMARY KEY(tenant_id,rp)
+);
 CREATE TABLE identity_authority.webauthn_accounts (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL, user_handle uuid NOT NULL DEFAULT gen_random_uuid(),
  enrolled boolean NOT NULL DEFAULT false, epoch bigint NOT NULL DEFAULT 1 CHECK(epoch>0),
@@ -225,7 +230,7 @@ CREATE INDEX webauthn_ceremony_subject ON identity_authority.webauthn_ceremonies
 CREATE INDEX step_up_expiry ON identity_authority.step_up_grants(tenant_id,expires_at);
 CREATE INDEX webauthn_account_credentials ON identity_authority.webauthn_credentials(tenant_id,principal_id);
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['webauthn_accounts','webauthn_credentials','webauthn_ceremonies','step_up_grants','platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','guard','local_credentials','accounts','memberships','password_attempts','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
+ FOREACH t IN ARRAY ARRAY['webauthn_rp','webauthn_accounts','webauthn_credentials','webauthn_ceremonies','step_up_grants','platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','guard','local_credentials','accounts','memberships','password_attempts','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
  EXECUTE format('ALTER TABLE identity_authority.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE identity_authority.%I FORCE ROW LEVEL SECURITY',t);
  EXECUTE format('CREATE POLICY tenant ON identity_authority.%I USING (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',t);

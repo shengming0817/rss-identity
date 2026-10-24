@@ -233,3 +233,5 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 `WebauthnAuthority` 绑定实例级 HTTPS origin 与 RP ID，支持 UV passkey，包括同步凭据；不证明企业硬件或设备合规。宿主策略允许本人首次登记，组件检查近期主认证；后续管理使用 WebAuthn 或 OIDC MFA 生成的用途绑定证明。`RegistrationAuthorization::HostRecovery` 只供可信宿主调用，必须独立实现 `AuthorizeWebauthnRecovery` 策略并在事务中核对恢复授权，参考宿主默认拒绝；普通浏览器不能选择此路径。恢复完成不重置“曾登记”状态。
 
 新候选直接替换旧 step-up 签名与会话升级行为，仅接受当前全新 schema。旧 revision 的消费者继续使用其固定闭包；升级时同步适配新请求、结果和消费接口，不使用 alias、旧 DTO 或运行时降级。
+
+`WebauthnAuthority::connect` 将部署配置与 PG 中的当前 RP 指纹/代际核对；首次使用可登记，已有指纹不匹配则拒绝启动。改变 origin 或 RP 策略时，部署 owner 使用 tenant-scoped READ COMMITTED 事务调用 `activate_webauthn_rp_on`，提供预期旧代际，再重建组件。runtime 只有配置表 SELECT/INSERT 权限，不能推进或回退代际。配置切换撤销旧凭据；旧进程、挑战和操作证明不能跨代际继续使用，用户通过独立企业 MFA 或受权恢复重新登记。部署 owner 持有此次配置切换的授权、审计和结算。

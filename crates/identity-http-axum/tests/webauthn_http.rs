@@ -39,11 +39,13 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
     let session = f.login().await?;
     let cookie = format!("__Host-identity-session={}", session.secret().expose());
     let csrf = session.secret().csrf();
-    let w = WebauthnAuthority::new(
+    let w = WebauthnAuthority::connect(
         f.store.clone(),
         "identity.example.test".into(),
         url::Url::parse(ORIGIN)?,
-    )?;
+        deadline(),
+    )
+    .await?;
     let app = webauthn_router(w, HttpConfig::new(ORIGIN, Duration::from_secs(30))?)?;
     let body = json!({"label":"browser key","recover":false});
     assert!(
@@ -117,6 +119,56 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
         .unwrap();
     let proof = format!("{cookie}; {proof_cookie}");
     assert!(r.headers()["set-cookie"].to_str()?.contains("HttpOnly"));
+    let cancelled = app
+        .clone()
+        .oneshot(request("operation/cancel", &proof, Some(&csrf), json!({})))
+        .await?;
+    assert_eq!(cancelled.status(), 200);
+    assert!(
+        cancelled.headers()["set-cookie"]
+            .to_str()?
+            .contains("Max-Age=0")
+    );
+    let removal_path = format!("credentials/{}/remove", credential["id"].as_str().unwrap());
+    assert!(
+        app.clone()
+            .oneshot(request(&removal_path, &proof, Some(&csrf), json!({})))
+            .await?
+            .status()
+            .is_client_error()
+    );
+    let r = app
+        .clone()
+        .oneshot(request(
+            "authenticate/begin",
+            &cookie,
+            Some(&csrf),
+            json!({"operation":{"kind":"remove","credential":credential["id"]}}),
+        ))
+        .await?;
+    let start = json_body(r).await?;
+    let response = authenticator.do_authentication(
+        url::Url::parse(ORIGIN)?,
+        serde_json::from_value(start["options"].clone())?,
+    )?;
+    let r = app
+        .clone()
+        .oneshot(request(
+            "authenticate/finish",
+            &cookie,
+            Some(&csrf),
+            json!({"id":start["id"],"response":response}),
+        ))
+        .await?;
+    assert_eq!(r.status(), 200);
+    let proof = format!(
+        "{cookie}; {}",
+        r.headers()["set-cookie"]
+            .to_str()?
+            .split(';')
+            .next()
+            .unwrap()
+    );
     let path = format!("credentials/{}/remove", credential["id"].as_str().unwrap());
     assert!(
         app.clone()

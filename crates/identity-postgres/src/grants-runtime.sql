@@ -26,3 +26,5 @@ GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.webauthn_accounts TO {ro
 GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.webauthn_credentials TO {role};
 GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.webauthn_ceremonies TO {role};
 GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.step_up_grants TO {role};
+
+GRANT SELECT,INSERT ON identity_authority.webauthn_rp TO {role};

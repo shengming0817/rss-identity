@@ -13,3 +13,5 @@
 私网 OIDC 接缝需要本机拥有的 RFC1918 接口。可用 `IDENTITY_TEST_PRIVATE_HOST` 显式选择已有接口；不能用 loopback、保留或非本机地址放宽生产策略。单独运行 `python3 hack/providers.py private-oidc` 时设置与本仓一致的 CARGO_TARGET_DIR。
 
 Web 接入由 rss-web 的现有联合测试持有；MDM 接入归其产品。需要真实浏览器、部署和恢复闭环时，独立评估并使用[参考运行入口](../deployment/images.md#功能验收)，不重复模拟 consumer 或容量验证。
+
+#2917/#2921 的公开消费检查：在候选推送后运行 `python3 hack/identity_consumer.py --revision <完整40位SHA>`。它创建独立 workspace 和 lock，通过固定 Git 来源编译四个公开包并运行操作上下文隔离检查；不引用本机相邻源码，不替代真实 PG/IdP 或物理认证器验收。

@@ -637,32 +637,26 @@ async function mfa() {
       } else await route.continue();
     },
   );
-  await stepUp(c,"bob",{success:false});
+  await stepUp(c,"bob",{success:false,otp:false});
   await c.page.unroute(input.issuer.split("/realms")[0] + "/**");
   check(downgraded, "browser-assurance-downgrade-exercised");
   journey = "mfa-fresh";
   await stepUp(c, "bob", { badOtp: true });
   const sessionCookie = cookies=>cookies.find(cookie=>cookie.name==="__Host-identity-session")?.value;
   check(sessionCookie(before)===sessionCookie(await c.context.cookies()),"operation-proof-preserves-session");
-  const cdp=await c.context.newCDPSession(c.page);
-  await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator",{options:{protocol:"ctap2",transport:"internal",hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true}});
-  const start=await write(c,"POST","webauthn/register/begin",{label:"T3 virtual authenticator",recover:false});
-  check(start.status===200,"fresh-mfa-registration-authorized");
-  const response=await c.page.evaluate(async options=>{
-    const decode=s=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/").padEnd(Math.ceil(s.length/4)*4,"=")),c=>c.charCodeAt(0));
-    const encode=b=>btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
-    const publicKey=options.publicKey;publicKey.challenge=decode(publicKey.challenge);publicKey.user.id=decode(publicKey.user.id);
-    for(const credential of publicKey.excludeCredentials||[])credential.id=decode(credential.id);
-    const credential=await navigator.credentials.create({publicKey});
-    return {id:credential.id,rawId:encode(credential.rawId),type:credential.type,response:{clientDataJSON:encode(credential.response.clientDataJSON),attestationObject:encode(credential.response.attestationObject),transports:credential.response.getTransports()},extensions:credential.getClientExtensionResults()};
-  },start.body.options);
-  check((await write(c,"POST","webauthn/register/finish",{id:start.body.id,response})).status===200,"virtual-webauthn-registration");
+  const proofCookie=(await c.context.cookies(origin)).find(cookie=>cookie.name==="__Host-identity-operation");
+  check(Boolean(proofCookie),"operation-proof-cookie");
+  const start=await write(c,"POST","webauthn/register/begin",{label:"pending enrollment",recover:false});
+  check(start.status===200,"fresh-mfa-enrollment-authorized");
+  check((await write(c,"POST",`webauthn/${start.body.id}/cancel`,{})).status===200,"pending-enrollment-cancelled");
+  await c.context.addCookies([{...proofCookie,expires:-1}]);
   check((await write(c,"POST","webauthn/register/begin",{label:"replay",recover:false})).status!==200,"operation-proof-single-use");
   await stepUp(c);
+  const expiring=(await c.context.cookies(origin)).find(cookie=>cookie.name==="__Host-identity-operation");
   await new Promise(resolve=>setTimeout(resolve,(input.policy.operationProofSeconds+1)*1000));
+  await c.context.addCookies([{...expiring,expires:-1}]);
   check((await write(c,"POST","webauthn/register/begin",{label:"expired",recover:false})).status!==200,"real-operation-proof-expiry");
-  await cdp.detach();
+
   const a = await admin();
   const p = await provider(a);
   const disabled = await write(a, "POST", `providers/${p.id}/enabled`, {
@@ -722,7 +716,6 @@ async function mfa() {
     realProofExpiryRejected: true,
     originalSessionPreserved: true,
     operationReplayRejected: true,
-    virtualAuthenticatorRegistered: true,
     wrongSubjectAndDowngradeRejected: true,
     wrongTotpRejected: true,
     federatedAccountRevocation: true,

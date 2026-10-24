@@ -41,6 +41,7 @@ pub(crate) enum GrantSource {
         credential: Uuid,
         epoch: i64,
         rp: String,
+        configuration: i64,
     },
 }
 #[derive(Serialize, Deserialize)]
@@ -83,6 +84,8 @@ pub(crate) async fn issue(
     if expires_at <= now {
         return Err(reject().into());
     }
+    sqlx::query("DELETE FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND principal_id=$2 AND expires_at<=$3")
+        .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(now).execute(&mut *c).await?;
     sqlx::query("DELETE FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND token_hash IN (SELECT token_hash FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND expires_at <= $2 ORDER BY expires_at LIMIT 128)").bind(key.tenant.to_string()).bind(now).execute(&mut *c).await?;
     let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND principal_id=$2").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_one(&mut *c).await?;
     if count >= 32 {
@@ -158,10 +161,31 @@ pub(crate) async fn validate_source(
 ) -> Result<(), rss_transactional_messaging_postgres::PgError> {
     let valid:bool=match source.clone() {
         GrantSource::Oidc{identity,provider,version,epoch}=>sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.external_identities e JOIN identity_authority.providers p USING(tenant_id,provider_id) WHERE e.tenant_id=$1::uuid AND e.principal_id=$2 AND e.identity_id=$3 AND p.provider_id=$4 AND p.enabled AND p.config_version=$5 AND p.revocation_epoch=$6)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(identity).bind(provider).bind(version).bind(epoch).fetch_one(&mut *c).await?,
-        GrantSource::Webauthn{credential,epoch,rp}=>sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.webauthn_credentials WHERE tenant_id=$1::uuid AND principal_id=$2 AND id=$3 AND epoch=$4 AND rp=$5 AND NOT revoked)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(credential).bind(epoch).bind(rp).fetch_one(&mut *c).await?,
+        GrantSource::Webauthn{credential,epoch,rp,configuration}=>sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.webauthn_credentials c JOIN identity_authority.webauthn_rp r USING(tenant_id,rp) WHERE c.tenant_id=$1::uuid AND c.principal_id=$2 AND c.id=$3 AND c.epoch=$4 AND c.rp=$5 AND NOT c.revoked AND r.fingerprint=c.rp_config AND r.generation=$6)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(credential).bind(epoch).bind(rp).bind(configuration).fetch_one(&mut *c).await?,
     };
     if !valid {
         return Err(reject());
     }
     Ok(())
+}
+
+impl Authority {
+    /// Cancel an unconsumed proof belonging to this exact live session. Does not authorize an effect.
+    pub async fn cancel_step_up(
+        &self,
+        actor: AuthenticatedSession,
+        handle: String,
+        deadline: OperationDeadline,
+    ) -> Result<(), AuthorityError> {
+        self.require_runtime()?;
+        if handle.len() != 43 {
+            return Err(AuthorityError::InvalidInput);
+        }
+        self.read_sql(actor.key.tenant,deadline,move|c|Box::pin(async move{
+            session_storage::recheck(c,&actor).await?;
+            sqlx::query("DELETE FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND principal_id=$2 AND session_id=$3 AND token_hash=$4")
+                .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(actor.view.id.as_uuid()).bind(digest(&handle).as_slice()).execute(c).await?;
+            Ok(())
+        })).await
+    }
 }

@@ -116,7 +116,9 @@ SUITES = {('rss-identity-postgres', 'audit::pg_tests'): {'authentication_outbox_
 
 SUITES[("rss-identity-http-axum", "webauthn_http")] = {"webauthn_http_csrf_lifecycle_and_one_use_proof"}
 
-SUITES[("rss-identity-postgres", "webauthn")] = {"webauthn_self_service_and_atomic_operation_proofs", "webauthn_cancellation_expiry_revocation_and_origin", "webauthn_uv_and_registration_event_rollback"}
+SUITES[("rss-identity-postgres", "federated_atomic")].add("federation_step_up_rechecks_expiry_after_settlement_wait")
+
+SUITES[("rss-identity-postgres", "webauthn")] = {"webauthn_self_service_and_atomic_operation_proofs", "webauthn_cancellation_expiry_revocation_and_origin", "webauthn_uv_and_registration_event_rollback", "webauthn_add_and_recovery_revoke_prior_authorization_atomically", "webauthn_rp_generation_fences_old_processes_and_proofs", "expired_other_subject_backlog_does_not_lock_out_self_service"}
 
 SUITES[("rss-identity-postgres", "audit::pg_tests")].update({
     "wakeup::notifications_settle_with_security_events",

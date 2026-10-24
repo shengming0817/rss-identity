@@ -218,11 +218,13 @@ pub async fn serve(
                     let origin = url::Url::parse(&config.public_origin)
                         .map_err(|_| AppError::Configuration)?;
                     let rp = origin.host_str().ok_or(AppError::Configuration)?.to_owned();
-                    let webauthn = rss_identity_postgres::WebauthnAuthority::new(
+                    let webauthn = rss_identity_postgres::WebauthnAuthority::connect(
                         authority.clone(),
                         rp,
                         origin,
-                    )?;
+                        crate::assembly::deadline(),
+                    )
+                    .await?;
                     let mut app = router(authority, http.clone())?
                         .merge(context)
                         .merge(rss_identity_http_axum::webauthn_router(

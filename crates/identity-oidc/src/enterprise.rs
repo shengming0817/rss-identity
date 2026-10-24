@@ -77,6 +77,7 @@ impl crate::HttpOidc {
         credentials: &rss_identity_core::federation::ProviderCredentials,
         target: &rss_identity_core::enterprise::EnterpriseTarget,
         assertion: &str,
+        assertion_expires_at: i64,
         expected_subject: &str,
     ) -> Result<EnterpriseAccess, rss_identity_core::federation::FederationError> {
         use openidconnect::AsyncHttpClient;
@@ -155,6 +156,7 @@ impl crate::HttpOidc {
             || claims.azp != target.client_id
             || claims.exp <= now
             || claims.exp > now + 30
+            || claims.exp > assertion_expires_at
         {
             return Err(FederationError::Claims);
         }

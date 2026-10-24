@@ -1,6 +1,7 @@
 
 'use strict';
-const $=id=>document.getElementById(id);let csrf='',ceremony=null,controller=null;
+const $=id=>document.getElementById(id);let csrf='',ceremony=null,controller=null,pending=false;
+const NAVIGATION='identity-security-navigation';
 const base=()=>'/api/v1/identity/tenants/'+encodeURIComponent($('tenant').value);
 function status(s){$('status').textContent=s}
 async function api(path,body){const response=await fetch(base()+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:body===undefined?{}:{'content-type':'application/json','x-identity-request':'1','x-csrf-token':csrf},body:body===undefined?undefined:JSON.stringify(body)});const text=await response.text();let result;try{result=JSON.parse(text)}catch{throw Error('服务器没有返回可确认的结果，请重新读取账户状态。')};if(!response.ok)throw Error(result.code||'请求未完成');return result}
@@ -12,6 +13,11 @@ async function authenticate(operation){const start=await api('/webauthn/authenti
 async function register(recover){const start=await api('/webauthn/register/begin',{label:$('label').value,recover});ceremony=start.id;controller=new AbortController();const publicKey=start.options.publicKey;publicKey.challenge=decode(publicKey.challenge);publicKey.user.id=decode(publicKey.user.id);for(const c of publicKey.excludeCredentials||[])c.id=decode(c.id);const result=await navigator.credentials.create({publicKey,signal:controller.signal});await api('/webauthn/register/finish',{id:start.id,response:credential(result)});ceremony=null;await load();status('登记完成。敏感操作仍需单独验证。')}
 async function run(f){try{await f()}catch(e){status(e.name==='NotAllowedError'||e.name==='AbortError'?'验证取消或超时，未生成成功证明。':e.message)}}
 $('load').onclick=()=>run(load);$('register').onclick=()=>run(()=>register(false));$('add').onclick=()=>run(async()=>{await authenticate({kind:'register'});await register(false)});$('recover').onclick=()=>run(async()=>{await authenticate({kind:'recover'});await register(true)});
-$('oidc').onclick=()=>run(async()=>{const result=await api('/oidc/'+$('providers').value+'/step-up',{returnTarget:'security',operation:{kind:$('intent').value}});location.assign(result.authorizationUrl)});$('complete').onclick=()=>run(()=>register($('intent').value==='recover'));
-$('cancel').onclick=()=>run(async()=>{controller?.abort();if(ceremony){await api('/webauthn/'+ceremony+'/cancel',{});ceremony=null}status('已取消')});
-const query=new URLSearchParams(location.search);if(query.has('tenant')){$('tenant').value=query.get('tenant');run(load)}
+$('oidc').onclick=()=>run(async()=>{sessionStorage.setItem(NAVIGATION,JSON.stringify({tenant:$('tenant').value,intent:$('intent').value,label:$('label').value}));const result=await api('/oidc/'+$('providers').value+'/step-up',{returnTarget:'security',operation:{kind:$('intent').value}});location.assign(result.authorizationUrl)});$('complete').onclick=()=>run(async()=>{if(!pending)throw Error('请先完成验证');await register($('intent').value==='recover');pending=false;sessionStorage.removeItem(NAVIGATION)});
+$('cancel').onclick=()=>run(async()=>{controller?.abort();if(ceremony){await api('/webauthn/'+ceremony+'/cancel',{});ceremony=null}await api('/webauthn/operation/cancel',{});pending=false;sessionStorage.removeItem(NAVIGATION);status('已取消；继续操作需要重新验证')});
+const query=new URLSearchParams(location.search);
+let navigation;try{navigation=JSON.parse(sessionStorage.getItem(NAVIGATION)||'null')}catch{}
+if(navigation && /^[0-9a-f-]{36}$/i.test(navigation.tenant) && ['register','recover'].includes(navigation.intent)){
+ $('tenant').value=navigation.tenant;$('intent').value=navigation.intent;$('label').value=String(navigation.label||'我的认证器').slice(0,128);pending=true;
+ run(async()=>{await load();status(navigation.intent==='recover'?'已返回账户恢复，请继续登记新认证器。':'已返回新增认证器，请继续登记。')});
+}else if(query.has('tenant')){$('tenant').value=query.get('tenant');run(load)}
