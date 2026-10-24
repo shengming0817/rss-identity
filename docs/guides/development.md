@@ -14,4 +14,4 @@
 
 Web 接入由 rss-web 的现有联合测试持有；MDM 接入归其产品。需要真实浏览器、部署和恢复闭环时，独立评估并使用[参考运行入口](../deployment/images.md#功能验收)，不重复模拟 consumer 或容量验证。
 
-#2917/#2921 的公开消费检查：在候选推送后运行 `python3 hack/identity_consumer.py --revision <完整40位SHA>`。它创建独立 workspace 和 lock，通过固定 Git 来源编译四个公开包并运行操作上下文隔离检查；不引用本机相邻源码，不替代真实 PG/IdP 或物理认证器验收。
+#2917/#2921/#2983 的公开消费检查：在候选推送后运行 `python3 hack/identity_consumer.py --revision <完整40位SHA>`。它创建独立 workspace 和 lock，通过固定 Git 来源编译四个公开包并运行操作上下文隔离检查，以及真实 PostgreSQL 中宿主同事务会话准入、业务提交/回滚和撤销后拒绝；不引用本机相邻源码，不替代真实 PG/IdP 或物理认证器验收。

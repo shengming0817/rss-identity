@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 import tomllib
+from providers import postgres
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,13 +24,17 @@ def main():
         manifest+=f'{package}={{git="https://dev.azure.com/shengming0923/rss/_git/rss-identity",rev="{args.revision}"}}\n'
     for package in ['rss-request-context','rss-transactional-messaging']:
         manifest+=f'{package}={{git="{rss["git"]}",rev="{rss["rev"]}"}}\n'
+    manifest+=f'rss-transactional-messaging-postgres={{git="{rss["git"]}",rev="{rss["rev"]}",default-features=false,features=["integration"]}}\n'
+    manifest+='anyhow="1"\ntokio={version="1",features=["macros","rt-multi-thread","time"]}\nsqlx={version="=0.9.0",default-features=false,features=["runtime-tokio","tls-rustls","postgres"]}\n'
     manifest+='serde_json="1"\nurl="2.5"\naxum={version="=0.8.9",default-features=false}\n'
     with tempfile.TemporaryDirectory(prefix='identity-public-consumer-') as directory:
         directory=Path(directory);(directory/'src').mkdir()
         (directory/'Cargo.toml').write_text(manifest)
         (directory/'src/main.rs').write_text((ROOT/'examples/identity_consumer.rs').read_text())
+        (directory/'src/live_session_consumer.rs').write_text((ROOT/'examples/live_session_consumer.rs').read_text())
         env={**os.environ,'CARGO_TARGET_DIR':str(ROOT/'target/independent-consumer')}
         subprocess.run(['cargo','generate-lockfile'],cwd=directory,env=env,check=True)
-        subprocess.run(['cargo','run','--locked'],cwd=directory,env=env,check=True)
+        with postgres() as (_, ports):
+            subprocess.run(['cargo','run','--locked'],cwd=directory,env={**env,'IDENTITY_TEST_PG_PORT':str(ports[5432])},check=True)
         print(f'Identity revision verified: {args.revision}')
 if __name__=='__main__':main()

@@ -290,6 +290,7 @@ struct Verifier {
         )>,
     >,
     unavailable: std::sync::atomic::AtomicBool,
+    last_backend: std::sync::atomic::AtomicI32,
     runtime: Arc<rss_transactional_messaging_postgres::PgRuntime>,
     fault: std::sync::Mutex<Option<PgTransactionFault>>,
 }
@@ -374,6 +375,12 @@ impl PlatformVerifier for Verifier {
             if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(PlatformError::Unavailable);
             }
+            let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *c)
+                .await
+                .map_err(|_| PlatformError::Unavailable)?;
+            self.last_backend
+                .store(pid, std::sync::atomic::Ordering::SeqCst);
             let row = sqlx::query(
                 "SELECT enabled,epoch FROM public.platform_binding WHERE id=$1 FOR UPDATE",
             )
@@ -426,6 +433,7 @@ async fn platform_host_for(
         evidence: std::sync::Mutex::new((true, false, None)),
         idp: std::sync::Mutex::new(None),
         unavailable: std::sync::atomic::AtomicBool::new(false),
+        last_backend: std::sync::atomic::AtomicI32::new(0),
         runtime: f.runtime.clone(),
         fault: std::sync::Mutex::new(None),
     });
@@ -2065,6 +2073,127 @@ async fn platform_subject_admission_requires_current_external_identity() -> anyh
     .execute(&mut *owner)
     .await?;
     drop(owner);
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn live_session_admission_retains_platform_source_locks() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let (store, verifier) = platform_host(&f, false).await?;
+    let browser = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let challenge = store
+        .begin_platform_login(
+            f.key.tenant,
+            verifier.binding.binding_id,
+            PlatformPurpose::BrowserLogin,
+            browser.into(),
+            source(),
+            deadline(),
+        )
+        .await?;
+    let signature = verifier
+        .key
+        .sign(&challenge.signing_payload)
+        .as_ref()
+        .to_vec();
+    let issued = store
+        .complete_platform_login(
+            f.key.tenant,
+            challenge.id,
+            challenge.nonce,
+            browser.into(),
+            signature,
+            deadline(),
+        )
+        .await?
+        .session;
+    let actor = proof(&store, &f, &issued).await?;
+    let mut tx = f.owner.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(A)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL ROLE identity_runtime")
+        .execute(&mut *tx)
+        .await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await?;
+    recheck_authenticated_session_on(&mut tx, &actor).await?;
+    assert_eq!(
+        verifier
+            .last_backend
+            .load(std::sync::atomic::Ordering::SeqCst),
+        pid
+    );
+    let pool = f.owner.clone();
+    let revoke = tokio::spawn(async move {
+        sqlx::query("UPDATE public.platform_binding SET enabled=false,epoch=epoch+1")
+            .execute(&pool)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%UPDATE public.platform_binding%')").bind(pid).fetch_one(&f.owner).await?;
+            if blocked { return Ok::<_,anyhow::Error>(()); }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await??;
+    tx.rollback().await?;
+    revoke.await??;
+    let mut tx = f.owner.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(A)
+        .execute(&mut *tx)
+        .await?;
+    assert!(
+        recheck_authenticated_session_on(&mut tx, &actor)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    sqlx::query("UPDATE public.platform_binding SET enabled=true,epoch=1")
+        .execute(&f.owner)
+        .await?;
+    verifier
+        .unavailable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut tx = f.owner.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(A)
+        .execute(&mut *tx)
+        .await?;
+    assert!(
+        recheck_authenticated_session_on(&mut tx, &actor)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    verifier
+        .unavailable
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    for change in [
+        "UPDATE public.platform_binding SET epoch=epoch+1",
+        "UPDATE identity_authority.sessions SET platform_authentication=jsonb_set(platform_authentication,'{binding,sourceVersion}','99') WHERE authentication_source='platform'",
+    ] {
+        let mut tx = f.owner.begin().await?;
+        sqlx::query(sqlx::AssertSqlSafe(change))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(A)
+            .execute(&mut *tx)
+            .await?;
+        assert!(
+            recheck_authenticated_session_on(&mut tx, &actor)
+                .await
+                .is_err()
+        );
+        tx.rollback().await?;
+    }
     f.close().await;
     Ok(())
 }
