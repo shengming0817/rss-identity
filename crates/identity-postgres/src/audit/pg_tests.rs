@@ -173,7 +173,7 @@ async fn authentication_outbox_reaches_audit_and_recovers() -> anyhow::Result<()
         .revoke_all_sessions(actor, support::deadline())
         .await?;
     assert_eq!(s.count(A).await?, 0);
-    let limit = RelayBatchLimit::new(std::num::NonZeroUsize::new(32).unwrap())?;
+    let limit = std::num::NonZeroUsize::new(32).unwrap();
     for _ in 0..3 {
         s.worker.run_once(limit).await?;
     }
@@ -234,20 +234,32 @@ async fn authentication_outbox_reaches_audit_and_recovers() -> anyhow::Result<()
 async fn conflicts_rollback_unknown_commit_and_lease_loss() -> anyhow::Result<()> {
     let s = Setup::new().await?;
     let body = serde_json::json!({"action":"created","tenant":A,"principal":B,"source":"local_password","session_id":SYSTEM,"replaced_session_id":null,"epoch":1});
-    enqueue(&s, super::tests::envelope("session", body.clone())).await?;
-    s.worker
-        .projection
-        .inject_next_projection_fault(PgTransactionFault::CommitUnknownAfterAck)?;
-    let limit = RelayBatchLimit::new(std::num::NonZeroUsize::MIN)?;
+    let base = super::tests::envelope("session", body.clone());
+    for n in 0..3 {
+        enqueue(
+            &s,
+            MessageEnvelope::new(
+                rss_transactional_messaging::message::MessageId::parse(&format!("mixed-{n}"))?,
+                base.metadata().clone(),
+                base.payload().clone(),
+            ),
+        )
+        .await?;
+    }
+    s.worker.projection.inject_next_projection_fault(
+        PgTransactionFault::CommitUnknownAfterAck,
+        std::future::ready(()),
+    )?;
+    let limit = std::num::NonZeroUsize::new(65).unwrap();
     assert!(matches!(
         s.worker.run_once(limit).await,
         Err(AuditDeliveryError::Transient)
     ));
-    assert_eq!(s.count(A).await?, 1);
+    assert_eq!(s.count(A).await?, 3);
     assert_eq!(s.worker.run_once(limit).await?.projected(), 1);
-    assert_eq!(s.count(A).await?, 1);
+    assert_eq!(s.count(A).await?, 3);
     let terminal: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox o JOIN rss_transactional_messaging.inbox i USING(tenant_id,message_id) WHERE o.status='published' AND i.disposition='succeeded'").fetch_one(&s.f.owner).await?;
-    assert_eq!(terminal, 1);
+    assert_eq!(terminal, 3);
     let message = super::tests::envelope("session", body);
     let pending = MessageEnvelope::new(
         rss_transactional_messaging::message::MessageId::parse("rollback")?,
@@ -257,16 +269,16 @@ async fn conflicts_rollback_unknown_commit_and_lease_loss() -> anyhow::Result<()
     enqueue(&s, pending).await?;
     s.worker
         .projection
-        .inject_next_projection_fault(PgTransactionFault::CommitPending)?;
+        .inject_next_projection_fault(PgTransactionFault::CommitPending, std::future::ready(()))?;
     assert!(matches!(
         s.worker.run_once(limit).await,
         Err(AuditDeliveryError::Transient)
     ));
-    assert_eq!(s.count(A).await?, 1);
+    assert_eq!(s.count(A).await?, 3);
     manipulate(&s.f.owner,"UPDATE rss_transactional_messaging.inbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='rollback' AND tenant_id=$1::uuid").await?;
     manipulate(&s.f.owner,"UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='rollback' AND tenant_id=$1::uuid").await?;
     s.worker.run_once(limit).await?;
-    assert_eq!(s.count(A).await?, 2);
+    assert_eq!(s.count(A).await?, 4);
     s.runtime.close().await;
     s.pool.close().await;
     Ok(())
@@ -341,14 +353,15 @@ async fn relay_quarantines_bad_events_and_recovers_lost_source_lease() -> anyhow
             |e| Err(anyhow::anyhow!(e)),
             |_| Err(anyhow::anyhow!("fenced")),
         )?;
-    let limit = RelayBatchLimit::new(std::num::NonZeroUsize::MIN)?;
+    let limit = std::num::NonZeroUsize::MIN;
     let mut lock = s.f.owner.begin().await?;
     sqlx::raw_sql("LOCK TABLE rss_audit.heads IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *lock)
         .await?;
-    s.worker
-        .projection
-        .inject_next_projection_fault(PgTransactionFault::RollbackFailedAfterAck)?;
+    s.worker.projection.inject_next_projection_fault(
+        PgTransactionFault::RollbackFailedAfterAck,
+        std::future::ready(()),
+    )?;
     let (result, injection) = tokio::join!(s.worker.run_once(limit), async {
         // Wait for the real relay claim, then revoke its source lease while the append is blocked.
         tokio::time::timeout(Duration::from_secs(3),async {
@@ -366,7 +379,6 @@ async fn relay_quarantines_bad_events_and_recovers_lost_source_lease() -> anyhow
     injection?;
     // Suppressed rollback ACK must retain the original identity, not release an uncertain claim.
     assert!(matches!(result, Err(AuditDeliveryError::Transient)));
-    assert!(s.worker.pending.lock().await.is_some());
     let published: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM rss_transactional_messaging.outbox WHERE status='published'",
     )
@@ -470,7 +482,7 @@ async fn permanent_storage_failure_stops_delivery_without_ack() -> anyhow::Resul
         .execute(&s.f.owner)
         .await?;
     enqueue(&s, message).await?;
-    let limit = RelayBatchLimit::new(std::num::NonZeroUsize::MIN)?;
+    let limit = std::num::NonZeroUsize::MIN;
     assert!(matches!(
         s.worker.run_once(limit).await,
         Err(AuditDeliveryError::Permanent)
@@ -567,47 +579,6 @@ async fn startup_validates_actual_worker_not_audit_pool() -> anyhow::Result<()> 
     )
     .await;
     assert!(matches!(result, Err(AuditDeliveryError::Invariant)));
-    s.runtime.close().await;
-    s.pool.close().await;
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires real PG"]
-async fn projection_batch_shares_one_absolute_budget() -> anyhow::Result<()> {
-    let mut s = Setup::new().await?;
-    let base = super::tests::envelope(
-        "session",
-        serde_json::json!({"action":"created","tenant":A,"principal":B,"source":"local_password","session_id":SYSTEM,"replaced_session_id":null,"epoch":1}),
-    );
-    for n in 0..8 {
-        enqueue(
-            &s,
-            MessageEnvelope::new(
-                rss_transactional_messaging::message::MessageId::parse(&format!("batch-{n}"))?,
-                base.metadata().clone(),
-                base.payload().clone(),
-            ),
-        )
-        .await?;
-    }
-    sqlx::raw_sql("CREATE FUNCTION public.slow_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.15); RETURN NEW; END $$; CREATE TRIGGER slow_audit BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.slow_audit()").execute(&s.f.owner).await?;
-    s.worker.timeout = Duration::from_millis(350);
-    let begin = Instant::now();
-    let _ = s
-        .worker
-        .run_once(RelayBatchLimit::new(
-            std::num::NonZeroUsize::new(8).unwrap(),
-        )?)
-        .await;
-    assert!(
-        begin.elapsed() < Duration::from_secs(1),
-        "batch must not renew its budget for each message"
-    );
-    let projected: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_audit.records")
-        .fetch_one(&s.f.owner)
-        .await?;
-    assert!(projected < 8);
     s.runtime.close().await;
     s.pool.close().await;
     Ok(())

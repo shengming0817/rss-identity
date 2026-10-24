@@ -11,7 +11,6 @@ use rss_identity_postgres::audit::AuditDelivery;
 use rss_request_context::Deadline;
 use rss_runtime::{ManagedTask, ManagedTaskRegistration, ShutdownError};
 use rss_transactional_messaging_postgres::PgRuntime;
-use rss_transactional_messaging_runtime::relay::RelayBatchLimit;
 use sqlx::{PgConnection, PgPool};
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -138,8 +137,7 @@ pub fn registration(
     else {
         return Err(AppError::Configuration);
     };
-    let limit = RelayBatchLimit::new(NonZeroUsize::new(*batch).ok_or(AppError::Budget)?)
-        .map_err(|_| AppError::Budget)?;
+    let limit = NonZeroUsize::new(*batch).ok_or(AppError::Budget)?;
     let poll = Duration::from_millis(*poll_millis);
     let (start, _) = ManagedTask::prepare("identity-audit", drain);
     Ok(start.into_registration(move |stop| async move {
@@ -210,6 +208,18 @@ mod tests {
         }
     }
     #[test]
+    fn audit_capacity_has_no_fixed_batch_ceiling() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
+        value["audit"] = serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1000,"batch":65,"recoveryKeys":{"activeKeyId":"audit","keys":[{"keyId":"audit","path":"audit.key"}]}});
+        assert!(
+            serde_json::from_value::<RuntimeConfig>(value)
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+    }
+    #[test]
     fn host_requires_explicit_mode_and_current_format() {
         let baseline: serde_json::Value =
             serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
@@ -227,7 +237,7 @@ mod tests {
         for mut a in [
             serde_json::json!({"mode":"enabled","user":"identity_runtime","passwordFile":"p","pollMillis":100,"batch":1}),
             serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1,"batch":1}),
-            serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":100,"batch":65}),
+            serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":100,"batch":0}),
         ] {
             let mut bad = baseline.clone();
             a["recoveryKeys"] = serde_json::json!({"activeKeyId":"audit","keys":[{"keyId":"audit","path":"audit.key"}]});

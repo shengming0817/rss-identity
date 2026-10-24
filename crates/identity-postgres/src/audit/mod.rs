@@ -25,9 +25,9 @@ use rss_transactional_messaging_postgres::{
     PgProjectionAttempt, PgProjectionOutcome, PgProjectionRecovery, PgRecoveryCapture, PgRuntime,
     PgTransaction,
 };
-use rss_transactional_messaging_runtime::relay::RelayBatchLimit;
 use std::{
-    sync::{Arc, OnceLock},
+    num::NonZeroUsize,
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -184,7 +184,7 @@ pub struct AuditDelivery<K> {
     projection: PgLocalProjection<Effect, K>,
     validator: Validator,
     fatal: Arc<OnceLock<AuditDeliveryError>>,
-    pending: tokio::sync::Mutex<Option<PgProjectionRecovery>>,
+    pending: Mutex<Vec<Arc<PgProjectionRecovery>>>,
     timeout: Duration,
 }
 impl<K: Aead + Send + Sync> AuditDelivery<K> {
@@ -263,7 +263,7 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
             projection,
             validator: Validator { tenants },
             fatal,
-            pending: tokio::sync::Mutex::new(None),
+            pending: Mutex::new(Vec::new()),
             timeout: budget.publish_timeout(),
         })
     }
@@ -279,7 +279,6 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
     fn consume_attempt(
         &self,
         attempt: PgProjectionAttempt,
-        pending: &mut Option<PgProjectionRecovery>,
         report: &mut AuditProjectionReport,
     ) -> Result<(), AuditDeliveryError> {
         use rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus as Status;
@@ -292,9 +291,11 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
             outcome.status(),
             Status::RollbackFailed | Status::CommitUnknown
         ) {
-            *pending = Some(identity);
+            self.pending
+                .lock()
+                .map_err(|_| AuditDeliveryError::Invariant)?
+                .push(Arc::new(identity));
         }
-        self.check_fatal()?;
         let progress = outcome.fold(
             |committed| {
                 self.committed(committed.into_parts().1.disposition())?;
@@ -316,22 +317,20 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
         }
         Ok(())
     }
-    /// Resolve any prior uncertainty first. Only provider leases authorize a fresh effect attempt.
-    pub async fn run_once(
+    async fn resolve_pending(
         &self,
-        limit: RelayBatchLimit,
-    ) -> Result<AuditProjectionReport, AuditDeliveryError> {
-        self.check_fatal()?;
-        let cutoff = Deadline::from_timeout(&Timer, self.timeout)
-            .map_err(|_| AuditDeliveryError::Configuration)?;
-        let mut pending = tokio::time::timeout(self.timeout, self.pending.lock())
-            .await
-            .map_err(|_| AuditDeliveryError::Transient)?;
-        let mut report = AuditProjectionReport::default();
-        if let Some(identity) = pending.as_ref() {
+        report: &mut AuditProjectionReport,
+    ) -> Result<(), AuditDeliveryError> {
+        let snapshot = self
+            .pending
+            .lock()
+            .map_err(|_| AuditDeliveryError::Invariant)?
+            .clone();
+        let mut failure = None;
+        for identity in snapshot {
             let result = self
                 .projection
-                .resolve(identity, OperationDeadline::from_cutoff(cutoff, &Timer))
+                .resolve(&identity, OperationDeadline::from_remaining(self.timeout))
                 .await;
             let event = match &result {
                 Ok(Some(_)) => diagnostics::Event::ResolutionConfirmed,
@@ -339,49 +338,86 @@ impl<K: Aead + Send + Sync> AuditDelivery<K> {
                 Err(_) => diagnostics::Event::ResolutionFailed,
             };
             diagnostics::record(event, std::io::stderr().lock());
-            if let Some(receipt) = result.map_err(AuditDeliveryError::pg)? {
-                self.committed(receipt.disposition())?;
-                report.projected += 1;
-            }
-            // None is not rollback proof: subsequent processing still requires a new durable claim.
-            *pending = None;
-        }
-        for _ in 0..limit.get().get() {
-            if cutoff
-                .remaining(Timer.now())
-                .is_none_or(|remaining| remaining.is_zero())
+            let result = match result {
+                Err(error) => Err(AuditDeliveryError::pg(error)),
+                Ok(receipt) => {
+                    let removed = {
+                        let mut pending = self
+                            .pending
+                            .lock()
+                            .map_err(|_| AuditDeliveryError::Invariant)?;
+                        pending
+                            .iter()
+                            .position(|entry| Arc::ptr_eq(entry, &identity))
+                            .map(|index| pending.swap_remove(index))
+                            .is_some()
+                    };
+                    // None is not rollback proof. Only a new durable claim authorizes another effect.
+                    if let Some(receipt) = receipt.filter(|_| removed) {
+                        self.committed(receipt.disposition())
+                            .map(|()| report.projected += 1)
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+            if let Err(error) = result
+                && failure.is_none_or(|previous: AuditDeliveryError| previous.is_retryable())
             {
-                break;
+                failure = Some(error);
             }
-            let result = self
-                .projection
-                .project_one(
-                    &self.validator,
-                    OperationDeadline::from_cutoff(cutoff, &Timer),
-                )
-                .await;
-            let result = result.map_err(|error| {
+        }
+        failure.map_or(Ok(()), Err)
+    }
+    /// Resolve prior uncertain outcomes, then claim one batch with independent event budgets.
+    /// The host may call concurrently; only the short pending-identity updates are locked.
+    pub async fn run_once(
+        &self,
+        limit: NonZeroUsize,
+    ) -> Result<AuditProjectionReport, AuditDeliveryError> {
+        self.check_fatal()?;
+        let mut report = AuditProjectionReport::default();
+        self.resolve_pending(&mut report).await?;
+        let batch = self
+            .projection
+            .project_batch(
+                &self.validator,
+                limit,
+                OperationDeadline::from_remaining(self.timeout),
+                self.timeout,
+            )
+            .await
+            .map_err(|error| {
                 self.fatal
                     .get()
                     .copied()
                     .unwrap_or_else(|| AuditDeliveryError::pg(error))
             })?;
-            match result {
-                PgProjectionOutcome::Empty => break,
-                PgProjectionOutcome::Attempt(attempt) => {
-                    self.consume_attempt(*attempt, &mut pending, &mut report)?;
+        let mut failure = None;
+        for item in batch {
+            let result = match item.into_outcome() {
+                Ok(PgProjectionOutcome::Attempt(attempt)) => {
+                    self.consume_attempt(*attempt, &mut report)
                 }
-                PgProjectionOutcome::Rejected(_) | PgProjectionOutcome::DeliveryExpired => {
+                Ok(PgProjectionOutcome::Rejected(_) | PgProjectionOutcome::DeliveryExpired) => {
                     let _ = self.fatal.set(AuditDeliveryError::RejectedEvent);
-                    return Err(AuditDeliveryError::RejectedEvent);
+                    Err(AuditDeliveryError::RejectedEvent)
                 }
-                PgProjectionOutcome::InProgress => {
+                Ok(PgProjectionOutcome::InProgress) => {
                     report.deferred += 1;
                     report.last_deferral = Some("in_progress");
+                    Ok(())
                 }
+                Err(error) => Err(AuditDeliveryError::pg(error)),
+            };
+            if let Err(error) = result
+                && failure.is_none_or(|previous: AuditDeliveryError| previous.is_retryable())
+            {
+                failure = Some(error);
             }
         }
-        Ok(report)
+        self.check_fatal()?;
+        failure.map_or(Ok(report), Err)
     }
 }
 #[cfg(test)]

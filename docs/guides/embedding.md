@@ -114,7 +114,7 @@ JWKS 只从固定 Microsoft tenant 地址经有界、禁重定向的 HTTPS 取�
 
 ## 认证审计交付
 
-`rss_identity_postgres::audit::AuditDelivery` 持有 Identity 事件语义。宿主注入同库的 worker `Arc<PgRuntime>`、`Arc<PgAudit>`、真实实例与租户绑定、delivery budget 和独立恢复保护密钥 `Arc<K: Aead + Send + Sync>`，调用有界 `run_once`。异步构造在一个有界预算内使用 worker 实际事务连接完成 Audit（启用 Ledger 时包括 Ledger）启动验证，并检查已有 dead-letter，worker 至少配置两个连接，为 effect 执行期间续租保留连接。Audit、Ledger（启用时）、Inbox 及源 Outbox 终态在唯一事务提交；返回的 `AuditProjectionReport` 区分已确认投影和延期。提交未知先按原恢复凭证核对持久终态，未提交消息仅由租约重新认领；不再进行独立成功确认。不创建任务或接管连接关闭；构造和运行统一返回 `AuditDeliveryError`，宿主只对 `is_retryable()` 为真的错误重试。权限通过公开 `audit::grant_worker` / `verify_worker` 接缝装配，不复制参考 app 的 SQL。参考实现见 [审计装配](../../app/identity/src/audit.rs)。
+`rss_identity_postgres::audit::AuditDelivery` 持有 Identity 事件语义。宿主注入同库的 worker `Arc<PgRuntime>`、`Arc<PgAudit>`、真实实例与租户绑定、delivery budget 和独立恢复保护密钥 `Arc<K: Aead + Send + Sync>`，调用 `run_once(NonZeroUsize)` 一次领取当前可用容量内的一批消息并跨分区并发执行；每事件拥有独立执行预算。异步构造在一个有界预算内使用 worker 实际事务连接完成 Audit（启用 Ledger 时包括 Ledger）启动验证，并检查已有 dead-letter，worker 至少配置两个连接，为 effect 执行期间续租保留连接。Audit、Ledger（启用时）、Inbox 及源 Outbox 终态在唯一事务提交；返回的 `AuditProjectionReport` 区分已确认投影和延期。提交未知的恢复身份由短锁保护，核对期间不持锁；后续调用先按原恢复凭证核对持久终态，未提交消息仅由租约重新认领；不再进行独立成功确认。不创建任务或接管连接关闭；构造和运行统一返回 `AuditDeliveryError`，宿主只对 `is_retryable()` 为真的错误重试。权限通过公开 `audit::grant_worker` / `verify_worker` 接缝装配，不复制参考 app 的 SQL。参考实现见 [审计装配](../../app/identity/src/audit.rs)。
 
 producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::connect_consumer`，Audit 开启 `messaging`。worker 不读取 Identity 私有表，也不能直接修改 Audit/Outbox；schema owner 和实际权限必须通过 startup probe。宿主负责保证来源实例对应当前 Identity 数据库，不接受请求指定的 source。
 

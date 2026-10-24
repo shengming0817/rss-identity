@@ -13,7 +13,6 @@ RSS_FEATURES = {
     'rss-transactional-messaging-recovery': set(),
     'rss-audit-core': set(), 'rss-audit-postgres': {'default','messaging','ledger'},
     'rss-ledger': {'default'}, 'rss-ledger-postgres': {'messaging'},
-    'rss-transactional-messaging-runtime': {'consumer','producer'},
     'rss-runtime': {'default'}, 'rss-axum': {'http1','managed-server'},
     'rss-contract': {'default'}, 'rss-request-context': {'default'},
     'rss-redact': {'default','derive'}, 'rss-diag-context': {'default'},

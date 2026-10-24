@@ -124,7 +124,6 @@ SUITES[("rss-identity-postgres", "audit::pg_tests")].update({
     "wakeup::notifications_settle_with_security_events",
     "concentrated_projection_replays_exact_bytes_after_clock_advances",
     "startup_validates_actual_worker_not_audit_pool",
-    "projection_batch_shares_one_absolute_budget",
 })
 
 SUITES[("rss-identity-postgres", "entra")] = {

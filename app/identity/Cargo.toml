@@ -19,7 +19,6 @@ path = "src/bin/migrate.rs"
 rss-data-protection.workspace = true
 ring.workspace = true
 rss-audit-postgres.workspace = true
-rss-transactional-messaging-runtime.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true
 rss-runtime.workspace = true

@@ -371,7 +371,7 @@ impl AuditConfig {
                 || recovery_keys.active_key_id.is_empty()
                 || recovery_keys.keys.is_empty()
                 || !(100..=300000).contains(poll_millis)
-                || !(1..=64).contains(batch))
+                || *batch == 0)
         {
             return Err(AppError::Configuration);
         }
