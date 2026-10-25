@@ -58,10 +58,6 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     assert_eq!(successes, 1);
     assert_eq!(f.account_events().await?, 1);
     assert_eq!(f.events().await?, 1);
-    let unordered: bool = sqlx::query_scalar(
-        "SELECT bool_and(partition_key IS NULL AND partition_seq IS NULL) FROM rss_transactional_messaging.outbox",
-    ).fetch_one(&f.owner).await?;
-    assert!(unordered, "security events retain unordered delivery");
     f.provision_a().await?;
     let instance: uuid::Uuid =
         sqlx::query_scalar("SELECT authority_id FROM identity_authority.deployment")
@@ -560,7 +556,7 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     .await?;
     assert_eq!(n, 1);
     // Event failure rolls back the actual companion account and membership.
-    sqlx::raw_sql("CREATE FUNCTION public.reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic secret must not escape'; END $$; CREATE TRIGGER reject_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic secret must not escape'; END $$; CREATE TRIGGER reject_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_event();").execute(&f.owner).await?;
     let actor = f.actor().await?;
     let result = f
         .store
@@ -584,11 +580,11 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
             .await,
         Err(AuthorityError::RollbackFailed(_))
     ));
-    sqlx::query("DROP TRIGGER reject_event ON rss_transactional_messaging.outbox")
+    sqlx::query("DROP TRIGGER reject_event ON rss_audit.records")
         .execute(&f.owner)
         .await?;
-    // Force a real duplicate outbox identity; the new companion account must roll back.
-    sqlx::raw_sql("CREATE OR REPLACE FUNCTION public.reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.message_id := (SELECT message_id FROM rss_transactional_messaging.outbox WHERE tenant_id=NEW.tenant_id LIMIT 1); RETURN NEW; END $$; CREATE TRIGGER reject_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_event();").execute(&f.owner).await?;
+    // Force a real duplicate Audit identity; the new companion account must roll back.
+    sqlx::raw_sql("CREATE OR REPLACE FUNCTION public.reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN SELECT source_id,event_id INTO NEW.source_id,NEW.event_id FROM rss_audit.records WHERE tenant_id=NEW.tenant_id LIMIT 1; RETURN NEW; END $$; CREATE TRIGGER reject_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_event();").execute(&f.owner).await?;
     f.reset_attempts().await?;
     assert!(
         f.store
@@ -608,7 +604,7 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     .await?;
     assert_eq!(n, 0);
     assert_eq!(f.account_events().await?, before + 1);
-    sqlx::query("DROP TRIGGER reject_event ON rss_transactional_messaging.outbox")
+    sqlx::query("DROP TRIGGER reject_event ON rss_audit.records")
         .execute(&f.owner)
         .await?;
     f.reset_attempts().await?;
@@ -934,59 +930,51 @@ async fn assert_event(
     epoch: i64,
     state: Option<AccountState>,
 ) -> anyhow::Result<()> {
-    let raw: String = sqlx::query_scalar(
-        "SELECT envelope::text FROM rss_transactional_messaging.outbox ORDER BY seq DESC LIMIT 1",
+    let raw: Vec<u8> = sqlx::query_scalar(
+        "SELECT canonical FROM rss_audit.records ORDER BY position DESC LIMIT 1",
     )
     .fetch_one(&f.owner)
     .await?;
-    assert_envelope(&raw, action, key, actor, epoch, state)
+    assert_audit_record(&raw, action, key, actor, epoch, state)
 }
 
-fn assert_envelope(
-    raw: &str,
+fn assert_audit_record(
+    raw: &[u8],
     action: &str,
     key: AccountKey,
     actor: Option<AccountKey>,
     epoch: i64,
     state: Option<AccountState>,
 ) -> anyhow::Result<()> {
-    use sha2::{Digest, Sha256};
-    let envelope: serde_json::Value = serde_json::from_str(raw)?;
-    let bytes: Vec<u8> = serde_json::from_value(envelope["payload"].clone())?;
-    let payload: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let decoded = rss_audit_core::decode_untrusted(raw)?;
+    let event = decoded.event();
+    let payload: serde_json::Value = serde_json::from_slice(event.context().payload().as_bytes())?;
     let expected_state = state.map(|s| serde_json::json!({"enabled":s.enabled(),"member_active":s.member_active(),"membership_epoch":s.membership_epoch()}));
     assert_eq!(
         payload,
-        serde_json::json!({"action":action,"tenant":key.tenant.to_string(),"principal":key.principal.as_uuid(),"actor":actor.map(|a| a.principal.as_uuid()),"epoch":epoch,"state":expected_state})
+        serde_json::json!({"epoch":epoch,"state":expected_state})
     );
-    assert_eq!(envelope["tenant"], key.tenant.to_string());
-    assert_eq!(envelope["domain"], "identity.security");
-    assert_eq!(envelope["route"], "account.changed");
-    assert_eq!(envelope["contract"], "identity.account.security");
+    assert_eq!(event.identity().tenant(), key.tenant);
     assert_eq!(
-        envelope["version"],
-        rss_contract::ContractVersion::from_major(3)?.to_string()
+        event.identity().source().contract().id().as_str(),
+        "identity.account.security"
     );
     assert_eq!(
-        envelope["schema"],
-        format!(
-            "sha256:{:x}",
-            Sha256::digest(include_str!("../security-event-v3.json"))
-        )
+        event.facts().action().as_str(),
+        format!("identity.account.{action}")
     );
-    assert!(uuid::Uuid::parse_str(envelope["id"].as_str().unwrap()).is_ok());
-    assert!(envelope["occurred_at"].as_i64().unwrap() > 0);
-    assert_eq!(envelope["attributes"], serde_json::json!({}));
-    for field in [
-        "correlation",
-        "partition",
-        "causation",
-        "trace",
-        "tenant_authority",
-    ] {
-        assert!(envelope[field].is_null());
+    assert_eq!(
+        event.facts().resource().id().as_str(),
+        key.principal.as_uuid().to_string()
+    );
+    if let Some(actor) = actor {
+        assert_eq!(
+            event.facts().actor().id().as_str(),
+            actor.principal.as_uuid().to_string()
+        );
     }
-    // Exact payload keys above also exclude credentials, login, token, digest and provider data.
+    assert!(uuid::Uuid::parse_str(event.identity().event_id().as_str()).is_ok());
+    assert!(decoded.recorded_at().unix_seconds() > 0);
     Ok(())
 }
 
@@ -1157,10 +1145,9 @@ async fn maintenance_races_preserve_current_state() -> anyhow::Result<()> {
                 .create_local_account(f.actor().await?, login(&name), password(), deadline())
                 .await?;
             let actor = f.actor().await?;
-            let before_seq: i64 =
-                sqlx::query_scalar("SELECT max(seq) FROM rss_transactional_messaging.outbox")
-                    .fetch_one(&f.owner)
-                    .await?;
+            let before_seq: i64 = sqlx::query_scalar("SELECT max(position) FROM rss_audit.records")
+                .fetch_one(&f.owner)
+                .await?;
             let first_role = if maintenance_first {
                 "identity_maintenance"
             } else {
@@ -1275,11 +1262,16 @@ async fn maintenance_races_preserve_current_state() -> anyhow::Result<()> {
                     expected.push(("password_recovered", None, recovered));
                 }
             }
-            let events: Vec<String> = sqlx::query_scalar("SELECT envelope::text FROM rss_transactional_messaging.outbox WHERE seq>$1 ORDER BY seq").bind(before_seq).fetch_all(&f.owner).await?;
+            let events: Vec<Vec<u8>> = sqlx::query_scalar(
+                "SELECT canonical FROM rss_audit.records WHERE position>$1 ORDER BY position",
+            )
+            .bind(before_seq)
+            .fetch_all(&f.owner)
+            .await?;
             assert_eq!(events.len(), expected.len());
             for (index, (raw, (action, actor, state))) in events.iter().zip(expected).enumerate() {
                 assert_eq!(state.epoch(), 2 + index as i64);
-                assert_envelope(raw, action, key, actor, state.epoch(), Some(state))?;
+                assert_audit_record(raw, action, key, actor, state.epoch(), Some(state))?;
             }
         }
     }

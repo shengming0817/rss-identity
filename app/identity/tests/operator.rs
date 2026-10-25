@@ -21,7 +21,7 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
         || -> anyhow::Result<Password> { Ok(Password::new(read_secret(&file)?.to_string())?) };
     // Both operations have one business transaction: faults target the mutation itself.
     for initialize in [true, false] {
-        sqlx::raw_sql("CREATE FUNCTION public.reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic private marker'; END $$; CREATE TRIGGER reject_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_event();").execute(&f.owner).await?;
+        sqlx::raw_sql("CREATE FUNCTION public.reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic private marker'; END $$; CREATE TRIGGER reject_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_event();").execute(&f.owner).await?;
         for fault in [None, Some(PgTransactionFault::RollbackFailedAfterAck)] {
             if let Some(fault) = fault {
                 f.maintenance_runtime.inject_next_transaction_fault(fault);
@@ -53,7 +53,11 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
                     .await?;
             assert_eq!(epochs, if initialize { vec![] } else { vec![1] });
         }
-        sqlx::raw_sql("DROP TRIGGER reject_event ON rss_transactional_messaging.outbox; DROP FUNCTION public.reject_event()").execute(&f.owner).await?;
+        sqlx::raw_sql(
+            "DROP TRIGGER reject_event ON rss_audit.records; DROP FUNCTION public.reject_event()",
+        )
+        .execute(&f.owner)
+        .await?;
         f.maintenance_runtime
             .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
         let result = if initialize {

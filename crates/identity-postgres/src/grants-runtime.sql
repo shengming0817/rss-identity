@@ -28,3 +28,7 @@ GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.webauthn_ceremonies TO {
 GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.step_up_grants TO {role};
 
 GRANT SELECT,INSERT ON identity_authority.webauthn_rp TO {role};
+
+GRANT USAGE ON SCHEMA rss_audit TO {role};
+GRANT SELECT ON rss_audit.records TO {role};
+GRANT EXECUTE ON FUNCTION rss_audit.append_batch(uuid,text[],text[],bigint[],bytea[],bigint[]) TO {role};

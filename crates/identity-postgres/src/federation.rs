@@ -88,12 +88,12 @@ pub(crate) enum Action {
 #[derive(Serialize)]
 pub(crate) struct FederationEvent {
     pub tenant: String,
-    action: Action,
-    provider_id: ProviderId,
-    config_version: i64,
-    principal: Option<Uuid>,
+    pub(crate) action: Action,
+    pub(crate) provider_id: ProviderId,
+    pub(crate) config_version: i64,
+    pub(crate) principal: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    diagnostic: Option<ProviderFailure>,
+    pub(crate) diagnostic: Option<ProviderFailure>,
 }
 pub(crate) fn event(
     tenant: TenantId,

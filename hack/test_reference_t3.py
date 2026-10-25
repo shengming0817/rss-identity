@@ -251,7 +251,7 @@ class EvidenceTests(unittest.TestCase):
                 "failedAttemptBudgetCommitted": True,
                 "responseLossObservedCommitted": True,
                 "durableEvents": 1,
-                "outboxSha256": sha,
+                "auditSha256": sha,
                 "eventIds": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
             },
             "availability": {
@@ -289,7 +289,7 @@ class EvidenceTests(unittest.TestCase):
             },
             "restore": {
                 "matchedSafetyCut": True,
-                "outboxSha256": sha,
+                "auditSha256": sha,
                 "sourceAndTargetGuards": True,
                 "operatorOpenedAfterVerification": True,
                 "dumpSha256": sha,

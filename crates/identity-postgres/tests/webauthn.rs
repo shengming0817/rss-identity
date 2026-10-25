@@ -264,7 +264,7 @@ async fn webauthn_uv_and_registration_event_rollback() -> anyhow::Result<()> {
     let mut key = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let response = key.do_registration(Url::parse(ORIGIN)?, start.options)?;
     let copy = serde_json::from_value(serde_json::to_value(&response)?)?;
-    sqlx::raw_sql("CREATE FUNCTION public.fail_webauthn_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_webauthn_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.fail_webauthn_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.fail_webauthn_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_webauthn_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.fail_webauthn_event();").execute(&f.owner).await?;
     assert!(
         w.finish_registration(actor(&f, &session).await?, start.id, response, deadline())
             .await
@@ -275,7 +275,7 @@ async fn webauthn_uv_and_registration_event_rollback() -> anyhow::Result<()> {
             .fetch_one(&f.owner)
             .await?;
     assert_eq!(count, 0);
-    sqlx::raw_sql("DROP TRIGGER fail_webauthn_event ON rss_transactional_messaging.outbox; DROP FUNCTION public.fail_webauthn_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("DROP TRIGGER fail_webauthn_event ON rss_audit.records; DROP FUNCTION public.fail_webauthn_event();").execute(&f.owner).await?;
     w.finish_registration(actor(&f, &session).await?, start.id, copy, deadline())
         .await?;
     f.close().await;
@@ -377,14 +377,14 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     let mut new_key = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let response = new_key.do_registration(Url::parse(ORIGIN)?, start.options)?;
     let copy = serde_json::from_value(serde_json::to_value(&response)?)?;
-    sqlx::raw_sql("CREATE FUNCTION public.fail_recovery_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_recovery_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.fail_recovery_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.fail_recovery_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_recovery_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.fail_recovery_event();").execute(&f.owner).await?;
     assert!(
         Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline()))
             .await
             .is_err()
     );
     assert_eq!(w.list(actor(&f, &s).await?, deadline()).await?.len(), 2);
-    sqlx::raw_sql("DROP TRIGGER fail_recovery_event ON rss_transactional_messaging.outbox;DROP FUNCTION public.fail_recovery_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("DROP TRIGGER fail_recovery_event ON rss_audit.records;DROP FUNCTION public.fail_recovery_event();").execute(&f.owner).await?;
     Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, copy, deadline())).await?;
     assert_eq!(w.list(actor(&f, &s).await?, deadline()).await?.len(), 1);
     assert!(

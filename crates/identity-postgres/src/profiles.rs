@@ -95,13 +95,13 @@ pub struct ProfileReceipt {
 #[derive(Serialize)]
 pub(crate) struct ProfileEvent {
     pub tenant: String,
-    principal: Uuid,
-    actor: Option<Uuid>,
-    action: &'static str,
-    source: ProfileSource,
-    snapshot_id: Option<Uuid>,
-    revision: Option<i64>,
-    changed_fields: Vec<&'static str>,
+    pub(crate) principal: Uuid,
+    pub(crate) actor: Option<Uuid>,
+    pub(crate) action: &'static str,
+    pub(crate) source: ProfileSource,
+    pub(crate) snapshot_id: Option<Uuid>,
+    pub(crate) revision: Option<i64>,
+    pub(crate) changed_fields: Vec<&'static str>,
 }
 fn event(
     key: AccountKey,

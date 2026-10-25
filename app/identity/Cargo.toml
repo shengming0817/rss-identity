@@ -16,7 +16,6 @@ name = "identity-migrate"
 path = "src/bin/migrate.rs"
 
 [dependencies]
-rss-data-protection.workspace = true
 ring.workspace = true
 rss-audit-postgres.workspace = true
 tokio-util.workspace = true
@@ -46,6 +45,7 @@ zeroize.workspace = true
 libc = "0.2"
 sqlx = { workspace = true, features = ["uuid"] }
 [dev-dependencies]
+rss-audit-core.workspace = true
 tower = { version = "0.5", features = ["util"] }
 anyhow.workspace = true
 uuid.workspace = true

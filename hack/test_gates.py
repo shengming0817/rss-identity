@@ -86,9 +86,8 @@ class Gates(unittest.TestCase):
     def test_production_features_do_not_include_test_support(self):
         actual = {k:set(v) for k,v in deps.RSS_FEATURES.items()}
         with self.assertRaises(ValueError): deps.check_features(actual,'production')
-        actual['rss-transactional-messaging-postgres']={'recovery'}
-        actual['rss-audit-postgres'].remove('ledger')
-        actual['rss-ledger']=set()
+        actual['rss-transactional-messaging-postgres']=set()
+        del actual['rss-ledger']
         del actual['rss-ledger-postgres']
         deps.check_features(actual,'production')
 

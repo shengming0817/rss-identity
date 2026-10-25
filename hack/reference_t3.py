@@ -301,10 +301,10 @@ EXTRA_FACTS = {
     "local": "failedAttempts assertions",
     "oidc": "assertions",
     "mfa": "assertions",
-    "events": "durableEvents outboxSha256 eventIds",
+    "events": "durableEvents auditSha256 eventIds",
     "database-rotation": "roles",
     "backup": "backupBytes dumpSha256 receiptSha256",
-    "restore": "outboxSha256 dumpSha256 receiptSha256 datasetRows",
+    "restore": "auditSha256 dumpSha256 receiptSha256 datasetRows",
 }
 TABLES = {
     "accounts",
@@ -318,7 +318,7 @@ TABLES = {
     "passwordAttempts",
     "linkIntents",
     "oidcTransactions",
-    "outbox",
+    "audit",
 }
 
 
@@ -371,7 +371,7 @@ def verify_observations(name, facts, subject):
             and all(type(v) is int and v >= 0 for v in rows.values())
             and rows["accounts"] >= 6
             and rows["providers"] == 2
-            and rows["outbox"] > 0,
+            and rows["audit"] > 0,
             "observation-dataset",
         )
 
@@ -833,8 +833,8 @@ class Run:
                 ("oidcTransactions", "oidc_transactions", "tenant_id,attempt_id"),
             ]
         }
-        queries["outbox"] = (
-            "SELECT * FROM rss_transactional_messaging.outbox ORDER BY seq"
+        queries["audit"] = (
+            "SELECT * FROM rss_audit.records ORDER BY position"
         )
         return {
             name: json.loads(
@@ -1123,17 +1123,17 @@ class Run:
         require(
             len(before["accounts"]) >= 6
             and len(before["providers"]) == 2
-            and len(before["outbox"]) > 0,
+            and len(before["audit"]) > 0,
             "durable-security-chain",
         )
         self.sql(
-            "CREATE FUNCTION public.t3_reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture rejection'; END $$; CREATE TRIGGER t3_reject_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.t3_reject_event();"
+            "CREATE FUNCTION public.t3_reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture rejection'; END $$; CREATE TRIGGER t3_reject_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.t3_reject_event();"
         )
         try:
             self.browser("rollback")
         finally:
             self.sql(
-                "DROP TRIGGER t3_reject_event ON rss_transactional_messaging.outbox; DROP FUNCTION public.t3_reject_event();"
+                "DROP TRIGGER t3_reject_event ON rss_audit.records; DROP FUNCTION public.t3_reject_event();"
             )
         require(
             self.sql(
@@ -1145,7 +1145,7 @@ class Run:
         after = self.snapshot()
         require(
             after["accounts"] == before["accounts"]
-            and after["outbox"] == before["outbox"],
+            and after["audit"] == before["audit"],
             "rollback-state-and-events",
         )
         require(
@@ -1161,58 +1161,31 @@ class Run:
             "unknown-observed-commit",
         )
         final = self.snapshot()
-        require(len(final["outbox"]) == len(after["outbox"]) + 1, "unknown-event-once")
-        row = final["outbox"][-1]
+        require(len(final["audit"]) == len(after["audit"]) + 1, "unknown-event-once")
+        row = final["audit"][-1]
         principal = self.sql(
             "SELECT principal_id FROM identity_authority.local_credentials WHERE login_key='uncertain';"
         )
         account = next(a for a in final["accounts"] if a["principal_id"] == principal)
         member = next(a for a in final["memberships"] if a["principal_id"] == principal)
-        envelope = row["envelope"]
-        payload = json.loads(bytes(envelope["payload"]))
         require(
             row["tenant_id"] == TENANTS[0]
-            and row["message_id"] == envelope["id"]
-            and row["domain"] == "identity.security"
-            and row["status"] == "pending",
-            "unknown-event-envelope",
+            and row["source_id"].startswith("identity.")
+            and bool(row["event_id"])
+            and bool(row["canonical"])
+            and row["recorded_at"] > 0,
+            "unknown-audit-record",
         )
-        require(
-            envelope["tenant"] == TENANTS[0]
-            and envelope["domain"] == "identity.security"
-            and envelope["route"] == "account.changed"
-            and envelope["contract"] == "identity.account.security"
-            and envelope["version"] == "v3"
-            and envelope["schema"]
-            == "sha256:"
-            + file_digest(ROOT / "crates/identity-postgres/src/security-event-v3.json"),
-            "unknown-event-contract",
-        )
-        require(
-            payload
-            == {
-                "action": "account_created",
-                "tenant": TENANTS[0],
-                "principal": principal,
-                "actor": PRINCIPALS[0],
-                "epoch": account["auth_epoch"],
-                "state": {
-                    "enabled": account["enabled"],
-                    "member_active": member["active"],
-                    "membership_epoch": member["epoch"],
-                },
-            },
-            "unknown-event-state-correlation",
-        )
+        # Canonical field meaning and redaction are owned by the existing component scenarios.
         return {
             "rollbackPreserved": True,
             "failedAttemptBudgetCommitted": True,
             "responseLossObservedCommitted": True,
-            "durableEvents": len(final["outbox"]),
-            "outboxSha256": digest(
-                json.dumps(final["outbox"], sort_keys=True).encode()
+            "durableEvents": len(final["audit"]),
+            "auditSha256": digest(
+                json.dumps(final["audit"], sort_keys=True).encode()
             ),
-            "eventIds": [row["message_id"] for row in final["outbox"]],
+            "eventIds": [row["event_id"] for row in final["audit"]],
         }
 
     def availability(self):
@@ -1537,7 +1510,7 @@ class Run:
         self.cut_b = self.snapshot()
         require(
             self.cut_a["accounts"] != self.cut_b["accounts"]
-            and len(self.cut_b["outbox"]) > len(self.cut_a["outbox"]),
+            and len(self.cut_b["audit"]) > len(self.cut_a["audit"]),
             "post-cut-revocation",
         )
         self.restore_data(self.stale, self.subnets[1], "stale-restored", self.backup_a)
@@ -1579,8 +1552,8 @@ class Run:
         return {
             "matchedSafetyCut": True,
             "datasetRows": {name: len(rows) for name, rows in restored.items()},
-            "outboxSha256": digest(
-                json.dumps(restored["outbox"], sort_keys=True).encode()
+            "auditSha256": digest(
+                json.dumps(restored["audit"], sort_keys=True).encode()
             ),
             "sourceAndTargetGuards": True,
             "operatorOpenedAfterVerification": True,

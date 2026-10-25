@@ -75,12 +75,15 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
             .revision,
         1
     );
-    let events:Vec<serde_json::Value>=sqlx::query_scalar("SELECT envelope FROM rss_transactional_messaging.outbox WHERE envelope->>'route'='profile.changed'").fetch_all(&f.owner).await?;
+    let events: Vec<Vec<u8>> = sqlx::query_scalar("SELECT canonical FROM rss_audit.records")
+        .fetch_all(&f.owner)
+        .await?;
     let mut updates = 0;
     for event in events {
-        let bytes: Vec<u8> = serde_json::from_value(event["payload"].clone())?;
+        let record = rss_audit_core::decode_untrusted(&event)?;
+        let bytes = record.event().context().payload().as_bytes().to_vec();
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if value["action"] == "local_updated" {
+        if record.event().facts().action().as_str() == "identity.profile.local_updated" {
             updates += 1;
             assert_eq!(value["revision"], 1);
             assert!(
@@ -218,7 +221,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
         expected_revision: 3,
         value: Some(local("must-rollback")),
     };
-    sqlx::raw_sql("CREATE FUNCTION public.reject_profile_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.envelope->>'route'='profile.changed' THEN RAISE EXCEPTION 'fixture reject'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_profile_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_profile_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reject_profile_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture reject'; END $$; CREATE TRIGGER reject_profile_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_profile_event();").execute(&f.owner).await?;
     assert!(
         f.store
             .update_local_profile(
@@ -243,7 +246,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
             .await?
             .is_none()
     );
-    sqlx::raw_sql("DROP TRIGGER reject_profile_event ON rss_transactional_messaging.outbox")
+    sqlx::raw_sql("DROP TRIGGER reject_profile_event ON rss_audit.records")
         .execute(&f.owner)
         .await?;
     f.policy.revoke(f.key);
@@ -1396,7 +1399,7 @@ async fn platform_evidence_admission_preserves_authentication_time() -> anyhow::
         let auth_time = offset.map(|offset| now + offset);
         *verifier.evidence.lock().unwrap() = (possession, verification, auth_time);
         let counts = async {
-            sqlx::query_as::<_,(i64,i64,i64)>("SELECT (SELECT count(*) FROM identity_authority.sessions),(SELECT count(*) FROM identity_authority.profile_observations),(SELECT count(*) FROM rss_transactional_messaging.outbox)").fetch_one(&f.owner).await
+            sqlx::query_as::<_,(i64,i64,i64)>("SELECT (SELECT count(*) FROM identity_authority.sessions),(SELECT count(*) FROM identity_authority.profile_observations),(SELECT count(*) FROM rss_audit.records)").fetch_one(&f.owner).await
         };
         let before = counts.await?;
         let signature = verifier
@@ -1426,7 +1429,7 @@ async fn platform_evidence_admission_preserves_authentication_time() -> anyhow::
             );
         } else {
             assert!(matches!(result, Err(AuthorityError::Rejected)));
-            let after=sqlx::query_as::<_,(i64,i64,i64)>("SELECT (SELECT count(*) FROM identity_authority.sessions),(SELECT count(*) FROM identity_authority.profile_observations),(SELECT count(*) FROM rss_transactional_messaging.outbox)").fetch_one(&f.owner).await?;
+            let after=sqlx::query_as::<_,(i64,i64,i64)>("SELECT (SELECT count(*) FROM identity_authority.sessions),(SELECT count(*) FROM identity_authority.profile_observations),(SELECT count(*) FROM rss_audit.records)").fetch_one(&f.owner).await?;
             assert_eq!(before, after);
         }
     }
@@ -1458,7 +1461,7 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
         )
         .await?;
     assert_eq!(receipt.revision, 1);
-    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox")
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_audit.records")
         .fetch_one(&f.owner)
         .await?;
     let result = f
@@ -1502,7 +1505,7 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
             .revision,
         1
     );
-    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox")
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_audit.records")
         .fetch_one(&f.owner)
         .await?;
     assert_eq!(before, after);

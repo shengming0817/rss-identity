@@ -94,8 +94,13 @@ impl AccountProvisioner {
         tx: &mut PgTransaction<'_>,
         actor: Arc<AuthenticatedSession>,
     ) -> Result<(), ProvisioningError> {
-        let bundle = self.authority.runtimes.snapshot()?;
-        bundle.outbox.validate_transaction(tx)?;
+        let bundle = self.authority.runtime.clone();
+        bundle.runtime.validate_transaction(tx)?;
+        if !matches!(&bundle.audit, rss_audit_postgres::Integrity::Plain) {
+            rss_audit_postgres::lock_head_in(tx, &bundle.audit)
+                .await
+                .map_err(PgError::from)?;
+        }
         let target = tx.tenant_id();
         if actor.key.tenant != self.source
             || target == self.source
@@ -151,11 +156,11 @@ impl AccountProvisioner {
             insert_account(c, key, prepared.login.as_str(), prepared.hash.as_str()).await?;
             Ok::<_, ProvisioningError>(load_for_maintenance(c, key).await?.state)
         })).await?;
-        let bundle = self.authority.runtimes.snapshot()?;
-        transaction::append_events(
+        let bundle = self.authority.runtime.clone();
+        crate::audit::append_events(
             tx,
-            &bundle.outbox,
-            &crate::audit::notification_channel(self.authority.instance, target),
+            &bundle.audit,
+            self.authority.instance,
             target,
             vec![SecurityEvent::provisioned(
                 state,

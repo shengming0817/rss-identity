@@ -8,7 +8,7 @@ use rss_identity_postgres::*;
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
 use rss_transactional_messaging::{
     fence::{Epoch, ExecutionBinding, StorageIdentity},
-    policy::{DeliveryBudget, OperationDeadline},
+    policy::OperationDeadline,
 };
 use rss_transactional_messaging_postgres::{PgConfig, PgPassword, PgRuntime};
 use sqlx::{
@@ -139,6 +139,13 @@ impl Fixture {
             .await?;
         let mut c = owner.acquire().await?;
         install(&mut c, instance).await?;
+        sqlx::raw_sql("DO $$ BEGIN IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='identity_audit_owner') THEN CREATE ROLE identity_audit_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$").execute(&mut *c).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("GRANT CREATE ON DATABASE {database} TO identity_audit_owner; SET ROLE identity_audit_owner"))).execute(&mut *c).await?;
+        sqlx::raw_sql(rss_audit_postgres::MIGRATION_SQL)
+            .execute(&mut *c)
+            .await?;
+        sqlx::raw_sql("RESET ROLE").execute(&mut *c).await?;
+
         grant_profile(&mut c, "identity_runtime", AuthorityProfile::Runtime).await?;
         grant_profile(
             &mut c,
@@ -293,14 +300,29 @@ impl Fixture {
         Ok(())
     }
     pub async fn account_events(&self) -> anyhow::Result<i64> {
-        Ok(sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox WHERE envelope->>'contract'='identity.account.security'").fetch_one(&self.owner).await?)
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT canonical FROM rss_audit.records")
+            .fetch_all(&self.owner)
+            .await?;
+        let mut count = 0;
+        for bytes in rows {
+            if rss_audit_core::decode_untrusted(&bytes)?
+                .event()
+                .identity()
+                .source()
+                .contract()
+                .id()
+                .as_str()
+                == "identity.account.security"
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
     pub async fn events(&self) -> anyhow::Result<i64> {
-        Ok(
-            sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox")
-                .fetch_one(&self.owner)
-                .await?,
-        )
+        Ok(sqlx::query_scalar("SELECT count(*) FROM rss_audit.records")
+            .fetch_one(&self.owner)
+            .await?)
     }
     pub async fn close(self) {
         self.runtime.close().await;
@@ -324,13 +346,7 @@ pub fn config(instance: InstanceId) -> AuthorityConfig {
             .map(|t| TenantId::parse(t).unwrap())
             .collect(),
         SessionPolicy::new(900, 14400).unwrap(),
-        DeliveryBudget::new(
-            Duration::from_secs(60),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-        )
-        .unwrap(),
+        rss_audit_postgres::Integrity::Plain,
     )
     .unwrap()
 }

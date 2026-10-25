@@ -123,6 +123,11 @@ pub(crate) async fn probe(
     if result != "ok" {
         return Ok(Some(result));
     }
+    let safe: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND has_table_privilege(r.oid,'rss_audit.records','MAINTAIN'))")
+        .fetch_one(&mut *connection).await?;
+    if !safe {
+        return Ok(Some("privileges".into()));
+    }
     Ok(Some("ok".into()))
 }
 

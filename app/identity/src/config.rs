@@ -209,7 +209,6 @@ impl Budgets {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeConfig {
-    pub audit: AuditConfig,
     pub format_version: u32,
     pub instance_id: String,
     pub public_origin: String,
@@ -236,13 +235,6 @@ impl RuntimeConfig {
             return Err(AppError::Configuration);
         }
         self.budgets.validate()?;
-        self.audit.validate(&self.database.user)?;
-        // Relay has at most five sequential 5s I/O stages; reserve drain for its settlement and pools.
-        if matches!(self.audit, AuditConfig::Enabled { .. })
-            && (self.budgets.resource_seconds < 30 || self.budgets.drain_seconds < 60)
-        {
-            return Err(AppError::Budget);
-        }
         self.storage.binding()?;
         self.instance()?;
         self.bootstrap_keys()?;
@@ -338,68 +330,9 @@ pub fn load<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, AppError> 
     serde_json::from_slice(&read_public_file(path, 256 * 1024)?).map_err(|_| AppError::Json)
 }
 
-/// Explicit host choice; missing audit configuration is an error.
-#[derive(Clone, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AuditConfig {
-    Disabled,
-    Enabled {
-        user: String,
-        #[serde(rename = "passwordFile")]
-        password_file: String,
-        #[serde(rename = "pollMillis")]
-        poll_millis: u64,
-        batch: usize,
-        #[serde(rename = "recoveryKeys")]
-        recovery_keys: CredentialKeyringConfig,
-    },
-}
-impl AuditConfig {
-    pub fn validate(&self, producer: &str) -> Result<(), AppError> {
-        if let Self::Enabled {
-            user,
-            password_file,
-            poll_millis,
-            batch,
-            recovery_keys,
-        } = self
-            && (user.is_empty()
-                || user.len() > 63
-                || user.contains('\0')
-                || user == producer
-                || password_file.is_empty()
-                || recovery_keys.active_key_id.is_empty()
-                || recovery_keys.keys.is_empty()
-                || !(100..=300000).contains(poll_millis)
-                || *batch == 0)
-        {
-            return Err(AppError::Configuration);
-        }
-        Ok(())
-    }
-    pub fn database(&self, producer: &DatabaseConfig) -> Option<DatabaseConfig> {
-        match self {
-            Self::Disabled => None,
-            Self::Enabled {
-                user,
-                password_file,
-                ..
-            } => Some(DatabaseConfig {
-                user: user.clone(),
-                password_file: password_file.clone(),
-                ..producer.clone()
-            }),
-        }
-    }
-}
+/// Required owner for fresh Audit installation; business roles append directly.
 #[derive(Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AuditInstallation {
-    Disabled,
-    Enabled {
-        #[serde(rename = "ownerRole")]
-        owner_role: String,
-        #[serde(rename = "workerRole")]
-        worker_role: String,
-    },
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuditInstallation {
+    pub owner_role: String,
 }

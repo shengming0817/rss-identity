@@ -9,16 +9,15 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 
 RSS_FEATURES = {
-    'rss-data-protection': {'default'}, 'rss-redact-derive': {'default'},
-    'rss-transactional-messaging-recovery': set(),
-    'rss-audit-core': set(), 'rss-audit-postgres': {'default','messaging','ledger'},
-    'rss-ledger': {'default'}, 'rss-ledger-postgres': {'messaging'},
+    'rss-audit-core': {'default'}, 'rss-audit-postgres': {'default','messaging'},
+    'rss-ledger': set(), 'rss-ledger-postgres': {'messaging'},
     'rss-runtime': {'default'}, 'rss-axum': {'http1','managed-server'},
     'rss-contract': {'default'}, 'rss-request-context': {'default'},
-    'rss-redact': {'default','derive'}, 'rss-diag-context': {'default'},
+    'rss-redact': {'default'}, 'rss-diag-context': {'default'},
     'rss-transactional-messaging': {'consumer', 'default', 'producer'},
-    'rss-transactional-messaging-postgres': {'default', 'integration', 'test-support', 'recovery'},
+    'rss-transactional-messaging-postgres': {'integration', 'test-support'},
 }
+
 
 def require(condition, message):
     if not condition:
@@ -27,9 +26,8 @@ def require(condition, message):
 def check_features(actual, profile):
     expected = {name: set(features) for name, features in RSS_FEATURES.items()}
     if profile == 'production':
-        expected['rss-audit-postgres'].remove('ledger')
-        expected['rss-transactional-messaging-postgres'] = {'recovery'}
-        expected['rss-ledger'] = set()
+        expected['rss-transactional-messaging-postgres'] = set()
+        del expected['rss-ledger']
         del expected['rss-ledger-postgres']
     require(actual == expected, f'{profile} RSS feature closure drift: {actual}')
 
@@ -45,7 +43,7 @@ def check(metadata, manifest):
     require(roots, 'RSS dependency roots missing')
     source_pins = {}
     for name, declaration in roots.items():
-        url = 'https://dev.azure.com/shengming0923/rss/_git/' + ('rss-audit' if name in {'rss-audit-core','rss-audit-postgres'} else 'rss')
+        url = 'https://dev.azure.com/shengming0923/rss/_git/' + ('rss-audit' if name in {'rss-audit-core','rss-audit-postgres','rss-ledger','rss-ledger-postgres'} else 'rss')
         rev = declaration.get('rev')
         require(declaration.get('git') == url, 'unknown RSS source')
         require(isinstance(rev,str) and len(rev)==40 and all(c in '0123456789abcdef' for c in rev), 'full SHA required')
@@ -56,7 +54,7 @@ def check(metadata, manifest):
     found = {}
     for p in metadata["packages"]:
         if p["name"].startswith("rss-") and p["id"] not in members:
-            url = 'https://dev.azure.com/shengming0923/rss/_git/' + ('rss-audit' if p['name'] in {'rss-audit-core','rss-audit-postgres'} else 'rss')
+            url = 'https://dev.azure.com/shengming0923/rss/_git/' + ('rss-audit' if p['name'] in {'rss-audit-core','rss-audit-postgres','rss-ledger','rss-ledger-postgres'} else 'rss')
             rev = source_pins.get(url)
             require(rev is not None and p['source'] == f'git+{url}?rev={rev}#{rev}', f"wrong source for {p['name']}")
             require(p['name'] not in found, f"duplicate RSS package {p['name']}")

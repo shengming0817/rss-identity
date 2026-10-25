@@ -162,7 +162,7 @@ impl std::fmt::Debug for AuthenticatedSession {
 }
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
-enum SessionAction {
+pub(crate) enum SessionAction {
     Created,
     Refreshed,
     Revoked,
@@ -181,13 +181,13 @@ pub(crate) fn checked_expiry(
 }
 #[derive(Serialize)]
 pub(crate) struct SessionEvent {
-    action: SessionAction,
+    pub(crate) action: SessionAction,
     pub tenant: String,
-    principal: Uuid,
-    source: rss_identity_core::session::AuthenticationSource,
-    session_id: SessionId,
-    replaced_session_id: Option<SessionId>,
-    epoch: i64,
+    pub(crate) principal: Uuid,
+    pub(crate) source: rss_identity_core::session::AuthenticationSource,
+    pub(crate) session_id: SessionId,
+    pub(crate) replaced_session_id: Option<SessionId>,
+    pub(crate) epoch: i64,
 }
 fn event(
     action: SessionAction,

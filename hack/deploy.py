@@ -53,7 +53,7 @@ def stage(data,out,images,final):
     fields(images,{'identity','web','postgres','runtime'},'images')
     require(all(re.fullmatch(r'sha256:[a-f0-9]{64}',v) for v in images.values()),'immutable image IDs required')
     c=copy.deepcopy(data['runtime'])
-    fields(c,{'formatVersion','instanceId','publicOrigin','bootstrapAccounts','database','storage','listen','publicGateway','budgets','oidc','audit'},'runtime')
+    fields(c,{'formatVersion','instanceId','publicOrigin','bootstrapAccounts','database','storage','listen','publicGateway','budgets','oidc'},'runtime')
     require(c['formatVersion']==5,'unsupported runtime config')
     origin=c['publicOrigin'];u=urlsplit(origin)
     require(u.scheme=='https' and u.hostname and not u.username and not u.password and not u.path and not u.query and not u.fragment and u.port is None and re.fullmatch(r'[a-z0-9.-]+',u.hostname),'canonical HTTPS origin required')
@@ -75,23 +75,7 @@ def stage(data,out,images,final):
     c['database']['passwordFile']=mount(c['database']['passwordFile'],'runtime-password',True)
     c['database']['caFile']=mount(c['database']['caFile'],'database-ca')
     runtime_files=['runtime-password','database-ca'];key_files=[]
-    audit=c['audit'];audit_install={'mode':'disabled'};audit_roles=[]
-    require(isinstance(audit,dict) and audit.get('mode') in ['disabled','enabled'],'explicit audit mode required')
-    if audit['mode']=='enabled':
-        fields(audit,{'mode','user','passwordFile','pollMillis','batch','recoveryKeys'},'audit')
-        require(audit['user']=='identity_audit','audit worker identity mismatch')
-        audit['passwordFile']=mount(audit['passwordFile'],'audit-password',True)
-        runtime_files.append('audit-password');audit_roles=[('identity_audit','audit-password')]
-        recovery=audit['recoveryKeys']
-        fields(recovery,{'activeKeyId','keys'},'audit recovery keys')
-        require(1 <= len(recovery['keys']) <= 8,'audit recovery key count')
-        require(recovery['activeKeyId'] in [k['keyId'] for k in recovery['keys']],'audit active recovery key missing')
-        for n,k in enumerate(recovery['keys']):
-            fields(k,{'keyId','path'},'audit recovery key')
-            name='audit-recovery-key-'+str(n);k['path']=mount(k['path'],name,True);runtime_files.append(name)
-        audit_install={'mode':'enabled' ,'ownerRole':'identity_audit_owner','workerRole':'identity_audit'}
-    else:
-        fields(audit,{'mode'},'audit')
+    audit_install={'ownerRole':'identity_audit_owner'}
     if c['oidc'] is not None:
         oidc=c['oidc'];oidc['stateKeyFile']=mount(oidc['stateKeyFile'],'state-key',True);runtime_files.append('state-key')
         require(oidc['returnTargets']=={'resume':origin+'/auth/resume'},'return target mismatch')
@@ -108,10 +92,10 @@ def stage(data,out,images,final):
     write('ui.json',json.dumps({'canonicalOrigin':origin,'oidcEnabled':c['oidc'] is not None}))
     def literal(value):return "'"+value.replace("'","''")+"'"
     sql='SET standard_conforming_strings=on;\nCREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS;\n'
-    for role,name in [('identity_runtime','runtime-password'),('identity_maintenance','maintenance-password')]+audit_roles:
+    for role,name in [('identity_runtime','runtime-password'),('identity_maintenance','maintenance-password')]:
         value=(inputs/name).read_text();require('\x00' not in value,'invalid password')
         sql+=f'CREATE ROLE {role} LOGIN NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION PASSWORD {literal(value)};\n'
-    if audit_roles: sql+='CREATE ROLE identity_audit_owner NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;\nGRANT CREATE ON DATABASE identity TO identity_audit_owner;\n'
+    sql+='CREATE ROLE identity_audit_owner NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;\nGRANT CREATE ON DATABASE identity TO identity_audit_owner;\n'
     sql+='REVOKE CREATE ON SCHEMA public FROM PUBLIC;\n'
     write('00-roles.sql',sql)
     cert=mount(data['tlsCertificateFile'],'public-cert');key=mount(data['tlsKeyFile'],'public-key',True)
