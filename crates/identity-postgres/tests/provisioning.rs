@@ -123,15 +123,27 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
         )
         .map_err(anyhow::Error::msg)?;
     assert_eq!(account.key().tenant, target);
-    let event: serde_json::Value = sqlx::query_scalar("SELECT envelope FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND envelope->>'contract'='identity.account.provisioning'")
-        .bind(B).fetch_one(&f.owner).await?;
-    assert_eq!(event["route"], "account.provisioned");
-    let bytes: Vec<u8> = serde_json::from_value(event["payload"].clone())?;
-    let payload: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let records: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT canonical FROM rss_audit.records WHERE tenant_id=$1::uuid")
+            .bind(B)
+            .fetch_all(&f.owner)
+            .await?;
+    let record = records
+        .iter()
+        .map(|b| rss_audit_core::decode_untrusted(b))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|r| r.event().facts().action().as_str() == "identity.account.provisioned")
+        .ok_or_else(|| anyhow::anyhow!("missing provisioning audit"))?;
+    let payload: serde_json::Value =
+        serde_json::from_slice(record.event().context().payload().as_bytes())?;
     assert_eq!(payload["actor_tenant"], A);
     assert_eq!(payload["actor_instance"], f.instance.to_string());
-    assert_eq!(payload["actor"], f.key.principal.as_uuid().to_string());
-    assert_eq!(payload["tenant"], B);
+    assert_eq!(
+        payload["actor_principal"],
+        f.key.principal.as_uuid().to_string()
+    );
+    assert_eq!(record.event().identity().tenant().to_string(), B);
     assert!(payload.get("password").is_none());
     let issued = f
         .store

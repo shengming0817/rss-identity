@@ -446,7 +446,7 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
     let timed_events = events(&f).await?;
     assert_eq!(
         timed_events.last().unwrap()["action"],
-        "provider_test_failed"
+        "identity.federation.provider_test_failed"
     );
     assert_eq!(
         timed_events.last().unwrap()["diagnostic"]["reason"],
@@ -457,7 +457,7 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
     upstream.fail.store(false, Ordering::SeqCst);
     let audits = events(&f).await?;
     let last = audits.last().unwrap();
-    assert_eq!(last["action"], "provider_test_failed");
+    assert_eq!(last["action"], "identity.federation.provider_test_failed");
     assert_eq!(last["config_version"], updated.version);
     assert_eq!(
         last["diagnostic"],
@@ -847,22 +847,31 @@ async fn federation_atomic_events_and_unknown_commit() -> anyhow::Result<()> {
     assert_eq!(persisted, (3, 3, 1, management_sessions + 1, 2));
     let committed = events(&f).await?;
     let pair = &committed[committed.len() - 3..];
-    assert_eq!(pair[0]["action"], "jit_created");
-    assert_eq!(pair[1]["action"], "created");
-    assert_eq!(pair[2]["action"], "observed");
-    assert_eq!(pair[2]["principal"], pair[0]["principal"]);
+    let account = pair
+        .iter()
+        .find(|v| v["action"] == "identity.federation.jit_created")
+        .unwrap();
+    let session = pair
+        .iter()
+        .find(|v| v["action"] == "identity.session.created")
+        .unwrap();
+    let profile = pair
+        .iter()
+        .find(|v| v["action"] == "identity.profile.observed")
+        .unwrap();
+    assert_eq!(profile["actor"], account["actor"]);
     assert_eq!(
-        pair[2]["source"],
+        profile["source"],
         serde_json::json!({"kind":"idp","provider":p.id.to_string()})
     );
-    assert_eq!(pair[0]["principal"], pair[1]["principal"]);
-    assert_eq!(pair[0]["provider_id"], p.id.to_string());
-    assert_eq!(pair[0]["config_version"], p.version);
+    assert_eq!(account["actor"], session["actor"]);
+    assert_eq!(account["provider_id"], p.id.to_string());
+    assert_eq!(account["config_version"], p.version);
     let before: f64 =
         sqlx::query_scalar("SELECT count(*)::float8 FROM identity_authority.accounts")
             .fetch_one(&f.owner)
             .await?;
-    sqlx::raw_sql("CREATE FUNCTION public.fail_federation_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_federation_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.fail_federation_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.fail_federation_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_federation_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.fail_federation_event();").execute(&f.owner).await?;
     assert!(finish(&s, begin(&f, &s, &p).await?, "bob").await.is_err());
     let after: f64 = sqlx::query_scalar("SELECT count(*)::float8 FROM identity_authority.accounts")
         .fetch_one(&f.owner)
@@ -1293,23 +1302,23 @@ async fn federation_concurrent_jit_rls_and_schema_drift() -> anyhow::Result<()> 
     assert_eq!(
         committed
             .iter()
-            .filter(|v| v["action"] == "jit_created")
+            .filter(|v| v["action"] == "identity.federation.jit_created")
             .count(),
         1
     );
     assert_eq!(
         committed
             .iter()
-            .filter(|v| v["action"] == "logged_in")
+            .filter(|v| v["action"] == "identity.federation.logged_in")
             .count(),
         1
     );
     assert_eq!(
         committed
             .iter()
-            .filter(|v| v["action"] == "created"
+            .filter(|v| v["action"] == "identity.session.created"
                 && v["tenant"] == A
-                && v["principal"] != f.key.principal.as_uuid().to_string())
+                && v["actor"] != f.key.principal.as_uuid().to_string())
             .count(),
         2
     );
@@ -1317,74 +1326,24 @@ async fn federation_concurrent_jit_rls_and_schema_drift() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Decode the actual committed envelope and enforce its wire contract, not an ad hoc key union.
+/// Inspect persisted Audit facts and the intentionally redacted product payload.
 pub async fn events(f: &Fixture) -> anyhow::Result<Vec<serde_json::Value>> {
-    use sha2::{Digest, Sha256};
-    let rows: Vec<serde_json::Value> =
-        sqlx::query_scalar("SELECT envelope FROM rss_transactional_messaging.outbox ORDER BY seq")
+    let rows: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT canonical FROM rss_audit.records ORDER BY position")
             .fetch_all(&f.owner)
             .await?;
-    let mut values = Vec::new();
-    for envelope in rows {
-        let bytes: Vec<u8> = serde_json::from_value(envelope["payload"].clone())?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let (route, contract, version, schema) = match envelope["route"].as_str().unwrap() {
-            "authentication.changed" => (
-                "authentication.changed",
-                "identity.authentication.security",
-                1,
-                include_str!("../authentication-security-event-v1.json"),
-            ),
-            "federation.changed" => (
-                "federation.changed",
-                "identity.federation.security",
-                2,
-                include_str!("../federation-security-event-v2.json"),
-            ),
-            "profile.changed" => (
-                "profile.changed",
-                "identity.profile.security",
-                1,
-                include_str!("../profile-security-event-v1.json"),
-            ),
-            "session.changed" => (
-                "session.changed",
-                "identity.session.security",
-                1,
-                include_str!("../session-security-event-v1.json"),
-            ),
-            "account.changed" => (
-                "account.changed",
-                "identity.account.security",
-                3,
-                include_str!("../security-event-v3.json"),
-            ),
-            _ => panic!("unexpected route"),
-        };
-        assert_eq!(envelope["route"], route);
-        assert_eq!(envelope["contract"], contract);
-        assert_eq!(envelope["version"], format!("v{version}"));
-        assert_eq!(
-            envelope["schema"],
-            format!("sha256:{:x}", Sha256::digest(schema))
-        );
-        let schema: serde_json::Value = serde_json::from_str(schema)?;
-        for required in schema["required"].as_array().unwrap() {
-            assert!(value.get(required.as_str().unwrap()).is_some());
-        }
-        assert!(
-            value
-                .as_object()
-                .unwrap()
-                .keys()
-                .all(|k| schema["properties"].get(k).is_some())
-        );
-        if let Some(actions) = schema["properties"]["action"]["enum"].as_array() {
-            assert!(actions.contains(&value["action"]));
-        }
-        values.push(value);
-    }
-    Ok(values)
+    rows.into_iter()
+        .map(|bytes| {
+            let record = rss_audit_core::decode_untrusted(&bytes)?;
+            let event = record.event();
+            let mut value: serde_json::Value =
+                serde_json::from_slice(event.context().payload().as_bytes())?;
+            value["action"] = serde_json::json!(event.facts().action().as_str());
+            value["actor"] = serde_json::json!(event.facts().actor().id().as_str());
+            value["tenant"] = serde_json::json!(event.identity().tenant().to_string());
+            Ok(value)
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -1481,7 +1440,10 @@ async fn federation_concurrent_linking_keeps_one_owner() -> anyhow::Result<()> {
     assert_eq!(owner, winner.principal.as_uuid());
     let committed = events(&f).await?;
     assert_eq!(
-        committed.iter().filter(|v| v["action"] == "linked").count(),
+        committed
+            .iter()
+            .filter(|v| v["action"] == "identity.federation.linked")
+            .count(),
         1
     );
     f.close().await;
@@ -1549,7 +1511,10 @@ async fn federation_step_up_unknown_commit_and_event_rollback() -> anyhow::Resul
     assert_eq!(remaining, 0);
     let committed_events = events(&f).await?;
     assert_eq!(committed_events.len(), events_before + 1);
-    assert_eq!(committed_events[events_before]["action"], "verified");
+    assert_eq!(
+        committed_events[events_before]["action"],
+        "identity.authentication.verified"
+    );
     assert!(step_finish(&s, token, &upgraded, "alice").await.is_err());
     let current = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
     let rollback_attempt = step_begin(&f, &s, &p, &current).await?;
@@ -1559,13 +1524,13 @@ async fn federation_step_up_unknown_commit_and_event_rollback() -> anyhow::Resul
             .fetch_one(&f.owner)
             .await?;
     let before_events = events(&f).await?.len();
-    sqlx::raw_sql("CREATE FUNCTION public.fail_step_up_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_step_up_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.fail_step_up_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.fail_step_up_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_step_up_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.fail_step_up_event();").execute(&f.owner).await?;
     assert!(
         step_finish(&s, rollback_attempt.clone(), &current, "alice")
             .await
             .is_err()
     );
-    sqlx::raw_sql("DROP TRIGGER fail_step_up_event ON rss_transactional_messaging.outbox; DROP FUNCTION public.fail_step_up_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("DROP TRIGGER fail_step_up_event ON rss_audit.records; DROP FUNCTION public.fail_step_up_event();").execute(&f.owner).await?;
     let after_sessions: i64 =
         sqlx::query_scalar("SELECT count(*) FROM identity_authority.sessions")
             .fetch_one(&f.owner)

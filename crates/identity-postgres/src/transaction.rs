@@ -1,17 +1,14 @@
 //! One private settlement path. ref: RSS transaction.rs @ bf5dd1350997d01aa834094a3347fce30247814e.
 use crate::{AccountKey, Authority, AuthorityError};
 use futures::future::BoxFuture;
-use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
+
 use rss_request_context::TenantId;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
-    message::*,
-    outbox::{AppendOutcome, OutboxWriter, PendingMessage},
     policy::OperationDeadline,
 };
 use rss_transactional_messaging_postgres::{PgError, PgTransaction};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use rss_identity_core::account::{AccountRuleError, AccountState, SecurityAction};
@@ -26,9 +23,9 @@ pub(crate) struct AccountEvent {
 }
 #[derive(Serialize)]
 pub(crate) struct EventState {
-    enabled: bool,
-    member_active: bool,
-    membership_epoch: i64,
+    pub(crate) enabled: bool,
+    pub(crate) member_active: bool,
+    pub(crate) membership_epoch: i64,
 }
 impl AccountEvent {
     pub fn account(action: SecurityAction, state: AccountState, actor: Option<AccountKey>) -> Self {
@@ -49,9 +46,9 @@ impl AccountEvent {
 #[derive(Serialize)]
 pub(crate) struct ProvisioningEvent {
     #[serde(flatten)]
-    account: AccountEvent,
-    actor_tenant: String,
-    actor_instance: String,
+    pub(crate) account: AccountEvent,
+    pub(crate) actor_tenant: String,
+    pub(crate) actor_instance: String,
 }
 /// Closed set of event contracts using the same settlement path.
 #[derive(Serialize)]
@@ -80,7 +77,7 @@ impl SecurityEvent {
     pub fn account(action: SecurityAction, state: AccountState, actor: Option<AccountKey>) -> Self {
         Self::Account(AccountEvent::account(action, state, actor))
     }
-    fn tenant(&self) -> &str {
+    pub(crate) fn tenant(&self) -> &str {
         match self {
             Self::Authentication(v) => &v.tenant,
             Self::Profile(v) => &v.tenant,
@@ -90,40 +87,30 @@ impl SecurityEvent {
             Self::Federation(v) => &v.tenant,
         }
     }
-    fn contract(&self) -> (&'static str, &'static str, u32, &'static str) {
+    pub(crate) fn contract(&self) -> (&'static str, u32, &'static str) {
         match self {
             Self::Authentication(_) => (
-                "authentication.changed",
                 "identity.authentication.security",
                 1,
                 include_str!("authentication-security-event-v1.json"),
             ),
             Self::Profile(_) => (
-                "profile.changed",
                 "identity.profile.security",
                 1,
                 include_str!("profile-security-event-v1.json"),
             ),
             Self::Provisioned(_) => (
-                "account.provisioned",
                 "identity.account.provisioning",
                 1,
                 include_str!("account-provisioning-v1.json"),
             ),
-            Self::Account(_) => (
-                "account.changed",
-                "identity.account.security",
-                3,
-                EVENT_SCHEMA,
-            ),
+            Self::Account(_) => ("identity.account.security", 3, EVENT_SCHEMA),
             Self::Federation(_) => (
-                "federation.changed",
                 "identity.federation.security",
                 2,
                 include_str!("federation-security-event-v2.json"),
             ),
             Self::Session(_) => (
-                "session.changed",
                 "identity.session.security",
                 1,
                 include_str!("session-security-event-v1.json"),
@@ -178,7 +165,7 @@ impl Authority {
             + Send
             + 'static,
     {
-        let bundle = self.runtimes.snapshot()?;
+        let bundle = self.runtime.clone();
         Self::read_bundle(bundle, tenant, deadline, true, operation).await
     }
     pub(crate) async fn read_bundle<T: Send, F>(
@@ -351,20 +338,25 @@ impl Authority {
             + Send
             + 'static,
     {
-        let bundle = self.runtimes.snapshot()?;
-        let outbox = bundle.outbox.clone();
-        let channel = crate::audit::notification_channel(self.instance(), tenant);
+        let bundle = self.runtime.clone();
+        let audit = bundle.audit.clone();
+        let instance = bundle.instance;
         let reason = std::sync::Arc::new(std::sync::OnceLock::new());
         let reason_slot = reason.clone();
         let result = Self::read_bundle(bundle, tenant, deadline, true, move |tx| {
             Box::pin(async move {
+                if !matches!(&audit, rss_audit_postgres::Integrity::Plain) {
+                    rss_audit_postgres::lock_head_in(tx, &audit)
+                        .await
+                        .map_err(PgError::from)?;
+                }
                 let (result, events) = operation(tx)
                     .await
                     .map_err(|e| sql_failure(e, &reason_slot))?;
                 if (require_event && events.is_empty()) || events.len() > MAX_MUTATION_EVENTS {
                     return Err(corrupt());
                 }
-                append_events(tx, &outbox, &channel, tenant, events).await?;
+                crate::audit::append_events(tx, &audit, instance, tenant, events).await?;
                 Ok(result)
             })
         })
@@ -418,70 +410,6 @@ fn domain_result<T>(
         (Err(AuthorityError::Rejected), Some(reason)) => Err(reason),
         (result, _) => result,
     }
-}
-
-pub(crate) async fn append_events(
-    tx: &mut PgTransaction<'_>,
-    outbox: &rss_transactional_messaging_postgres::PgOutboxStore<()>,
-    channel: &str,
-    tenant: TenantId,
-    events: Vec<SecurityEvent>,
-) -> Result<(), PgError> {
-    let has_events = !events.is_empty();
-    for event in events {
-        if event.tenant() != tenant.to_string() {
-            return Err(corrupt());
-        }
-        let now: i64 = tx
-            .with_connection(|c| {
-                Box::pin(async {
-                    sqlx::query_scalar(
-                        "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint",
-                    )
-                    .fetch_one(c)
-                    .await
-                })
-            })
-            .await?;
-        let (route, contract, version, schema) = event.contract();
-        let envelope = MessageEnvelope::new(
-            MessageId::parse(&Uuid::new_v4().to_string()).map_err(|_| corrupt())?,
-            MessageMetadata::new(
-                AuthoredMessageMetadata::new(
-                    tenant,
-                    Timepoint::try_from(now).map_err(|_| corrupt())?,
-                    MessagingDomain::parse("identity.security").map_err(|_| corrupt())?,
-                    MessageRoute::parse(route).map_err(|_| corrupt())?,
-                    ContractIdentity::new(
-                        ContractId::parse(contract).map_err(|_| corrupt())?,
-                        ContractVersion::from_major(version).map_err(|_| corrupt())?,
-                        SchemaDigest::parse(&format!("sha256:{:x}", Sha256::digest(schema)))
-                            .map_err(|_| corrupt())?,
-                    ),
-                ),
-                MessageMetadataExtensions::default(),
-            ),
-            serde_json::to_vec(&event).map_err(|_| corrupt())?,
-        );
-        if outbox.append(tx, PendingMessage::new(envelope)).await? != AppendOutcome::Inserted {
-            return Err(corrupt());
-        }
-    }
-    if has_events {
-        let channel = channel.to_owned();
-        // ref: PostgreSQL REL_17_6 src/backend/commands/async.c:
-        // pending notifications settle with this transaction, including failures.
-        tx.with_connection(move |c| {
-            Box::pin(async move {
-                sqlx::query("SELECT pg_catalog.pg_notify($1, '')")
-                    .bind(channel)
-                    .execute(c)
-                    .await
-            })
-        })
-        .await?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

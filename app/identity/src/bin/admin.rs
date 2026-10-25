@@ -61,7 +61,7 @@ async fn run() -> Result<(), AppError> {
             .map_err(|_| AppError::Configuration)?,
         config.storage.tenants()?,
         rss_identity_core::session::SessionPolicy::new(900, 14400).map_err(|_| AppError::Budget)?,
-        assembly::delivery_budget()?,
+        rss_audit_postgres::Integrity::Plain,
     )?;
     let database = config.database.pg()?;
     let binding = config.storage.binding()?;

@@ -4,8 +4,8 @@
 
 ## 本地认证与安装
 
-1. 宿主提供已绑定 storage/fence 的 `Arc<PgRuntime>`、共享有界 KDF、显式实例与租户、会话策略、事件预算和管理策略。Identity 不创建、更换或关闭宿主池，不自动发现租户。
-2. 数据库 owner 先安装所选 RSS 版本的完整消息 migration，再安装 Identity schema 并授予 runtime/maintenance profile。仅接受当前全新安装；在提交安装事务前，以实际目标角色验证有效权限和结构。入口见 [schema owner](../../crates/identity-postgres/src/schema.rs)；生产迁移执行属于宿主。
+1. 宿主提供已绑定 storage/fence 的 `Arc<PgRuntime>`、共享有界 KDF、显式实例与租户、会话策略、显式 Audit `Integrity` 和管理策略。Identity 不创建、更换或关闭宿主池，不自动发现租户。
+2. 数据库 owner 先安装所选 RSS 版本的完整消息 migration，再以独立受限 owner 安装 Audit schema，安装 Identity schema 并授予 runtime/maintenance profile。仅接受当前全新安装；在提交安装事务前，以实际目标角色验证有效权限和结构。入口见 [schema owner](../../crates/identity-postgres/src/schema.rs)；生产迁移执行属于宿主。
 3. 维护身份只用于初始化和本地密码恢复，凭据不注入日常服务。恢复推进失效代际，保留账户/成员启停状态，不授予宿主角色。
 4. runtime Authority 必须接收宿主 ManagementPolicy。密码校验和凭据签发经单一登录入口完成；浏览器 JSON、普通账户快照或上游结构值不能构造可信会话。
 
@@ -114,21 +114,20 @@ JWKS 只从固定 Microsoft tenant 地址经有界、禁重定向的 HTTPS 取�
 
 ## 认证审计交付
 
-`rss_identity_postgres::audit::AuditDelivery` 持有 Identity 事件语义。宿主注入同库的 worker `Arc<PgRuntime>`、`Arc<PgAudit>`、真实实例与租户绑定、delivery budget 和独立恢复保护密钥 `Arc<K: Aead + Send + Sync>`，调用 `run_once(NonZeroUsize)` 一次领取当前可用容量内的一批消息并跨分区并发执行；每事件拥有独立执行预算。异步构造在一个有界预算内使用 worker 实际事务连接完成 Audit（启用 Ledger 时包括 Ledger）启动验证，并检查已有 dead-letter，worker 至少配置两个连接，为 effect 执行期间续租保留连接。Audit、Ledger（启用时）、Inbox 及源 Outbox 终态在唯一事务提交；返回的 `AuditProjectionReport` 区分已确认投影和延期。提交未知的恢复身份由短锁保护，核对期间不持锁；后续调用先按原恢复凭证核对持久终态，未提交消息仅由租约重新认领；不再进行独立成功确认。不创建任务或接管连接关闭；构造和运行统一返回 `AuditDeliveryError`，宿主只对 `is_retryable()` 为真的错误重试。权限通过公开 `audit::grant_worker` / `verify_worker` 接缝装配，不复制参考 app 的 SQL。参考实现见 [审计装配](../../app/identity/src/audit.rs)。
+Identity 直接将内部安全事件映射成准备好的 Audit 记录，在原业务事务内批量追加。
+`AuthorityConfig::new(instance, tenants, sessions, integrity)` 必须显式选择完整性；参考宿主使用
+`rss_audit_postgres::Integrity::Plain`，不存在禁用审计分支。嵌入宿主可通过同源 Audit feature
+启用 Ledger，并注入其认证器。启动在实际业务连接上验证 Audit；无专用审计池、worker、通知或恢复密钥。
 
-producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::connect_consumer`，Audit 开启 `messaging`。worker 不读取 Identity 私有表，也不能直接修改 Audit/Outbox；schema owner 和实际权限必须通过 startup probe。宿主负责保证来源实例对应当前 Identity 数据库，不接受请求指定的 source。
+产品决定来源真实性、事件含义和业务授权。Identity 每次操作生成一次事件身份，在原连接取得
+记录时间，直接调用 Audit 的无池批量入口。成功提交包含业务和 Audit；追加失败回滚原事务，
+提交未知仍为未知，不自动重执行业务或重新生成审计材料。普通读取不新增安全事件。
 
-存储角色、结构或函数的受控变更须先停止相关写实例并排空，再变更、以实际 worker 角色重新验证并恢复接流；不承诺逐次操作主动发现管理员带外漂移。真实 SQL 权限失败仍停止投递、不 ACK。
+runtime、maintenance、provisioning profile 授予 Audit records SELECT 和 append_batch EXECUTE；
+不授予直接表写入、sequence 或 owner 权限。共享 PgRuntime、fencing 和 producer profile 所需
+RSS schema/权限保留，不代表 Identity 仍发布审计 Outbox 消息。Ledger 模式在业务锁前取得链锁。
 
-有安全事件的业务事务在全部 Outbox append 后调用同事务 `pg_notify`，提交后发送空 payload；通知 SQL 失败按原事务错误传播，未知提交仍为未知。无事件的条件写入不发送通知。宿主通过公开 `audit::notification_channel(instance, tenant)` 计算每个可信实例/租户的稳定频道，先完成同库 `LISTEN` 再扫描，重连后重新扫描。频道不提供访问控制或投递证明，通知可能丢失或被伪造；不要发送身份、令牌或事件内容。
-
-宿主调用 `AuditDelivery::next_wakeup(OperationDeadline)` 获取原 RSS `OutboxWakeup`：`due_now` 与未来最早 `next_deadline` 独立存在，已到期但被其他 worker 锁住的工作不会掩盖未来期限。查询不领取、发布或证明审计成功，仍受 worker runtime 的租户 fencing、领域和总预算约束。宿主持有通知、期限和周期恢复扫描的等待策略，并在空领取后限制即时重扫；连接池与 worker 生命周期仍由宿主负责。
-
-当前只接收 account v3、account.provisioning v1、session v1、federation v2 的精确 schema，映射为 Audit V1。账户主体来自 actor，维护事件标识维护主体；会话主体来自 principal，all_revoked 的对象是账户会话集合；联合身份按 action 区分 provider 和认证主体。provider_test_failed 为 Failed，其余已提交事件为 Succeeded。UUID 会话坐标不是 bearer secret。输出只含稳定坐标、epoch、状态、配置版本和封闭诊断码。
-
-业务与安全事件先原子提交到 Outbox。独立 worker 在另一事务内同时提交 Audit 和 Inbox receipt，之后才确认源 Outbox。发生时间来自原事件，落录时间来自该 PG 事务；乱序不改变原事件含义。**认证成功及 Outbox 已提交均不表示 Audit 已落库**。查询授权仍由宿主持有。
-
-审计 worker 的日志保留发布、结算、重试和故障等闭合事件；成功 claim 的耗时 tick 不写入日志，避免空轮询制造活动记录。该日志选择不改变底层 RSS observation、投递或 readiness 语义。
+仅支持全新安装；变更角色/结构须由宿主停写并重新验证，旧配置与旧数据库不自动迁移。
 
 ## 受限账户创建
 
@@ -136,7 +135,7 @@ producer 保持 `connect_producer`；worker 使用独立角色的 `PgRuntime::co
 
 先用 `prepare_local_account` 处理密码，再在宿主目标事务中调用 `authorize_in`（包括历史回执重放）和 `create_local_account_in`。组件在源租户作用域复查真实会话与宿主 ProvisionAccount 权限，恢复目标作用域后才写账户及安全事件；组件通过 RSS 同连接接缝校验源租户 execution binding 并持有源栅栏直至目标事务结算，源 epoch 失效时拒绝操作。宿主在同事务写产品授权和回执，任何组件错误均须传播并回滚，禁止捕获错误后继续提交。组件不签发目标租户会话，也不赋予产品管理员权限。
 
-`identity.account.provisioning/v1` 事件包含源 actor 的实例、租户和主体，消费者使用组件审计 worker。产品持有操作幂等、密码安全指纹和首次使用登记；不得用随机盐密码编码作为请求指纹或把明文秘密写进回执。
+`identity.account.provisioning/v1` 事件包含源 actor 的实例、租户和主体，在原目标事务内直接追加 Audit。产品持有操作幂等、密码安全指纹和首次使用登记；不得用随机盐密码编码作为请求指纹或把明文秘密写进回执。
 
 ## 消费方的事实到期测试
 

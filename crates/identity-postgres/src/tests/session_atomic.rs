@@ -342,7 +342,7 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
     assert!(proof(&f, &live).await.is_err());
     let live = issue(&f).await?;
     let before = f.events().await?;
-    sqlx::raw_sql("CREATE FUNCTION public.reject_session_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'session secret marker'; END $$; CREATE TRIGGER reject_session_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_session_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reject_session_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'session secret marker'; END $$; CREATE TRIGGER reject_session_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_session_event();").execute(&f.owner).await?;
     let candidate = f.candidate().await?;
     assert!(matches!(
         f.store.create_session(candidate, None, deadline()).await,
@@ -376,7 +376,7 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
         Err(AuthorityError::RollbackFailed(_))
     ));
     assert_eq!(f.events().await?, before);
-    sqlx::query("DROP TRIGGER reject_session_event ON rss_transactional_messaging.outbox")
+    sqlx::query("DROP TRIGGER reject_session_event ON rss_audit.records")
         .execute(&f.owner)
         .await?;
     let auth = proof(&f, &live).await?;
@@ -387,20 +387,19 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
         Err(AuthorityError::CommitUnknown(_))
     ));
     assert!(proof(&f, &live).await.is_err());
-    let rows: Vec<String> =
-        sqlx::query_scalar("SELECT envelope::text FROM rss_transactional_messaging.outbox")
-            .fetch_all(&f.owner)
-            .await?;
-    for raw in rows {
-        let envelope: serde_json::Value = serde_json::from_str(&raw)?;
-        let bytes: Vec<u8> = serde_json::from_value(envelope["payload"].clone())?;
-        let body = String::from_utf8(bytes)?;
+    let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT canonical FROM rss_audit.records")
+        .fetch_all(&f.owner)
+        .await?;
+    for bytes in rows {
+        let record = rss_audit_core::decode_untrusted(&bytes)?;
+        let body = String::from_utf8(record.event().context().payload().as_bytes().to_vec())?;
         assert!(!body.contains(live.secret().expose()));
         assert!(!body.contains(PASSWORD));
-        if envelope["route"] == "session.changed" {
+        if record.event().identity().source().contract().id().as_str()
+            == "identity.session.security"
+        {
             let payload: serde_json::Value = serde_json::from_str(&body)?;
-            assert_eq!(envelope["contract"], "identity.session.security");
-            assert_eq!(payload.as_object().unwrap().len(), 7);
+            assert_eq!(payload.as_object().unwrap().len(), 4);
             for banned in ["token", "cookie", "password", "hash", "verifier", "code"] {
                 assert!(payload.get(banned).is_none());
             }
@@ -576,28 +575,34 @@ async fn expect_session_event(
     replaced: Option<rss_identity_core::SessionId>,
     epoch: i64,
 ) -> anyhow::Result<()> {
-    use sha2::{Digest, Sha256};
-    let raw: String = sqlx::query_scalar(
-        "SELECT envelope::text FROM rss_transactional_messaging.outbox WHERE envelope->>'route'='session.changed' ORDER BY seq DESC LIMIT 1",
-    )
-    .fetch_one(&f.owner)
-    .await?;
-    let envelope: serde_json::Value = serde_json::from_str(&raw)?;
-    let bytes: Vec<u8> = serde_json::from_value(envelope["payload"].clone())?;
-    let payload: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let rows: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT canonical FROM rss_audit.records ORDER BY position DESC")
+            .fetch_all(&f.owner)
+            .await?;
+    let record = rows
+        .iter()
+        .map(|b| rss_audit_core::decode_untrusted(b))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|r| {
+            r.event().identity().source().contract().id().as_str() == "identity.session.security"
+        })
+        .ok_or_else(|| anyhow::anyhow!("missing session audit"))?;
+    let payload: serde_json::Value =
+        serde_json::from_slice(record.event().context().payload().as_bytes())?;
     assert_eq!(
         payload,
-        serde_json::json!({"action":action,"tenant":A,"principal":f.key.principal.as_uuid(),"session_id":id,"replaced_session_id":replaced,"epoch":epoch,"source":"local_password"})
+        serde_json::json!({"session_id":id,"replaced_session_id":replaced,"epoch":epoch,"source":"local_password"})
     );
     assert_eq!(
-        envelope["schema"],
-        format!(
-            "sha256:{:x}",
-            Sha256::digest(include_str!("../session-security-event-v1.json"))
-        )
+        record.event().facts().action().as_str(),
+        format!("identity.session.{action}")
     );
-    assert_eq!(envelope["route"], "session.changed");
-    assert_eq!(envelope["contract"], "identity.session.security");
+    assert_eq!(record.event().identity().tenant().to_string(), A);
+    assert_eq!(
+        record.event().facts().actor().id().as_str(),
+        f.key.principal.as_uuid().to_string()
+    );
     Ok(())
 }
 #[tokio::test]
@@ -1008,7 +1013,7 @@ async fn bearer_issuance_settlement_never_exposes_uncertain_secret() -> anyhow::
     .fetch_one(&f.owner)
     .await?;
     assert_eq!(kind, "bearer");
-    sqlx::raw_sql("CREATE FUNCTION public.reject_bearer_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'secret-marker'; END $$; CREATE TRIGGER reject_bearer_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_bearer_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reject_bearer_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'secret-marker'; END $$; CREATE TRIGGER reject_bearer_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_bearer_event();").execute(&f.owner).await?;
     let result = bearer(&f).await;
     assert!(result.is_err());
     assert!(!format!("{result:?}").contains("secret-marker"));

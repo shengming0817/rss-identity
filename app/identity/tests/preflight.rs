@@ -69,7 +69,6 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
     let path = root.join("config.json");
     let server = env!("CARGO_BIN_EXE_identity-server");
     check(server, &path, &runtime, true);
-    audit_recovery_preflight(server, &path, &runtime, &root);
     for pointer in [
         "/database",
         "/storage",
@@ -126,7 +125,7 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
         false,
     );
     let mut migration = common;
-    migration["audit"] = json!({"mode":"disabled"});
+    migration["audit"] = json!({"ownerRole":"identity_audit_owner"});
     migration["runtimeRole"] = json!("runtime");
     migration["maintenanceRole"] = json!("maintenance");
     check(
@@ -135,7 +134,7 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
         &migration,
         true,
     );
-    migration["audit"] = json!({"mode":"disabled"});
+    migration["audit"] = json!({"ownerRole":"identity_audit_owner"});
     migration["runtimeRole"] = json!("x".repeat(64));
     check(
         env!("CARGO_BIN_EXE_identity-migrate"),
@@ -143,25 +142,4 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
         &migration,
         false,
     );
-}
-
-fn audit_recovery_preflight(binary: &str, path: &Path, runtime: &Value, root: &Path) {
-    let key = root.join("audit-key");
-    fs::write(&key, "33".repeat(32)).unwrap();
-    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
-    let mut enabled = runtime.clone();
-    enabled["audit"] = json!({"mode":"enabled","user":"identity_audit","passwordFile":root.join("password"),"pollMillis":1000,"batch":1,"recoveryKeys":{"activeKeyId":"audit","keys":[{"keyId":"audit","path":key}]}});
-    check(binary, path, &enabled, true);
-    for content in ["not-hex".into(), "00".repeat(32)] {
-        fs::write(&key, content).unwrap();
-        check(binary, path, &enabled, false);
-    }
-    fs::write(&key, "33".repeat(32)).unwrap();
-    let mut duplicate = enabled.clone();
-    duplicate["audit"]["recoveryKeys"]["keys"]
-        .as_array_mut()
-        .unwrap()
-        .push(enabled["audit"]["recoveryKeys"]["keys"][0].clone());
-    check(binary, path, &duplicate, false);
-    check(binary, path, &enabled, true);
 }

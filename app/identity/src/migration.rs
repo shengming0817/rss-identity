@@ -173,7 +173,7 @@ mod tests {
             serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
         for role in ["".to_owned(), "x".repeat(64), "bad\0role".to_owned()] {
             let config = serde_json::from_value(serde_json::json!({
-                "formatVersion": 5, "audit": {"mode":"disabled"}, "instanceId": runtime["instanceId"],
+                "formatVersion": 5, "audit": {"ownerRole":"identity_audit_owner"}, "instanceId": runtime["instanceId"],
                 "storage": runtime["storage"], "database": runtime["database"],
                 "runtimeRole": role, "maintenanceRole": "maintenance"
             }))

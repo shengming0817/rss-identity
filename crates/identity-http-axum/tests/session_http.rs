@@ -497,7 +497,7 @@ async fn session_http_settlement_never_sets_uncertain_cookie() -> anyhow::Result
     );
     let (cookie, csrf, _) = successful_login(&app).await?;
     let before = f.events().await?;
-    sqlx::raw_sql("CREATE FUNCTION public.reject_http_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private-http-marker'; END $$; CREATE TRIGGER reject_http_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_http_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reject_http_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private-http-marker'; END $$; CREATE TRIGGER reject_http_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_http_event();").execute(&f.owner).await?;
     for req in [
         login_request(None, None),
         request(
@@ -1249,7 +1249,7 @@ async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Re
     assert!((590..=600).contains(&retry));
     assert_eq!(body(limited).await?, json!({"code":"rate_limited"}));
     f.reset_attempts().await?;
-    sqlx::raw_sql("CREATE FUNCTION public.reject_programmatic_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private-event-marker'; END $$; CREATE TRIGGER reject_programmatic_event BEFORE INSERT ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.reject_programmatic_event();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reject_programmatic_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private-event-marker'; END $$; CREATE TRIGGER reject_programmatic_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_programmatic_event();").execute(&f.owner).await?;
     let response = app.clone().oneshot(bearer_login()).await?;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!response.headers().contains_key("set-cookie"));
@@ -1260,7 +1260,7 @@ async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Re
         .fetch_one(&f.owner)
         .await?;
     assert_eq!(count, 0);
-    sqlx::raw_sql("DROP TRIGGER reject_programmatic_event ON rss_transactional_messaging.outbox; DROP FUNCTION public.reject_programmatic_event()").execute(&f.owner).await?;
+    sqlx::raw_sql("DROP TRIGGER reject_programmatic_event ON rss_audit.records; DROP FUNCTION public.reject_programmatic_event()").execute(&f.owner).await?;
     for i in 0..7 {
         let path = if i % 2 == 0 { "login" } else { "bearer/login" };
         let response = app

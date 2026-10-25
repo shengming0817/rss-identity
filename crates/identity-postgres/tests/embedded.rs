@@ -251,12 +251,7 @@ async fn host_role_names_and_session_policy_survive_composition() -> anyhow::Res
         f.instance,
         f.store.active_tenants()?,
         SessionPolicy::new(60, 600)?,
-        rss_transactional_messaging::policy::DeliveryBudget::new(
-            Duration::from_secs(60),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-        )?,
+        rss_audit_postgres::Integrity::Plain,
     )?;
     let changed = Authority::connect_runtime(
         runtime.clone(),

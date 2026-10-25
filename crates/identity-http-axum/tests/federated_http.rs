@@ -322,16 +322,18 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     tx.rollback().await?;
     let replay = callback(&app, &cb, &browser).await?;
     assert!(!replay.headers().contains_key("set-cookie"));
-    let envelopes: Vec<Value> = sqlx::query_scalar("SELECT envelope FROM rss_transactional_messaging.outbox WHERE envelope->>'route'='authentication.changed'").fetch_all(&f.owner).await?;
-    let audit: Vec<Value> = envelopes
-        .into_iter()
-        .map(|v| {
-            let bytes: Vec<u8> = serde_json::from_value(v["payload"].clone()).unwrap();
-            serde_json::from_slice(&bytes).unwrap()
-        })
-        .collect();
+    let records: Vec<Vec<u8>> = sqlx::query_scalar("SELECT canonical FROM rss_audit.records")
+        .fetch_all(&f.owner)
+        .await?;
+    let audit = records
+        .iter()
+        .map(|b| rss_audit_core::decode_untrusted(b))
+        .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(
-        audit.iter().filter(|v| v["action"] == "verified").count(),
+        audit
+            .iter()
+            .filter(|r| r.event().facts().action().as_str() == "identity.authentication.verified")
+            .count(),
         1
     );
     // A real adapter profile withdrawal is applied before startup opens HTTP admission.

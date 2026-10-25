@@ -1,75 +1,29 @@
-//! Reference host ownership of audit worker connections, permissions and lifecycle.
-mod protection;
-use crate::{
-    AppError,
-    assembly::Timer,
-    config::{AuditConfig, AuditInstallation, MigrationConfig, RuntimeConfig},
-};
-use protection::Protection;
-use rss_audit_postgres::{Control, Integrity, PgAudit};
-use rss_identity_postgres::audit::AuditDelivery;
-use rss_request_context::Deadline;
-use rss_runtime::{ManagedTask, ManagedTaskRegistration, ShutdownError};
-use rss_transactional_messaging_postgres::PgRuntime;
-use sqlx::{PgConnection, PgPool};
-use std::{num::NonZeroUsize, sync::Arc, time::Duration};
-use tokio_util::sync::CancellationToken;
-
-fn recovery_protection(config: &AuditConfig) -> Result<Option<Arc<Protection>>, AppError> {
-    match config {
-        AuditConfig::Disabled => Ok(None),
-        AuditConfig::Enabled { recovery_keys, .. } => {
-            Protection::load(&recovery_keys.active_key_id, &recovery_keys.keys)
-                .map(Arc::new)
-                .map(Some)
-        }
-    }
-}
-/// Offline validation uses the same constructor as runtime; it never opens a database.
-pub(crate) fn preflight(config: &AuditConfig) -> Result<(), AppError> {
-    recovery_protection(config).map(|_| ())
-}
-
+//! Required Audit installation; business runtime credentials append directly.
+use crate::{AppError, config::MigrationConfig};
+use sqlx::PgConnection;
+const OWNER_PROFILE: &str = "SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1 AND NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication)";
 pub fn validate_installation(c: &MigrationConfig) -> Result<(), AppError> {
-    if let AuditInstallation::Enabled {
-        owner_role,
-        worker_role,
-    } = &c.audit
-    {
-        let roles = [
-            owner_role,
-            worker_role,
-            &c.runtime_role,
-            &c.maintenance_role,
-            &c.database.user,
-        ];
-        if roles
+    let roles = [
+        &c.audit.owner_role,
+        &c.runtime_role,
+        &c.maintenance_role,
+        &c.database.user,
+    ];
+    if roles
+        .iter()
+        .any(|r| r.is_empty() || r.len() > 63 || r.contains('\0'))
+        || roles
             .iter()
-            .any(|r| r.is_empty() || r.len() > 63 || r.contains('\0'))
-            || roles
-                .iter()
-                .enumerate()
-                .any(|(i, r)| roles[i + 1..].contains(r))
-        {
-            return Err(AppError::Configuration);
-        }
+            .enumerate()
+            .any(|(i, r)| roles[i + 1..].contains(r))
+    {
+        return Err(AppError::Configuration);
     }
     Ok(())
 }
-const OWNER_PROFILE: &str = "SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1 AND NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication)";
-fn quoted(role: &str) -> String {
-    format!("\"{}\"", role.replace('"', "\"\""))
-}
-/// Runs in the caller's fresh installation transaction, never in server startup.
+/// Run only in the caller's fresh installation transaction, before granting business profiles.
 pub async fn install(c: &mut PgConnection, config: &MigrationConfig) -> Result<(), sqlx::Error> {
-    let AuditInstallation::Enabled {
-        owner_role,
-        worker_role,
-    } = &config.audit
-    else {
-        return Ok(());
-    };
-    let owner = quoted(owner_role);
+    let owner_role = &config.audit.owner_role;
     let safe: bool = sqlx::query_scalar(OWNER_PROFILE)
         .bind(owner_role)
         .fetch_one(&mut *c)
@@ -77,177 +31,33 @@ pub async fn install(c: &mut PgConnection, config: &MigrationConfig) -> Result<(
     if !safe {
         return Err(sqlx::Error::Protocol("audit owner rejected".into()));
     }
+    let owner = format!("\"{}\"", owner_role.replace('"', "\"\""));
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET LOCAL ROLE {owner}")))
         .execute(&mut *c)
         .await?;
     sqlx::raw_sql(rss_audit_postgres::MIGRATION_SQL)
         .execute(&mut *c)
         .await?;
-    sqlx::raw_sql("SET LOCAL ROLE NONE")
-        .execute(&mut *c)
-        .await?;
-    rss_identity_postgres::audit::grant_worker(c, worker_role)
-        .await
-        .map_err(|_| sqlx::Error::Protocol("audit worker grants rejected".into()))?;
+    sqlx::raw_sql("SET LOCAL ROLE NONE").execute(c).await?;
     Ok(())
 }
-/// Host-owned handles must be registered for cleanup before constructing the adapter.
-pub async fn delivery(
-    config: &RuntimeConfig,
-    runtime: Arc<PgRuntime>,
-    pool: PgPool,
-) -> Result<AuditDelivery<Protection>, AppError> {
-    let protector = recovery_protection(&config.audit)?.ok_or(AppError::Configuration)?;
-    // The worker must not acquire credential access through inherited or PUBLIC grants.
-    let role: String = sqlx::query_scalar("SELECT current_user::text")
-        .fetch_one(&pool)
-        .await
-        .map_err(|_| AppError::Provider)?;
-    let mut connection = pool.acquire().await.map_err(|_| AppError::Provider)?;
-    rss_identity_postgres::audit::verify_worker(&mut connection, &role)
-        .await
-        .map_err(|_| AppError::Configuration)?;
-    drop(connection);
-    let cancel = CancellationToken::new();
-    let cutoff =
-        Deadline::from_timeout(&Timer, Duration::from_secs(10)).map_err(|_| AppError::Budget)?;
-    let control = Control::new(&Timer, cutoff, cutoff, &cancel);
-    let audit = PgAudit::new(pool, Integrity::Plain, &control)
-        .await
-        .map_err(|_| AppError::Provider)?;
-    AuditDelivery::new(
-        runtime,
-        Arc::new(audit),
-        config.instance()?,
-        config.storage.tenants()?,
-        crate::assembly::delivery_budget()?,
-        protector,
-    )
-    .await
-    .map_err(|_| AppError::Provider)
-}
-pub fn registration(
-    config: &AuditConfig,
-    delivery: AuditDelivery<Protection>,
-    drain: Duration,
-) -> Result<ManagedTaskRegistration, AppError> {
-    let AuditConfig::Enabled {
-        poll_millis, batch, ..
-    } = config
-    else {
-        return Err(AppError::Configuration);
-    };
-    let limit = NonZeroUsize::new(*batch).ok_or(AppError::Budget)?;
-    let poll = Duration::from_millis(*poll_millis);
-    let (start, _) = ManagedTask::prepare("identity-audit", drain);
-    Ok(start.into_registration(move |stop| async move {
-        loop {
-            if stop.is_cancelled() { return Ok(()); }
-            match delivery.run_once(limit).await {
-                Err(e) => {
-                    eprintln!("component=identity-audit event=delivery_failure kind={} retryable={}",e.as_label(),e.is_retryable());
-                    if !e.is_retryable() { return Err(ShutdownError::new(e)); }
-                },
-                Ok(report) if report.projected()>0 || report.deferred()>0 => {
-                    eprintln!("component=identity-audit event=projection_progress projected={} deferred={} reason={}",report.projected(),report.deferred(),report.last_deferral().unwrap_or("none"));
-                },
-                Ok(_) => {},
-            }
-            tokio::select! { () = stop.cancelled() => return Ok(()), () = tokio::time::sleep(poll) => {} }
-        }
-    }).critical())
-}
-/// Verify the selected installation without repairing it. Runtime probes validate exact provider schemas.
+/// Read-only installation role check. Full component admission runs on each Authority connection.
 pub async fn verify(c: &mut PgConnection, config: &MigrationConfig) -> Result<(), sqlx::Error> {
-    let AuditInstallation::Enabled {
-        owner_role,
-        worker_role,
-    } = &config.audit
-    else {
-        return Ok(());
-    };
-    let owner_safe: bool = sqlx::query_scalar(OWNER_PROFILE)
-        .bind(owner_role)
+    let owner = &config.audit.owner_role;
+    let present: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_namespace n JOIN pg_roles r ON r.oid=n.nspowner WHERE n.nspname='rss_audit' AND r.rolname=$1)").bind(owner).fetch_one(&mut *c).await?;
+    let safe: bool = sqlx::query_scalar(OWNER_PROFILE)
+        .bind(owner)
         .fetch_one(&mut *c)
         .await?;
-    if !owner_safe {
-        return Err(sqlx::Error::Protocol("audit owner rejected".into()));
+    if !present || !safe {
+        return Err(sqlx::Error::Protocol("audit installation rejected".into()));
     }
-    let present: bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_namespace n JOIN pg_roles r ON r.oid=n.nspowner WHERE n.nspname='rss_audit' AND r.rolname=$1)").bind(owner_role).fetch_one(&mut *c).await?;
-    if !present {
-        return Err(sqlx::Error::Protocol("audit installation mismatch".into()));
-    }
-    rss_identity_postgres::audit::verify_worker(c, worker_role)
-        .await
-        .map_err(|_| sqlx::Error::Protocol("audit worker authority rejected".into()))?;
-    let safe: bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1 AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb) AND NOT pg_has_role($1,$2,'SET') AND has_schema_privilege($1,'rss_audit','USAGE') AND has_table_privilege($1,'rss_audit.records','SELECT') AND NOT has_table_privilege($1,'rss_audit.records','INSERT,UPDATE,DELETE,TRUNCATE') AND has_function_privilege($1,'rss_audit.reserve(uuid)','EXECUTE') AND has_function_privilege($1,'rss_audit.append(uuid,text,text,bigint,bytea,bigint)','EXECUTE')").bind(worker_role).bind(owner_role).fetch_one(c).await?;
-    if !safe {
-        return Err(sqlx::Error::Protocol("audit worker rejected".into()));
+    for role in [&config.runtime_role, &config.maintenance_role] {
+        let safe: bool = sqlx::query_scalar("SELECT NOT pg_has_role($1,$2,'SET') AND has_schema_privilege($1,'rss_audit','USAGE') AND has_table_privilege($1,'rss_audit.records','SELECT') AND NOT has_table_privilege($1,'rss_audit.records','INSERT,UPDATE,DELETE,TRUNCATE') AND NOT has_sequence_privilege($1,'rss_audit.positions','USAGE,SELECT,UPDATE') AND has_function_privilege($1,'rss_audit.append_batch(uuid,text[],text[],bigint[],bytea[],bigint[])','EXECUTE')")
+            .bind(role).bind(owner).fetch_one(&mut *c).await?;
+        if !safe {
+            return Err(sqlx::Error::Protocol("audit writer grants rejected".into()));
+        }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn enabled_worker_requires_enough_time_to_drain_active_batch() {
-        let mut value: serde_json::Value =
-            serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
-        value["audit"] = serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1000,"batch":16,"recoveryKeys":{"activeKeyId":"audit","keys":[{"keyId":"audit","path":"audit.key"}]}});
-        for (resource, drain, valid) in [(29, 60, false), (30, 59, false), (30, 60, true)] {
-            value["budgets"]["resourceSeconds"] = serde_json::json!(resource);
-            value["budgets"]["drainSeconds"] = serde_json::json!(drain);
-            assert_eq!(
-                serde_json::from_value::<RuntimeConfig>(value.clone())
-                    .unwrap()
-                    .validate()
-                    .is_ok(),
-                valid
-            );
-        }
-    }
-    #[test]
-    fn audit_capacity_has_no_fixed_batch_ceiling() {
-        let mut value: serde_json::Value =
-            serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
-        value["audit"] = serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1000,"batch":65,"recoveryKeys":{"activeKeyId":"audit","keys":[{"keyId":"audit","path":"audit.key"}]}});
-        assert!(
-            serde_json::from_value::<RuntimeConfig>(value)
-                .unwrap()
-                .validate()
-                .is_ok()
-        );
-    }
-    #[test]
-    fn host_requires_explicit_mode_and_current_format() {
-        let baseline: serde_json::Value =
-            serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
-        let mut missing = baseline.clone();
-        missing.as_object_mut().unwrap().remove("audit");
-        assert!(serde_json::from_value::<RuntimeConfig>(missing).is_err());
-        let mut old = baseline.clone();
-        old["formatVersion"] = serde_json::json!(4);
-        assert!(
-            serde_json::from_value::<RuntimeConfig>(old)
-                .unwrap()
-                .validate()
-                .is_err()
-        );
-        for mut a in [
-            serde_json::json!({"mode":"enabled","user":"identity_runtime","passwordFile":"p","pollMillis":100,"batch":1}),
-            serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":1,"batch":1}),
-            serde_json::json!({"mode":"enabled","user":"audit","passwordFile":"p","pollMillis":100,"batch":0}),
-        ] {
-            let mut bad = baseline.clone();
-            a["recoveryKeys"] = serde_json::json!({"activeKeyId":"audit","keys":[{"keyId":"audit","path":"audit.key"}]});
-            bad["audit"] = a;
-            assert!(
-                serde_json::from_value::<RuntimeConfig>(bad)
-                    .unwrap()
-                    .validate()
-                    .is_err()
-            );
-        }
-    }
 }

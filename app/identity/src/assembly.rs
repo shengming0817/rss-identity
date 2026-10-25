@@ -7,7 +7,7 @@ use rss_identity_postgres::{
     ManagementOperation, ManagementPolicy, ReauthenticationRequirement,
 };
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
-use rss_transactional_messaging::policy::{DeliveryBudget, OperationDeadline};
+use rss_transactional_messaging::policy::OperationDeadline;
 use rss_transactional_messaging_postgres::PgRuntime;
 use std::{
     path::Path,
@@ -24,15 +24,6 @@ impl ExecutionTimer for Timer {
     async fn sleep_until(&self, d: Deadline) {
         tokio::time::sleep(d.remaining(self.now()).unwrap_or_default()).await;
     }
-}
-pub fn delivery_budget() -> Result<DeliveryBudget, AppError> {
-    DeliveryBudget::new(
-        Duration::from_secs(60),
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-    )
-    .map_err(|_| AppError::Budget)
 }
 pub fn deadline() -> OperationDeadline {
     OperationDeadline::from_remaining(Duration::from_secs(10))
@@ -105,7 +96,7 @@ pub fn authority_config(config: &RuntimeConfig) -> Result<AuthorityConfig, AppEr
         config.instance()?,
         config.storage.tenants()?,
         session_policy()?,
-        delivery_budget()?,
+        rss_audit_postgres::Integrity::Plain,
     )?)
 }
 pub async fn authority(
@@ -132,10 +123,6 @@ struct FederationInputs {
 pub fn preflight(config: &RuntimeConfig) -> Result<(), AppError> {
     config.validate()?;
     config.database.pg()?;
-    if let Some(db) = config.audit.database(&config.database) {
-        db.pg()?;
-    }
-    crate::audit::preflight(&config.audit)?;
     authority_config(config)?;
     federation_inputs(config)?;
     Ok(())

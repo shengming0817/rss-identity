@@ -2,7 +2,7 @@
 mod attempts;
 mod password_attempts;
 pub use password_attempts::{PASSWORD_FAILURE_LIMIT, PASSWORD_FAILURE_SECONDS};
-pub mod audit;
+mod audit;
 mod auth_facts;
 mod credentials;
 mod department;
@@ -58,7 +58,7 @@ use rss_identity_core::{
     session::SessionPolicy,
 };
 use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::{DeliveryBudget, OperationDeadline};
+use rss_transactional_messaging::policy::OperationDeadline;
 use rss_transactional_messaging_postgres::PgRuntime;
 pub use schema::{
     MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_SIGNATURE_SQL, SCHEMA_VERSION,
@@ -79,7 +79,7 @@ pub struct AuthorityConfig {
     instance: InstanceId,
     tenants: Vec<TenantId>,
     sessions: SessionPolicy,
-    events: DeliveryBudget,
+    audit: rss_audit_postgres::Integrity,
     platform: Option<Arc<dyn platform::PlatformVerifier>>,
     enterprise: Option<platform::EnterpriseConfig>,
     profile_limits: rss_identity_core::profile::ProfileLimits,
@@ -105,7 +105,7 @@ impl AuthorityConfig {
         instance: InstanceId,
         mut tenants: Vec<TenantId>,
         sessions: SessionPolicy,
-        events: DeliveryBudget,
+        audit: rss_audit_postgres::Integrity,
     ) -> Result<Self, AuthorityError> {
         tenants.sort_by_key(|tenant| tenant.to_string());
         if tenants.is_empty()
@@ -118,7 +118,7 @@ impl AuthorityConfig {
             instance,
             tenants,
             sessions,
-            events,
+            audit,
             platform: None,
             enterprise: None,
             profile_limits: Default::default(),
@@ -130,7 +130,7 @@ pub struct Authority {
     enterprise: Option<platform::EnterpriseConfig>,
     session_checks: session_checks::SessionChecks,
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
-    runtimes: Arc<runtime::RuntimeState>,
+    runtime: Arc<runtime::RuntimeBundle>,
     profile: AuthorityProfile,
     instance: InstanceId,
     session_policy: SessionPolicy,
@@ -189,25 +189,29 @@ impl Authority {
                 ..Default::default()
             },
             kdf,
-            runtimes: Arc::new(runtime::RuntimeState::new(
+            runtime: Arc::new(runtime::RuntimeBundle {
                 runtime,
-                config.events,
-                config.tenants,
+                audit: config.audit,
+                tenants: config.tenants,
                 instance,
-            )?),
+            }),
             profile,
             instance,
             session_policy: config.sessions,
             policy,
             profile_limits: config.profile_limits,
         };
+        let integrity = authority.runtime.audit.clone();
         let valid = Self::read_bundle(
-            authority.runtimes.snapshot()?,
+            authority.runtime.clone(),
             tenant,
             budget.remaining(),
             false,
             move |tx| {
                 Box::pin(async move {
+                    rss_audit_postgres::validate_in(tx, &integrity)
+                        .await
+                        .map_err(rss_transactional_messaging_postgres::PgError::from)?;
                     transaction::connection(tx, move |c| {
                         Box::pin(schema::probe(c, profile, instance))
                     })
@@ -217,7 +221,7 @@ impl Authority {
         )
         .await;
         check_probe(valid)?;
-        let bundle = authority.runtimes.snapshot()?;
+        let bundle = authority.runtime.clone();
         // Schema/profile are global, but every declared tenant has its own runtime fence.
         for tenant in bundle.tenants.iter().skip(1) {
             Self::read_bundle(bundle.clone(), *tenant, budget.remaining(), true, |_| {
@@ -231,12 +235,10 @@ impl Authority {
         self.instance
     }
     pub fn active_tenants(&self) -> Result<Vec<TenantId>, AuthorityError> {
-        Ok(self.runtimes.snapshot()?.tenants.clone())
+        Ok(self.runtime.clone().tenants.clone())
     }
     pub fn tenant_active(&self, tenant: TenantId) -> bool {
-        self.runtimes
-            .snapshot()
-            .is_ok_and(|r| r.tenants.contains(&tenant))
+        self.runtime.tenants.contains(&tenant)
     }
     fn require_maintenance(&self) -> Result<(), AuthorityError> {
         if self.profile != AuthorityProfile::Maintenance {

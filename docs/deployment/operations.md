@@ -47,18 +47,12 @@ DNS 的全部 A/AAAA 必须属于公网基线或该绑定授权的私网；reqwe
 
 仅更新前端时，保持 --identity-image 和宿主配置不变，以新 --web-image 渲染新目录。通过原部署 close 后在新目录 verify/open；后端不需重建，备份只绑定后端版本。前端管理导航请求的网络、超时或合法 503 暂不可用保留已接受会话，隐藏提示依赖的入口并提供手动重试；401、协议错误与身份不匹配继续拒绝。
 
-## 审计 worker
+## 同事务审计
 
-当前配置格式为 5，所有 runtime 配置必须包含 `"audit":{"mode":"disabled"}` 或显式启用配置：
+当前参考宿主固定 Plain Audit，安全事件必须与业务一次提交。运行配置没有 audit 开关、专用凭据、
+轮询或恢复密钥字段；旧字段直接拒绝。部署渲染器始终生成独立 NOLOGIN Audit owner，迁移配置为
+`"audit":{"ownerRole":"identity_audit_owner"}`。业务 runtime/maintenance 使用自己的事务凭据追加。
 
-```json
-"audit": {"mode":"enabled","user":"identity_audit","passwordFile":"/run/input/audit-password","pollMillis":1000,"batch":16,"recoveryKeys":{"activeKeyId":"audit-1","keys":[{"keyId":"audit-1","path":"/run/input/audit-recovery-key"}]}}
-```
-
-启用审计要求 `budgets.resourceSeconds >= 30`、`budgets.drainSeconds >= 60`，覆盖正在结算的有界批次和连接关闭；收到停止信号后不再领取下一批。
-
-恢复密钥文件为 32 字节密钥的十六进制文本，遵循秘密文件权限规则；使用独立审计密钥，不复用 OIDC 凭据密钥。轮换时保留旧 keyId 与文件直至关联隔离消息按保留策略处置，并将密钥与数据库纳入联合恢复材料。
-
-worker 继承 database 目标和 storage/instance 绑定；凭据文件遵循现有秘密文件规则。部署渲染器为启用配置生成独立 worker 和 NOLOGIN Audit owner，并在 migration 配置中写入 `audit.mode=enabled`、`ownerRole`、`workerRole`。仅支持全新安装，无旧配置解析或旧 schema 自动升级。嵌入宿主应自行预配等价角色。
-
-启用后任一构造/probe 失败会拒绝启动；运行期间暂时故障保留同 ID 重试，永久 schema/绑定故障或新隔离的 dead-letter 终止关键 worker，并使参考宿主非零退出。诊断使用稳定 event/phase/status/kind 字段；关键任务退出同时记录 task、closed reason 和 shutdown 结果。关闭时先停止 worker 再关闭连接。关闭审计交付不会删除或排空 Outbox，宿主负责积压容量和保留策略。Plain 审计持久化不宣称 HMAC/WORM。
+仅支持全新安装；Audit 结构或权限不匹配时启动失败。追加失败使业务事务失败，提交未知不能解释为
+回滚或自动重试许可。关闭时由原 HTTP/业务事务及 runtime 生命周期排空，不存在审计 worker。
+Plain 提供事务可靠性，不宣称 HMAC、WORM 或对数据库管理员的独立防篡改。

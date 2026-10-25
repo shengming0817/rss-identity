@@ -1,160 +1,29 @@
+use crate::transaction::SecurityEvent;
 use rss_audit_core::*;
-use rss_contract::Timepoint;
+use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_identity_core::InstanceId;
-use rss_transactional_messaging::message::MessageEnvelope;
-use serde::Deserialize;
+use rss_request_context::TenantId;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 #[error("invalid identity audit event")]
 pub(super) struct InvalidEvent;
-
-pub(super) fn accepted_contract(id: &str, version: &str, digest: &str) -> Option<&'static str> {
-    let (expected, schema, route) = match id {
-        "identity.authentication.security" => (
-            "v1",
-            include_str!("../authentication-security-event-v1.json"),
-            "authentication.changed",
-        ),
-        "identity.profile.security" => (
-            "v1",
-            include_str!("../profile-security-event-v1.json"),
-            "profile.changed",
-        ),
-        "identity.account.provisioning" => (
-            "v1",
-            include_str!("../account-provisioning-v1.json"),
-            "account.provisioned",
-        ),
-        "identity.account.security" => (
-            "v3",
-            include_str!("../security-event-v3.json"),
-            "account.changed",
-        ),
-        "identity.session.security" => (
-            "v1",
-            include_str!("../session-security-event-v1.json"),
-            "session.changed",
-        ),
-        "identity.federation.security" => (
-            "v2",
-            include_str!("../federation-security-event-v2.json"),
-            "federation.changed",
-        ),
-        _ => return None,
-    };
-    (version == expected && digest == format!("sha256:{:x}", Sha256::digest(schema)))
-        .then_some(route)
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProfileChange {
-    changed_fields: Vec<String>,
-    tenant: Uuid,
-    principal: Uuid,
-    actor: Option<Uuid>,
-    action: String,
-    source: crate::profiles::ProfileSource,
-    snapshot_id: Option<Uuid>,
-    revision: Option<i64>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Account {
-    action: String,
-    tenant: Uuid,
-    principal: Uuid,
-    actor: Option<Uuid>,
-    epoch: i64,
-    state: State,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Provisioned {
-    action: String,
-    tenant: Uuid,
-    principal: Uuid,
-    actor: Uuid,
-    actor_tenant: Uuid,
-    actor_instance: Uuid,
-    epoch: i64,
-    state: State,
-}
-#[derive(Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct State {
-    enabled: bool,
-    member_active: bool,
-    membership_epoch: i64,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Session {
-    source: rss_identity_core::session::AuthenticationSource,
-    action: String,
-    tenant: Uuid,
-    principal: Uuid,
-    session_id: Uuid,
-    replaced_session_id: Option<Uuid>,
-    epoch: i64,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Federation {
-    action: String,
-    tenant: Uuid,
-    principal: Option<Uuid>,
-    provider_id: Uuid,
-    config_version: i64,
-    diagnostic: Option<Diagnostic>,
-}
-#[derive(Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct Diagnostic {
-    stage: String,
-    reason: String,
-}
 fn require(ok: bool) -> Result<(), InvalidEvent> {
     if ok { Ok(()) } else { Err(InvalidEvent) }
 }
-fn parse<T: serde::de::DeserializeOwned>(
-    bytes: &[u8],
-    required: &[&str],
-) -> Result<T, InvalidEvent> {
-    // Option<T> accepts an absent field; the wire requires explicit null for these coordinates.
-    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| InvalidEvent)?;
-    require(value.is_object())?;
-    // Serde structs also accept sequences; these source schemas require nested JSON objects.
-    for key in ["state", "diagnostic"] {
-        if let Some(field) = value.get(key) {
-            require(field.is_object())?;
-        }
-    }
-    require(required.iter().all(|key| value.get(*key).is_some()))?;
-    serde_json::from_slice(bytes).map_err(|_| InvalidEvent)
-}
-
 pub(super) fn map_event(
     instance: InstanceId,
-    message: &MessageEnvelope<Vec<u8>>,
-    recorded: Timepoint,
+    tenant_id: TenantId,
+    id: Uuid,
+    occurred: Timepoint,
+    event: &SecurityEvent,
 ) -> Result<AuditEventV1, InvalidEvent> {
-    let meta = message.metadata();
-    let contract = meta.contract();
-    let route = accepted_contract(
-        contract.id().as_str(),
-        &contract.version().to_string(),
-        contract.schema_digest().as_str(),
-    )
-    .ok_or(InvalidEvent)?;
-    require(meta.domain().as_str() == "identity.security" && meta.route().as_str() == route)?;
-    require(message.payload().len() <= 4096 && meta.occurred_at() <= recorded)?;
-    let tenant = meta.tenant_id().to_string();
-    let (action, actor_kind, actor_id, resource_kind, resource_id, outcome, payload) = match route {
-        "authentication.changed" => {
-            let e: crate::step_up::AuthenticationEvent = parse(message.payload(), &[])?;
+    let tenant = tenant_id.to_string();
+    require(event.tenant() == tenant)?;
+    let (action, actor_kind, actor_id, resource_kind, resource_id, outcome, payload) = match event {
+        SecurityEvent::Authentication(e) => {
             require(e.tenant == tenant && !e.principal.is_nil())?;
             let action = match e.action {
                 crate::step_up::AuthenticationAction::Registered => "registered",
@@ -172,13 +41,12 @@ pub(super) fn map_event(
                 json!({}),
             )
         }
-        "profile.changed" => {
-            let e: ProfileChange = parse(message.payload(), &["actor", "snapshot_id", "revision"])?;
+        SecurityEvent::Profile(e) => {
             require(
                 e.changed_fields.len() <= 6
                     && e.changed_fields.iter().all(|v| {
                         matches!(
-                            v.as_str(),
+                            *v,
                             "displayName"
                                 | "username"
                                 | "email"
@@ -191,7 +59,7 @@ pub(super) fn map_event(
             require(
                 e.tenant.to_string() == tenant
                     && !e.principal.is_nil()
-                    && matches!(e.action.as_str(), "observed" | "local_updated")
+                    && matches!(e.action, "observed" | "local_updated")
                     && e.revision.is_none_or(|v| v > 0),
             )?;
             require(
@@ -208,35 +76,33 @@ pub(super) fn map_event(
                 json!({"source":e.source,"snapshot_id":e.snapshot_id,"revision":e.revision,"changed_fields":e.changed_fields}),
             )
         }
-        "account.provisioned" => {
-            let e: Provisioned = parse(message.payload(), &[])?;
+        SecurityEvent::Provisioned(v) => {
+            let e = &v.account;
+            let actor = e.actor.ok_or(InvalidEvent)?;
             require(
                 e.action == "account_created"
-                    && e.tenant.to_string() == tenant
-                    && e.actor_instance == instance.as_uuid()
-                    && e.actor_tenant != e.tenant
-                    && !e.actor.is_nil()
-                    && !e.actor_tenant.is_nil()
+                    && v.actor_instance == instance.to_string()
+                    && v.actor_tenant != e.tenant
+                    && !actor.is_nil()
                     && !e.principal.is_nil()
                     && e.epoch > 0
                     && e.state.membership_epoch > 0,
             )?;
+            rss_request_context::TenantId::parse(&v.actor_tenant).map_err(|_| InvalidEvent)?;
             (
                 "identity.account.provisioned".into(),
                 "principal",
-                format!("{}:{}", e.actor_tenant, e.actor),
+                format!("{}:{}", v.actor_tenant, actor),
                 "account",
                 e.principal.to_string(),
                 Outcome::Succeeded,
-                json!({"epoch":e.epoch,"state":e.state,
-                    "actor_instance":e.actor_instance,"actor_tenant":e.actor_tenant,"actor_principal":e.actor}),
+                json!({"epoch":e.epoch,"state":e.state,"actor_instance":v.actor_instance,"actor_tenant":v.actor_tenant,"actor_principal":actor}),
             )
         }
-        "account.changed" => {
-            let e: Account = parse(message.payload(), &["actor"])?;
+        SecurityEvent::Account(e) => {
             require(e.tenant.to_string() == tenant && e.epoch > 0 && e.state.membership_epoch > 0)?;
             require(matches!(
-                e.action.as_str(),
+                e.action,
                 "initialized"
                     | "account_created"
                     | "account_enabled"
@@ -249,7 +115,7 @@ pub(super) fn map_event(
             require(
                 e.actor.is_some()
                     || matches!(
-                        e.action.as_str(),
+                        e.action,
                         "initialized" | "account_created" | "password_recovered"
                     ),
             )?;
@@ -266,21 +132,26 @@ pub(super) fn map_event(
                 json!({"epoch":e.epoch,"state":e.state}),
             )
         }
-        "session.changed" => {
-            let e: Session = parse(message.payload(), &["replaced_session_id"])?;
+        SecurityEvent::Session(e) => {
+            let action = match e.action {
+                crate::sessions::SessionAction::Created => "created",
+                crate::sessions::SessionAction::Refreshed => "refreshed",
+                crate::sessions::SessionAction::Revoked => "revoked",
+                crate::sessions::SessionAction::AllRevoked => "all_revoked",
+            };
             require(e.tenant.to_string() == tenant && e.epoch > 0)?;
             require(matches!(
-                e.action.as_str(),
+                action,
                 "created" | "refreshed" | "revoked" | "all_revoked"
             ))?;
-            require(e.action == "created" || e.replaced_session_id.is_none())?;
-            let (kind, id) = if e.action == "all_revoked" {
-                ("account_sessions", e.principal)
+            require(action == "created" || e.replaced_session_id.is_none())?;
+            let (kind, id) = if action == "all_revoked" {
+                ("account_sessions", e.principal.to_string())
             } else {
-                ("session", e.session_id)
+                ("session", e.session_id.to_string())
             };
             (
-                format!("identity.session.{}", e.action),
+                format!("identity.session.{}", action),
                 "principal",
                 e.principal.to_string(),
                 kind,
@@ -289,11 +160,24 @@ pub(super) fn map_event(
                 json!({"epoch":e.epoch,"session_id":e.session_id,"replaced_session_id":e.replaced_session_id,"source":e.source}),
             )
         }
-        _ => {
-            let e: Federation = parse(message.payload(), &["principal"])?;
+        SecurityEvent::Federation(e) => {
+            let action = match e.action {
+                crate::federation::Action::ProviderCreated => "provider_created",
+                crate::federation::Action::ProviderUpdated => "provider_updated",
+                crate::federation::Action::ProviderEnabled => "provider_enabled",
+                crate::federation::Action::ProviderDisabled => "provider_disabled",
+                crate::federation::Action::ProviderTested => "provider_tested",
+                crate::federation::Action::ProviderTestFailed => "provider_test_failed",
+                crate::federation::Action::JitCreated => "jit_created",
+                crate::federation::Action::LoggedIn => "logged_in",
+                crate::federation::Action::Linked => "linked",
+                crate::federation::Action::AlreadyLinked => "already_linked",
+                crate::federation::Action::Reauthenticated => "reauthenticated",
+                crate::federation::Action::SteppedUp => "stepped_up",
+            };
             require(e.tenant.to_string() == tenant && e.config_version > 0)?;
             let provider_action = matches!(
-                e.action.as_str(),
+                action,
                 "provider_created"
                     | "provider_updated"
                     | "provider_enabled"
@@ -304,7 +188,7 @@ pub(super) fn map_event(
             require(
                 provider_action
                     || matches!(
-                        e.action.as_str(),
+                        action,
                         "jit_created"
                             | "logged_in"
                             | "linked"
@@ -313,44 +197,26 @@ pub(super) fn map_event(
                             | "stepped_up"
                     ),
             )?;
-            require(e.principal.is_some() || e.action == "provider_updated")?;
-            require(e.diagnostic.is_some() == (e.action == "provider_test_failed"))?;
-            if let Some(d) = &e.diagnostic {
-                require(matches!(
-                    d.stage.as_str(),
-                    "binding" | "discovery" | "jwks" | "exchange" | "claims"
-                ))?;
-                require(matches!(
-                    d.reason.as_str(),
-                    "unapproved_binding"
-                        | "missing_secret"
-                        | "invalid_trust_anchor"
-                        | "egress_denied"
-                        | "tls_rejected"
-                        | "unavailable"
-                        | "timeout"
-                        | "invalid_response"
-                        | "issuer_mismatch"
-                        | "issuer_response_unsupported"
-                        | "code_rejected"
-                        | "invalid_token"
-                ))?;
-            }
+            require(e.principal.is_some() || action == "provider_updated")?;
+            require(e.diagnostic.is_some() == (action == "provider_test_failed"))?;
             let (kind, actor) = e.principal.map_or(("system", instance.to_string()), |p| {
                 ("principal", p.to_string())
             });
             let (resource, id) = if provider_action {
-                ("provider", e.provider_id)
+                ("provider", e.provider_id.to_string())
             } else {
-                ("federated_principal", e.principal.ok_or(InvalidEvent)?)
+                (
+                    "federated_principal",
+                    e.principal.ok_or(InvalidEvent)?.to_string(),
+                )
             };
             (
-                format!("identity.federation.{}", e.action),
+                format!("identity.federation.{}", action),
                 kind,
                 actor,
                 resource,
                 id.to_string(),
-                if e.action == "provider_test_failed" {
+                if action == "provider_test_failed" {
                     Outcome::Failed
                 } else {
                     Outcome::Succeeded
@@ -359,9 +225,23 @@ pub(super) fn map_event(
             )
         }
     };
+    let (contract, version, schema) = event.contract();
+    let source_contract = SourceContract::new(
+        ContractId::parse(contract).map_err(|_| InvalidEvent)?,
+        ContractVersion::from_major(version).map_err(|_| InvalidEvent)?,
+        SchemaDigest::parse(&format!("sha256:{:x}", Sha256::digest(schema)))
+            .map_err(|_| InvalidEvent)?,
+    );
     let build = || -> Result<_, rss_audit_core::Error> {
         Ok(AuditEventV1::new(
-            record_identity(instance, message)?,
+            RecordIdentity::new(
+                tenant_id,
+                SourceIdentity::new(
+                    SourceId::parse(&format!("identity.{instance}"))?,
+                    source_contract,
+                ),
+                EventId::parse(&id.to_string())?,
+            ),
             EventFacts::new(
                 ActorRef::new(ActorKind::parse(actor_kind)?, ActorId::parse(&actor_id)?),
                 Action::parse(&action)?,
@@ -370,7 +250,7 @@ pub(super) fn map_event(
                     ResourceId::parse(&resource_id)?,
                 ),
                 outcome,
-                meta.occurred_at(),
+                occurred,
             ),
             EventContext::new(
                 Coordinates::new(None, None, None),
@@ -382,24 +262,4 @@ pub(super) fn map_event(
         ))
     };
     build().map_err(|_| InvalidEvent)
-}
-
-pub(super) fn record_identity(
-    instance: InstanceId,
-    message: &MessageEnvelope<Vec<u8>>,
-) -> Result<RecordIdentity, rss_audit_core::Error> {
-    let meta = message.metadata();
-    let contract = meta.contract();
-    Ok(RecordIdentity::new(
-        meta.tenant_id(),
-        SourceIdentity::new(
-            SourceId::parse(&format!("identity.{instance}"))?,
-            SourceContract::new(
-                contract.id().clone(),
-                contract.version(),
-                contract.schema_digest().clone(),
-            ),
-        ),
-        EventId::parse(message.id().as_str())?,
-    ))
 }
