@@ -211,7 +211,7 @@ impl Authority {
                 Box::pin(async move {
                     rss_audit_postgres::validate_in(tx, &integrity)
                         .await
-                        .map_err(PgError::from)?;
+                        .map_err(rss_transactional_messaging_postgres::PgError::from)?;
                     transaction::connection(tx, move |c| {
                         Box::pin(schema::probe(c, profile, instance))
                     })

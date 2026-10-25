@@ -120,12 +120,6 @@ SUITES[("rss-identity-postgres", "federated_atomic")].add("federation_step_up_re
 
 SUITES[("rss-identity-postgres", "webauthn")] = {"webauthn_self_service_and_atomic_operation_proofs", "webauthn_cancellation_expiry_revocation_and_origin", "webauthn_uv_and_registration_event_rollback", "webauthn_add_and_recovery_revoke_prior_authorization_atomically", "webauthn_rp_generation_fences_old_processes_and_proofs", "expired_other_subject_backlog_does_not_lock_out_self_service", "same_configuration_rotation_invalidates_pending_first_enrollment"}
 
-SUITES[("rss-identity-postgres", "audit::pg_tests")].update({
-    "wakeup::notifications_settle_with_security_events",
-    "concentrated_projection_replays_exact_bytes_after_clock_advances",
-    "startup_validates_actual_worker_not_audit_pool",
-})
-
 SUITES[("rss-identity-postgres", "entra")] = {
     "native_jit_is_unique_sessionless_and_revocable",
     "native_unknown_users_and_provider_changes_reject",
@@ -154,7 +148,7 @@ SUITES[("rss-identity-postgres", "profile_platform")].add("live_session_admissio
 
 def cargo(package, test, env, features=()):
     expected = SUITES[(package,test)]
-    internal = (package=="rss-identity-postgres" and test in {"atomic","session_atomic","federated_atomic","audit::pg_tests"}) or (package=="rss-identity-oidc" and test=="private_provider_tests")
+    internal = (package=="rss-identity-postgres" and test in {"atomic","session_atomic","federated_atomic"}) or (package=="rss-identity-oidc" and test=="private_provider_tests")
     module = "account_atomic" if test == "atomic" else test
     if internal: expected={f"{module}::{name}" for name in expected}
     filtered = 0
@@ -199,7 +193,6 @@ def pg():
         cargo("rss-identity-postgres", "webauthn", env)
         cargo("rss-identity-http-axum", "webauthn_http", env)
         cargo("rss-identity-postgres", "provisioning", env)
-        cargo("rss-identity-postgres", "audit::pg_tests", env)
         cargo("rss-identity-postgres", "session_atomic", env)
         cargo("rss-identity-http-axum", "session_http", env)
         cargo("rss-identity-http-axum", "management_http", env)

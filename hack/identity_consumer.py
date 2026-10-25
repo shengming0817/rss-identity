@@ -19,12 +19,14 @@ def main():
         parser.error('full immutable revision required')
     workspace=tomllib.loads((ROOT/'Cargo.toml').read_text())
     rss=workspace['workspace']['dependencies']['rss-request-context']
+    audit=workspace['workspace']['dependencies']['rss-audit-postgres']
     manifest='[package]\nname="identity-independent-consumer"\nversion="0.0.0"\nedition="2024"\n[workspace]\n[dependencies]\n'
     for package in ['rss-identity-core','rss-identity-postgres','rss-identity-oidc','rss-identity-http-axum']:
         manifest+=f'{package}={{git="https://dev.azure.com/shengming0923/rss/_git/rss-identity",rev="{args.revision}"}}\n'
     for package in ['rss-request-context','rss-transactional-messaging']:
         manifest+=f'{package}={{git="{rss["git"]}",rev="{rss["rev"]}"}}\n'
     manifest+=f'rss-transactional-messaging-postgres={{git="{rss["git"]}",rev="{rss["rev"]}",default-features=false,features=["integration"]}}\n'
+    manifest+=f'rss-audit-postgres={{git="{audit["git"]}",rev="{audit["rev"]}",default-features=false,features=["messaging"]}}\n'
     manifest+='anyhow="1"\ntokio={version="1",features=["macros","rt-multi-thread","time"]}\nsqlx={version="=0.9.0",default-features=false,features=["runtime-tokio","tls-rustls","postgres"]}\n'
     manifest+='serde_json="1"\nurl="2.5"\naxum={version="=0.8.9",default-features=false}\n'
     with tempfile.TemporaryDirectory(prefix='identity-public-consumer-') as directory:

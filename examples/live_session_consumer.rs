@@ -8,7 +8,7 @@ use rss_identity_postgres::*;
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
 use rss_transactional_messaging::{
     fence::{Epoch, ExecutionBinding, StorageIdentity},
-    policy::{DeliveryBudget, OperationDeadline},
+    policy::OperationDeadline,
 };
 use rss_transactional_messaging_postgres::{PgConfig, PgPassword, PgRuntime};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -94,6 +94,9 @@ pub async fn run() -> anyhow::Result<()> {
     let instance = InstanceId::generate();
     let mut c = owner.acquire().await?;
     install(&mut c, instance).await?;
+    sqlx::raw_sql("CREATE ROLE identity_audit_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; GRANT CREATE ON DATABASE identity_consumer TO identity_audit_owner; SET ROLE identity_audit_owner").execute(&mut *c).await?;
+    sqlx::raw_sql(rss_audit_postgres::MIGRATION_SQL).execute(&mut *c).await?;
+    sqlx::raw_sql("RESET ROLE").execute(&mut *c).await?;
     grant_profile(&mut c, "identity_runtime", AuthorityProfile::Runtime).await?;
     grant_profile(
         &mut c,
@@ -119,12 +122,7 @@ pub async fn run() -> anyhow::Result<()> {
         instance,
         vec![tenant],
         SessionPolicy::new(900, 14400)?,
-        DeliveryBudget::new(
-            Duration::from_secs(60),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-        )?,
+        rss_audit_postgres::Integrity::Plain,
     )?;
     let maintenance = Authority::connect_maintenance(
         maintenance_runtime.clone(),
