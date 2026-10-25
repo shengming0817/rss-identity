@@ -57,7 +57,7 @@ pub(super) fn map_event(
                     }),
             )?;
             require(
-                e.tenant.to_string() == tenant
+                e.tenant == tenant
                     && !e.principal.is_nil()
                     && matches!(e.action, "observed" | "local_updated")
                     && e.revision.is_none_or(|v| v > 0),
@@ -100,7 +100,7 @@ pub(super) fn map_event(
             )
         }
         SecurityEvent::Account(e) => {
-            require(e.tenant.to_string() == tenant && e.epoch > 0 && e.state.membership_epoch > 0)?;
+            require(e.tenant == tenant && e.epoch > 0 && e.state.membership_epoch > 0)?;
             require(matches!(
                 e.action,
                 "initialized"
@@ -139,7 +139,7 @@ pub(super) fn map_event(
                 crate::sessions::SessionAction::Revoked => "revoked",
                 crate::sessions::SessionAction::AllRevoked => "all_revoked",
             };
-            require(e.tenant.to_string() == tenant && e.epoch > 0)?;
+            require(e.tenant == tenant && e.epoch > 0)?;
             require(matches!(
                 action,
                 "created" | "refreshed" | "revoked" | "all_revoked"
@@ -175,7 +175,7 @@ pub(super) fn map_event(
                 crate::federation::Action::Reauthenticated => "reauthenticated",
                 crate::federation::Action::SteppedUp => "stepped_up",
             };
-            require(e.tenant.to_string() == tenant && e.config_version > 0)?;
+            require(e.tenant == tenant && e.config_version > 0)?;
             let provider_action = matches!(
                 action,
                 "provider_created"
