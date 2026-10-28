@@ -182,6 +182,7 @@ impl Authority {
                         c,
                         reader.key.tenant,
                         Some(max_age),
+                        None,
                         expires,
                         Some(
                             loaded
@@ -275,17 +276,30 @@ pub(crate) async fn read_window(
     c: &mut PgConnection,
     tenant: TenantId,
     max_age: Option<u32>,
+    department_source: Option<&str>,
     expires: Instant,
     actor_until: Option<i64>,
 ) -> Result<PersonnelWindow, MutationError> {
     let sampled = Instant::now();
-    let (generation, micros, next): (i64, i64, Option<i64>) = if let Some(max_age) = max_age {
+    let (generation, micros, mut next): (i64, i64, Option<i64>) = if let Some(max_age) = max_age {
         sqlx::query_as("WITH sampled AS MATERIALIZED (SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint AS micros) SELECT personnel_revision,sampled.micros,LEAST((SELECT min(idle_expires_at) FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND revoked_at IS NULL AND idle_expires_at>sampled.micros/1000000),(SELECT min(absolute_expires_at) FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND revoked_at IS NULL AND absolute_expires_at>sampled.micros/1000000),(SELECT min(expires_at) FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND expires_at>sampled.micros/1000000),(SELECT min(observed_at)+$2 FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND observed_at>sampled.micros/1000000-$2)) FROM identity_authority.guard CROSS JOIN sampled WHERE tenant_id=$1::uuid").bind(tenant.to_string()).bind(i64::from(max_age)).fetch_one(&mut *c).await?
     } else {
         sqlx::query_as("WITH sampled AS MATERIALIZED (SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint AS micros) SELECT personnel_revision,sampled.micros,LEAST((SELECT min(idle_expires_at) FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND revoked_at IS NULL AND idle_expires_at>sampled.micros/1000000),(SELECT min(absolute_expires_at) FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND revoked_at IS NULL AND absolute_expires_at>sampled.micros/1000000)) FROM identity_authority.guard CROSS JOIN sampled WHERE tenant_id=$1::uuid")
             .bind(tenant.to_string()).fetch_one(&mut *c).await?
     };
     let now = micros / 1_000_000;
+    if let Some(source) = department_source {
+        let until: Option<i64> = sqlx::query_scalar(include_str!("department-expiry.sql"))
+            .bind(tenant.to_string())
+            .bind(source)
+            .bind(now)
+            .fetch_one(&mut *c)
+            .await?;
+        next = match (next, until) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+    }
     let valid_until = next
         .unwrap_or(i64::MAX)
         .min(actor_until.unwrap_or(i64::MAX))

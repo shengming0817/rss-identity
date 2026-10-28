@@ -373,6 +373,7 @@ impl Federation {
                             sessions::SessionAuthentication::Oidc(db::Origin {
                                 identity: identity_id,
                                 epoch: view.revocation_epoch,
+                                facts_sequence: crate::profiles::sequence(c, tenant).await?,
                                 facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, view.settings.claims().department_snapshot.as_ref(), now)?,
                             }),
                             attempt.replacement,

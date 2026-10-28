@@ -188,7 +188,8 @@ impl Authority {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let window =
-                        crate::personnel::read_window(c, tenant, None, budget.0, None).await?;
+                        crate::personnel::read_window(c, tenant, None, None, budget.0, None)
+                            .await?;
                     let expires = window.expires;
                     let relation = crate::personnel::session_relation(
                         instance,

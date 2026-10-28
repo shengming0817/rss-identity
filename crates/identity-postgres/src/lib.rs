@@ -11,6 +11,7 @@ pub use entra::{EntraAuthority, RevalidatedAccount, VerifiedExternalSubject};
 mod session_checks;
 #[cfg(feature = "test-support")]
 pub use session_checks::ControlledFactTime;
+mod account_directory;
 mod federation;
 mod federation_link;
 mod federation_login;
@@ -19,6 +20,7 @@ mod groups;
 mod maintenance;
 mod management;
 mod operations;
+pub use account_directory::{AccountDirectoryRow, AccountPage};
 mod personnel;
 pub mod platform;
 mod profiles;
@@ -51,7 +53,7 @@ pub use management::{
     ManagementContext, ManagementDenied, ManagementOperation, ManagementPolicy,
     ReauthenticationRequirement,
 };
-pub use operations::{AccountPage, AccountView};
+pub use operations::AccountView;
 use rss_identity_core::{
     InstanceId,
     account::{AccountChange, AccountKey, AccountState},

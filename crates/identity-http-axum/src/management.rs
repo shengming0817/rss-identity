@@ -31,6 +31,9 @@ impl From<HttpError> for Error {
 impl From<AuthorityError> for Error {
     fn from(error: AuthorityError) -> Self {
         let (status, code) = match error {
+            AuthorityError::CursorInvalidated => {
+                (StatusCode::CONFLICT, "account_cursor_invalidated")
+            }
             AuthorityError::RevisionConflict => (StatusCode::CONFLICT, "revision_conflict"),
             AuthorityError::OperationConflict => (StatusCode::CONFLICT, "operation_conflict"),
             AuthorityError::Rejected => (StatusCode::UNAUTHORIZED, "invalid_credential"),
@@ -91,6 +94,7 @@ pub fn management_router(
             "/tenants/{tenant}/accounts",
             get(accounts).post(create_account),
         )
+        .route("/tenants/{tenant}/accounts/{principal}", get(read_account))
         .route(
             "/tenants/{tenant}/accounts/{principal}/enabled",
             post(enabled),
@@ -148,7 +152,11 @@ fn account(state: rss_identity_core::account::AccountState) -> Response {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Page {
+struct AccountParameters {
+    filter: Option<String>,
+    sort: Option<String>,
+    fields: Option<String>,
+    source: Option<String>,
     cursor: Option<String>,
     limit: Option<u16>,
 }
@@ -157,22 +165,35 @@ async fn accounts(
     Path(t): Path<String>,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,
-    q: std::result::Result<Query<Page>, axum::extract::rejection::QueryRejection>,
+    q: std::result::Result<Query<AccountParameters>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Response> {
     let Query(page) = q.map_err(|_| BAD)?;
+    let query = rss_identity_core::directory::AccountQuery::parse(
+        page.filter.as_deref(),
+        page.sort.as_deref(),
+        page.fields.as_deref(),
+        page.source.as_deref(),
+        page.limit.unwrap_or(50),
+    )
+    .map_err(|_| BAD)?;
     let actor = actor(&s, &t, &h, b, false).await?;
     Ok(Json(crate::dto::AccountPage::from(
         s.authority
-            .list_accounts(
-                actor,
-                page.cursor
-                    .as_deref()
-                    .map(PrincipalId::parse)
-                    .transpose()
-                    .map_err(|_| BAD)?,
-                page.limit.unwrap_or(50),
-                b.remaining(),
-            )
+            .list_accounts(actor, query, page.cursor, b.remaining())
+            .await?,
+    ))
+    .into_response())
+}
+async fn read_account(
+    State(s): State<Management>,
+    Path((t, p)): Path<(String, String)>,
+    Extension(b): Extension<RequestBudget>,
+    h: HeaderMap,
+) -> Result<Response> {
+    let actor = actor(&s, &t, &h, b, false).await?;
+    Ok(Json(crate::dto::Account::from(
+        s.authority
+            .read_account(actor, target(&t, &p)?, b.remaining())
             .await?,
     ))
     .into_response())

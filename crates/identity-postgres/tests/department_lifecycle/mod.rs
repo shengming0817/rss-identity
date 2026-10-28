@@ -130,8 +130,8 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
                 managed
                     .inspect_session(f.key.tenant, secret(&session), deadline())
                     .await?,
+                rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
                 None,
-                10,
                 deadline(),
             )
             .await?;
@@ -165,8 +165,8 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
                     managed
                         .inspect_session(f.key.tenant, secret(&refreshed), deadline())
                         .await?,
+                    rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
                     None,
-                    10,
                     deadline()
                 )
                 .await
@@ -326,7 +326,12 @@ async fn department_source_is_instance_tenant_principal_and_provider_bound() -> 
     assert!(
         other
             .store
-            .list_accounts(actor, None, 10, deadline())
+            .list_accounts(
+                actor,
+                rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
+                None,
+                deadline()
+            )
             .await
             .is_err()
     );

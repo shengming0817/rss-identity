@@ -2,6 +2,7 @@
 pub mod account;
 pub mod assurance;
 pub mod department;
+pub mod directory;
 pub mod entra;
 pub mod facts;
 pub mod federation;

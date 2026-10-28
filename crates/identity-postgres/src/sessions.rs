@@ -252,8 +252,8 @@ pub(crate) async fn insert(
     sqlx::query(concat!(
         "INSERT INTO identity_authority.sessions(tenant_id,principal_id,session_id,token_",
         "hash,auth_epoch,membership_epoch,issued_at,idle_expires_at,absolute_expires_at,e",
-        "xternal_identity_id,provider_epoch,auth_facts,idle_timeout,absolute_timeout,credential_kind,authentication_source,local_authenticated_at,platform_authentication) VALUES($1::uuid,$2::uuid,$3::uuid",
-        ",$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)"
+        "xternal_identity_id,provider_epoch,auth_facts,idle_timeout,absolute_timeout,credential_kind,authentication_source,local_authenticated_at,platform_authentication,facts_sequence) VALUES($1::uuid,$2::uuid,$3::uuid",
+        ",$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)"
     ))
     .bind(key.tenant.to_string())
     .bind(key.principal.as_uuid().to_string())
@@ -273,6 +273,7 @@ pub(crate) async fn insert(
     .bind(source)
     .bind(local_authenticated_at)
     .bind(platform)
+    .bind(origin.as_ref().map(|o| o.facts_sequence))
     .execute(c)
     .await?;
     Ok((

@@ -321,36 +321,6 @@ impl Authority {
             Ok((next, vec![SecurityEvent::account(action, next, Some(actor.key))]))
         })).await
     }
-    pub async fn list_accounts(
-        &self,
-        actor: AuthenticatedSession,
-        cursor: Option<PrincipalId>,
-        limit: u16,
-        deadline: OperationDeadline,
-    ) -> Result<AccountPage, AuthorityError> {
-        self.require_runtime()?;
-        if !(1..=100).contains(&limit) {
-            return Err(AuthorityError::InvalidInput);
-        }
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
-        let policy = self.policy.clone();
-        let instance = self.instance;
-        self.read_sql(actor.key.tenant, budget.remaining(), move |c| Box::pin(async move {
-            let loaded = crate::session_storage::recheck(c, &actor).await?;
-            crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListAccounts,None, c).await?;
-            let rows:Vec<(uuid::Uuid,Option<String>)>=sqlx::query_as("SELECT a.principal_id,l.login_key FROM identity_authority.accounts a LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_id) WHERE a.tenant_id=$1::uuid AND ($2::uuid IS NULL OR a.principal_id>$2) ORDER BY a.principal_id LIMIT $3")
-                .bind(actor.key.tenant.to_string()).bind(cursor.map(|id|id.as_uuid())).bind(i64::from(limit)+1).fetch_all(&mut *c).await?;
-            let more=rows.len()>usize::from(limit); let mut accounts=Vec::new();
-            for (id,login) in rows.into_iter().take(usize::from(limit)) {
-                let principal=principal(&id.to_string())?;
-                let state=load(c,AccountKey{tenant:actor.key.tenant,principal}).await?.state;
-                accounts.push(AccountView::new(state,login));
-            }
-            let next_cursor=if more {accounts.last().map(|a|a.principal_id)} else {None};
-            Ok(AccountPage{accounts,next_cursor})
-        })).await
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -371,13 +341,4 @@ impl AccountView {
             has_local_password: state.has_local_password(),
         }
     }
-}
-/// Domain results are mapped to wire DTOs by the hosting adapter.
-/// ```compile_fail
-/// fn serialize(page: rss_identity_postgres::AccountPage) { let _ = serde_json::to_value(page); }
-/// ```
-#[derive(Debug)]
-pub struct AccountPage {
-    pub accounts: Vec<AccountView>,
-    pub next_cursor: Option<PrincipalId>,
 }
