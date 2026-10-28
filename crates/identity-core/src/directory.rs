@@ -332,7 +332,7 @@ impl Parser<'_> {
         .find(|op| self.eat(op))
         .ok_or(InvalidQuery)?;
         let set = matches!(operator, "=in=" | "=out=");
-        let values = if set {
+        let mut values = if set {
             if !self.eat("(") {
                 return Err(InvalidQuery);
             }
@@ -370,10 +370,13 @@ impl Parser<'_> {
         if matches!(operator, "=isnull=" | "=isnotnull=") && values != ["true"] {
             return Err(InvalidQuery);
         }
-        if field == Field::PrincipalId
-            && values.iter().any(|v| crate::PrincipalId::parse(v).is_err())
-        {
-            return Err(InvalidQuery);
+        if field == Field::PrincipalId {
+            for value in &mut values {
+                *value = crate::PrincipalId::parse(value)
+                    .map_err(|_| InvalidQuery)?
+                    .as_uuid()
+                    .to_string();
+            }
         }
         Ok(Expression::Compare {
             field,

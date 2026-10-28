@@ -265,7 +265,13 @@ impl Authority {
                     ),
                 )
                 .await?;
-                let key = actor.digest;
+                // Persisted independently of any client credential; shared by all Authority instances.
+                let key: Vec<u8> = sqlx::query_scalar(
+                    "SELECT account_cursor_key FROM identity_authority.deployment",
+                )
+                .fetch_one(&mut *c)
+                .await?;
+                let key = zeroize::Zeroizing::new(key);
                 let binding = Sha256::digest(
                     serde_json::to_vec(&(
                         instance.to_string(),

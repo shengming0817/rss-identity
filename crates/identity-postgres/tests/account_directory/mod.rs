@@ -297,6 +297,91 @@ async fn account_directory_filters_before_stable_pagination_and_invalidates_chan
         .await?;
     assert_eq!(disabled.accounts.len(), 1);
     assert_eq!(disabled.accounts[0].login.as_deref(), Some("gamma"));
+    // The core parser accepts normal UUID representations; SQL must use their canonical value.
+    for representation in [
+        target.principal.as_uuid().to_string().to_uppercase(),
+        target.principal.as_uuid().simple().to_string(),
+    ] {
+        for operator in ["==", "!=", "=in=", "=out="] {
+            let operand = if operator.contains("in") || operator.contains("out") {
+                format!("('{representation}')")
+            } else {
+                format!("'{representation}'")
+            };
+            let query = AccountQuery::parse(
+                Some(&format!("principalId{operator}{operand}")),
+                None,
+                Some("principalId"),
+                None,
+                100,
+            )?;
+            let rows = f
+                .store
+                .list_accounts(f.actor().await?, query, None, deadline())
+                .await?
+                .accounts;
+            let includes = rows
+                .iter()
+                .any(|r| r.principal_id == target.principal.as_uuid().to_string());
+            assert_eq!(includes, matches!(operator, "==" | "=in="));
+            if includes {
+                assert_eq!(rows.len(), 1);
+            }
+        }
+    }
+    // Possession of the session secret must not confer cursor signing authority.
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let session = f.login().await?;
+    let actor = || {
+        f.store
+            .inspect_session(f.key.tenant, secret(&session), deadline())
+    };
+    let query = AccountQuery::parse(None, None, None, None, 1)?;
+    let first = f
+        .store
+        .list_accounts(actor().await?, query.clone(), None, deadline())
+        .await?;
+    let original = first.next_cursor.unwrap();
+    let raw = URL_SAFE_NO_PAD.decode(&original)?;
+    let mut payload: serde_json::Value = serde_json::from_slice(&raw[32..])?;
+    payload["expires"] = serde_json::json!(i64::MAX);
+    payload["position"] = serde_json::json!([target.principal.as_uuid().to_string()]);
+    let plain = serde_json::to_vec(&payload)?;
+    let mut signed = b"identity.accounts.cursor.v1\0".to_vec();
+    signed.extend(&plain);
+    let tag = ring::hmac::sign(
+        &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &secret(&session).digest()),
+        &signed,
+    );
+    let mut forged = tag.as_ref().to_vec();
+    forged.extend(plain);
+    assert!(matches!(
+        f.store
+            .list_accounts(
+                actor().await?,
+                query.clone(),
+                Some(URL_SAFE_NO_PAD.encode(forged)),
+                deadline()
+            )
+            .await,
+        Err(AuthorityError::CursorInvalidated)
+    ));
+    let second_authority = Authority::connect_runtime(
+        f.runtime.clone(),
+        Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        f.config(),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
+    assert!(
+        !second_authority
+            .list_accounts(actor().await?, query, Some(original), deadline())
+            .await?
+            .accounts
+            .is_empty()
+    );
+
     f.close().await;
     Ok(())
 }

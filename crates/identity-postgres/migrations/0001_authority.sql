@@ -4,7 +4,8 @@ CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK
 INSERT INTO identity_authority.schema_version VALUES(17);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
- authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000')
+ authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),
+ account_cursor_key bytea NOT NULL CHECK(octet_length(account_cursor_key)=32)
 );
 CREATE FUNCTION identity_authority.protect_deployment() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN

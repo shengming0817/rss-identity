@@ -1,6 +1,36 @@
 use rss_identity_core::directory::{AccountQuery, Field};
 
 #[test]
+fn principal_uuid_operands_are_canonical_for_equal_and_set_queries() {
+    use rss_identity_core::directory::Expression;
+    let canonical = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    for representation in [
+        "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa",
+    ] {
+        for operator in ["==", "!=", "=in=", "=out="] {
+            let operand = if operator.contains("in") || operator.contains("out") {
+                format!("('{representation}')")
+            } else {
+                format!("'{representation}'")
+            };
+            let query = AccountQuery::parse(
+                Some(&format!("principalId{operator}{operand}")),
+                None,
+                None,
+                None,
+                50,
+            )
+            .unwrap();
+            let Some(Expression::Compare { values, .. }) = query.filter() else {
+                panic!("comparison required")
+            };
+            assert_eq!(values.as_slice(), [canonical.to_owned()]);
+        }
+    }
+}
+
+#[test]
 fn query_preserves_false_and_composes_only_explicit_sources() {
     let q = AccountQuery::parse(
         Some("enabled==false;(login=icontains='a\\'b',memberActive==true)"),
