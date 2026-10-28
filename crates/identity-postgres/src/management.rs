@@ -18,6 +18,8 @@ pub enum ManagementOperation {
     UpdateLocalProfile,
     ReadLatestProfile,
     ListAccounts,
+    ReadAccount,
+    ReadLatestDepartments,
     CreateAccount,
     /// Restricted provisioner only; normal Authority never invokes this operation.
     ProvisionAccount(rss_request_context::TenantId),

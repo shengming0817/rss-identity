@@ -83,6 +83,129 @@ async fn login_as(app: &Router, name: &str, pw: &str) -> anyhow::Result<(String,
     assert!(v["identity"]["principalId"].is_string());
     Ok((cookie, v["csrfToken"].as_str().unwrap().into()))
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn account_query_projection_detail_and_cursor_context() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let (app, _, _) = app(&f);
+    let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
+    let base = format!("/api/v1/identity/tenants/{A}/accounts");
+    for name in ["alpha", "beta", "gamma"] {
+        let response = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &base,
+                &cookie,
+                &csrf,
+                json!({"login":name,"password":PASSWORD}),
+            ))
+            .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("filter", "login=in=('alpha','beta','gamma')")
+        .append_pair("sort", "-login")
+        .append_pair("fields", "principalId,login")
+        .append_pair("limit", "1")
+        .finish();
+    let mut cursor = None;
+    let mut seen = Vec::new();
+    let mut first_cursor = None;
+    let principal = loop {
+        let suffix = cursor
+            .as_ref()
+            .map(|c| format!("&cursor={c}"))
+            .unwrap_or_default();
+        let response = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("{base}?{query}{suffix}"),
+                &cookie,
+                "",
+                json!(null),
+            ))
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = json_body(response).await?;
+        assert_eq!(page["accounts"].as_array().unwrap().len(), 1);
+        let row = &page["accounts"][0];
+        assert_eq!(row.as_object().unwrap().len(), 2);
+        seen.push(row["login"].as_str().unwrap().to_owned());
+        let principal = row["principalId"].as_str().unwrap().to_owned();
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if first_cursor.is_none() {
+            first_cursor = cursor.clone();
+        }
+        if cursor.is_none() {
+            break principal;
+        }
+    };
+    assert_eq!(seen, ["gamma", "beta", "alpha"]);
+    let detail = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("{base}/{principal}"),
+            &cookie,
+            "",
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(detail.status(), StatusCode::OK);
+    assert_eq!(json_body(detail).await?["hasLocalPassword"], true);
+    let changed = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("{base}?limit=1&cursor={}", first_cursor.unwrap()),
+            &cookie,
+            "",
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(changed).await?["code"],
+        "account_cursor_invalidated"
+    );
+    for query in [
+        format!("cursor={principal}"),
+        "filter=enabled%3D%3D0".into(),
+        "fields=password".into(),
+        "fields=email".into(),
+        "limit=1&limit=2".into(),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("{base}?{query}"),
+                &cookie,
+                "",
+                json!(null),
+            ))
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    f.policy.revoke(f.key);
+    let denied = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("{base}/{principal}"),
+            &cookie,
+            "",
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    f.close().await;
+    Ok(())
+}
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {

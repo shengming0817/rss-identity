@@ -309,7 +309,12 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             .await?;
         assert!(
             authority
-                .list_accounts(member_actor, None, 10, assembly::deadline())
+                .list_accounts(
+                    member_actor,
+                    rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
+                    None,
+                    assembly::deadline()
+                )
                 .await
                 .is_err()
         );

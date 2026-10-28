@@ -94,14 +94,40 @@ impl From<rss_identity_postgres::AccountView> for Account {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountPage {
-    accounts: Vec<Account>,
+    accounts: Vec<serde_json::Value>,
     next_cursor: Option<String>,
 }
 impl From<rss_identity_postgres::AccountPage> for AccountPage {
     fn from(v: rss_identity_postgres::AccountPage) -> Self {
+        use rss_identity_core::directory::Field;
         Self {
-            accounts: v.accounts.into_iter().map(Into::into).collect(),
-            next_cursor: v.next_cursor.map(|id| id.as_uuid().to_string()),
+            accounts: v
+                .accounts
+                .into_iter()
+                .map(|row| {
+                    let mut value = serde_json::Map::new();
+                    for field in &v.fields {
+                        let item = match field {
+                            Field::PrincipalId => serde_json::json!(row.principal_id),
+                            Field::Login => serde_json::json!(row.login),
+                            Field::Enabled => serde_json::json!(row.enabled),
+                            Field::MemberActive => serde_json::json!(row.member_active),
+                            Field::HasLocalPassword => serde_json::json!(row.has_local_password),
+                            Field::DisplayName => serde_json::json!(row.display_name),
+                            Field::Email => serde_json::json!(row.email),
+                            Field::ProfileStatus => serde_json::json!(row.profile_status),
+                            Field::DepartmentStatus => serde_json::json!(row.department_status),
+                            Field::DepartmentSnapshot => serde_json::json!(row.department_snapshot),
+                            Field::Department | Field::DepartmentSubtree => {
+                                unreachable!("checked output field")
+                            }
+                        };
+                        value.insert(field.name().into(), item);
+                    }
+                    serde_json::Value::Object(value)
+                })
+                .collect(),
+            next_cursor: v.next_cursor,
         }
     }
 }
@@ -453,18 +479,26 @@ mod tests {
     fn domain_ids_are_projected_by_the_http_adapter() {
         let principal = rss_identity_core::PrincipalId::generate();
         let page = rss_identity_postgres::AccountPage {
-            accounts: vec![rss_identity_postgres::AccountView {
-                principal_id: principal,
+            accounts: vec![rss_identity_postgres::AccountDirectoryRow {
+                principal_id: principal.as_uuid().to_string(),
                 login: Some("member".into()),
                 enabled: true,
                 member_active: true,
                 has_local_password: true,
+                display_name: None,
+                email: None,
+                profile_status: "missing".into(),
+                department_status: "missing".into(),
+                department_snapshot: None,
             }],
-            next_cursor: Some(principal),
+            fields: rss_identity_core::directory::AccountQuery::default()
+                .fields()
+                .to_vec(),
+            next_cursor: Some("opaque_cursor".into()),
         };
         assert_eq!(
             serde_json::to_value(AccountPage::from(page)).unwrap(),
-            json!({"accounts":[{"principalId":principal.as_uuid().to_string(),"login":"member","enabled":true,"memberActive":true,"hasLocalPassword":true}],"nextCursor":principal.as_uuid().to_string()})
+            json!({"accounts":[{"principalId":principal.as_uuid().to_string(),"login":"member","enabled":true,"memberActive":true,"hasLocalPassword":true}],"nextCursor":"opaque_cursor"})
         );
     }
 }

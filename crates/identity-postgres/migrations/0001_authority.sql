@@ -77,6 +77,7 @@ CREATE TABLE identity_authority.external_identities (
 );
 CREATE TABLE identity_authority.sessions (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL,
+ facts_sequence bigint GENERATED ALWAYS AS IDENTITY,
  session_id uuid NOT NULL CHECK(session_id <> '00000000-0000-0000-0000-000000000000'),
  authentication_source text NOT NULL CHECK(authentication_source IN ('local_password','oidc','platform')),
  local_authenticated_at bigint,
@@ -110,6 +111,7 @@ CREATE TABLE identity_authority.sessions (
  CONSTRAINT session_duration CHECK(absolute_expires_at::numeric-issued_at::numeric=absolute_timeout),
  CONSTRAINT session_revocation CHECK(revoked_at IS NULL OR revoked_at >= issued_at)
 );
+CREATE INDEX sessions_accepted_facts ON identity_authority.sessions(tenant_id,principal_id,facts_sequence DESC) WHERE external_identity_id IS NOT NULL;
 CREATE INDEX sessions_principal ON identity_authority.sessions(tenant_id,principal_id,session_id);
 CREATE TABLE identity_authority.link_intents (
  tenant_id uuid NOT NULL, intent_id uuid NOT NULL, principal_id uuid NOT NULL, session_id uuid NOT NULL,

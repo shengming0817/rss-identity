@@ -1,4 +1,5 @@
 //! Public embedding contract. These tests cannot access password candidates or session issuance internals.
+mod account_directory;
 mod department_lifecycle;
 mod federation_support;
 mod support;
@@ -109,7 +110,12 @@ async fn local_facade_reauthenticates_and_host_policy_is_current() -> anyhow::Re
         ReauthenticationRequirement::RecentMfa(Duration::from_secs(300));
     assert!(matches!(
         f.store
-            .list_accounts(f.actor().await?, None, 10, deadline())
+            .list_accounts(
+                f.actor().await?,
+                rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
+                None,
+                deadline()
+            )
             .await,
         Err(AuthorityError::RuleRejected(
             AccountRuleError::ReauthenticationRequired
@@ -137,7 +143,12 @@ async fn local_facade_reauthenticates_and_host_policy_is_current() -> anyhow::Re
         ReauthenticationRequirement::Recent(Duration::from_secs(300));
     assert!(
         !f.store
-            .list_accounts(f.actor().await?, None, 10, deadline())
+            .list_accounts(
+                f.actor().await?,
+                rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
+                None,
+                deadline()
+            )
             .await?
             .accounts
             .is_empty()
@@ -169,7 +180,12 @@ async fn instances_tenants_and_borrowed_pool_are_separate() -> anyhow::Result<()
     assert!(
         other
             .store
-            .list_accounts(actor, None, 10, deadline())
+            .list_accounts(
+                actor,
+                rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
+                None,
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -366,7 +382,14 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     let fresh = managed
         .inspect_session(f.key.tenant, secret(&session), deadline())
         .await?;
-    managed.list_accounts(fresh, None, 10, deadline()).await?;
+    managed
+        .list_accounts(
+            fresh,
+            rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
+            None,
+            deadline(),
+        )
+        .await?;
     let original_expiry = groups.expires_at();
     let original: serde_json::Value = sqlx::query_scalar(
         "SELECT auth_facts FROM identity_authority.sessions WHERE session_id=$1",

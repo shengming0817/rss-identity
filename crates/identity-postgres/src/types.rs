@@ -41,6 +41,8 @@ impl AttemptSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorityError {
+    #[error("account cursor invalidated")]
+    CursorInvalidated,
     #[error("user interaction required")]
     InteractionRequired,
     #[error("authentication cancelled")]

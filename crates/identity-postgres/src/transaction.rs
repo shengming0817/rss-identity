@@ -120,6 +120,10 @@ impl SecurityEvent {
 }
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MutationError {
+    #[error("invalid account query")]
+    InvalidInput,
+    #[error("account cursor invalidated")]
+    CursorInvalidated,
     #[error(transparent)]
     Storage(#[from] PgError),
     #[error(transparent)]
@@ -383,6 +387,14 @@ where
 
 fn sql_failure(error: MutationError, reason: &std::sync::OnceLock<AuthorityError>) -> PgError {
     match error {
+        MutationError::InvalidInput => {
+            let _ = reason.set(AuthorityError::InvalidInput);
+            reject()
+        }
+        MutationError::CursorInvalidated => {
+            let _ = reason.set(AuthorityError::CursorInvalidated);
+            reject()
+        }
         MutationError::RevisionConflict => {
             let _ = reason.set(AuthorityError::RevisionConflict);
             reject()

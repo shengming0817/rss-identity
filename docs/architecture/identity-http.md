@@ -24,7 +24,11 @@ bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpO
 
 ## 账户管理
 
-同一 tenant 前缀：GET/POST `/accounts`（分页 / `{login,password}`）；POST `/accounts/{principal}/enabled`、`/membership`（`{enabled}`）；POST `/accounts/{principal}/password`（`{password}`）；POST `/account/password`（`{currentPassword,password}`）。管理角色与防锁死由宿主 ManagementPolicy 提供，每次事务重查；没有 administrator 字段/路由。
+同一 tenant 前缀：GET/POST `/accounts`（目录查询 / `{login,password}`），GET `/accounts/{principal}` 读取完整账户；POST `/accounts/{principal}/enabled`、`/membership`（`{enabled}`）；POST `/accounts/{principal}/password`（`{password}`）；POST `/account/password`（`{currentPassword,password}`）。管理角色与防锁死由宿主 ManagementPolicy 提供，每次事务重查；没有 administrator 字段/路由。
+
+账户目录接受 `filter/sort/fields/limit/cursor`；字段与操作符由 `identity-core::directory::AccountQuery` 定义。页大小默认 50、最多 100，排序追加主体 ID。投影行只含所选字段，编辑先读取完整详情。查询姓名、邮箱或资料状态必须显式指定 `source=local` 或确切 IdP UUID；不会混合不同来源。部门 exact/subtree 条件也使用指定 IdP，每个账户在自身完整部门树中匹配。资料与部门的筛选、排序和输出均单独调用宿主管理授权，账户目录权限不隐含资料读取权限。
+
+部门目录取该来源最新成功接受的登录事实，再判定来源、代际和有效期；缺失、无效或过期不回退旧观察。登出不删除仍在期限内的目录观察，明确空成员与未知状态分别表达。这些目录数据不代替当前会话绑定的认证与授权事实。游标是不透明、会话及查询绑定的值，旧账户 UUID 游标已退出；`409 account_cursor_invalidated` 后由用户显式从首页重查。会话列表继续使用自身固定顺序的窗口合同。
 
 ## 可选 OIDC Router
 
