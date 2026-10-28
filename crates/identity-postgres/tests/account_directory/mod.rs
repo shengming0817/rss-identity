@@ -3,6 +3,218 @@ use rss_identity_core::directory::AccountQuery;
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
+async fn department_link_preserves_source_observation_acceptance_order() -> anyhow::Result<()> {
+    use federation_support::{
+        BROWSER, ScriptedOidc, begin, department_snapshot, enabled_department, finish, issued,
+        service, state,
+    };
+    use rss_identity_core::department::UpstreamDepartmentSnapshot;
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let federation = service(&f, upstream.clone());
+    let source_provider = enabled_department(&f, &federation, 120).await?;
+    let target_provider = enabled_department(&f, &federation, 120).await?;
+    let old = issued(
+        finish(
+            &federation,
+            begin(&f, &federation, &source_provider).await?,
+            "alice",
+        )
+        .await?,
+    );
+    let actor = f
+        .store
+        .inspect_session(f.key.tenant, secret(&old), deadline())
+        .await?;
+    let principal = actor.account().principal.as_uuid().to_string();
+    let first = state(
+        federation
+            .begin_link(
+                LinkRequest {
+                    actor,
+                    target_provider: target_provider.id,
+                    password: None,
+                    browser: BROWSER.into(),
+                    target: "home".into(),
+                    source: source(),
+                },
+                deadline(),
+            )
+            .await?,
+    );
+    let second = match federation
+        .complete(
+            first,
+            BROWSER.into(),
+            zeroize::Zeroizing::new("alice".into()),
+            "https://idp.example.test".into(),
+            Some(secret(&old)),
+            deadline(),
+        )
+        .await?
+    {
+        FederatedOutcome::Redirect(redirect) => state(redirect),
+        _ => anyhow::bail!("expected target authentication"),
+    };
+    // A distinct login accepts a newer missing source observation between the two link stages.
+    *upstream.department_snapshot.lock().unwrap() = UpstreamDepartmentSnapshot::Missing;
+    let newer = issued(
+        finish(
+            &federation,
+            begin(&f, &federation, &source_provider).await?,
+            "alice",
+        )
+        .await?,
+    );
+    *upstream.department_snapshot.lock().unwrap() =
+        UpstreamDepartmentSnapshot::Present(department_snapshot(Some("target-only")));
+    let linked = issued(
+        federation
+            .complete(
+                second,
+                BROWSER.into(),
+                zeroize::Zeroizing::new("another-subject".into()),
+                "https://idp.example.test".into(),
+                Some(secret(&old)),
+                deadline(),
+            )
+            .await?,
+    );
+    let (retained,latest):(i64,i64)=sqlx::query_as("SELECT (SELECT facts_sequence FROM identity_authority.sessions WHERE session_id=$1),(SELECT facts_sequence FROM identity_authority.sessions WHERE session_id=$2)")
+        .bind(linked.view().id.as_uuid()).bind(newer.view().id.as_uuid()).fetch_one(&f.owner).await?;
+    assert!(
+        retained < latest,
+        "copying a source fact must preserve its acceptance order"
+    );
+    let source_id = source_provider.id.to_string();
+    let query = AccountQuery::parse(
+        Some(&format!("principalId=='{principal}'")),
+        None,
+        Some("principalId,departmentStatus,departmentSnapshot"),
+        Some(&source_id),
+        50,
+    )?;
+    let rows = f
+        .store
+        .list_accounts(f.actor().await?, query, None, deadline())
+        .await?
+        .accounts;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].department_snapshot.is_none());
+    assert_eq!(rows[0].department_status, "unavailable");
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn account_directory_null_and_equal_values_keep_total_order() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let mut ids = Vec::new();
+    for name in ["alpha", "beta", "gamma", "omega"] {
+        let state = f
+            .store
+            .create_local_account(f.actor().await?, login(name), password(), deadline())
+            .await?;
+        ids.push((name, state.key().principal.as_uuid().to_string()));
+        if ["alpha", "beta"].contains(&name) {
+            let profile = rss_identity_core::profile::LocalProfile {
+                display_name: Some("Same".into()),
+                username: None,
+                email: None,
+                extensions: serde_json::json!({}).try_into()?,
+                max_age_seconds: 3600,
+            };
+            f.store
+                .update_local_profile(
+                    f.actor().await?,
+                    state.key(),
+                    ProfileChange {
+                        operation_id: uuid::Uuid::new_v4(),
+                        expected_revision: 0,
+                        value: Some(profile),
+                    },
+                    deadline(),
+                )
+                .await?;
+            f.store
+                .login_local(
+                    f.key.tenant,
+                    login(name),
+                    password(),
+                    source(),
+                    None,
+                    deadline(),
+                )
+                .await?;
+        }
+    }
+    for sort in ["displayName,enabled", "-displayName,-enabled"] {
+        let query = AccountQuery::parse(
+            Some("login=in=('alpha','beta','gamma','omega')"),
+            Some(sort),
+            Some("principalId"),
+            Some("local"),
+            1,
+        )?;
+        let mut expected = ids.clone();
+        expected.sort_by(|(a, aid), (b, bid)| {
+            let missing = |name: &&str| !["alpha", "beta"].contains(name);
+            missing(a).cmp(&missing(b)).then_with(|| aid.cmp(bid))
+        });
+        let mut cursor = None;
+        let mut actual = Vec::new();
+        loop {
+            let page = f
+                .store
+                .list_accounts(f.actor().await?, query.clone(), cursor, deadline())
+                .await?;
+            actual.extend(page.accounts.into_iter().map(|row| row.principal_id));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            actual,
+            expected.into_iter().map(|(_, id)| id).collect::<Vec<_>>()
+        );
+    }
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn account_detail_rejects_expiry_during_target_read() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let target = f
+        .store
+        .create_local_account(f.actor().await?, login("target"), password(), deadline())
+        .await?
+        .key();
+    let session = f.login().await?;
+    sqlx::query("UPDATE identity_authority.sessions SET issued_at=floor(extract(epoch FROM clock_timestamp()))::bigint-118,local_authenticated_at=floor(extract(epoch FROM clock_timestamp()))::bigint-118,idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+2,absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+2,idle_timeout=120,absolute_timeout=120 WHERE session_id=$1")
+        .bind(session.view().id.as_uuid()).execute(&f.owner).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION identity_authority.delay_directory_detail() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(3); RETURN true; END $$; GRANT EXECUTE ON FUNCTION identity_authority.delay_directory_detail() TO identity_runtime; CREATE POLICY delay_directory_detail ON identity_authority.local_credentials AS RESTRICTIVE FOR SELECT USING (CASE WHEN principal_id='{}'::uuid THEN identity_authority.delay_directory_detail() ELSE true END)",target.principal.as_uuid())))
+        .execute(&f.owner).await?;
+    let actor = f
+        .store
+        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .await?;
+    assert!(matches!(
+        f.store.read_account(actor, target, deadline()).await,
+        Err(AuthorityError::Rejected)
+    ));
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
 async fn account_directory_filters_before_stable_pagination_and_invalidates_changes()
 -> anyhow::Result<()> {
     let f = Fixture::new().await?;

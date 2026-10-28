@@ -146,6 +146,16 @@ SUITES[("rss-identity-postgres", "live_session")] = {
 
 SUITES[("rss-identity-postgres", "profile_platform")].add("live_session_admission_retains_platform_source_locks")
 
+SUITES[("rss-identity-postgres", "embedded")].update({
+    "account_directory::account_directory_filters_before_stable_pagination_and_invalidates_changes",
+    "account_directory::account_directory_profiles_are_source_selected_and_authorized_for_predicates",
+    "account_directory::department_directory_uses_latest_accepted_fact_without_resurrecting_older_memberships",
+    "account_directory::account_directory_null_and_equal_values_keep_total_order",
+    "account_directory::account_detail_rejects_expiry_during_target_read",
+    "account_directory::department_link_preserves_source_observation_acceptance_order",
+})
+SUITES[("rss-identity-http-axum", "management_http")].add("account_query_projection_detail_and_cursor_context")
+
 def cargo(package, test, env, features=()):
     expected = SUITES[(package,test)]
     internal = (package=="rss-identity-postgres" and test in {"atomic","session_atomic","federated_atomic"}) or (package=="rss-identity-oidc" and test=="private_provider_tests")

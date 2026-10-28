@@ -207,8 +207,10 @@ impl Authority {
         self.read_sql(target.tenant,budget.remaining(),move |c|Box::pin(async move {
             let loaded=crate::session_storage::recheck(c,&actor).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadAccount,Some(target),c).await?;
+            let expires=crate::sessions::checked_expiry(&loaded,budget.0)?;
             let state=crate::storage::load(c,target).await?.state;
             let login=sqlx::query_scalar("SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2").bind(target.tenant.to_string()).bind(target.principal.as_uuid()).fetch_optional(c).await?;
+            if std::time::Instant::now()>=expires { return Err(reject().into()); }
             Ok(AccountView::new(state,login))
         })).await
     }

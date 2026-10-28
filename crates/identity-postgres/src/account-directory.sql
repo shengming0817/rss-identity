@@ -15,7 +15,7 @@ WITH account_rows AS (
   FROM identity_authority.sessions s
   JOIN identity_authority.external_identities e ON e.tenant_id=s.tenant_id AND e.identity_id=s.external_identity_id
   WHERE s.tenant_id=a.tenant_id AND s.principal_id=a.principal_id AND e.provider_id::text=$2
-  ORDER BY s.facts_sequence DESC LIMIT 1
+  ORDER BY s.facts_sequence DESC,s.auth_epoch DESC,s.membership_epoch DESC,s.session_id LIMIT 1
  ) ds ON $5
  LEFT JOIN identity_authority.external_identities de ON de.tenant_id=a.tenant_id AND de.principal_id=a.principal_id AND de.identity_id=ds.external_identity_id
  LEFT JOIN identity_authority.providers dp ON dp.tenant_id=de.tenant_id AND dp.provider_id=de.provider_id

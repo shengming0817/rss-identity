@@ -108,6 +108,21 @@ impl Default for AccountQuery {
     }
 }
 impl AccountQuery {
+    /// Parse bounded account-directory inputs; omitted ordering uses `principalId`.
+    ///
+    /// Filters use `;` for AND and `,` for OR (AND binds more tightly); parentheses
+    /// group conditions. Quote operands containing delimiters and escape quotes or
+    /// backslashes with a backslash. Sets use `=in=(...)` / `=out=(...)`; null tests use
+    /// `=isnull=true` / `=isnotnull=true`. Sorting is comma-separated, with `-` for
+    /// descending order; the unique principal key is appended automatically.
+    /// Profile and department fields require an explicit source (`local` or IdP UUID).
+    ///
+    /// ```
+    /// use rss_identity_core::directory::AccountQuery;
+    /// let query = AccountQuery::parse(Some("enabled==true;login=icontains='alice'"),
+    ///     Some("-login"), Some("principalId,login"), None, 20)?;
+    /// # Ok::<(), rss_identity_core::directory::InvalidQuery>(())
+    /// ```
     pub fn parse(
         filter: Option<&str>,
         sort: Option<&str>,

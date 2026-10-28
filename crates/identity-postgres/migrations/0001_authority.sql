@@ -77,7 +77,7 @@ CREATE TABLE identity_authority.external_identities (
 );
 CREATE TABLE identity_authority.sessions (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL,
- facts_sequence bigint GENERATED ALWAYS AS IDENTITY,
+ facts_sequence bigint CHECK(facts_sequence>0),
  session_id uuid NOT NULL CHECK(session_id <> '00000000-0000-0000-0000-000000000000'),
  authentication_source text NOT NULL CHECK(authentication_source IN ('local_password','oidc','platform')),
  local_authenticated_at bigint,
@@ -102,7 +102,7 @@ CREATE TABLE identity_authority.sessions (
  CONSTRAINT authentication_kind CHECK (((authentication_source='local_password' AND local_authenticated_at>0 AND local_authenticated_at<=issued_at AND platform_authentication IS NULL AND external_identity_id IS NULL)
  OR (authentication_source='oidc' AND local_authenticated_at IS NULL AND platform_authentication IS NULL AND external_identity_id IS NOT NULL)
  OR (authentication_source='platform' AND local_authenticated_at IS NULL AND external_identity_id IS NULL AND jsonb_typeof(platform_authentication)='object' AND octet_length(platform_authentication::text)<=4096)) IS TRUE),
- CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL) OR (external_identity_id IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND octet_length(auth_facts::text)<=32768 AND (auth_facts->'format_version'='3'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
+ CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL AND facts_sequence IS NULL) OR (external_identity_id IS NOT NULL AND facts_sequence IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND octet_length(auth_facts::text)<=32768 AND (auth_facts->'format_version'='3'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
  FOREIGN KEY(tenant_id,principal_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,principal_id,identity_id),
  PRIMARY KEY(tenant_id,session_id),
  UNIQUE(tenant_id,token_hash), UNIQUE(tenant_id,principal_id,session_id),
@@ -116,7 +116,7 @@ CREATE INDEX sessions_principal ON identity_authority.sessions(tenant_id,princip
 CREATE TABLE identity_authority.link_intents (
  tenant_id uuid NOT NULL, intent_id uuid NOT NULL, principal_id uuid NOT NULL, session_id uuid NOT NULL,
  auth_epoch bigint NOT NULL CHECK(auth_epoch>0), membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
- source_identity uuid, source_epoch bigint, source_facts jsonb, local_authenticated_at bigint,
+ source_identity uuid, source_epoch bigint, source_facts jsonb, source_facts_sequence bigint CHECK(source_facts_sequence>0), local_authenticated_at bigint,
  CHECK (((source_identity IS NULL AND local_authenticated_at>0) OR (source_identity IS NOT NULL AND local_authenticated_at IS NULL)) IS TRUE),
  target_provider uuid NOT NULL, target_version bigint NOT NULL CHECK(target_version>0),
  browser_hash bytea NOT NULL CHECK(octet_length(browser_hash)=32),
@@ -127,7 +127,7 @@ CREATE TABLE identity_authority.link_intents (
  FOREIGN KEY(tenant_id,session_id) REFERENCES identity_authority.sessions,
  FOREIGN KEY(tenant_id,target_provider) REFERENCES identity_authority.providers,
  FOREIGN KEY(tenant_id,source_identity) REFERENCES identity_authority.external_identities,
- CHECK((source_identity IS NULL AND source_epoch IS NULL AND source_facts IS NULL) OR (source_identity IS NOT NULL AND source_epoch IS NOT NULL AND source_epoch>0 AND source_facts IS NOT NULL AND jsonb_typeof(source_facts)='object' AND octet_length(source_facts::text)<=32768 AND (source_facts->'format_version'='3'::jsonb AND jsonb_typeof(source_facts->'department_snapshot')='object') IS TRUE))
+ CHECK((source_identity IS NULL AND source_epoch IS NULL AND source_facts IS NULL AND source_facts_sequence IS NULL) OR (source_identity IS NOT NULL AND source_facts_sequence IS NOT NULL AND source_epoch IS NOT NULL AND source_epoch>0 AND source_facts IS NOT NULL AND jsonb_typeof(source_facts)='object' AND octet_length(source_facts::text)<=32768 AND (source_facts->'format_version'='3'::jsonb AND jsonb_typeof(source_facts->'department_snapshot')='object') IS TRUE))
 );
 CREATE TABLE identity_authority.oidc_transactions (
  operation_context jsonb,

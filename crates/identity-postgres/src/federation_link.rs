@@ -47,6 +47,7 @@ pub(crate) async fn intent(
             Ok::<_, rss_transactional_messaging_postgres::PgError>(db::Origin {
                 identity,
                 epoch: r.try_get("source_epoch")?,
+                facts_sequence: r.try_get("source_facts_sequence")?,
                 facts: crate::auth_facts::AuthenticationFacts::decode(r.try_get("source_facts")?)?,
             })
         })
@@ -201,8 +202,8 @@ impl Federation {
                     let id = Uuid::new_v4();
                     let expiry = now + 300;
                     sqlx::query(concat!(
-                        "INSERT INTO identity_authority.link_intents(tenant_id,intent_id,principal_id,session_id,auth_epoch,membership_epoch,source_identity,source_epoch,source_facts,target_provider,target_version,browser_hash,stage,created_at,expires_at,local_authenticated_at) VALUES($1::uuid,$2,$3,$4::uuid,$5,$6",
-                        ",$7,$8,$9,$10::uuid,$11,$12,$13,$14,$15,$16)"
+                        "INSERT INTO identity_authority.link_intents(tenant_id,intent_id,principal_id,session_id,auth_epoch,membership_epoch,source_identity,source_epoch,source_facts,target_provider,target_version,browser_hash,stage,created_at,expires_at,local_authenticated_at,source_facts_sequence) VALUES($1::uuid,$2,$3,$4::uuid,$5,$6",
+                        ",$7,$8,$9,$10::uuid,$11,$12,$13,$14,$15,$16,$17)"
                     ))
                     .bind(tenant.to_string())
                     .bind(id)
@@ -224,6 +225,7 @@ impl Federation {
                     .bind(now)
                     .bind(expiry)
                     .bind(local_authenticated_at)
+                    .bind(origin.as_ref().map(|o| o.facts_sequence))
                     .execute(&mut *c)
                     .await?;
                     db::insert_attempt(
@@ -330,7 +332,7 @@ impl Federation {
                         return Err(FederationError::Claims.into());
                     }
                     sqlx::query(concat!(
-                        "UPDATE identity_authority.link_intents SET source_facts=$3 WHERE tenant_",
+                        "UPDATE identity_authority.link_intents SET source_facts=$3,source_facts_sequence=$4 WHERE tenant_",
                         "id=$1::uuid AND intent_id=$2"
                     ))
                     .bind(tenant.to_string())
@@ -350,6 +352,7 @@ impl Federation {
                         .encode(c)
                         .await?,
                     )
+                    .bind(crate::profiles::sequence(c, tenant).await?)
                     .execute(&mut *c)
                     .await?;
                     advance(c, tenant, intent_id, LinkStage::ReauthenticationRequired).await?;
