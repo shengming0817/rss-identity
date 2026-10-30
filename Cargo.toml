@@ -9,16 +9,16 @@ version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
-rss-audit-core = { git = "https://dev.azure.com/shengming0923/rss/_git/rss-audit", rev = "b2ff40f19bf2d4518d04f4defd9abff2c0bf6e91" }
-rss-audit-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss-audit", rev = "b2ff40f19bf2d4518d04f4defd9abff2c0bf6e91", features = ["messaging"] }
+rss-audit-core = { git = "https://dev.azure.com/shengming0923/rss/_git/rss-audit", rev = "504a0d966d93bed498a028a9409175805da923bc" }
+rss-audit-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss-audit", rev = "504a0d966d93bed498a028a9409175805da923bc", features = ["messaging"] }
 tokio-util = "0.7"
 rss-identity-core = { path = "crates/identity-core" }
-rss-runtime = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "3de9b9eb7c43fad5ed39a02e41a035464224d3fb", default-features = false }
-rss-axum = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "3de9b9eb7c43fad5ed39a02e41a035464224d3fb", default-features = false }
-rss-contract = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "3de9b9eb7c43fad5ed39a02e41a035464224d3fb" }
-rss-request-context = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "3de9b9eb7c43fad5ed39a02e41a035464224d3fb" }
-rss-transactional-messaging = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "3de9b9eb7c43fad5ed39a02e41a035464224d3fb", default-features = false, features = ["producer"] }
-rss-transactional-messaging-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "3de9b9eb7c43fad5ed39a02e41a035464224d3fb", default-features = false }
+rss-runtime = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "b5bd7dfc5e8f525ae8a2b8c6f772f9b41c84c4f5", default-features = false }
+rss-axum = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "b5bd7dfc5e8f525ae8a2b8c6f772f9b41c84c4f5", default-features = false }
+rss-contract = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "b5bd7dfc5e8f525ae8a2b8c6f772f9b41c84c4f5" }
+rss-request-context = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "b5bd7dfc5e8f525ae8a2b8c6f772f9b41c84c4f5" }
+rss-transactional-messaging = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "b5bd7dfc5e8f525ae8a2b8c6f772f9b41c84c4f5", default-features = false, features = ["producer"] }
+rss-transactional-messaging-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss", rev = "b5bd7dfc5e8f525ae8a2b8c6f772f9b41c84c4f5", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
