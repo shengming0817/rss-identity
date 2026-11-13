@@ -454,6 +454,27 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
     .await?;
     f.bootstrap().await?;
     f.reset_attempts().await?;
+    let claim = f
+        .store
+        .claim_password(
+            f.key.tenant,
+            &login("admin"),
+            &source(),
+            rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+                Duration::from_secs(120),
+            ),
+        )
+        .await?;
+    let ttl: f64=sqlx::query_scalar("SELECT extract(epoch FROM claim_until-clock_timestamp())::float8 FROM identity_authority.password_attempts WHERE claim_token IS NOT NULL").fetch_one(&f.owner).await?;
+    assert!((110.0..=120.0).contains(&ttl));
+    assert_eq!(
+        f.store
+            .settle_password(claim, Err(AuthorityError::Unavailable), deadline())
+            .await
+            .err(),
+        Some(AuthorityError::Unavailable)
+    );
+    f.reset_attempts().await?;
     // Successful verification never consumes the account failure allowance.
     for _ in 0..7 {
         f.login().await?;
@@ -565,7 +586,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
     )
     .fetch_one(&f.owner)
     .await?;
-    assert_eq!(remaining, 9_872);
+    assert_eq!(remaining, 12000 - 1024);
     f.close().await;
     Ok(())
 }

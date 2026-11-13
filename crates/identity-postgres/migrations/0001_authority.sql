@@ -168,7 +168,7 @@ CREATE TABLE identity_authority.platform_challenges (
 CREATE INDEX platform_challenge_expiry ON identity_authority.platform_challenges(tenant_id,expires_at);
 CREATE TABLE identity_authority.local_profiles (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL, revision bigint NOT NULL CHECK(revision>0),
- value jsonb CHECK(value IS NULL OR (jsonb_typeof(value)='object' AND octet_length(value::text)<=98304)),
+ value jsonb CHECK(value IS NULL OR (jsonb_typeof(value)='object')),
  PRIMARY KEY(tenant_id,principal_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
 );
@@ -178,7 +178,7 @@ CREATE TABLE identity_authority.profile_observations (
  snapshot_id uuid NOT NULL, sequence bigint NOT NULL CHECK(sequence>0),
  observed_at bigint NOT NULL CHECK(observed_at>0), collected_at bigint NOT NULL CHECK(collected_at>0),
  expires_at bigint NOT NULL CHECK(expires_at>observed_at),
- value jsonb NOT NULL CHECK(jsonb_typeof(value)='object' AND octet_length(value::text)<=98304),
+ value jsonb NOT NULL CHECK(jsonb_typeof(value)='object'),
  CHECK (((source='local' AND provider_id IS NULL AND config_version IS NULL AND source_epoch IS NULL)
  OR (provider_id IS NOT NULL AND source=provider_id::text AND config_version>0 AND source_epoch>0 AND source_revision IS NULL)) IS TRUE),
  PRIMARY KEY(tenant_id,principal_id,source),

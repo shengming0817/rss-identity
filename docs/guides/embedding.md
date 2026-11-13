@@ -27,7 +27,7 @@ Cookie 登录、Bearer 登录、密码重认证及本人改密共用密码防护
 
 HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` 及 enterprise exchange 显式接收 RSS `Deadline`；整个调用链只消耗该绝对截止，`OperationDeadline` 仅在数据库等边界提供当时的剩余时长。
 
-组与部门快照各数量支持 1024；部门树深仍为 16。`with_auth_facts_budget` 选择完整 JSONB 表示的字节预算，数量合法不保证任意长名称组合都能装入预算。普通资料的 raw JSON、HTTP 包络与 JSONB 预算各有表示含义，不共用一个数值。
+组与部门快照各数量支持 1024；部门树深仍为 16。`with_auth_facts_budget` 选择完整 JSONB 表示的字节预算，数量合法不保证任意长名称组合都能装入预算。普通资料由 core 限制 raw JSON，HTTP 另限制完整请求包络；JSONB 的空格和数值展开不再受另一份不等价的文本长度上限拦截，SQL 保留对象结构约束。
 
 `with_future_skew`、`with_operation_proof_lifetime` 和 `PlatformVerifier::challenge_seconds` 持有相应时间选择。策略只决定新签发内容，已有事实、证明和在途登记执行冻结期限；任何本地预算都不能延长签名 exp、会话或已存 expiry。
 

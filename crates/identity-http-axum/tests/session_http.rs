@@ -1397,6 +1397,44 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
         .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
         .await?;
     assert_eq!(body(deleted).await?, json!({"revision":2,"value":null}));
+    // Compact JSON and PostgreSQL JSONB have different encoding overheads.
+    let mut arrays = vec![vec![0; 1023]; 32];
+    arrays.last_mut().unwrap().truncate(1019);
+    let expanded = json!({"x":arrays});
+    assert!(serde_json::to_vec(&expanded)?.len() <= rss_identity_core::profile::MAX_BYTES);
+    let value = json!({"displayName":"n".repeat(512),"username":"u".repeat(256),"email":"e".repeat(320),"extensions":expanded,"maxAgeSeconds":3600});
+    let write = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            &path,
+            Some(&cookie),
+            Some(&csrf),
+            json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":2,"value":value}),
+        ))
+        .await?;
+    assert_eq!(write.status(), StatusCode::OK);
+    let read = app
+        .clone()
+        .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+        .await?;
+    assert_eq!(body(read).await?["value"], value);
+    let (fresh_cookie, _, _) = successful_login(&app).await?;
+    let observation = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "profile",
+            Some(&fresh_cookie),
+            None,
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(observation.status(), StatusCode::OK);
+    assert_eq!(
+        body(observation).await?["profile"]["extensions"]["value"],
+        expanded
+    );
     f.policy.revoke(f.key);
     assert_eq!(
         app.clone()

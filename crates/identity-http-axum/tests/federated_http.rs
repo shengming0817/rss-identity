@@ -225,7 +225,19 @@ async fn successful(app: &Router, p: &ProviderView, user: &str) -> anyhow::Resul
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
+    f.store = Authority::connect_runtime(
+        f.runtime.clone(),
+        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?),
+        f.config()
+            .with_operation_proof_lifetime(std::num::NonZeroU32::new(600).unwrap()),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
     f.bootstrap().await?;
     let s = service(&f, Arc::new(fixture_transport(true)?));
     let p = provider(&f, &s).await?;
@@ -301,6 +313,13 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     let cb = authorize_factor(&url, "step-up", true).await?;
     let r = callback(&app, &cb, &browser).await?;
     assert_eq!(r.headers()["location"], format!("{ORIGIN}/done"));
+    let age: u64 = r.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .find_map(|p| p.trim().strip_prefix("Max-Age="))
+        .unwrap()
+        .parse()?;
+    assert!((590..=600).contains(&age));
     let operation_cookie = r.headers()["set-cookie"]
         .to_str()?
         .split(';')
