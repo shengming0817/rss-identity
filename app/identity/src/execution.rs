@@ -45,12 +45,15 @@ pub(crate) async fn scope(
                 || path.ends_with("/session/security")
             {
                 if let Some(federation) = &state.federation {
-                    if federation
+                    if let Err(error) = federation
                         .reconcile_assurance_profiles(binding, assembly::deadline(cutoff))
                         .await
-                        .is_err()
                     {
-                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        response
+                            .extensions_mut()
+                            .insert(rss_identity_http_axum::HttpFailure::Authority(error));
+                        return response;
                     }
                 }
             }
