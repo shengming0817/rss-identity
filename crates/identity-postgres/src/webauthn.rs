@@ -222,7 +222,7 @@ impl WebauthnAuthority {
                         RegistrationAuthorization::First
                             if !enrolled
                                 && !recover
-                                && loaded.recently_authenticated(Duration::from_secs(300)) =>
+                                && loaded.recently_authenticated(Duration::from_secs(u64::from(this.authority.operation_proof_seconds.get()))) =>
                         {
                             None
                         }
@@ -307,8 +307,8 @@ impl WebauthnAuthority {
             let current=read(c,&actor,id,this.config).await?;
             if current.epoch!=snapshot.epoch || !matches!(current.ceremony,Ceremony::Register{..}) {return Err(reject().into());}
             management::authorize(this.authority.policy.as_ref(),this.authority.instance,&loaded,if host_recovery{ManagementOperation::AuthorizeWebauthnRecovery}else if recover{ManagementOperation::RecoverWebauthn}else{ManagementOperation::RegisterWebauthn},Some(actor.key),c).await?;
-            if let Some(source)=authorization {let now=session_storage::now(c).await?;if authorization_time.is_none_or(|at|at>now || now-at>=300){return Err(reject().into());}crate::step_up::validate_source(c,actor.key,&source).await?;}
-            else if !host_recovery && !loaded.recently_authenticated(Duration::from_secs(300)) {return Err(reject().into());}
+            if let Some(source)=authorization {let now=session_storage::now(c).await?;if authorization_time.is_none_or(|at|at>now || now-at>=i64::from(this.authority.operation_proof_seconds.get())){return Err(reject().into());}crate::step_up::validate_source(c,actor.key,&source).await?;}
+            else if !host_recovery && !loaded.recently_authenticated(Duration::from_secs(u64::from(this.authority.operation_proof_seconds.get()))) {return Err(reject().into());}
             if recover {sqlx::query("UPDATE identity_authority.webauthn_credentials SET revoked=true,epoch=epoch+1 WHERE tenant_id=$1::uuid AND principal_id=$2 AND NOT revoked").bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).execute(&mut *c).await?;}
             let id_new=Uuid::new_v4();let hash=Sha256::digest(passkey.cred_id().as_ref());
             let inserted=sqlx::query("INSERT INTO identity_authority.webauthn_credentials(tenant_id,principal_id,id,rp,rp_config,credential_hash,value,label) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(rp,credential_hash) DO NOTHING")
@@ -415,7 +415,7 @@ impl WebauthnAuthority {
                 .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(selected.id).bind(selected.version).bind(selected.epoch).bind(serde_json::to_value(selected.passkey).map_err(|_|corrupt())?).execute(&mut *c).await?.rows_affected();
             if updated!=1 {return Err(reject().into());}
             let now=snapshot.observed_at;
-            let grant=crate::step_up::issue(c,&loaded,&context,GrantSource::Webauthn{credential:selected.id,epoch:selected.epoch,configuration:*this.generations.get(&actor.key.tenant.to_string()).ok_or_else(reject)?,rp:this.rp},now).await?;
+            let grant=crate::step_up::issue(c,&loaded,&context,GrantSource::Webauthn{credential:selected.id,epoch:selected.epoch,configuration:*this.generations.get(&actor.key.tenant.to_string()).ok_or_else(reject)?,rp:this.rp},now, this.authority.operation_proof_seconds).await?;
             if session_storage::now(c).await?>=current.expires_at{return Err(reject().into());}
             consume(c,actor.key,id).await?;
             Ok((grant,vec![crate::step_up::event(actor.key,AuthenticationAction::Verified)]))

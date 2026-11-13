@@ -71,13 +71,14 @@ pub(crate) async fn issue(
     context: &StepUpContext,
     source: GrantSource,
     authenticated_at: i64,
+    lifetime: std::num::NonZeroU32,
 ) -> Result<StepUpGrant, MutationError> {
     let now = session_storage::now(c).await?;
-    if authenticated_at <= 0 || authenticated_at > now || now - authenticated_at >= 300 {
+    if authenticated_at <= 0 || authenticated_at > now || now - authenticated_at >= i64::from(lifetime.get()) {
         return Err(reject().into());
     }
     let key = loaded.state.key();
-    let expires_at = (authenticated_at + 300)
+    let expires_at = authenticated_at.checked_add(i64::from(lifetime.get())).ok_or_else(reject)?
         .min(loaded.view.idle_expires_at)
         .min(loaded.view.absolute_expires_at);
     if expires_at <= now {

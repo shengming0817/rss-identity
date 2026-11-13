@@ -48,8 +48,7 @@ fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
                     &metadata,
                     "nonce",
                     "client",
-                    "fixture-secret"
-                )
+                    "fixture-secret", 30)
                 .is_ok(),
                 valid && key,
                 "{field}"
@@ -412,8 +411,7 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
                     &metadata,
                     "nonce",
                     "client",
-                    "fixture-secret",
-                );
+                    "fixture-secret", 30);
                 assert_eq!(verified.is_ok(), accepted && key);
                 if let Ok(claims) = verified {
                     assert_eq!(
@@ -440,8 +438,7 @@ fn malformed_profile_is_independent_of_verified_security_claims() {
         &metadata,
         "nonce",
         "client",
-        "fixture-secret",
-    )
+        "fixture-secret", 30)
     .unwrap();
     let settings = rss_identity_core::profile::ProfileSettings {
         extensions_claim: Some("attributes".into()),
@@ -466,8 +463,7 @@ fn malformed_profile_is_independent_of_verified_security_claims() {
             &metadata,
             "nonce",
             "client",
-            "fixture-secret"
-        )
+            "fixture-secret", 30)
         .is_err()
     );
 }
@@ -676,10 +672,10 @@ fn id_token_rejects_unadvertised_algorithm_and_ambiguous_key() {
     let raw = signed_token(&claims, true);
     let mut metadata = token_metadata();
     metadata.id_token_signing_alg_values_supported = vec!["HS256".into()];
-    assert!(profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret").is_err());
+    assert!(profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err());
     let mut metadata = token_metadata();
     metadata.jwks.keys.push(metadata.jwks.keys[0].clone());
-    assert!(profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret").is_err());
+    assert!(profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err());
 }
 
 fn transport_policy() -> crate::TransportPolicy {

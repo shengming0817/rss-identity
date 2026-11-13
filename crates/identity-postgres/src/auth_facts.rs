@@ -6,7 +6,7 @@ use rss_identity_core::{
         DepartmentSnapshot, DepartmentSnapshotClaim, DepartmentUnavailableReason,
         UpstreamDepartmentSnapshot,
     },
-    facts::{FactSource, FactUnavailableReason, acceptable_observation, valid_snapshot_window},
+    facts::{FactSource, FactUnavailableReason, valid_snapshot_window},
     federation::{FederationError, UpstreamClaims},
     groups::{GroupFactsMaxAge, Groups, UpstreamGroups, VERSION},
 };
@@ -54,6 +54,7 @@ impl DepartmentObservation {
         claims: &UpstreamClaims,
         mapping: Option<&DepartmentSnapshotClaim>,
         now: i64,
+        future_skew_seconds: u32,
     ) -> Result<Self, FederationError> {
         let (mapping, snapshot) = match (&claims.department_snapshot, mapping) {
             (UpstreamDepartmentSnapshot::NotConfigured, None) => {
@@ -79,7 +80,7 @@ impl DepartmentObservation {
         Ok(Self::Available {
             snapshot_id: Uuid::new_v4(),
             observed_at: claims.issued_at,
-            expires_at: mapping.expires_at(claims.issued_at, claims.expires_at, now)?,
+            expires_at: mapping.expires_at(claims.issued_at, claims.expires_at, now, future_skew_seconds)?,
             snapshot,
         })
     }
@@ -111,9 +112,10 @@ impl AuthenticationFacts {
         policy: GroupFactsMaxAge,
         department_snapshot: Option<&DepartmentSnapshotClaim>,
         now: i64,
+        future_skew_seconds: u32,
     ) -> Result<Self, FederationError> {
         claims.validate()?;
-        let expires_at = policy.expires_at(claims.issued_at, claims.expires_at, now)?;
+        let expires_at = policy.expires_at(claims.issued_at, claims.expires_at, now, future_skew_seconds)?;
         if version < 1 {
             return Err(FederationError::Claims);
         }
@@ -137,6 +139,7 @@ impl AuthenticationFacts {
                 claims,
                 department_snapshot,
                 now,
+                future_skew_seconds,
             )?),
             provider_config_version: version,
             assurance: claims.assurance.clone(),
@@ -172,13 +175,13 @@ impl AuthenticationFacts {
     }
     /// PostgreSQL jsonb::text is the storage constraint's exact representation,
     /// including JSON escaping and whitespace. Apply it to sessions, intents and grants.
-    pub async fn encode(&self, c: &mut sqlx::PgConnection) -> Result<serde_json::Value, PgError> {
+    pub async fn encode(&self, c: &mut sqlx::PgConnection, budget: std::num::NonZeroU32) -> Result<serde_json::Value, PgError> {
         let mut value = serde_json::to_value(self).map_err(|_| corrupt())?;
         let size: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
             .bind(&value)
             .fetch_one(&mut *c)
             .await?;
-        if size > 32768 {
+        if i64::from(size) > i64::from(budget.get()) {
             if !matches!(
                 &*self.department_snapshot,
                 DepartmentObservation::Available { .. }
@@ -196,7 +199,7 @@ impl AuthenticationFacts {
                 .bind(&value)
                 .fetch_one(&mut *c)
                 .await?;
-            if remaining > 32768 {
+            if i64::from(remaining) > i64::from(budget.get()) {
                 return Err(reject());
             }
         }
@@ -211,7 +214,7 @@ impl AuthenticationFacts {
                 expires_at,
                 values,
             } => {
-                if !acceptable_observation(*observed_at, now) {
+                if *observed_at <= 0 || now <= 0 {
                     return Err(reject());
                 }
                 if now < *observed_at {
@@ -261,8 +264,7 @@ mod tests {
             1,
             GroupFactsMaxAge::new(300).unwrap(),
             None,
-            1000,
-        )
+            1000, 30)
         .unwrap();
         let value = serde_json::to_value(facts).unwrap();
         assert_eq!(value["format_version"], 3);
@@ -299,8 +301,7 @@ mod tests {
                 1,
                 GroupFactsMaxAge::new(300).unwrap(),
                 Some(&mapping),
-                1000,
-            )
+                1000, 30)
             .unwrap();
             let value = serde_json::to_value(&facts).unwrap();
             assert_eq!(value["groups"]["expires_at"], 1300);
@@ -338,8 +339,7 @@ mod tests {
                     1,
                     GroupFactsMaxAge::new(300).unwrap(),
                     None,
-                    1000
-                )
+                    1000, 30)
                 .is_err()
             );
         }
@@ -350,8 +350,7 @@ mod tests {
                 1,
                 GroupFactsMaxAge::new(300).unwrap(),
                 Some(&mapping),
-                1000
-            )
+                1000, 30)
             .is_err()
         );
     }
@@ -363,8 +362,7 @@ mod tests {
             2,
             GroupFactsMaxAge::new(300).unwrap(),
             None,
-            1200,
-        )
+            1200, 30)
         .unwrap();
         let value = serde_json::to_value(&facts).unwrap();
         let restored = AuthenticationFacts::decode(value.clone()).unwrap();
@@ -396,8 +394,7 @@ mod tests {
                 2,
                 GroupFactsMaxAge::new(1).unwrap(),
                 None,
-                1200,
-            )
+                1200, 30)
             .unwrap();
             assert_eq!(
                 facts.project(source(), 1600).unwrap(),
@@ -412,8 +409,7 @@ mod tests {
             2,
             GroupFactsMaxAge::new(300).unwrap(),
             None,
-            1000,
-        )
+            1000, 30)
         .unwrap();
         let base = serde_json::to_value(facts).unwrap();
         for (key, value) in [
@@ -461,8 +457,7 @@ mod tests {
                 1,
                 GroupFactsMaxAge::new(1).unwrap(),
                 None,
-                1000,
-            )
+                1000, 30)
             .unwrap();
             let encoded = serde_json::to_value(&facts).unwrap();
             let restored = AuthenticationFacts::decode(encoded.clone()).unwrap();
@@ -490,8 +485,7 @@ mod tests {
                     1,
                     GroupFactsMaxAge::new(1).unwrap(),
                     None,
-                    999
-                )
+                    999, 30)
                 .is_err()
             );
         }

@@ -1,7 +1,5 @@
 //! Exact host-owned operation context; this value itself proves no authentication.
 use serde::{Deserialize, Serialize};
-/// Maximum age and lifetime of an operation-specific authentication proof.
-pub const OPERATION_PROOF_SECONDS: i64 = 300;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Input")]
 pub struct StepUpContext {

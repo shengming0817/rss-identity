@@ -68,7 +68,7 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
     let user = Uuid::new_v4();
     let device = Uuid::new_v4();
     let claims = json!({"iss":p.issuer(),"aud":p.app_id,"ver":"2.0","idtyp":"user","tid":p.tenant,"oid":user,"azp":p.authorized_clients[0],"iat":now-1,"nbf":now-1,"exp":now+300,"scp":"mdm.enroll other","deviceid":device});
-    let verifier = Arc::new(HttpEntra::for_loopback_test(endpoint.clone(), transport_policy(), 32768)?);
+    let verifier = Arc::new(HttpEntra::for_loopback_test(endpoint.clone(), transport_policy(), 32768, cache_policy())?);
     let result = verifier
         .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-a"), key_a)), upstream_deadline())
         .await?;
@@ -163,10 +163,11 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
     resume.notify_one();
     pending.await??;
     assert!(hot??.user == user);
-    // A new cache sees rotated public keys, rejects removed keys and duplicate key ids.
+    // The same still-valid cache refreshes once for a rotated unknown key.
     *document.write().unwrap() =
         json!({"keys":[serde_json::from_str::<Value>(include_str!("fixtures/entra-b.json"))?]});
-    let rotated = HttpEntra::for_loopback_test(endpoint.clone(), transport_policy(), 32768)?;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let rotated = verifier.clone();
     assert!(
         rotated
             .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-b"), key_b)), upstream_deadline())
@@ -182,7 +183,7 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
     let a: Value = serde_json::from_str(include_str!("fixtures/entra-a.json"))?;
     *document.write().unwrap() = json!({"keys":[a,a]});
     assert!(
-        HttpEntra::for_loopback_test(endpoint, transport_policy(), 32768)?
+        HttpEntra::for_loopback_test(endpoint, transport_policy(), 32768, cache_policy())?
             .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-a"), key_a)), upstream_deadline())
             .await
             .is_err()
@@ -198,4 +199,8 @@ fn transport_policy() -> rss_identity_oidc::TransportPolicy {
 
 fn upstream_deadline() -> rss_request_context::Deadline {
     rss_request_context::Deadline::at(std::time::Instant::now().checked_add(std::time::Duration::from_secs(30)).unwrap())
+}
+
+fn cache_policy() -> rss_identity_oidc::entra::JwksCachePolicy {
+    rss_identity_oidc::entra::JwksCachePolicy::new(Duration::from_secs(60),std::num::NonZeroUsize::new(1024).unwrap(),Duration::from_millis(20)).unwrap()
 }

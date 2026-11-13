@@ -124,8 +124,9 @@ impl DepartmentSnapshotClaim {
         issued_at: i64,
         expires_at: i64,
         now: i64,
+        future_skew_seconds: u32,
     ) -> Result<i64, FederationError> {
-        crate::facts::expires_at(self.max_age_seconds, issued_at, expires_at, now)
+        crate::facts::expires_at(self.max_age_seconds, issued_at, expires_at, now, future_skew_seconds)
     }
 }
 

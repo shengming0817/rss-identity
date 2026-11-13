@@ -207,7 +207,7 @@ fn event(
     })
 }
 pub(crate) enum SessionAuthentication {
-    LocalPassword(i64),
+    LocalPassword(i64, CredentialKind),
     Oidc(crate::federation_storage::Origin),
     Platform(crate::platform::PlatformAuthentication),
 }
@@ -218,23 +218,24 @@ pub(crate) async fn insert(
     authentication: SessionAuthentication,
     now: i64,
     policy: SessionPolicy,
-    kind: CredentialKind,
+    max_auth_facts_bytes: std::num::NonZeroU32,
 ) -> Result<(IssuedSession, SecurityEvent), transaction::MutationError> {
     let key = state.key();
-    let (source, local_authenticated_at, origin, platform) = match authentication {
-        SessionAuthentication::LocalPassword(time) if time > 0 && time <= now => {
-            ("local_password", Some(time), None, None)
+    let (source, local_authenticated_at, origin, platform, kind) = match authentication {
+        SessionAuthentication::LocalPassword(time, kind) if time > 0 && time <= now => {
+            ("local_password", Some(time), None, None, kind)
         }
-        SessionAuthentication::Oidc(origin) if kind == CredentialKind::Cookie => {
-            ("oidc", None, Some(origin), None)
+        SessionAuthentication::Oidc(origin) => {
+            ("oidc", None, Some(origin), None, CredentialKind::Cookie)
         }
-        SessionAuthentication::Platform(platform) if kind == CredentialKind::Cookie => {
+        SessionAuthentication::Platform(platform) => {
             platform.assurance()?;
             (
                 "platform",
                 None,
                 None,
                 Some(serde_json::to_value(platform).map_err(|_| corrupt())?),
+                CredentialKind::Cookie,
             )
         }
         _ => return Err(reject().into()),
@@ -246,7 +247,7 @@ pub(crate) async fn insert(
     }
     let id = SessionId::generate();
     let facts = match &origin {
-        Some(o) => Some(o.facts.encode(c).await?),
+        Some(o) => Some(o.facts.encode(c, max_auth_facts_bytes).await?),
         None => None,
     };
     sqlx::query(concat!(
@@ -318,6 +319,7 @@ impl Authority {
             budget.0 = budget.0.shortened_to(old.expires);
         }
         let policy = self.session_policy;
+        let max_auth_facts_bytes = self.max_auth_facts_bytes;
         let limits = self.profile_limits;
         let key = candidate.state.key();
         self.mutate_events(key.tenant, budget.remaining(), move |tx| {
@@ -339,10 +341,10 @@ impl Authority {
                             c,
                             state,
                             replaced,
-                            SessionAuthentication::LocalPassword(candidate.authenticated_at),
+                            SessionAuthentication::LocalPassword(candidate.authenticated_at, kind),
                             now,
                             policy,
-                            kind,
+                            max_auth_facts_bytes,
                         )
                         .await?;
                         let observation = crate::profiles::local_observation(c, key, now).await?;

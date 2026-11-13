@@ -2,26 +2,20 @@
 use crate::{ValidationError, federation::FederationError};
 use serde::{Deserialize, Serialize};
 
-/// Deployment TTL and persisted/wire snapshot window share these bounds.
-pub const MIN_TTL_SECONDS: i64 = 1;
-pub const MAX_TTL_SECONDS: i64 = 300;
-/// A future observation may authenticate, but its facts stay unavailable before iat.
-pub const MAX_FUTURE_SKEW_SECONDS: i64 = 30;
-pub fn valid_max_age(seconds: i64) -> bool {
-    (MIN_TTL_SECONDS..=MAX_TTL_SECONDS).contains(&seconds)
-}
+/// Structural lifetime range; deployment freshness is selected at issuance.
+pub fn valid_max_age(seconds: i64) -> bool { seconds > 0 }
 pub fn valid_snapshot_window(observed_at: i64, expires_at: i64) -> bool {
     observed_at > 0
         && expires_at
             .checked_sub(observed_at)
             .is_some_and(valid_max_age)
 }
-pub fn acceptable_observation(observed_at: i64, now: i64) -> bool {
+pub fn acceptable_observation(observed_at: i64, now: i64, future_skew_seconds: u32) -> bool {
     observed_at > 0
         && now > 0
         && observed_at
             .checked_sub(now)
-            .is_some_and(|ahead| ahead <= MAX_FUTURE_SKEW_SECONDS)
+            .is_some_and(|ahead| ahead <= i64::from(future_skew_seconds))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,8 +88,9 @@ pub(crate) fn expires_at(
     issued_at: i64,
     expires_at: i64,
     now: i64,
+    future_skew_seconds: u32,
 ) -> Result<i64, FederationError> {
-    if !acceptable_observation(issued_at, now) || expires_at <= issued_at || expires_at <= now {
+    if !acceptable_observation(issued_at, now, future_skew_seconds) || expires_at <= issued_at || expires_at <= now {
         return Err(FederationError::Claims);
     }
     Ok(issued_at

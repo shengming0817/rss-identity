@@ -135,14 +135,15 @@ impl Assurance {
         mode: AuthenticationMode,
         started: i64,
         now: i64,
+        future_skew_seconds: u32,
     ) -> Result<(), FederationError> {
         if started <= 0
             || now < started
-            || self.auth_time.is_some_and(|t| t > now.saturating_add(30))
+            || self.auth_time.is_some_and(|t| t > now.saturating_add(i64::from(future_skew_seconds)))
             || (mode != AuthenticationMode::Login
                 && self
                     .auth_time
-                    .is_none_or(|t| t < started.saturating_sub(30)))
+                    .is_none_or(|t| t < started.saturating_sub(i64::from(future_skew_seconds))))
             || (mode == AuthenticationMode::StepUp && self.acr != Acr::Mfa)
         {
             return Err(FederationError::Claims);

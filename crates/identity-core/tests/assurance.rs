@@ -2,12 +2,12 @@ use rss_identity_core::assurance::{Acr, Amr, Assurance, AuthenticationMode};
 #[test]
 fn normalized_facts_enforce_time_strength_and_method_invariants() {
     let facts = Assurance::new(Some(100), Acr::Mfa, vec![Amr::Otp]).unwrap();
-    assert!(facts.check(AuthenticationMode::StepUp, 100, 101).is_ok());
+    assert!(facts.check(AuthenticationMode::StepUp, 100, 101, 30).is_ok());
     for time in [69, 132] {
         assert!(
             Assurance::new(Some(time), Acr::Mfa, vec![])
                 .unwrap()
-                .check(AuthenticationMode::StepUp, 100, 101)
+                .check(AuthenticationMode::StepUp, 100, 101, 30)
                 .is_err()
         );
     }

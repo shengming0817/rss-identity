@@ -31,11 +31,11 @@ fn department_mapping_is_complete_validated_and_has_no_default_age() {
         assert_eq!(mapping.claim(), "organization_snapshot");
         assert_eq!(mapping.max_age_seconds(), seconds);
         assert_eq!(
-            mapping.expires_at(1000, 2000, 1000).unwrap(),
+            mapping.expires_at(1000, 2000, 1000, 30).unwrap(),
             1000 + seconds
         );
     }
-    for seconds in [0, 301, i64::MAX] {
+    for seconds in [0,-1] {
         assert!(DepartmentSnapshotClaim::new("organization_snapshot".into(), seconds).is_err());
     }
     for claim in [
@@ -62,13 +62,13 @@ fn department_mapping_is_complete_validated_and_has_no_default_age() {
         assert!(serde_json::from_value::<DepartmentSnapshotClaim>(value).is_err());
     }
     let mapping = DepartmentSnapshotClaim::new("organization_snapshot".into(), 60).unwrap();
-    assert_eq!(mapping.expires_at(1000, 1020, 1000).unwrap(), 1020);
-    assert_eq!(mapping.expires_at(1000, 2000, 1500).unwrap(), 1060);
-    assert_eq!(mapping.expires_at(1030, 2000, 1000).unwrap(), 1090);
-    assert!(mapping.expires_at(1031, 2000, 1000).is_err());
+    assert_eq!(mapping.expires_at(1000, 1020, 1000, 30).unwrap(), 1020);
+    assert_eq!(mapping.expires_at(1000, 2000, 1500, 30).unwrap(), 1060);
+    assert_eq!(mapping.expires_at(1030, 2000, 1000, 30).unwrap(), 1090);
+    assert!(mapping.expires_at(1031, 2000, 1000, 30).is_err());
     assert!(
         mapping
-            .expires_at(i64::MAX - 1, i64::MAX, i64::MAX - 1)
+            .expires_at(i64::MAX - 1, i64::MAX, i64::MAX - 1, 30)
             .is_err()
     );
 }

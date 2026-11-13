@@ -84,8 +84,15 @@ pub struct AuthorityConfig {
     profile_limits: rss_identity_core::profile::ProfileLimits,
     authentication: AuthenticationPolicy,
     profile_receipt_capacity: std::num::NonZeroU32,
+    future_skew_seconds: u32,
+    operation_proof_seconds: std::num::NonZeroU32,
+    max_auth_facts_bytes: std::num::NonZeroU32,
 }
 impl AuthorityConfig {
+    pub fn with_future_skew(mut self, seconds: u32) -> Self { self.future_skew_seconds=seconds; self }
+    pub fn with_operation_proof_lifetime(mut self, seconds: std::num::NonZeroU32) -> Self { self.operation_proof_seconds=seconds; self }
+    pub fn with_auth_facts_budget(mut self, bytes: std::num::NonZeroU32) -> Self { self.max_auth_facts_bytes=bytes; self }
+
     pub fn with_authentication_policy(mut self, policy: AuthenticationPolicy) -> Self {
         self.authentication = policy;
         self
@@ -134,6 +141,9 @@ impl AuthorityConfig {
             profile_limits: Default::default(),
             authentication: AuthenticationPolicy::standard(std::time::Duration::from_secs(60))?,
             profile_receipt_capacity: std::num::NonZeroU32::new(4096).expect("positive default"),
+            future_skew_seconds: 30,
+            operation_proof_seconds: std::num::NonZeroU32::new(300).expect("positive default"),
+            max_auth_facts_bytes: std::num::NonZeroU32::new(32768).expect("positive default"),
         })
     }
 }
@@ -150,6 +160,9 @@ pub struct Authority {
     profile_limits: rss_identity_core::profile::ProfileLimits,
     authentication: AuthenticationPolicy,
     profile_receipt_capacity: std::num::NonZeroU32,
+    future_skew_seconds: u32,
+    operation_proof_seconds: std::num::NonZeroU32,
+    max_auth_facts_bytes: std::num::NonZeroU32,
 }
 impl Authority {
     pub async fn connect_runtime(
@@ -216,6 +229,9 @@ impl Authority {
             profile_limits: config.profile_limits,
             authentication: config.authentication,
             profile_receipt_capacity: config.profile_receipt_capacity,
+            future_skew_seconds: config.future_skew_seconds,
+            operation_proof_seconds: config.operation_proof_seconds,
+            max_auth_facts_bytes: config.max_auth_facts_bytes,
         };
         let integrity = authority.runtime.audit.clone();
         let valid = Self::read_bundle(

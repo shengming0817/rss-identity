@@ -81,6 +81,7 @@ fn failure(stage: ProviderStage, reason: ProviderReason) -> FederationError {
 struct EgressDenied;
 /// Protocol transport with tenant credentials supplied for each exact provider version.
 pub struct HttpOidc {
+    future_skew_seconds: u32,
     policy: TransportPolicy,
     profiles: Vec<TrustedAssuranceProfile>,
     private_access: Vec<PrivateProviderAccess>,
@@ -89,6 +90,9 @@ pub struct HttpOidc {
     lookup: Option<std::sync::Arc<dyn reqwest::dns::Resolve>>,
 }
 impl HttpOidc {
+    /// Select the accepted signed-time skew; it never extends token expiry.
+    pub fn with_future_skew(mut self, seconds: u32) -> Self { self.future_skew_seconds=seconds; self }
+
     /// Production uses HTTPS and vetted public or explicitly authorized private addresses.
     /// Every DNS answer is checked against the current tenant/issuer/client permission.
     pub fn new(
@@ -139,6 +143,7 @@ impl HttpOidc {
             parse_url(&grant.issuer, false, &grant.cidrs)?;
         }
         let result = Self {
+            future_skew_seconds: 30,
             policy,
             profiles,
             private_access,
@@ -518,8 +523,7 @@ impl UpstreamOidc for HttpOidc {
                 &metadata,
                 m.nonce.as_str(),
                 client_id.as_str(),
-                credentials.client_secret(),
-            )?;
+                credentials.client_secret(), self.future_skew_seconds)?;
             let all = serde_json::to_value(&claims).map_err(|_| FederationError::Claims)?;
 
             let groups = mapped_groups(c.claims().groups.as_deref(), &all)?;

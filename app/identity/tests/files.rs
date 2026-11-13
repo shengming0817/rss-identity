@@ -138,10 +138,7 @@ fn group_facts_policy_is_required_only_when_oidc_is_configured() {
         serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
     example["oidc"] = serde_json::json!({"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[],"stateKeyFile":"/host/state.key","credentialKeyring":{"activeKeyId":"host","keys":[{"keyId":"host","path":"/host/credential.key"}]},"returnTargets":{"home":"https://identity.example.test/"}});
     for value in [
-        GroupFactsMaxAge::MIN_SECONDS - 1,
-        GroupFactsMaxAge::MIN_SECONDS,
-        GroupFactsMaxAge::MAX_SECONDS,
-        GroupFactsMaxAge::MAX_SECONDS + 1,
+        0, 1, 3600, i64::MAX,
     ] {
         let mut runtime = example.clone();
         runtime["oidc"]["groupFactsMaxAgeSeconds"] = value.into();

@@ -235,7 +235,7 @@ impl Authority {
             .ok_or(AuthorityError::Configuration)?;
         if verifier.audience().is_empty()
             || verifier.audience().len() > 256
-            || !(1..=120).contains(&verifier.challenge_seconds())
+            || verifier.challenge_seconds() == 0
             || binding.is_nil()
         {
             return Err(AuthorityError::Configuration);
@@ -266,7 +266,7 @@ impl Authority {
                 .bind(tenant.to_string()).bind(now).execute(&mut *c).await?;
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.platform_challenges WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
             if count>=10000{return Err(reject().into());}
-            let id=Uuid::new_v4();let nonce=random_secret()?;let expires=now+i64::from(verifier.challenge_seconds());
+            let id=Uuid::new_v4();let nonce=random_secret()?;let expires=now.checked_add(i64::from(verifier.challenge_seconds())).ok_or_else(reject)?;
             let sequence=crate::profiles::sequence(c,tenant).await?;
             sqlx::query("INSERT INTO identity_authority.platform_challenges(tenant_id,challenge_id,principal_id,binding,audience,nonce_hash,browser_hash,auth_epoch,membership_epoch,created_at,expires_at,profile_sequence,purpose,target) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)")
                 .bind(tenant.to_string()).bind(id).bind(resolved.account.principal.as_uuid()).bind(serde_json::to_value(&resolved).map_err(|_|corrupt())?).bind(verifier.audience()).bind(digest(&nonce).as_slice()).bind(digest(&browser).as_slice()).bind(state.epoch()).bind(state.membership_epoch()).bind(now).bind(expires).bind(sequence).bind(serde_json::to_value(&purpose).map_err(|_|corrupt())?).bind(target.map(serde_json::to_value).transpose().map_err(|_|corrupt())?).execute(c).await?;
@@ -343,6 +343,8 @@ impl Authority {
         let enterprise = self.enterprise.clone();
         let checks = self.session_checks.clone();
         let policy = self.session_policy;
+        let max_auth_facts_bytes = self.max_auth_facts_bytes;
+        let future_skew_seconds = self.future_skew_seconds;
         let limits = self.profile_limits;
         self.write_sql(tenant,budget.remaining(),move|c|Box::pin(async move{
             lock_guard(c,tenant).await?;
@@ -362,21 +364,21 @@ impl Authority {
             };
             if row.try_get::<Option<serde_json::Value>,_>("target")? != target.as_ref().map(serde_json::to_value).transpose().map_err(|_|corrupt())? {return Err(reject().into());}
             let now=crate::session_storage::now(c).await?;
-            if stored.authenticated_at.is_some_and(|t| t< context.created_at.saturating_sub(30) || t>now) {return Err(reject().into());}
+            if stored.authenticated_at.is_some_and(|t| t< context.created_at.saturating_sub(i64::from(future_skew_seconds)) || t>now) {return Err(reject().into());}
             let sequence=row.try_get("profile_sequence")?;
             let observation=match verified.profile {
                 PlatformProfile::Unavailable=>None,
                 PlatformProfile::IdentityLocal=>Some(crate::profiles::local_observation(c,key,now).await?),
                 PlatformProfile::Idp{provider,claims}=>{
                     let binding=actual.external_identity.as_ref().ok_or_else(reject)?;
-                    if provider!=binding.provider || claims.issued_at<context.created_at.saturating_sub(30){return Err(reject().into());}
+                    if provider!=binding.provider || claims.issued_at<context.created_at.saturating_sub(i64::from(future_skew_seconds)){return Err(reject().into());}
                     let view=crate::federation_storage::provider(c,tenant,provider).await?;
                     let (_,issuer,subject)=crate::federation_storage::identity(c,tenant,binding.identity_id).await?;
                     if claims.issuer!=issuer || claims.subject.storage_key()!=subject {return Err(reject().into());}
                     Some(crate::profiles::oidc_observation(&claims,&view,sequence))
                 }
             };
-            let (issued,event)=crate::sessions::insert(c,state,None,crate::sessions::SessionAuthentication::Platform(stored.clone()),now,policy,CredentialKind::Cookie).await?;
+            let (issued,event)=crate::sessions::insert(c,state,None,crate::sessions::SessionAuthentication::Platform(stored.clone()),now,policy,max_auth_facts_bytes).await?;
             let assertion = match target {
                 Some(target)=>Some(enterprise::issue(enterprise.as_ref().ok_or_else(reject)?,target,&stored,now,issued.view().absolute_expires_at.min(issued.view().idle_expires_at))?),
                 None=>None,
