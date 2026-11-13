@@ -103,7 +103,11 @@ async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()>
     let snapshot = s
         .current_session_security(
             f.store
-                .inspect_session(f.key.tenant, secret(&local), deadline())
+                .inspect_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&local),
+                    deadline(),
+                )
                 .await?,
             deadline(),
         )
@@ -130,7 +134,11 @@ async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()>
     let snapshot = s
         .current_session_security(
             f.store
-                .inspect_session(f.key.tenant, secret(&linked), deadline())
+                .inspect_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&linked),
+                    deadline(),
+                )
                 .await?,
             deadline(),
         )
@@ -182,7 +190,11 @@ async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()>
     assert!(
         s.current_session_security(
             f.store
-                .inspect_session(f.key.tenant, secret(&linked), deadline())
+                .inspect_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&linked),
+                    deadline()
+                )
                 .await?,
             deadline()
         )
@@ -196,7 +208,11 @@ async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()>
     let snapshot = s
         .current_session_security(
             f.store
-                .inspect_session(f.key.tenant, secret(&linked), deadline())
+                .inspect_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&linked),
+                    deadline(),
+                )
                 .await?,
             deadline(),
         )
@@ -204,19 +220,27 @@ async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()>
     assert_eq!(snapshot.eligible_step_up_providers.len(), 1);
     let proof = f
         .store
-        .inspect_session(f.key.tenant, secret(&linked), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&linked),
+            deadline(),
+        )
         .await?;
     s.enable_provider(actor(&f).await?, p.id, p.version, false, deadline())
         .await?;
     assert!(s.current_session_security(proof, deadline()).await.is_err());
     assert!(step_begin(&f, &s, &p, &linked).await.is_err());
     upstream.trusted_assurance.store(false, Ordering::SeqCst);
-    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+    s.reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
     let snapshot = s
         .current_session_security(
             f.store
-                .inspect_session(f.key.tenant, secret(&local), deadline())
+                .inspect_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&local),
+                    deadline(),
+                )
                 .await?,
             deadline(),
         )
@@ -237,13 +261,17 @@ async fn step_begin(
     Ok(state(
         s.begin_step_up(
             LoginRequest {
-                tenant: f.key.tenant,
+                binding: crate::support::binding(f.key.tenant),
                 provider: p.id,
                 browser: BROWSER.into(),
                 target: "home".into(),
                 replacement: Some(
                     f.store
-                        .inspect_session(f.key.tenant, secret(session), deadline())
+                        .inspect_session(
+                            crate::support::binding(f.key.tenant),
+                            secret(session),
+                            deadline(),
+                        )
                         .await?,
                 ),
                 source: source(),
@@ -297,7 +325,11 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
         let token = step_begin(&f, &s, &p, &old).await?;
         assert!(step_finish(&s, token, &old, "alice").await.is_err());
         f.store
-            .inspect_session(f.key.tenant, secret(&old), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&old),
+                deadline(),
+            )
             .await?;
     }
     *upstream.assurance.lock().unwrap() = Some(Assurance::new(
@@ -338,15 +370,16 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
     assert!(step_finish(&s, token, &old, "alice").await.is_err());
     let proof = f
         .store
-        .inspect_session(f.key.tenant, secret(&old), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&old),
+            deadline(),
+        )
         .await?;
     let context =
         rss_identity_core::step_up::StepUpContext::new("test.operation".into(), [7; 32]).unwrap();
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(f.key.tenant.to_string())
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, crate::support::binding(f.key.tenant)).await?;
     rss_identity_postgres::consume_step_up_on(&mut tx, &proof, &context, grant.expose()).await?;
     tx.rollback().await?;
     // A config edit after beginning the flow invalidates the exact persisted binding.
@@ -369,7 +402,11 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
     f.store
         .revoke_all_sessions(
             f.store
-                .inspect_session(f.key.tenant, secret(&current), deadline())
+                .inspect_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&current),
+                    deadline(),
+                )
                 .await?,
             deadline(),
         )
@@ -488,7 +525,7 @@ async fn federation_configuration_authorization_and_versions() -> anyhow::Result
     let member = f
         .store
         .verify_password(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             login("member"),
             password(),
             source(),
@@ -545,6 +582,30 @@ async fn federation_state_restart_expiry_and_replay() -> anyhow::Result<()> {
     let mut bad = begin(&f, &s, &p).await?.into_bytes();
     bad[30] = if bad[30] == b'A' { b'B' } else { b'A' };
     assert!(finish(&s, String::from_utf8(bad)?, "alice").await.is_err());
+    for (change, restore) in [
+        (
+            "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2",
+            "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=1",
+        ),
+        (
+            "UPDATE rss_transactional_messaging.storage_lineage SET lineage=decode(repeat('03',16),'hex')",
+            "UPDATE rss_transactional_messaging.storage_lineage SET lineage=decode(repeat('02',16),'hex')",
+        ),
+        (
+            "UPDATE rss_transactional_messaging.storage_lineage SET target=decode(repeat('04',16),'hex')",
+            "UPDATE rss_transactional_messaging.storage_lineage SET target=decode(repeat('01',16),'hex')",
+        ),
+    ] {
+        let pending = begin(&f, &s, &p).await?;
+        let calls = upstream.calls.load(Ordering::SeqCst);
+        sqlx::query(change).execute(&f.owner).await?;
+        assert!(matches!(
+            finish(&s, pending, "alice").await,
+            Err(AuthorityError::Fenced)
+        ));
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), calls);
+        sqlx::query(restore).execute(&f.owner).await?;
+    }
     f.close().await;
     Ok(())
 }
@@ -568,18 +629,30 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
     let second = issued(finish(&s, begin(&f, &s, &p).await?, "bob").await?);
     let a = f
         .store
-        .inspect_session(f.key.tenant, secret(&first), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&first),
+            deadline(),
+        )
         .await?;
     let b = f
         .store
-        .inspect_session(f.key.tenant, secret(&second), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&second),
+            deadline(),
+        )
         .await?;
     assert_ne!(a.account(), b.account());
     let other = enabled(&f, &s).await?;
     let across_provider = issued(finish(&s, begin(&f, &s, &other).await?, "alice").await?);
     let distinct = f
         .store
-        .inspect_session(f.key.tenant, secret(&across_provider), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&across_provider),
+            deadline(),
+        )
         .await?;
     assert_ne!(a.account(), distinct.account());
     // Seed tenant B as deployment provisioning; the product has no self-service tenant creation.
@@ -597,7 +670,13 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
     });
     let admin_b = f
         .store
-        .verify_password(tenant_b, login("admin"), password(), source(), deadline())
+        .verify_password(
+            crate::support::binding(tenant_b),
+            login("admin"),
+            password(),
+            source(),
+            deadline(),
+        )
         .await?;
     let provider_b = s
         .create_provider(
@@ -610,7 +689,13 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
         .await?;
     let admin_b = f
         .store
-        .verify_password(tenant_b, login("admin"), password(), source(), deadline())
+        .verify_password(
+            crate::support::binding(tenant_b),
+            login("admin"),
+            password(),
+            source(),
+            deadline(),
+        )
         .await?;
     let provider_b = s
         .enable_provider(
@@ -624,7 +709,7 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
     let pending_b = state(
         s.begin_login(
             LoginRequest {
-                tenant: tenant_b,
+                binding: crate::support::binding(tenant_b),
                 provider: provider_b.id,
                 browser: BROWSER.into(),
                 target: "home".into(),
@@ -638,7 +723,11 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
     let session_b = issued(finish(&s, pending_b, "alice").await?);
     let account_b = f
         .store
-        .inspect_session(tenant_b, secret(&session_b), deadline())
+        .inspect_session(
+            crate::support::binding(tenant_b),
+            secret(&session_b),
+            deadline(),
+        )
         .await?
         .account();
     assert_ne!(account_b.principal, a.account().principal);
@@ -696,7 +785,11 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
     let unverified = issued(finish(&s, begin(&f, &s, &p).await?, "unverified").await?);
     let unverified_proof = f
         .store
-        .inspect_session(f.key.tenant, secret(&unverified), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&unverified),
+            deadline(),
+        )
         .await?;
     let profile = f
         .store
@@ -710,7 +803,11 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
     );
     let fed_proof = f
         .store
-        .inspect_session(f.key.tenant, secret(&fed), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&fed),
+            deadline(),
+        )
         .await?;
     assert_ne!(unverified_proof.account(), fed_proof.account());
     let pending = begin(&f, &s, &p).await?;
@@ -733,7 +830,11 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
     ));
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&fed), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&fed),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -741,7 +842,11 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
     let current_session = issued(finish(&s, begin(&f, &s, &edited).await?, "alice").await?);
     let current_proof = f
         .store
-        .inspect_session(f.key.tenant, secret(&current_session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&current_session),
+            deadline(),
+        )
         .await?;
     for (id, groups, version) in [
         (fed_proof.view().id, serde_json::json!(["staff"]), p.version),
@@ -776,13 +881,21 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
     assert!(finish(&s, pending, "alice").await.is_err());
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&fed), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&fed),
+                deadline()
+            )
             .await
             .is_err()
     );
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&current_session), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&current_session),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -791,13 +904,21 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
         .await?;
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&fed), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&fed),
+                deadline()
+            )
             .await
             .is_err()
     );
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&local), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&local),
+                deadline()
+            )
             .await
             .is_ok()
     );
@@ -893,7 +1014,11 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
     let local_profile = linked_profile(&f, &local).await?;
     let proof = f
         .store
-        .inspect_session(f.key.tenant, secret(&local), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&local),
+            deadline(),
+        )
         .await?;
     let link = state(
         s.begin_link(
@@ -911,7 +1036,11 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
     );
     let refreshed = f
         .store
-        .refresh_session(f.key.tenant, secret(&local), deadline())
+        .refresh_session(
+            crate::support::binding(f.key.tenant),
+            secret(&local),
+            deadline(),
+        )
         .await?;
     let linked = issued(
         s.complete(
@@ -926,7 +1055,11 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
     );
     assert_eq!(
         f.store
-            .inspect_session(f.key.tenant, secret(&linked), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&linked),
+                deadline()
+            )
             .await?
             .account(),
         f.key
@@ -950,7 +1083,11 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
     let original_profile = linked_profile(&f, &fed).await?;
     let fed = f
         .store
-        .refresh_session(f.key.tenant, secret(&fed), deadline())
+        .refresh_session(
+            crate::support::binding(f.key.tenant),
+            secret(&fed),
+            deadline(),
+        )
         .await?;
     assert_eq!(
         stored_facts(&f, &fed).await?,
@@ -964,7 +1101,11 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         ));
     let proof = f
         .store
-        .inspect_session(f.key.tenant, secret(&fed), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&fed),
+            deadline(),
+        )
         .await?;
     let principal = proof.account();
     let reauth = state(
@@ -1031,14 +1172,22 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
     );
     assert_eq!(
         f.store
-            .inspect_session(f.key.tenant, secret(&linked), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&linked),
+                deadline()
+            )
             .await?
             .account(),
         principal
     );
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&fed), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&fed),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -1082,7 +1231,11 @@ async fn federation_link_conflict_logout_and_wrong_reauthentication() -> anyhow:
     let local = session(&f).await?;
     let proof = f
         .store
-        .inspect_session(f.key.tenant, secret(&local), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&local),
+            deadline(),
+        )
         .await?;
     let pending = state(
         s.begin_link(
@@ -1114,14 +1267,22 @@ async fn federation_link_conflict_logout_and_wrong_reauthentication() -> anyhow:
     assert_eq!(f.events().await?, before);
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&local), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&local),
+                deadline()
+            )
             .await
             .is_ok()
     );
     f.reset_attempts().await?;
     let proof = f
         .store
-        .inspect_session(f.key.tenant, secret(&local), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&local),
+            deadline(),
+        )
         .await?;
     let pending = state(
         s.begin_link(
@@ -1140,7 +1301,11 @@ async fn federation_link_conflict_logout_and_wrong_reauthentication() -> anyhow:
     f.store
         .revoke_current_session(
             f.store
-                .inspect_session(f.key.tenant, secret(&local), deadline())
+                .inspect_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&local),
+                    deadline(),
+                )
                 .await?,
             deadline(),
         )
@@ -1159,7 +1324,11 @@ async fn federation_link_conflict_logout_and_wrong_reauthentication() -> anyhow:
     );
     let proof = f
         .store
-        .inspect_session(f.key.tenant, secret(&fed), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&fed),
+            deadline(),
+        )
         .await?;
     let pending = state(
         s.begin_link(
@@ -1236,11 +1405,19 @@ async fn federation_concurrent_jit_rls_and_schema_drift() -> anyhow::Result<()> 
     let b = issued(b?);
     assert_eq!(
         f.store
-            .inspect_session(f.key.tenant, secret(&a), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&a),
+                deadline()
+            )
             .await?
             .account(),
         f.store
-            .inspect_session(f.key.tenant, secret(&b), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&b),
+                deadline()
+            )
             .await?
             .account()
     );
@@ -1270,7 +1447,7 @@ async fn federation_concurrent_jit_rls_and_schema_drift() -> anyhow::Result<()> 
     assert!(
         s.begin_login(
             LoginRequest {
-                tenant: rss_request_context::TenantId::parse(B)?,
+                binding: crate::support::binding(rss_request_context::TenantId::parse(B)?),
                 provider: p.id,
                 browser: BROWSER.into(),
                 target: "home".into(),
@@ -1367,7 +1544,7 @@ async fn federation_concurrent_linking_keeps_one_owner() -> anyhow::Result<()> {
         .create_session(
             f.store
                 .verify_password(
-                    f.key.tenant,
+                    crate::support::binding(f.key.tenant),
                     login("member"),
                     password(),
                     source(),
@@ -1382,7 +1559,11 @@ async fn federation_concurrent_linking_keeps_one_owner() -> anyhow::Result<()> {
     for current in [&admin, &member] {
         let proof = f
             .store
-            .inspect_session(f.key.tenant, secret(current), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(current),
+                deadline(),
+            )
             .await?;
         pending.push(state(
             s.begin_link(
@@ -1427,12 +1608,20 @@ async fn federation_concurrent_linking_keeps_one_owner() -> anyhow::Result<()> {
     let winner = issued(winner);
     let winner = f
         .store
-        .inspect_session(f.key.tenant, secret(&winner), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&winner),
+            deadline(),
+        )
         .await?
         .account();
     let loser = f
         .store
-        .inspect_session(f.key.tenant, secret(loser), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(loser),
+            deadline(),
+        )
         .await?
         .account();
     assert_ne!(winner, loser);
@@ -1497,7 +1686,11 @@ async fn federation_step_up_unknown_commit_and_event_rollback() -> anyhow::Resul
             .await?;
     assert_eq!(sessions_after, sessions_before);
     f.store
-        .inspect_session(f.key.tenant, secret(&upgraded), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&upgraded),
+            deadline(),
+        )
         .await?;
     let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.step_up_grants")
         .fetch_one(&f.owner)
@@ -1542,7 +1735,11 @@ async fn federation_step_up_unknown_commit_and_event_rollback() -> anyhow::Resul
     assert_eq!(before_sessions, after_sessions);
     assert_eq!(before_events, events(&f).await?.len());
     f.store
-        .inspect_session(f.key.tenant, secret(&current), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&current),
+            deadline(),
+        )
         .await?;
     let claimed: bool = sqlx::query_scalar(
         "SELECT claimed FROM identity_authority.oidc_transactions WHERE state_hash=$1",
@@ -1585,11 +1782,15 @@ async fn federation_assurance_change_revokes_attempts_and_sessions() -> anyhow::
     let prior = issued(finish(&s, begin(&f, &s, &p).await?, "alice").await?);
     let pending = step_begin(&f, &s, &p, &prior).await?;
     upstream.trusted_assurance.store(false, Ordering::SeqCst);
-    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+    s.reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&prior), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&prior),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -1598,12 +1799,12 @@ async fn federation_assurance_change_revokes_attempts_and_sessions() -> anyhow::
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     assert!(matches!(
-        s.reconcile_assurance_profiles(f.key.tenant, deadline())
+        s.reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
             .await,
         Err(AuthorityError::CommitUnknown(_))
     ));
     let settled_events = events(&f).await?.len();
-    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+    s.reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
     assert_eq!(
         events(&f).await?.len(),
@@ -1612,7 +1813,11 @@ async fn federation_assurance_change_revokes_attempts_and_sessions() -> anyhow::
     );
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&prior), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&prior),
+                deadline()
+            )
             .await
             .is_err(),
         "restored assurance profile must not resurrect an old session"
@@ -1621,7 +1826,7 @@ async fn federation_assurance_change_revokes_attempts_and_sessions() -> anyhow::
     sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2,decode(repeat('00',32),'hex'),1 FROM generate_series(1,9)")
         .bind(A).bind(serde_json::to_value(settings())?).execute(&f.owner).await?;
     let before_batch = events(&f).await?.len();
-    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+    s.reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
     assert_eq!(events(&f).await?.len(), before_batch + 9);
     let unprofiled: i64 = sqlx::query_scalar(
@@ -1630,7 +1835,7 @@ async fn federation_assurance_change_revokes_attempts_and_sessions() -> anyhow::
     .fetch_one(&f.owner)
     .await?;
     assert_eq!(unprofiled, 0);
-    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+    s.reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
     assert_eq!(events(&f).await?.len(), before_batch + 9);
     f.close().await;
@@ -1712,7 +1917,11 @@ async fn federation_group_snapshot_storage_bounds() -> anyhow::Result<()> {
     );
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&exact), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&exact),
+                deadline()
+            )
             .await
             .is_ok()
     );
@@ -1751,7 +1960,11 @@ async fn federation_signed_time_skew_preserves_identity() -> anyhow::Result<()> 
     // Session loading projects future groups to unavailable without rejecting identity.
     let future = f
         .store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     assert!(matches!(
         future.department_snapshot()?,
@@ -1791,7 +2004,11 @@ async fn federation_signed_time_skew_preserves_identity() -> anyhow::Result<()> 
 async fn linked_profile(f: &Fixture, issued: &IssuedSession) -> anyhow::Result<serde_json::Value> {
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(issued), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(issued),
+            deadline(),
+        )
         .await?;
     Ok(serde_json::to_value(
         f.store.current_profile(&actor, deadline()).await?.view()?,
@@ -1808,7 +2025,11 @@ async fn link_again(
     f.reset_attempts().await?;
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(old), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(old),
+            deadline(),
+        )
         .await?;
     let mut token = state(
         s.begin_link(
@@ -1893,7 +2114,11 @@ async fn federation_step_up_rechecks_expiry_after_settlement_wait() -> anyhow::R
     assert_eq!(count, 0);
     assert_eq!(events(&f).await?.len(), before);
     f.store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     f.close().await;
     Ok(())

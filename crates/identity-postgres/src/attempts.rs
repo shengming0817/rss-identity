@@ -2,6 +2,7 @@
 //! ref: vaultwarden src/ratelimit.rs@b71cb7a832080d9fdfdd97bcccf065307cf73236.
 use crate::{AttemptSource, Authority, AuthorityError, storage::lock_guard};
 use rss_request_context::TenantId;
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::policy::OperationDeadline;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row};
@@ -142,14 +143,15 @@ impl Authority {
     /// OIDC/platform reservation commits independently and is never refunded.
     pub(crate) async fn reserve(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         scope: String,
         source: &AttemptSource,
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
+        let tenant = binding.tenant();
         let source = format!("s:{}", source.value());
         let policy = self.authentication;
-        self.read(tenant, deadline, move |tx| {
+        self.read(binding, deadline, move |tx| {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {

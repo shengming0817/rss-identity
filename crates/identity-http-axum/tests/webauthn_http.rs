@@ -12,11 +12,12 @@ use std::time::Duration;
 use support::*;
 use tower::ServiceExt;
 use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
+const C: &str = "33333333-3333-4333-8333-333333333333";
 const ORIGIN: &str = "https://identity.example.test";
 fn request(path: &str, cookie: &str, csrf: Option<&str>, body: Value) -> Request<Body> {
     let mut r = Request::builder()
         .method("POST")
-        .uri(format!("/api/v1/identity/tenants/{A}/webauthn/{path}"))
+        .uri(format!("/api/v1/identity/tenants/{C}/webauthn/{path}"))
         .header("origin", ORIGIN)
         .header("cookie", cookie)
         .header("content-type", "application/json")
@@ -43,33 +44,70 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
         )?),
         f.config()
             .with_operation_proof_lifetime(std::num::NonZeroU32::new(600).unwrap()),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
     .await?;
     f.bootstrap().await?;
-    let session = f.login().await?;
-    let cookie = format!("__Host-identity-session={}", session.secret().expose());
-    let csrf = session.secret().csrf();
-    let w = WebauthnAuthority::connect(
+    let w = WebauthnAuthority::new(
         f.store.clone(),
         "identity.example.test".into(),
         url::Url::parse(ORIGIN)?,
-        deadline(),
-    )
-    .await?;
-    let app = webauthn_router(w, HttpConfig::new(ORIGIN, Duration::from_secs(30))?)?;
+    )?;
+    let app = webauthn_router(w, HttpConfig::new(ORIGIN, Duration::from_secs(30))?)?.merge(
+        rss_identity_http_axum::router(
+            f.store.clone(),
+            HttpConfig::new(ORIGIN, Duration::from_secs(30))?,
+        )?,
+    );
+    // The HTTP router, verifier and shared runtime already exist when the host registers C.
+    f.key.tenant = rss_request_context::TenantId::parse(C)?;
+    f.policy.allow(f.key);
+    sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,1)")
+        .bind(C)
+        .execute(&f.owner)
+        .await?;
+    f.provision_a().await?;
+    let login_request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/identity/tenants/{C}/login"))
+        .header("origin", ORIGIN)
+        .header("content-type", "application/json")
+        .header("x-identity-request", "1")
+        .extension(rss_identity_http_axum::ClientAddress("127.0.0.1".parse()?))
+        .body(Body::from(
+            json!({"login":"admin","password":PASSWORD}).to_string(),
+        ))?;
+    let login_response = app
+        .clone()
+        .oneshot(crate::request_support::scoped(login_request))
+        .await?;
+    assert_eq!(login_response.status(), StatusCode::OK);
+    let session = f.login().await?;
+    let cookie = format!("__Host-identity-session={}", session.secret().expose());
+    let csrf = session.secret().csrf();
     let body = json!({"label":"browser key","recover":false});
     assert!(
         app.clone()
-            .oneshot(request("register/begin", &cookie, None, body.clone()))
+            .oneshot(crate::request_support::scoped(request(
+                "register/begin",
+                &cookie,
+                None,
+                body.clone()
+            )))
             .await?
             .status()
             .is_client_error()
     );
     let r = app
         .clone()
-        .oneshot(request("register/begin", &cookie, Some(&csrf), body))
+        .oneshot(crate::request_support::scoped(request(
+            "register/begin",
+            &cookie,
+            Some(&csrf),
+            body,
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(r.headers()["cache-control"], "no-store");
@@ -83,30 +121,35 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
     let body = json!({"id":start["id"],"response":response});
     let r = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "register/finish",
             &cookie,
             Some(&csrf),
             body.clone(),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), 200);
     let credential = json_body(r).await?;
     assert!(
         app.clone()
-            .oneshot(request("register/finish", &cookie, Some(&csrf), body))
+            .oneshot(crate::request_support::scoped(request(
+                "register/finish",
+                &cookie,
+                Some(&csrf),
+                body
+            )))
             .await?
             .status()
             .is_client_error()
     );
     let r = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "authenticate/begin",
             &cookie,
             Some(&csrf),
             json!({"operation":{"kind":"remove","credential":credential["id"]}}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), 200);
     let start = json_body(r).await?;
@@ -116,12 +159,12 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
     )?;
     let r = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "authenticate/finish",
             &cookie,
             Some(&csrf),
             json!({"id":start["id"],"response":response}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), 200);
     let age: u64 = r.headers()["set-cookie"]
@@ -140,7 +183,12 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
     assert!(r.headers()["set-cookie"].to_str()?.contains("HttpOnly"));
     let cancelled = app
         .clone()
-        .oneshot(request("operation/cancel", &proof, Some(&csrf), json!({})))
+        .oneshot(crate::request_support::scoped(request(
+            "operation/cancel",
+            &proof,
+            Some(&csrf),
+            json!({}),
+        )))
         .await?;
     assert_eq!(cancelled.status(), 200);
     assert!(
@@ -151,19 +199,24 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
     let removal_path = format!("credentials/{}/remove", credential["id"].as_str().unwrap());
     assert!(
         app.clone()
-            .oneshot(request(&removal_path, &proof, Some(&csrf), json!({})))
+            .oneshot(crate::request_support::scoped(request(
+                &removal_path,
+                &proof,
+                Some(&csrf),
+                json!({})
+            )))
             .await?
             .status()
             .is_client_error()
     );
     let r = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "authenticate/begin",
             &cookie,
             Some(&csrf),
             json!({"operation":{"kind":"remove","credential":credential["id"]}}),
-        ))
+        )))
         .await?;
     let start = json_body(r).await?;
     let response = authenticator.do_authentication(
@@ -172,12 +225,12 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
     )?;
     let r = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "authenticate/finish",
             &cookie,
             Some(&csrf),
             json!({"id":start["id"],"response":response}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), 200);
     let proof = format!(
@@ -191,24 +244,42 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
     let path = format!("credentials/{}/remove", credential["id"].as_str().unwrap());
     assert!(
         app.clone()
-            .oneshot(request(&path, &cookie, Some(&csrf), json!({})))
+            .oneshot(crate::request_support::scoped(request(
+                &path,
+                &cookie,
+                Some(&csrf),
+                json!({})
+            )))
             .await?
             .status()
             .is_client_error()
     );
     assert_eq!(
         app.clone()
-            .oneshot(request(&path, &proof, Some(&csrf), json!({})))
+            .oneshot(crate::request_support::scoped(request(
+                &path,
+                &proof,
+                Some(&csrf),
+                json!({})
+            )))
             .await?
             .status(),
         200
     );
     assert!(
-        app.oneshot(request(&path, &proof, Some(&csrf), json!({})))
-            .await?
-            .status()
-            .is_client_error()
+        app.oneshot(crate::request_support::scoped(request(
+            &path,
+            &proof,
+            Some(&csrf),
+            json!({})
+        )))
+        .await?
+        .status()
+        .is_client_error()
     );
     f.close().await;
     Ok(())
 }
+
+#[path = "request_support/mod.rs"]
+mod request_support;

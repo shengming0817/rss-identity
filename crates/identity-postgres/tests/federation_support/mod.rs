@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use crate::support::*;
 use rss_identity_core::federation::*;
+use rss_identity_postgres::StateSigner;
 use rss_identity_postgres::*;
 use rss_request_context::TenantId;
 use std::{
@@ -275,7 +276,7 @@ pub async fn begin(f: &Fixture, s: &Federation, p: &ProviderView) -> anyhow::Res
     Ok(state(
         s.begin_login(
             rss_identity_postgres::LoginRequest {
-                tenant: f.key.tenant,
+                binding: crate::support::binding(f.key.tenant),
                 provider: p.id,
                 browser: BROWSER.into(),
                 target: "home".into(),

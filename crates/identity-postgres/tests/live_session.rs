@@ -13,10 +13,13 @@ async fn transaction<'a>(
     tenant: &str,
 ) -> anyhow::Result<Transaction<'a, Postgres>> {
     let mut tx = c.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(tenant)
-        .execute(&mut *tx)
-        .await?;
+    if let Ok(tenant) = rss_request_context::TenantId::parse(tenant) {
+        crate::support::fence(&mut tx, binding(tenant)).await?;
+    } else {
+        sqlx::query("SELECT set_config('rss.tenant_id','',true)")
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("SET LOCAL ROLE identity_runtime")
         .execute(&mut *tx)
         .await?;
@@ -25,7 +28,7 @@ async fn transaction<'a>(
 async fn actor(f: &Fixture, issued: &IssuedSession) -> anyhow::Result<AuthenticatedSession> {
     Ok(f.store
         .inspect_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             SessionSecret::parse(issued.secret().expose().into())?,
             deadline(),
         )
@@ -74,7 +77,7 @@ async fn host_admission_is_passive_and_transaction_scoped() -> anyhow::Result<()
     let bearer = f
         .store
         .login_local_bearer(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             login("admin"),
             password(),
             source(),
@@ -84,7 +87,7 @@ async fn host_admission_is_passive_and_transaction_scoped() -> anyhow::Result<()
     let bearer_actor = f
         .store
         .inspect_bearer(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             BearerSecret::parse(bearer.secret().expose().into())?,
             deadline(),
         )
@@ -149,10 +152,7 @@ async fn host_admission_is_passive_and_transaction_scoped() -> anyhow::Result<()
         sqlx::query(sqlx::AssertSqlSafe(isolation))
             .execute(&mut *tx)
             .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(A)
-            .execute(&mut *tx)
-            .await?;
+        crate::support::fence(&mut tx, binding(rss_request_context::TenantId::parse(A)?)).await?;
         assert!(
             recheck_authenticated_session_on(&mut tx, &cookie_actor)
                 .await
@@ -260,7 +260,7 @@ async fn host_admission_rejects_stale_credentials_and_subjects() -> anyhow::Resu
     let rotated = f
         .store
         .refresh_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             SessionSecret::parse(issued.secret().expose().into())?,
             deadline(),
         )
@@ -287,10 +287,7 @@ async fn host_admission_rejects_stale_credentials_and_subjects() -> anyhow::Resu
         sqlx::query(sqlx::AssertSqlSafe(mutation))
             .execute(&mut *tx)
             .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(A)
-            .execute(&mut *tx)
-            .await?;
+        crate::support::fence(&mut tx, binding(rss_request_context::TenantId::parse(A)?)).await?;
         assert!(
             recheck_authenticated_session_on(&mut tx, &proof)
                 .await
@@ -300,7 +297,12 @@ async fn host_admission_rejects_stale_credentials_and_subjects() -> anyhow::Resu
         tx.rollback().await?;
     }
     f.maintenance
-        .recover_local_password(f.key, password(), deadline())
+        .recover_local_password(
+            crate::support::binding((f.key).tenant),
+            f.key,
+            password(),
+            deadline(),
+        )
         .await?;
     assert!(!accepted(&f, &proof).await?);
     f.close().await;
@@ -394,10 +396,7 @@ async fn host_admission_rechecks_federated_source() -> anyhow::Result<()> {
         sqlx::query(sqlx::AssertSqlSafe(mutation))
             .execute(&mut *tx)
             .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(A)
-            .execute(&mut *tx)
-            .await?;
+        crate::support::fence(&mut tx, binding(rss_request_context::TenantId::parse(A)?)).await?;
         assert!(
             recheck_authenticated_session_on(&mut tx, &proof)
                 .await
@@ -418,7 +417,7 @@ async fn host_admission_checks_expiry_after_guard_wait() -> anyhow::Result<()> {
     let proof = f
         .store
         .inspect_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             SessionSecret::parse(issued.secret().expose().into())?,
             rss_transactional_messaging::policy::OperationDeadline::from_remaining(
                 Duration::from_secs(2),

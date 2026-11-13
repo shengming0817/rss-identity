@@ -53,7 +53,7 @@ def stage(data,out,images,final):
     fields(images,{'identity','web','postgres','runtime'},'images')
     require(all(re.fullmatch(r'sha256:[a-f0-9]{64}',v) for v in images.values()),'immutable image IDs required')
     c=copy.deepcopy(data['runtime'])
-    fields(c,{'formatVersion','instanceId','publicOrigin','bootstrapAccounts','database','storage','listen','publicGateway','budgets','oidc','authority','passwordWork','http'},'runtime')
+    fields(c,{'formatVersion','instanceId','publicOrigin','bootstrapAccounts','database','storage','listen','publicGateway','budgets','oidc','authority','passwordWork','http','webauthnGeneration'},'runtime')
     require(c['formatVersion']==5,'unsupported runtime config')
     origin=c['publicOrigin'];u=urlsplit(origin)
     require(u.scheme=='https' and u.hostname and not u.username and not u.password and not u.path and not u.query and not u.fragment and u.port is None and re.fullmatch(r'[a-z0-9.-]+',u.hostname),'canonical HTTPS origin required')
@@ -61,8 +61,9 @@ def stage(data,out,images,final):
     gateway,identity,postgres=(str(network.network_address+i) for i in (2,3,4))
     require(c['listen']=='0.0.0.0:8080' and c['publicGateway']==gateway,'ingress mismatch')
     require(c['database']['host']=='postgres' and c['database']['database']=='identity' and c['database']['user']=='identity_runtime' and c['database']['port']==5432,'database identity mismatch')
-    tenants=c['storage']['tenants'];accounts=c['bootstrapAccounts']
-    require(len(tenants)==len(set(tenants)) and 1<=len(tenants)<=1024 and len(accounts)==len(tenants) and all(sum(a['tenantId']==t for a in accounts)==1 for t in tenants),'one bootstrap account per tenant required')
+    accounts=c['bootstrapAccounts'];tenants=[a['tenantId'] for a in accounts]
+    require(bool(accounts) and len(tenants)==len(set(tenants)),'one bootstrap account per initialization target required')
+    targets=[{'tenantId':t,'generation':c['storage']['generation']} for t in tenants]
     os.chown(out,UID,UID)
     inputs=out/'input';inputs.mkdir(mode=0o700);os.chown(inputs,UID,UID)
     mounts={}
@@ -88,7 +89,7 @@ def stage(data,out,images,final):
     owner_db={**c['database'],'user':'postgres','passwordFile':mount(data['ownerPasswordFile'],'owner-password',True)}
     common={k:c[k] for k in ['formatVersion','instanceId','storage','budgets']}
     write('maintenance.json',json.dumps({**common,'bootstrapAccounts':c['bootstrapAccounts'],'database':maintenance_db,'authority':c['authority'],'passwordWork':c['passwordWork']}))
-    write('migration.json',json.dumps({**common,'database':owner_db,'runtimeRole':'identity_runtime','maintenanceRole':'identity_maintenance','audit':audit_install}))
+    write('migration.json',json.dumps({**common,'database':owner_db,'runtimeRole':'identity_runtime','maintenanceRole':'identity_maintenance','audit':audit_install,'targets':targets}))
     write('ui.json',json.dumps({'canonicalOrigin':origin,'oidcEnabled':c['oidc'] is not None}))
     def literal(value):return "'"+value.replace("'","''")+"'"
     sql='SET standard_conforming_strings=on;\nCREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS;\n'

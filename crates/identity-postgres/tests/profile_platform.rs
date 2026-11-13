@@ -25,7 +25,7 @@ async fn proof(
 ) -> anyhow::Result<AuthenticatedSession> {
     Ok(store
         .inspect_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             rss_identity_core::session::SessionSecret::parse(s.secret().expose().into())?,
             deadline(),
         )
@@ -153,7 +153,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
     let refreshed = f
         .store
         .refresh_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             rss_identity_core::session::SessionSecret::parse(second.secret().expose().into())?,
             deadline(),
         )
@@ -454,6 +454,7 @@ async fn platform_host_for(
             .unwrap(),
         ),
         f.config().with_platform(verifier.clone()),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -470,7 +471,7 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
     let browser = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let challenge = store
         .begin_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             binding.binding_id,
             PlatformPurpose::BrowserLogin,
             browser.into(),
@@ -488,7 +489,7 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
         .to_vec();
     let (a, b) = tokio::join!(
         store.complete_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             challenge.id,
             challenge.nonce.clone(),
             browser.into(),
@@ -496,7 +497,7 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
             deadline()
         ),
         store.complete_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             challenge.id,
             challenge.nonce,
             browser.into(),
@@ -532,7 +533,7 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
     assert!(
         f.store
             .inspect_session(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
                 deadline()
             )
@@ -545,7 +546,7 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
     assert!(matches!(
         store
             .inspect_session(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
                 deadline()
             )
@@ -554,7 +555,11 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
     ));
     assert!(matches!(
         store
-            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .recheck_session_reference(
+                crate::support::binding(f.key.tenant),
+                &reference,
+                deadline()
+            )
             .await,
         Err(AuthorityError::RolledBack(StorageFailure::Transient))
     ));
@@ -568,14 +573,18 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
     assert!(proof(&store, &f, &issued).await.is_err());
     assert!(
         store
-            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .recheck_session_reference(
+                crate::support::binding(f.key.tenant),
+                &reference,
+                deadline()
+            )
             .await
             .is_err()
     );
     assert!(
         store
             .refresh_session(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
                 deadline()
             )
@@ -590,7 +599,7 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
     );
     let local = store
         .login_local(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             login("admin"),
             password(),
             source(),
@@ -679,7 +688,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
     let browser = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA";
     let begin = store
         .begin_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             verifier.binding.binding_id,
             PlatformPurpose::BrowserLogin,
             browser.into(),
@@ -691,7 +700,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
     assert!(
         store
             .complete_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 begin.id,
                 "x".repeat(43),
                 browser.into(),
@@ -705,7 +714,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
     assert!(
         store
             .complete_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 begin.id,
                 begin.nonce.clone(),
                 "x".repeat(43),
@@ -719,7 +728,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
     assert!(
         store
             .complete_platform_login(
-                rss_request_context::TenantId::parse(B)?,
+                crate::support::binding(rss_request_context::TenantId::parse(B)?),
                 begin.id,
                 begin.nonce.clone(),
                 browser.into(),
@@ -733,7 +742,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
     assert!(
         store
             .complete_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 begin.id,
                 begin.nonce.clone(),
                 browser.into(),
@@ -748,7 +757,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
     assert!(matches!(
         store
             .complete_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 begin.id,
                 begin.nonce.clone(),
                 browser.into(),
@@ -762,7 +771,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
     assert!(
         store
             .complete_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 begin.id,
                 begin.nonce,
                 browser.into(),
@@ -786,7 +795,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
     assert_eq!(observations, 1);
     let begin = store
         .begin_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             verifier.binding.binding_id,
             PlatformPurpose::BrowserLogin,
             browser.into(),
@@ -799,7 +808,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
     assert!(
         store
             .complete_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 begin.id,
                 begin.nonce.clone(),
                 browser.into(),
@@ -826,7 +835,7 @@ async fn platform_binding_errors_and_uncertain_commit_never_issue_a_secret() -> 
     assert!(
         store
             .complete_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 begin.id,
                 begin.nonce,
                 browser.into(),
@@ -890,7 +899,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
     };
     let challenge = store
         .begin_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             verifier.binding.binding_id,
             PlatformPurpose::BrowserLogin,
             BROWSER.into(),
@@ -917,7 +926,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
         assert!(
             store
                 .complete_platform_login(
-                    f.key.tenant,
+                    crate::support::binding(f.key.tenant),
                     challenge.id,
                     challenge.nonce.clone(),
                     BROWSER.into(),
@@ -932,7 +941,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
     *verifier.idp.lock().unwrap() = Some((provider.id, claims));
     let platform = store
         .complete_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             challenge.id,
             challenge.nonce,
             BROWSER.into(),
@@ -989,7 +998,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
     .await?;
     let unlinked = store
         .begin_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             verifier.binding.binding_id,
             PlatformPurpose::BrowserLogin,
             BROWSER.into(),
@@ -1009,7 +1018,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
     assert!(
         store
             .complete_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 unlinked.id,
                 unlinked.nonce,
                 BROWSER.into(),
@@ -1028,7 +1037,11 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
     assert!(proof(&store, &f, &platform).await.is_err());
     assert!(
         store
-            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .recheck_session_reference(
+                crate::support::binding(f.key.tenant),
+                &reference,
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -1042,7 +1055,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
     let actor = proof(&store, &f, &platform).await?;
     let pending = store
         .begin_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             verifier.binding.binding_id,
             PlatformPurpose::BrowserLogin,
             BROWSER.into(),
@@ -1067,7 +1080,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
     assert!(
         store
             .complete_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 pending.id,
                 pending.nonce,
                 BROWSER.into(),
@@ -1081,13 +1094,21 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
     assert!(proof(&store, &f, &platform).await.is_err());
     assert!(
         store
-            .refresh_session(f.key.tenant, secret(&platform), deadline())
+            .refresh_session(
+                crate::support::binding(f.key.tenant),
+                secret(&platform),
+                deadline()
+            )
             .await
             .is_err()
     );
     assert!(
         store
-            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .recheck_session_reference(
+                crate::support::binding(f.key.tenant),
+                &reference,
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -1408,7 +1429,7 @@ async fn platform_evidence_admission_preserves_authentication_time() -> anyhow::
     ] {
         let challenge = store
             .begin_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 verifier.binding.binding_id,
                 PlatformPurpose::BrowserLogin,
                 browser.into(),
@@ -1433,7 +1454,7 @@ async fn platform_evidence_admission_preserves_authentication_time() -> anyhow::
             .to_vec();
         let result = store
             .complete_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 challenge.id,
                 challenge.nonce,
                 browser.into(),
@@ -1476,6 +1497,7 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
             std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
         )?),
         selected(8192),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -1528,6 +1550,7 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
         )?),
         f.config()
             .with_profile_receipt_capacity(std::num::NonZeroU32::new(1).unwrap()),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -1577,6 +1600,7 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
         )?),
         f.config()
             .with_profile_receipt_capacity(std::num::NonZeroU32::new(8193).unwrap()),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -1654,7 +1678,7 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
     let _other_session = f
         .store
         .login_local(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             support::login("other-person"),
             password(),
             source(),
@@ -1672,6 +1696,7 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
             .unwrap(),
         ),
         f.config(),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         Arc::new(SelfProfiles),
         deadline(),
     )
@@ -1791,8 +1816,10 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
     assert!(!trusted_reference(&f.store, f.key.tenant, wrong).await?.1);
     assert!(
         f.store
-            .with_session_references_read(f.key.tenant, deadline(), |mut read| Box::pin(
-                async move {
+            .with_session_references_read(
+                crate::support::binding(f.key.tenant),
+                deadline(),
+                |mut read| Box::pin(async move {
                     read.query(
                         "SELECT login FROM identity_personnel",
                         Default::default(),
@@ -1800,35 +1827,41 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
                     )
                     .await
                     .map(|_| ())
-                }
-            ))
+                })
+            )
             .await
             .is_err()
     );
     sqlx::raw_sql("CREATE FUNCTION public.reference_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.guard SET personnel_revision=personnel_revision+1 RETURNING personnel_revision'").execute(&f.owner).await?;
     assert!(
         f.store
-            .with_session_references_read(f.key.tenant, deadline(), |mut read| Box::pin(
-                async move {
+            .with_session_references_read(
+                crate::support::binding(f.key.tenant),
+                deadline(),
+                |mut read| Box::pin(async move {
                     read.query("SELECT public.reference_write()", Default::default(), 1)
                         .await
                         .map(|_| ())
-                }
-            ))
+                })
+            )
             .await
             .is_err()
     );
     let other = rss_request_context::TenantId::parse(&Uuid::new_v4().to_string())?;
     assert!(
         f.store
-            .with_session_references_read(other, deadline(), |_| Box::pin(async { Ok(()) }))
+            .with_session_references_read(crate::support::binding(other), deadline(), |_| Box::pin(
+                async { Ok(()) }
+            ))
             .await
             .is_err()
     );
     assert!(
         f.store
-            .with_session_references_read(f.key.tenant, deadline(), |mut read| Box::pin(
-                async move {
+            .with_session_references_read(
+                crate::support::binding(f.key.tenant),
+                deadline(),
+                |mut read| Box::pin(async move {
                     read.query(
                         "SELECT n FROM generate_series(1,2) n",
                         Default::default(),
@@ -1836,8 +1869,8 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
                     )
                     .await
                     .map(|_| ())
-                }
-            ))
+                })
+            )
             .await
             .is_err()
     );
@@ -1860,7 +1893,7 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
         .bind(f.key.tenant.to_string()).execute(&f.owner).await?;
     assert!(changed.rows_affected() > 0);
     f.store
-        .with_session_references_read(f.key.tenant, deadline(), |read| {
+        .with_session_references_read(crate::support::binding(f.key.tenant), deadline(), |read| {
             Box::pin(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
                 read.revision().map(|_| ())
@@ -1871,10 +1904,14 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
         .bind(f.key.tenant.to_string()).bind(issued.view().id.as_uuid()).execute(&f.owner).await?;
     assert!(
         f.store
-            .with_session_references_read(f.key.tenant, deadline(), |read| Box::pin(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-                read.revision().map(|_| ())
-            }))
+            .with_session_references_read(
+                crate::support::binding(f.key.tenant),
+                deadline(),
+                |read| Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                    read.revision().map(|_| ())
+                })
+            )
             .await
             .is_err()
     );
@@ -1890,7 +1927,7 @@ async fn trusted_reference(
     tenant: rss_request_context::TenantId,
     reference: serde_json::Value,
 ) -> Result<(PersonnelRevision, bool), AuthorityError> {
-    store.with_session_references_read(tenant, deadline(), move |mut read| Box::pin(async move {
+    store.with_session_references_read(crate::support::binding(tenant), deadline(), move |mut read| Box::pin(async move {
             use sqlx::Arguments;
             let revision = read.revision()?;
             assert!(!revision.logins);
@@ -2178,7 +2215,7 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
     let browser = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let challenge = store
         .begin_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             verifier.binding.binding_id,
             PlatformPurpose::BrowserLogin,
             browser.into(),
@@ -2193,7 +2230,7 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
         .to_vec();
     let issued = store
         .complete_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             challenge.id,
             challenge.nonce,
             browser.into(),
@@ -2204,10 +2241,7 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
         .session;
     let actor = proof(&store, &f, &issued).await?;
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(A)
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, binding(f.key.tenant)).await?;
     sqlx::query("SET LOCAL ROLE identity_runtime")
         .execute(&mut *tx)
         .await?;
@@ -2237,10 +2271,7 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
     tx.rollback().await?;
     revoke.await??;
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(A)
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, binding(f.key.tenant)).await?;
     assert!(
         recheck_authenticated_session_on(&mut tx, &actor)
             .await
@@ -2254,10 +2285,7 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
         .unavailable
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(A)
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, binding(f.key.tenant)).await?;
     assert!(
         recheck_authenticated_session_on(&mut tx, &actor)
             .await
@@ -2275,10 +2303,7 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
         sqlx::query(sqlx::AssertSqlSafe(change))
             .execute(&mut *tx)
             .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(A)
-            .execute(&mut *tx)
-            .await?;
+        crate::support::fence(&mut tx, binding(f.key.tenant)).await?;
         assert!(
             recheck_authenticated_session_on(&mut tx, &actor)
                 .await

@@ -40,15 +40,11 @@ def check_backup(path,backend_version=None,config=None):
         if not isinstance(value,str) or str(uuid.UUID(value))!=value or uuid.UUID(value).int==0:raise Rejection('backup-uuid')
     identity(record['instanceId'])
     storage=record['storage']
-    if not isinstance(storage,dict) or set(storage)!={'target','lineage','tenants','generation'}:raise Rejection('backup-storage-fields')
+    if not isinstance(storage,dict) or set(storage)!={'target','lineage','generation'}:raise Rejection('backup-storage-fields')
     for name in ['target','lineage']:
         v=storage[name]
         if not isinstance(v,list) or len(v)!=16 or any(type(b) is not int or not 0<=b<=255 for b in v) or not any(v):raise Rejection('backup-storage-identity')
     if type(storage['generation']) is not int or not 0<storage['generation']<=2**63-1:raise Rejection('backup-epoch')
-    tenants=storage['tenants']
-    if not isinstance(tenants,list) or not tenants:raise Rejection('backup-tenants')
-    for tenant in tenants:identity(tenant)
-    if len(set(tenants))!=len(tenants):raise Rejection('backup-tenants')
     if record['sha256']!=sha(path):raise Rejection('backup-digest')
     if backend_version is not None and record['backendVersion']!=backend_version:raise Rejection('backup-backend-version-mismatch')
     if config is not None and (record['instanceId'],storage)!=(config['instanceId'],config['storage']):raise Rejection('restore-binding-mismatch')
@@ -156,7 +152,8 @@ def execute(args,backend_version,compose,directory,record):
     elif args.command in ['rekey','verify-keys']:
         closed()
         # --verify-keys requires the generated keyring to contain only the new key.
-        migration('--'+args.command,'/run/config/keyring.json')
+        targets=args.targets.resolve(strict=True)
+        run('run','--rm','--volume',str(targets)+':/run/targets.json:ro','migrate','--config','/run/config/migration.json','--'+args.command,'/run/config/keyring.json','/run/targets.json',mutating=args.command=='rekey')
     elif args.command=='backup':
         closed();migration('--verify')
         path=args.backup.resolve()
@@ -181,7 +178,8 @@ def execute(args,backend_version,compose,directory,record):
 def main():
     p=argparse.ArgumentParser();p.add_argument('--deployment',type=Path,required=True);p.add_argument('--project',required=True)
     sub=p.add_subparsers(dest='command',required=True)
-    for name in ['install','verify','open','close','rekey','verify-keys']:sub.add_parser(name)
+    for name in ['install','verify','open','close']:sub.add_parser(name)
+    for name in ['rekey','verify-keys']:sub.add_parser(name).add_argument('targets',type=Path)
     for name in ['backup','check-backup','restore']:sub.add_parser(name).add_argument('backup',type=Path)
     for name in ['initialize','recover']:
         command=sub.add_parser(name);command.add_argument('tenant');command.add_argument('account',help='login for initialize; principal UUID for recover');command.add_argument('password',type=Path)

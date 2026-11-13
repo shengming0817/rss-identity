@@ -64,13 +64,13 @@ async fn json_body(r: Response<Body>) -> anyhow::Result<Value> {
 async fn login_as(app: &Router, name: &str, pw: &str) -> anyhow::Result<(String, String)> {
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("/api/v1/identity/tenants/{A}/login"),
             "",
             "",
             json!({"login":name,"password":pw}),
-        ))
+        )))
         .await?;
     anyhow::ensure!(r.status() == StatusCode::OK, "login failed: {}", r.status());
     let cookie = r.headers()["set-cookie"]
@@ -95,13 +95,13 @@ async fn account_query_projection_detail_and_cursor_context() -> anyhow::Result<
     for name in ["alpha", "beta", "gamma"] {
         let response = app
             .clone()
-            .oneshot(req(
+            .oneshot(crate::request_support::scoped(req(
                 "POST",
                 &base,
                 &cookie,
                 &csrf,
                 json!({"login":name,"password":PASSWORD}),
-            ))
+            )))
             .await?;
         assert_eq!(response.status(), StatusCode::CREATED);
     }
@@ -121,13 +121,13 @@ async fn account_query_projection_detail_and_cursor_context() -> anyhow::Result<
             .unwrap_or_default();
         let response = app
             .clone()
-            .oneshot(req(
+            .oneshot(crate::request_support::scoped(req(
                 "GET",
                 &format!("{base}?{query}{suffix}"),
                 &cookie,
                 "",
                 json!(null),
-            ))
+            )))
             .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let page = json_body(response).await?;
@@ -147,25 +147,25 @@ async fn account_query_projection_detail_and_cursor_context() -> anyhow::Result<
     assert_eq!(seen, ["gamma", "beta", "alpha"]);
     let detail = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/{principal}"),
             &cookie,
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(detail.status(), StatusCode::OK);
     assert_eq!(json_body(detail).await?["hasLocalPassword"], true);
     let changed = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}?limit=1&cursor={}", first_cursor.unwrap()),
             &cookie,
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(changed.status(), StatusCode::CONFLICT);
     assert_eq!(
@@ -181,26 +181,26 @@ async fn account_query_projection_detail_and_cursor_context() -> anyhow::Result<
     ] {
         let response = app
             .clone()
-            .oneshot(req(
+            .oneshot(crate::request_support::scoped(req(
                 "GET",
                 &format!("{base}?{query}"),
                 &cookie,
                 "",
                 json!(null),
-            ))
+            )))
             .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
     f.policy.revoke(f.key);
     let denied = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/{principal}"),
             &cookie,
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
     f.close().await;
@@ -217,13 +217,13 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     let base = format!("/api/v1/identity/tenants/{A}");
     let security = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/session/security"),
             &cookie,
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(security.status(), StatusCode::OK);
     assert!(
@@ -237,35 +237,35 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     assert_eq!(facts["eligibleStepUpProviders"], json!([]));
     let absent = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/session/security"),
             "",
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(absent.status(), StatusCode::UNAUTHORIZED);
     let other = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("/api/v1/identity/tenants/{B}/session/security"),
             &cookie,
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(other.status(), StatusCode::UNAUTHORIZED);
     let duplicate = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{base}/accounts"),
             &cookie,
             &csrf,
             json!({"login":"admin","password":"different strong password"}),
-        ))
+        )))
         .await?;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
     assert_eq!(
@@ -274,25 +274,25 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     );
     let current = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/session"),
             &cookie,
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(current.status(), StatusCode::OK);
     let self_path = format!("{base}/accounts/{}/enabled", f.key.principal.as_uuid());
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &self_path,
             &cookie,
             &csrf,
             json!({"enabled":false}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
     assert_eq!(json_body(r).await?["code"], "insufficient_privilege");
@@ -302,31 +302,34 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     ] {
         let r = app
             .clone()
-            .oneshot(req(
+            .oneshot(crate::request_support::scoped(req(
                 "POST",
                 &format!("{base}/accounts"),
                 cookie_value,
                 csrf_value,
                 json!({"login":"member","password":PASSWORD}),
-            ))
+            )))
             .await?;
         assert_eq!(r.status(), status);
     }
     let mut r = req("POST", &self_path, &cookie, &csrf, json!({"enabled":false}));
     r.headers_mut().remove("origin");
     assert_eq!(
-        app.clone().oneshot(r).await?.status(),
+        app.clone()
+            .oneshot(crate::request_support::scoped(r))
+            .await?
+            .status(),
         StatusCode::FORBIDDEN
     );
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{base}/accounts"),
             &cookie,
             &csrf,
             json!({"login":"member","password":PASSWORD}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::CREATED);
     let member = json_body(r).await?;
@@ -334,45 +337,51 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     let (member_cookie, member_csrf) = login_as(&app, "member", PASSWORD).await?;
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/accounts"),
             &member_cookie,
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
     assert_eq!(json_body(r).await?["code"], "insufficient_privilege");
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{base}/accounts/{id}/administrator"),
             &member_cookie,
             &member_csrf,
             json!({"enabled":true}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
-    let r=app.clone().oneshot(req("POST",&format!("{base}/account/password"),&member_cookie,&member_csrf,json!({"currentPassword":"wrong but sufficiently long","password":"new private member password"}))).await?;
+    let r=app.clone().oneshot(crate::request_support::scoped(req("POST",&format!("{base}/account/password"),&member_cookie,&member_csrf,json!({"currentPassword":"wrong but sufficiently long","password":"new private member password"})))).await?;
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
     assert_eq!(json_body(r).await?["code"], "reauthentication_failed");
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/session"),
             &member_cookie,
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
     let foreign = format!("/api/v1/identity/tenants/{B}/accounts");
     assert_eq!(
         app.clone()
-            .oneshot(req("GET", &foreign, &cookie, "", json!(null)))
+            .oneshot(crate::request_support::scoped(req(
+                "GET",
+                &foreign,
+                &cookie,
+                "",
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::UNAUTHORIZED
@@ -380,25 +389,25 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     for (action, enabled) in [("membership", false), ("enabled", false)] {
         let r = app
             .clone()
-            .oneshot(req(
+            .oneshot(crate::request_support::scoped(req(
                 "POST",
                 &format!("{base}/accounts/{id}/{action}"),
                 &cookie,
                 &csrf,
                 json!({"enabled":enabled}),
-            ))
+            )))
             .await?;
         assert_eq!(r.status(), StatusCode::OK);
     }
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{base}/accounts/{id}/password"),
             &cookie,
             &csrf,
             json!({"password":"new private member password"}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
     let v = json_body(r).await?;
@@ -407,13 +416,13 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     assert!(v.get("administrator").is_none());
     assert_eq!(
         app.clone()
-            .oneshot(req(
+            .oneshot(crate::request_support::scoped(req(
                 "GET",
                 &format!("{base}/session"),
                 &member_cookie,
                 "",
                 json!(null)
-            ))
+            )))
             .await?
             .status(),
         StatusCode::UNAUTHORIZED
@@ -421,13 +430,13 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     for action in ["enabled", "membership"] {
         assert_eq!(
             app.clone()
-                .oneshot(req(
+                .oneshot(crate::request_support::scoped(req(
                     "POST",
                     &format!("{base}/accounts/{id}/{action}"),
                     &cookie,
                     &csrf,
                     json!({"enabled":true})
-                ))
+                )))
                 .await?
                 .status(),
             StatusCode::OK
@@ -438,24 +447,30 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
         principal: rss_identity_core::PrincipalId::parse(id)?,
     });
     let (mc, mt) = login_as(&app, "member", "new private member password").await?;
-    let r=app.clone().oneshot(req("POST",&format!("{base}/account/password"),&mc,&mt,json!({"currentPassword":"new private member password","password":"another private member password"}))).await?;
+    let r=app.clone().oneshot(crate::request_support::scoped(req("POST",&format!("{base}/account/password"),&mc,&mt,json!({"currentPassword":"new private member password","password":"another private member password"})))).await?;
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(
         app.clone()
-            .oneshot(req("GET", &format!("{base}/session"), &mc, "", json!(null)))
+            .oneshot(crate::request_support::scoped(req(
+                "GET",
+                &format!("{base}/session"),
+                &mc,
+                "",
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::UNAUTHORIZED
     );
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/accounts?limit=1"),
             &cookie,
             "",
             json!(null),
-        ))
+        )))
         .await?;
     let v = json_body(r).await?;
     assert_eq!(v["accounts"].as_array().unwrap().len(), 1);
@@ -466,13 +481,13 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     while let Some(next) = cursor.as_str() {
         let response = app
             .clone()
-            .oneshot(req(
+            .oneshot(crate::request_support::scoped(req(
                 "GET",
                 &format!("{base}/accounts?limit=1&cursor={next}"),
                 &cookie,
                 "",
                 json!(null),
-            ))
+            )))
             .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let page = json_body(response).await?;
@@ -483,13 +498,13 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     }
     let all = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/accounts"),
             &cookie,
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(
         seen.len(),
@@ -498,13 +513,13 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
     for query in ["cursor=invalid", "limit=0", "limit=1025"] {
         let r = app
             .clone()
-            .oneshot(req(
+            .oneshot(crate::request_support::scoped(req(
                 "GET",
                 &format!("{base}/accounts?{query}"),
                 &cookie,
                 "",
                 json!(null),
-            ))
+            )))
             .await?;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
@@ -523,13 +538,13 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     let base = format!("/api/v1/identity/tenants/{A}");
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{base}/providers"),
             &cookie,
             &csrf,
             json!({"settings": settings_wire(&federation_support::settings().input()), "clientSecret":"fixture-secret"}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::CREATED);
     let p = json_body(r).await?;
@@ -538,13 +553,13 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     original.issuer = "https://idp.example.test/realms/other".into();
     let created = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{base}/providers"),
             &cookie,
             &csrf,
             json!({"settings": settings_wire(&original), "clientSecret":"fixture-secret"}),
-        ))
+        )))
         .await?;
     let second = json_body(created).await?;
     let second_path = format!("{base}/providers/{}", second["id"].as_str().unwrap());
@@ -553,7 +568,13 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     let update = json!({"expectedVersion":1,"settings":settings_wire(&changed),"clientSecret":"rotated-secret"});
     let updated = app
         .clone()
-        .oneshot(req("PUT", &second_path, &cookie, &csrf, update.clone()))
+        .oneshot(crate::request_support::scoped(req(
+            "PUT",
+            &second_path,
+            &cookie,
+            &csrf,
+            update.clone(),
+        )))
         .await?;
     assert_eq!(updated.status(), StatusCode::OK);
     let updated = json_body(updated).await?;
@@ -562,7 +583,13 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     assert_eq!(updated["enabled"], false);
     let stale = app
         .clone()
-        .oneshot(req("PUT", &second_path, &cookie, &csrf, update))
+        .oneshot(crate::request_support::scoped(req(
+            "PUT",
+            &second_path,
+            &cookie,
+            &csrf,
+            update,
+        )))
         .await?;
     assert_eq!(stale.status(), StatusCode::CONFLICT);
     assert_eq!(json_body(stale).await?["code"], "configuration_changed");
@@ -570,59 +597,59 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     let url = format!("{base}/providers/{id}");
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{url}/enabled"),
             &cookie,
             &csrf,
             json!({"enabled":true,"expectedVersion":1}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{url}/enabled"),
             &cookie,
             &csrf,
             json!({"enabled":false,"expectedVersion":1}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::CONFLICT);
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/login-options"),
             "",
             "",
             json!(null),
-        ))
+        )))
         .await?;
     let options = json_body(r).await?;
     assert_eq!(options["providers"].as_array().unwrap().len(), 1);
     assert!(!options.to_string().contains("clientSecret"));
     let enabled = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{second_path}/enabled"),
             &cookie,
             &csrf,
             json!({"enabled":true,"expectedVersion":2}),
-        ))
+        )))
         .await?;
     assert_eq!(enabled.status(), StatusCode::OK);
     let choices = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("{base}/login-options"),
             "",
             "",
             json!(null),
-        ))
+        )))
         .await?;
     let choices = json_body(choices).await?;
     let choices = choices["providers"].as_array().unwrap();
@@ -636,38 +663,38 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
 
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{url}/test"),
             &cookie,
             &csrf,
             json!({}),
-        ))
+        )))
         .await?;
     assert_eq!(json_body(r).await?["passed"], true);
     upstream.fail.store(true, Ordering::SeqCst);
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{url}/test"),
             &cookie,
             &csrf,
             json!({}),
-        ))
+        )))
         .await?;
     let v = json_body(r).await?;
     assert_eq!(v["passed"], false);
     assert_eq!(v["diagnostic"]["stage"], "jwks");
     let r = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!("{url}/enabled"),
             &cookie,
             &csrf,
             json!({"enabled":false,"expectedVersion":2}),
-        ))
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
     f.close().await;
@@ -687,7 +714,13 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
     ] {
         let r = app
             .clone()
-            .oneshot(req("GET", &path, "", "", json!(null)))
+            .oneshot(crate::request_support::scoped(req(
+                "GET",
+                &path,
+                "",
+                "",
+                json!(null),
+            )))
             .await?;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
@@ -695,7 +728,13 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
     let oversized = format!("{prefix}{}", "a".repeat(8193 - prefix.len()));
     let r = app
         .clone()
-        .oneshot(req("GET", &oversized, "", "", json!(null)))
+        .oneshot(crate::request_support::scoped(req(
+            "GET",
+            &oversized,
+            "",
+            "",
+            json!(null),
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
     assert_eq!(r.headers()["location"], "/auth/error?reason=failed");
@@ -711,13 +750,13 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
     let path = format!("{}?{}", url.path(), url.query().unwrap());
     let wrong = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &path,
             "__Host-identity-oidc-browser=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(wrong.status(), StatusCode::SEE_OTHER);
     let cookie = format!(
@@ -726,7 +765,13 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
     );
     let r = app
         .clone()
-        .oneshot(req("GET", &path, &cookie, "", json!(null)))
+        .oneshot(crate::request_support::scoped(req(
+            "GET",
+            &path,
+            &cookie,
+            "",
+            json!(null),
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
     assert_eq!(r.headers()["location"], "/auth/error?reason=cancelled");
@@ -734,7 +779,13 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
     assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
     let r = app
         .clone()
-        .oneshot(req("GET", &path, &cookie, "", json!(null)))
+        .oneshot(crate::request_support::scoped(req(
+            "GET",
+            &path,
+            &cookie,
+            "",
+            json!(null),
+        )))
         .await?;
     assert_eq!(r.headers()["location"], "/auth/error?reason=failed");
     assert!(
@@ -768,7 +819,7 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
         let issued = f
             .store
             .login_local(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 support::login("second"),
                 password(),
                 source(),
@@ -779,7 +830,7 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
         let other = f
             .store
             .inspect_session(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
                 deadline(),
             )
@@ -816,13 +867,13 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
         }));
         let r = app
             .clone()
-            .oneshot(req(
+            .oneshot(crate::request_support::scoped(req(
                 "POST",
                 &format!("/api/v1/identity/tenants/{A}/providers/{}/test", p.id),
                 &cookie,
                 &csrf,
                 json!({}),
-            ))
+            )))
             .await?;
         assert_eq!(
             r.status(),
@@ -860,10 +911,16 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
     let settings = json!({"settings":settings_wire(&federation_support::settings().input()),"clientSecret":"fixture-secret"});
     let path = format!("/api/v1/identity/tenants/{A}/providers");
     let (first, second) = tokio::join!(
-        app.clone()
-            .oneshot(req("POST", &path, &cookie, &csrf, settings.clone())),
-        app.clone()
-            .oneshot(req("POST", &path, &cookie, &csrf, settings))
+        app.clone().oneshot(crate::request_support::scoped(req(
+            "POST",
+            &path,
+            &cookie,
+            &csrf,
+            settings.clone()
+        ))),
+        app.clone().oneshot(crate::request_support::scoped(req(
+            "POST", &path, &cookie, &csrf, settings
+        )))
     );
     let first = first?;
     let second = second?;
@@ -876,7 +933,13 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
     assert_eq!(rejected.status(), StatusCode::CONFLICT);
     assert_eq!(json_body(rejected).await?["code"], "provider_limit_reached");
     let list = app
-        .oneshot(req("GET", &path, &cookie, "", json!(null)))
+        .oneshot(crate::request_support::scoped(req(
+            "GET",
+            &path,
+            &cookie,
+            "",
+            json!(null),
+        )))
         .await?;
     assert_eq!(list.status(), StatusCode::OK);
     assert_eq!(
@@ -908,13 +971,13 @@ async fn management_rejects_password_for_federated_only_account() -> anyhow::Res
     assert!(!issued.identity().has_local_password);
     let security = app
         .clone()
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "GET",
             &format!("/api/v1/identity/tenants/{A}/session/security"),
             &format!("__Host-identity-session={}", issued.secret().expose()),
             "",
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(security.status(), StatusCode::OK);
     assert_eq!(security.headers()["cache-control"], "no-store");
@@ -924,7 +987,7 @@ async fn management_rejects_password_for_federated_only_account() -> anyhow::Res
     );
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let response = app
-        .oneshot(req(
+        .oneshot(crate::request_support::scoped(req(
             "POST",
             &format!(
                 "/api/v1/identity/tenants/{A}/accounts/{}/password",
@@ -933,14 +996,14 @@ async fn management_rejects_password_for_federated_only_account() -> anyhow::Res
             &cookie,
             &csrf,
             json!({"password":"new private member password"}),
-        ))
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(json_body(response).await?["code"], "malformed_request");
     let actor = f
         .store
         .inspect_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
             deadline(),
         )
@@ -949,3 +1012,6 @@ async fn management_rejects_password_for_federated_only_account() -> anyhow::Res
     f.close().await;
     Ok(())
 }
+
+#[path = "request_support/mod.rs"]
+mod request_support;

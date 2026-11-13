@@ -8,7 +8,7 @@ use rss_identity_core::{
     account::{LoginKey, Password},
     session::{BearerSecret, CredentialKind},
 };
-use rss_request_context::TenantId;
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::policy::OperationDeadline;
 
 /// A committed issuance. Only the explicit HTTP response may expose its secret.
@@ -34,7 +34,7 @@ impl Authority {
     /// Does not replace a browser session or claim MFA assurance.
     pub async fn login_local_bearer(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         login: LoginKey,
         password: Password,
         source: AttemptSource,
@@ -42,7 +42,7 @@ impl Authority {
     ) -> Result<IssuedBearer, AuthorityError> {
         let budget = Budget::new(deadline)?;
         let candidate = self
-            .verify_password(tenant, login, password, source, budget.remaining())
+            .verify_password(binding, login, password, source, budget.remaining())
             .await?;
         let issued = self
             .create_session_for(candidate, None, CredentialKind::Bearer, budget.remaining())
@@ -57,12 +57,12 @@ impl Authority {
     /// Check a retained credential without extending its idle deadline.
     pub async fn inspect_bearer(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         secret: BearerSecret,
         deadline: OperationDeadline,
     ) -> Result<AuthenticatedSession, AuthorityError> {
         self.session_proof(
-            tenant,
+            binding,
             secret.digest(),
             CredentialKind::Bearer,
             deadline,
@@ -74,12 +74,12 @@ impl Authority {
     /// Host ingress must have admitted the transport/source before calling this method.
     pub async fn authenticate_bearer(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         secret: BearerSecret,
         deadline: OperationDeadline,
     ) -> Result<AuthenticatedSession, AuthorityError> {
         self.session_proof(
-            tenant,
+            binding,
             secret.digest(),
             CredentialKind::Bearer,
             deadline,

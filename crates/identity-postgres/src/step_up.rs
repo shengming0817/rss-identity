@@ -178,7 +178,7 @@ impl Authority {
         if handle.len() != 43 {
             return Err(AuthorityError::InvalidInput);
         }
-        self.read_sql(actor.key.tenant,deadline,move|c|Box::pin(async move{
+        self.read_sql(actor.binding,deadline,move|c|Box::pin(async move{
             session_storage::recheck(c,&actor).await?;
             sqlx::query("DELETE FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND principal_id=$2 AND session_id=$3 AND token_hash=$4")
                 .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(actor.view.id.as_uuid()).bind(digest(&handle).as_slice()).execute(c).await?;

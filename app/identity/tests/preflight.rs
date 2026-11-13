@@ -65,7 +65,7 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
     runtime["database"]["passwordFile"] = json!(root.join("password"));
     runtime["database"]["caFile"] = json!(cert);
     runtime["database"]["port"] = json!(1);
-    runtime["oidc"] = json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[{"tenantId":runtime["storage"]["tenants"][0],"issuer":"https://idp.example.test","clientId":"fixture","keycloakTotp":false}],"stateKeyFile":root.join("state"),"credentialKeyring":{"activeKeyId":"active","keys":[{"keyId":"active","path":root.join("key")}]},"returnTargets":{"resume":"https://identity.example.test/auth/resume"}});
+    runtime["oidc"] = json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[{"tenantId":runtime["bootstrapAccounts"][0]["tenantId"],"issuer":"https://idp.example.test","clientId":"fixture","keycloakTotp":false}],"stateKeyFile":root.join("state"),"credentialKeyring":{"activeKeyId":"active","keys":[{"keyId":"active","path":root.join("key")}]},"returnTargets":{"resume":"https://identity.example.test/auth/resume"}});
     let path = root.join("config.json");
     let server = env!("CARGO_BIN_EXE_identity-server");
     check(server, &path, &runtime, true);
@@ -96,14 +96,10 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
     old["formatVersion"] = json!(3);
     check(server, &path, &old, false);
     let mut private = runtime.clone();
-    private["oidc"]["privateProviders"] = json!([{"tenantId":runtime["storage"]["tenants"][0],"issuer":"https://10.42.0.9/realms/reference","clientId":"fixture","cidrs":["10.42.0.9/32"]}]);
+    private["oidc"]["privateProviders"] = json!([{"tenantId":runtime["bootstrapAccounts"][0]["tenantId"],"issuer":"https://10.42.0.9/realms/reference","clientId":"fixture","cidrs":["10.42.0.9/32"]}]);
     private["oidc"]["assuranceProfiles"][0]["issuer"] = json!("https://10.42.0.9/realms/reference");
     check(server, &path, &private, true);
-    for (field, value) in [
-        ("cidrs", json!(["0.0.0.0/0"])),
-        ("tenantId", json!("33333333-3333-4333-8333-333333333333")),
-        ("extra", json!(true)),
-    ] {
+    for (field, value) in [("cidrs", json!(["0.0.0.0/0"])), ("extra", json!(true))] {
         let mut bad = private.clone();
         bad["oidc"]["privateProviders"][0][field] = value;
         check(server, &path, &bad, false);
@@ -129,6 +125,8 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
     let mut migration = common;
     migration["audit"] = json!({"ownerRole":"identity_audit_owner"});
     migration["runtimeRole"] = json!("runtime");
+    migration["targets"] =
+        json!([{"tenantId":runtime["bootstrapAccounts"][0]["tenantId"],"generation":1}]);
     migration["maintenanceRole"] = json!("maintenance");
     check(
         env!("CARGO_BIN_EXE_identity-migrate"),

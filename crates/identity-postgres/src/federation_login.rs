@@ -42,15 +42,17 @@ impl Federation {
         deadline: OperationDeadline,
     ) -> Result<FederatedRedirect, AuthorityError> {
         let LoginRequest {
-            tenant,
+            binding,
             provider,
             browser,
             target,
             replacement,
             source,
         } = request;
+        let tenant = binding.tenant();
         if replacement.as_ref().is_some_and(|p| {
-            p.view().credential_kind != rss_identity_core::session::CredentialKind::Cookie
+            p.binding != binding
+                || p.view().credential_kind != rss_identity_core::session::CredentialKind::Cookie
         }) {
             return Err(AuthorityError::Rejected);
         }
@@ -61,7 +63,7 @@ impl Federation {
             let actor = replacement.ok_or(FederationError::Rejected)?;
             let oidc = self.oidc.clone();
             self.authority
-                .read_sql(tenant, budget.remaining(), move |c| {
+                .read_sql(binding, budget.remaining(), move |c| {
                     Box::pin(async move {
                         lock_guard(c, tenant).await?;
                         if actor.key.tenant != tenant {
@@ -77,27 +79,34 @@ impl Federation {
                 .await?
         } else {
             (
-                db::read_provider(&self.authority, tenant, provider, budget.remaining()).await?,
+                db::read_provider(&self.authority, binding, provider, budget.remaining()).await?,
                 replacement,
             )
         };
         self.check_assurance_profile(tenant, &view)?;
         let credentials = self
-            .provider_credentials(tenant, view.id, view.credential_version, budget.remaining())
+            .provider_credentials(
+                binding,
+                view.id,
+                view.credential_version,
+                budget.remaining(),
+            )
             .await?;
         if !view.enabled {
             return Err(FederationError::Rejected.into());
         }
         self.authority
             .reserve(
-                tenant,
+                binding,
                 format!("oidc:{}:{}", provider, hex_digest(&browser)),
                 &source,
                 budget.remaining(),
             )
             .await?;
-        let state = self.signer.issue(tenant, Purpose::Login)?;
-        let locator = self.signer.verify(&state)?;
+        let state = self
+            .signer
+            .issue(self.authority.instance(), binding, Purpose::Login)?;
+        let locator = self.signer.verify(self.authority.instance(), &state)?;
         let material = ProtocolMaterial::new(state)?;
         let url = self
             .upstream(
@@ -114,7 +123,7 @@ impl Federation {
             .await?;
         let oidc = self.oidc.clone();
         self.authority
-            .read_sql(tenant, budget.remaining(), move |c| {
+            .read_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let replacement = match replacement {
@@ -169,11 +178,12 @@ impl Federation {
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
         check_browser(&browser)?;
-        let locator = self.signer.verify(&state)?;
-        let tenant = locator.tenant();
+        let locator = self.signer.verify(self.authority.instance(), &state)?;
+        let binding = locator.binding();
+        let tenant = binding.tenant();
         let session = session.map(|s| s.digest());
         self.authority
-            .read_sql(tenant, deadline, move |c| {
+            .read_sql(binding, deadline, move |c| {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, false).await?;
@@ -203,14 +213,15 @@ impl Federation {
         Box::pin(async move {
         check_browser(&browser)?;
         let budget = Budget::new(deadline)?;
-        let locator = self.signer.verify(&state)?;
-        let tenant = locator.tenant();
+        let locator = self.signer.verify(self.authority.instance(), &state)?;
+        let binding = locator.binding();
+        let tenant = binding.tenant();
         let session = session.map(|s| s.digest());
         let claim_state = state.clone();
         let claim_browser = browser.clone();
         let claimed_issuer = response_issuer;
         let claim_oidc = self.oidc.clone();
-        let (attempt,view,material)=self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
+        let (attempt,view,material)=self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, secrets) = db::attempt(c, &locator, &claim_state, &claim_browser, false).await?;
                     let view = db::provider(c, tenant, attempt.provider).await?;
@@ -241,7 +252,7 @@ impl Federation {
                 }) }).await?;
         self.check_assurance_profile(tenant, &view)?;
         let credentials = self
-            .provider_credentials(tenant, view.id, view.credential_version, budget.remaining())
+            .provider_credentials(binding, view.id, view.credential_version, budget.remaining())
             .await?;
         if !self.allowed_return(&attempt.return_url) {
             return Err(FederationError::Rejected.into());
@@ -273,7 +284,7 @@ impl Federation {
                 )
                 .await;
         }
-        let locator = self.signer.verify(&state)?;
+        let locator = self.signer.verify(self.authority.instance(), &state)?;
         let commit_oidc = self.oidc.clone();
         let group_policy = self.group_policy;
         let future_skew_seconds = self.authority.future_skew_seconds;
@@ -281,7 +292,7 @@ impl Federation {
         let operation_proof_seconds = self.authority.operation_proof_seconds;
         let session_policy = self.authority.session_policy;
         let limits = self.authority.profile_limits;
-        self.authority.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
+        self.authority.write_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
                     let view = db::provider(c, tenant, attempt.provider).await?;

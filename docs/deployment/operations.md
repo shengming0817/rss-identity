@@ -2,7 +2,7 @@
 
 在 Linux Docker 部署主机使用本仓 hack/deploy.py / hack/operate.py（部署只需脚本、deployment 配置及已准备的镜像）。复制 `deployment/deploy.example.json` 为私有输入，填写随机 instanceId、storage target/lineage、租户与唯一 bootstrap principal、固定 HTTPS origin 和秘密路径。`runtime.publicGateway` 必须等于 backendSubnet 的 .2；Identity .3、PostgreSQL .4，网段为不冲突的私有 /24。公开入口仅 HTTPS 443，租户登录入口 `/tenants/{tenant-uuid}/login`（例如 `https://identity.example.test/tenants/11111111-1111-4111-8111-111111111111/login`），API `/api/v1/identity`，唯一 callback `/api/v1/identity/oidc/callback`。
 
-每个 `storage.tenants` 中的租户使用自己的登录 URL；将 origin 与该租户 UUID 组合后交给用户。根路径 `/` 不负责选择租户。
+每个已由宿主登记 execution fence 并初始化的租户使用自己的登录 URL；将 origin 与该租户 UUID 组合后交给用户。根路径 `/` 不负责选择租户。运行配置不保存租户全集；`bootstrapAccounts` 只决定初始化身份和示范管理策略。安装器接收明确 `targets`，verify 不要求数据库只有这些租户。参考宿主以 `storage.generation` 作为操作期望 epoch，以显式 `webauthnGeneration` 作为 RP 期望代际；数据库不匹配时拒绝，不自动更新期望值。
 
 准备公共 TLS 证书及私钥，证书 SAN 覆盖 origin；PG 证书 SAN 含 postgres，database.caFile 信任其 CA。每个数据库角色用不同的私有 0600 密码文件，无尾部换行；口令长度和内容须满足宿主配置校验。OIDC 为空即本地模式。开启时配置 stateKeyFile、credentialKeyring、assuranceProfiles、groupFactsMaxAgeSeconds 及 `returnTargets: {"resume":"https://固定域名/auth/resume"}`，字段以 RuntimeConfig 为准。state/keyring 钥文件为非零 32 字节随机钥的 64 位十六进制，不能复用。
 
@@ -16,7 +16,7 @@ python3 hack/operate.py --deployment /private/rendered --project identity-main o
 
 输出目录必须不存在；root 渲染为服务 UID/GID 10001:10001，目录0700、文件0600。操作命令由有权读取此目录和使用 Docker 的部署 owner 执行；新口令文件也须归10001且0600。同一输入生成 runtime、maintenance、owner migration 和严格静态 UI JSON。渲染在同父目录的私有临时目录完成，使用同一后端镜像的三个程序 `--check-config FILE` 在无网络容器内复用 Rust 的配置、秘密与契约校验；同时以实际 Web 镜像、仅网关配置与 TLS 挂载离线运行 nginx -t，并核对静态 index.html 存在。全部通过才原子发布，缺少所需程序、静态首页或不接受实际配置的镜像在开放前拒绝；失败清理临时输出并允许原路径重试。不要手改生成配置或二次 envsubst；Compose 字面量已转义。部署 owner 负责选择并预先构建或拉取正确的前后端镜像；预检验证配置与必要运行文件，不通过静态文件标记或角色 label 证明镜像产品身份。首次 install 只安装数据库结构与角色授权；不会创建账户或开放入口。
 
-`initialize <tenant> <login> <password-file>` 的 principal 取自该租户唯一 bootstrapAccounts。组件一次性 guard 拒绝重复、并发输家及重启后重做；旧 principal 参数形式拒绝。新 tenant 必须显式交由宿主配置，不提供平台租户 API。维护恢复命令为 `recover <tenant> <principal> <password-file>`，仅更新既有本地密码和 epoch，保持 enabled/member 与管理策略不变。
+`initialize <tenant> <login> <password-file>` 的 principal 取自该租户唯一 bootstrapAccounts。组件一次性 guard 拒绝重复、并发输家及重启后重做。新 tenant 的登记与预期 epoch 必须显式交由宿主持有，不提供平台租户 API。维护恢复命令为 `recover <tenant> <principal> <password-file>`，仅更新既有本地密码和 epoch，保持 enabled/member 与管理策略不变。
 
 `verify` 是只读安装核验，检查 schema、instance、目标角色及有效权限、storage identity 和完整 tenant fence；不补建、不修授权、不初始化。`close` 先停网关再排空 Identity，并核对容器身份、终态、退出码与 OOM 状态；重启中/暂停/未知状态不视为关闭。`open` 先核验、再等待 Identity 内部健康检查、最后开放网关。非零退出或中断均不确认成功，先检查实际状态；不自动重发写命令。
 
@@ -30,7 +30,7 @@ python3 hack/operate.py --deployment /private/rendered --project identity-main o
 
 配置形状以 [RuntimeConfig](../../app/identity/src/config.rs) 和 [部署示例](../../deployment/deploy.example.json) 为准。镜像内 `identity-migrate --describe` 查询该版本 schema，`identity-server --acceptance-profile < runtime.json` 从所选配置查询非秘密策略（不读取凭据文件）；已安装状态使用上述 `verify`，不能只比较版本号。旧配置和不匹配安装直接拒绝。
 
-OIDC 存在时必须显式提供 `privateProviders`，空数组表示仅公网。宿主可按 `tenantId`、完整 `issuer`、`clientId` 精确授权 RFC1918/IPv6 ULA CIDR；数量与格式边界由配置校验持有；网段须规范化且不重复。租户必须属于本实例配置。CIDR 不携带主机位，不接受通配 issuer；租户 ProviderSettings 无网络授权字段。例：
+OIDC 存在时必须显式提供 `privateProviders`，空数组表示仅公网。宿主可按 `tenantId`、完整 `issuer`、`clientId` 精确授权 RFC1918/IPv6 ULA CIDR；数量与格式边界由配置校验持有；网段须规范化且不重复。租户坐标必须明确；该网络授权不是 Identity 的租户准入名单。CIDR 不携带主机位，不接受通配 issuer；租户 ProviderSettings 无网络授权字段。例：
 
 ```json
 "privateProviders": [{

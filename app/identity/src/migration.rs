@@ -16,7 +16,7 @@ pub(crate) fn validate(config: &MigrationConfig) -> Result<InstanceId, AppError>
     }
     config.budgets.validate()?;
     crate::audit::validate_installation(config)?;
-    config.storage.bindings()?;
+    crate::config::target_bindings(&config.storage, &config.targets)?;
     InstanceId::parse(&config.instance_id).map_err(|_| AppError::Configuration)
 }
 
@@ -45,6 +45,12 @@ pub async fn verify(config: MigrationConfig) -> Result<(), AppError> {
             .await?;
         watchdog(&mut tx, cutoff).await?;
         verify_storage(&mut tx, &config.storage).await?;
+        verify_targets(
+            &mut tx,
+            &crate::config::target_bindings(&config.storage, &config.targets)
+                .map_err(|_| sqlx::Error::Protocol("invalid targets".into()))?,
+        )
+        .await?;
         crate::audit::verify(&mut tx, &config).await?;
         for (role, profile) in [
             (&config.runtime_role, AuthorityProfile::Runtime),
@@ -77,32 +83,32 @@ pub(crate) async fn verify_storage(
         sqlx::query_as("SELECT target,lineage FROM rss_transactional_messaging.storage_lineage")
             .fetch_all(&mut *c)
             .await?;
-    let tenants: Vec<(uuid::Uuid, i64)> = sqlx::query_as(
-        "SELECT tenant_id,epoch FROM rss_transactional_messaging.tenant_epoch ORDER BY tenant_id",
-    )
-    .fetch_all(c)
-    .await?;
-    let mut expected = storage
-        .tenants()
-        .map_err(|_| sqlx::Error::Protocol("invalid tenant binding".into()))?
-        .into_iter()
-        .map(|t| (t.to_string(), storage.generation))
-        .collect::<Vec<_>>();
-    expected.sort();
-    if identity != [(storage.target.to_vec(), storage.lineage.to_vec())]
-        || tenants
-            .into_iter()
-            .map(|(t, e)| (t.to_string(), e))
-            .collect::<Vec<_>>()
-            != expected
-    {
+    if identity != [(storage.target.to_vec(), storage.lineage.to_vec())] {
         return Err(sqlx::Error::Protocol("storage binding mismatch".into()));
     }
     Ok(())
 }
+async fn verify_targets(
+    c: &mut PgConnection,
+    targets: &[rss_transactional_messaging::fence::ExecutionBinding],
+) -> Result<(), sqlx::Error> {
+    for target in targets {
+        let epoch: Option<i64> = sqlx::query_scalar(
+            "SELECT epoch FROM rss_transactional_messaging.tenant_epoch WHERE tenant_id=$1::uuid",
+        )
+        .bind(target.tenant().to_string())
+        .fetch_optional(&mut *c)
+        .await?;
+        if epoch != Some(target.epoch().get()) {
+            return Err(sqlx::Error::Protocol("target epoch mismatch".into()));
+        }
+    }
+    Ok(())
+}
+
 pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
     let instance = validate(&config)?;
-    let tenants = config.storage.tenants()?;
+    let targets = crate::config::target_bindings(&config.storage, &config.targets)?;
     let cutoff = crate::config::cutoff(config.budgets.migration_seconds)?;
     let mut c = tokio::time::timeout_at(
         cutoff.instant().into(),
@@ -143,10 +149,10 @@ pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
             .bind(config.storage.lineage.as_slice())
             .execute(&mut *tx)
             .await?;
-        for tenant in tenants {
+        for target in targets {
             sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,$2)")
-                .bind(tenant.to_string())
-                .bind(config.storage.generation)
+                .bind(target.tenant().to_string())
+                .bind(target.epoch().get())
                 .execute(&mut *tx)
                 .await?;
         }
@@ -216,6 +222,7 @@ mod tests {
             let config = serde_json::from_value(serde_json::json!({
                 "formatVersion": 5, "audit": {"ownerRole":"identity_audit_owner"}, "instanceId": runtime["instanceId"],
                 "storage": runtime["storage"], "database": runtime["database"], "budgets": runtime["budgets"],
+                "targets":[{"tenantId":runtime["bootstrapAccounts"][0]["tenantId"],"generation":1}],
                 "runtimeRole": role, "maintenanceRole": "maintenance"
             }))
             .unwrap();

@@ -2046,7 +2046,6 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
- "hmac 0.12.1",
  "rand_core 0.6.4",
  "rss-request-context",
  "serde",
@@ -2127,6 +2126,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "futures",
+ "hmac 0.12.1",
  "rand_core 0.6.4",
  "ring",
  "rss-audit-core",

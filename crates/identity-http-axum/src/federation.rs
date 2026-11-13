@@ -1,4 +1,5 @@
 use crate::{boundary::*, *};
+use rss_transactional_messaging::fence::ExecutionBinding;
 
 use axum::{
     Extension, Json,
@@ -70,7 +71,7 @@ pub fn federated_router(
 
 async fn security(
     State(state): State<FederationState>,
-    Path(raw): Path<String>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
@@ -78,7 +79,7 @@ async fn security(
     let actor = state
         .local
         .authority
-        .inspect_session(tenant(&raw)?, secret, budget.remaining())
+        .inspect_session(binding, secret, budget.remaining())
         .await?;
     let security = state
         .federation
@@ -139,7 +140,7 @@ fn source(request: &Request) -> Result<AttemptSource, HttpError> {
 
 async fn actor(
     state: &FederationState,
-    tenant: rss_request_context::TenantId,
+    binding: ExecutionBinding,
     headers: &HeaderMap,
     budget: RequestBudget,
     required: bool,
@@ -153,7 +154,7 @@ async fn actor(
             .local
             .authority
             .inspect_session(
-                tenant,
+                binding,
                 SessionSecret::parse(secret.expose().into()).map_err(|_| UNAUTH)?,
                 budget.remaining(),
             )
@@ -198,13 +199,12 @@ fn redirect_response(
 
 async fn begin(
     State(state): State<FederationState>,
-    Path((raw, provider)): Path<(String, ProviderId)>,
+    Path((_raw, provider)): Path<(String, ProviderId)>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response, HttpError> {
-    let tenant = tenant(&raw)?;
-
-    let actor = actor(&state, tenant, request.headers(), budget, false).await?;
+    let actor = actor(&state, binding, request.headers(), budget, false).await?;
 
     let (browser, created) = browser(request.headers(), true)?;
 
@@ -222,7 +222,7 @@ async fn begin(
         .federation
         .begin_login(
             rss_identity_postgres::LoginRequest {
-                tenant,
+                binding,
                 provider,
                 browser: browser.clone(),
                 target: input.return_target,
@@ -238,13 +238,12 @@ async fn begin(
 
 async fn step_up(
     State(state): State<FederationState>,
-    Path((raw, provider)): Path<(String, ProviderId)>,
+    Path((_raw, provider)): Path<(String, ProviderId)>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response, HttpError> {
-    let tenant = tenant(&raw)?;
-
-    let actor = actor(&state, tenant, request.headers(), budget, true).await?;
+    let actor = actor(&state, binding, request.headers(), budget, true).await?;
 
     let (browser, created) = browser(request.headers(), true)?;
 
@@ -268,7 +267,7 @@ async fn step_up(
         .federation
         .begin_step_up(
             rss_identity_postgres::LoginRequest {
-                tenant,
+                binding,
                 provider,
                 browser: browser.clone(),
                 target: input.return_target,
@@ -285,13 +284,12 @@ async fn step_up(
 
 async fn link(
     State(state): State<FederationState>,
-    Path((raw, provider)): Path<(String, ProviderId)>,
+    Path((_raw, provider)): Path<(String, ProviderId)>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response, HttpError> {
-    let tenant = tenant(&raw)?;
-
-    let actor = actor(&state, tenant, request.headers(), budget, true)
+    let actor = actor(&state, binding, request.headers(), budget, true)
         .await?
         .ok_or(UNAUTH)?;
 

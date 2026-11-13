@@ -15,6 +15,7 @@ use axum::{
 };
 use rss_identity_core::federation::*;
 use rss_identity_postgres::{AuthenticatedSession, AuthorityError, Federation};
+use rss_transactional_messaging::fence::ExecutionBinding;
 use serde::Deserialize;
 type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
@@ -54,7 +55,7 @@ pub(crate) fn router(
 }
 async fn actor(
     s: &Management,
-    t: &str,
+    binding: ExecutionBinding,
     h: &HeaderMap,
     b: RequestBudget,
     write: bool,
@@ -68,18 +69,18 @@ async fn actor(
     }
     Ok(s.federation
         .authority()
-        .inspect_session(tenant(t)?, secret, b.remaining())
+        .inspect_session(binding, secret, b.remaining())
         .await?)
 }
 async fn options(
     State(s): State<Management>,
-    Path(t): Path<String>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
 ) -> Result<Response> {
     Ok(Json(dto::LoginOptions {
         providers: s
             .federation
-            .login_options(tenant(&t)?, b.remaining())
+            .login_options(binding, b.remaining())
             .await?
             .into_iter()
             .map(Into::into)
@@ -89,11 +90,11 @@ async fn options(
 }
 async fn providers(
     State(s): State<Management>,
-    Path(t): Path<String>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, &h, b, false).await?;
+    let actor = actor(&s, binding, &h, b, false).await?;
     Ok(Json(dto::Providers {
         providers: s
             .federation
@@ -114,11 +115,11 @@ struct CreateProvider {
 }
 async fn create_provider(
     State(s): State<Management>,
-    Path(t): Path<String>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
+    let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: CreateProvider = body(r, b).await?;
     let credentials =
         ProviderCredentials::new(v.client_secret, v.ca_pem).map_err(AuthorityError::from)?;
@@ -143,11 +144,12 @@ struct UpdateProvider {
 }
 async fn update_provider(
     State(s): State<Management>,
-    Path((t, p)): Path<(String, ProviderId)>,
+    Path((_t, p)): Path<(String, ProviderId)>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
+    let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: UpdateProvider = body(r, b).await?;
     let credentials =
         ProviderCredentials::new(v.client_secret, v.ca_pem).map_err(AuthorityError::from)?;
@@ -174,11 +176,12 @@ struct ProviderToggle {
 }
 async fn provider_enabled(
     State(s): State<Management>,
-    Path((t, p)): Path<(String, ProviderId)>,
+    Path((_t, p)): Path<(String, ProviderId)>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
+    let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: ProviderToggle = body(r, b).await?;
     Ok(Json(dto::Provider::from(
         s.federation
@@ -189,11 +192,12 @@ async fn provider_enabled(
 }
 async fn test_provider(
     State(s): State<Management>,
-    Path((t, p)): Path<(String, ProviderId)>,
+    Path((_t, p)): Path<(String, ProviderId)>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, &h, b, true).await?;
+    let actor = actor(&s, binding, &h, b, true).await?;
     match s.federation.test_provider(actor, p, b.remaining()).await {
         Ok(report) => Ok(Json(serde_json::json!({"passed":true,"report":dto::ConnectionReport::from(report)})).into_response()),
         Err(AuthorityError::Federation(

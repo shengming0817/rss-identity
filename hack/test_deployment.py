@@ -87,8 +87,7 @@ class OperationTests(unittest.TestCase):
         with fixture() as (root,data,images):
             path=root/'cut.dump';valid=receipt(path,data,images)
             self.assertEqual(operate.check_backup(path,images['identity'],data['runtime']),valid)
-            import uuid
-            expanded=copy.deepcopy(data['runtime']);expanded['storage']['tenants']=[str(uuid.uuid4()) for _ in range(1024)]
+            expanded=copy.deepcopy(data['runtime']);expanded['storage']['generation']=2
             full={**valid,'storage':expanded['storage']};path.with_suffix('.dump.json').write_text(json.dumps(full))
             self.assertEqual(operate.check_backup(path,images['identity'],expanded),full)
             with self.assertRaises(ValueError):operate.check_backup(path,images['identity'],data['runtime'])

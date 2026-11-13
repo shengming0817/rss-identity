@@ -75,7 +75,11 @@ async fn setup(
 }
 async fn admit(native: &EntraAuthority) -> Result<RevalidatedAccount, AuthorityError> {
     let subject = native
-        .verify(Zeroizing::new(USER.into()), deadline())
+        .verify(
+            crate::support::binding(rss_request_context::TenantId::parse(A).unwrap()),
+            Zeroizing::new(USER.into()),
+            deadline(),
+        )
         .await?;
     native.resolve(subject, deadline()).await
 }
@@ -126,7 +130,11 @@ async fn native_jit_is_unique_sessionless_and_revocable() -> anyhow::Result<()> 
         .await?;
     assert!(
         native
-            .verify(Zeroizing::new(USER.into()), deadline())
+            .verify(
+                crate::support::binding(f.key.tenant),
+                Zeroizing::new(USER.into()),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -144,7 +152,11 @@ async fn native_unknown_users_and_provider_changes_reject() -> anyhow::Result<()
     assert!(admit(&native).await.is_err());
     assert_eq!(before, f.events().await?);
     let subject = native
-        .verify(Zeroizing::new(USER.into()), deadline())
+        .verify(
+            crate::support::binding(f.key.tenant),
+            Zeroizing::new(USER.into()),
+            deadline(),
+        )
         .await?;
     federation
         .enable_provider(f.actor().await?, view.id, view.version, false, deadline())
@@ -152,7 +164,11 @@ async fn native_unknown_users_and_provider_changes_reject() -> anyhow::Result<()
     assert!(native.resolve(subject, deadline()).await.is_err());
     assert!(
         native
-            .verify(Zeroizing::new("invalid-token".into()), deadline())
+            .verify(
+                crate::support::binding(f.key.tenant),
+                Zeroizing::new("invalid-token".into()),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -168,7 +184,11 @@ async fn native_jit_commit_unknown_does_not_return_proof() -> anyhow::Result<()>
     f.bootstrap().await?;
     let (_, _, native) = setup(&f, true).await?;
     let subject = native
-        .verify(Zeroizing::new(USER.into()), deadline())
+        .verify(
+            crate::support::binding(f.key.tenant),
+            Zeroizing::new(USER.into()),
+            deadline(),
+        )
         .await?;
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
@@ -204,7 +224,7 @@ async fn browser_and_native_share_one_canonical_identity() -> anyhow::Result<()>
     let session = f
         .store
         .inspect_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             federation_support::secret(&issued),
             deadline(),
         )

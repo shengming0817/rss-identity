@@ -25,7 +25,11 @@ async fn department_link_preserves_source_observation_acceptance_order() -> anyh
     );
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&old), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&old),
+            deadline(),
+        )
         .await?;
     let principal = actor.account().principal.as_uuid().to_string();
     let first = state(
@@ -141,7 +145,7 @@ async fn account_directory_null_and_equal_values_keep_total_order() -> anyhow::R
                 .await?;
             f.store
                 .login_local(
-                    f.key.tenant,
+                    crate::support::binding(f.key.tenant),
                     login(name),
                     password(),
                     source(),
@@ -203,7 +207,11 @@ async fn account_detail_rejects_expiry_during_target_read() -> anyhow::Result<()
         .execute(&f.owner).await?;
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     assert!(matches!(
         f.store.read_account(actor, target, deadline()).await,
@@ -333,8 +341,11 @@ async fn account_directory_filters_before_stable_pagination_and_invalidates_chan
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let session = f.login().await?;
     let actor = || {
-        f.store
-            .inspect_session(f.key.tenant, secret(&session), deadline())
+        f.store.inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
     };
     let query = AccountQuery::parse(None, None, None, None, 1)?;
     let first = f
@@ -376,6 +387,7 @@ async fn account_directory_filters_before_stable_pagination_and_invalidates_chan
             .unwrap(),
         ),
         f.config(),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -462,6 +474,7 @@ async fn account_directory_profiles_are_source_selected_and_authorized_for_predi
             .unwrap(),
         ),
         f.config(),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         Arc::new(NoProfiles),
         deadline(),
     )
@@ -523,7 +536,11 @@ async fn department_directory_uses_latest_accepted_fact_without_resurrecting_old
     // Logging out does not rewrite the accepted directory observation or extend its TTL.
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&old), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&old),
+            deadline(),
+        )
         .await?;
     f.store.revoke_current_session(actor, deadline()).await?;
     assert_eq!(

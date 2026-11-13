@@ -4,7 +4,11 @@
 
 ## 本地认证与安装
 
-1. 宿主提供已绑定 storage/fence 的 `Arc<PgRuntime>`、共享有界 KDF、显式实例与租户、会话策略、显式 Audit `Integrity` 和管理策略。Identity 不创建、更换或关闭宿主池，不自动发现租户。
+1. 宿主提供已绑定 storage/fence 的 `Arc<PgRuntime>`、共享有界 KDF、显式实例、逐操作执行作用域、会话策略、显式 Audit `Integrity` 和管理策略。Identity 不创建、更换或关闭宿主池，不自动发现租户。
+
+`connect_runtime/connect_maintenance` 以宿主提供的一次性 probe binding 验证 schema、数据库角色、Audit 与 instance，之后丢弃 probe，不将其作为服务租户名单。宿主登记新 tenant fence 后，已有 Authority 和 router 可立即接收该租户的明确 scope。普通 HTTP 请求必须由可信宿主注入 RSS `ExecutionBinding` extension；组件核对路径 tenant，登录后生成的不可构造证明保存完整原 scope。借用连接的证明复核同样比较 storage、lineage、tenant 和 epoch。
+
+`StateSigner` 由 `rss_identity_postgres` 导出。OIDC state v2 签名绑定 instance 和完整执行坐标；callback 从验签结果继续原 scope，旧 epoch/lineage 不能用新配置重认。state 不是当前用户或资源授权证明。
 2. 数据库 owner 先安装所选 RSS 版本的完整消息 migration，再以独立受限 owner 安装 Audit schema，安装 Identity schema 并授予 runtime/maintenance profile。仅接受当前全新安装；在提交安装事务前，以实际目标角色验证有效权限和结构。入口见 [schema owner](../../crates/identity-postgres/src/schema.rs)；生产迁移执行属于宿主。
 3. 维护身份只用于初始化和本地密码恢复，凭据不注入日常服务。恢复推进失效代际，保留账户/成员启停状态，不授予宿主角色。
 4. runtime Authority 必须接收宿主 ManagementPolicy。密码校验和凭据签发经单一登录入口完成；浏览器 JSON、普通账户快照或上游结构值不能构造可信会话。
@@ -45,7 +49,7 @@ HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` �
 
 任何复核错误都要求宿主回滚；宿主继续负责 fencing、操作预算、资源授权和最终结算。复核成功不等于业务已提交，`CommitUnknown` 与回滚失败必须保留原结算语义。guard 串行化状态变更，不冻结自然时间或延长 actor 的原期限，不得跨事务缓存成功结果。该接口只接受当前请求的 `AuthenticatedSession`；异步保存的 `SessionReference` 不含当前凭据摘要，其独立复核用途不变。
 
-参考宿主为每个配置租户指定唯一 bootstrap 账户，并阻止其自我禁用；这是示范宿主策略，不成为其它产品的默认授权。密码恢复与 IdP 故障都不能自动提升权限或复活禁用状态。
+参考宿主为每个初始化目标指定唯一 bootstrap 账户，并阻止其自我禁用；这是示范宿主策略，不成为其它产品的默认授权。密码恢复与 IdP 故障都不能自动提升权限或复活禁用状态。
 
 ## 可选程序化 Bearer
 
@@ -82,7 +86,7 @@ Keycloak 使用内置 JSON UserAttributeMapper，把管理员维护的单个完�
 
 ## 可选 OIDC 与 HTTP 装配
 
-Federation 接收 Authority、上游适配器、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。`AuthorityConfig` 接收宿主明确给定的各租户 `ExecutionBinding`；连接只绑定 storage，每次事务绑定 tenant/epoch，不从数据库自动更新代际。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
+Federation 接收 Authority、上游适配器、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。Authority 不保存租户名单；无认证证明的操作接收 `ExecutionBinding`，已认证操作沿用证明的原 binding。连接固定 storage，每次事务核对 tenant/epoch，不从数据库自动更新代际。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
 
 ```rust,ignore
 let routes = rss_identity_http_axum::router(authority, http.clone())?
@@ -108,7 +112,7 @@ async fn client_address(
 
 不要用通用 timeout 丢弃数据库写 future。组件/RSS 持有有界事务结算；CommitUnknown、RollbackFailed 等内部结果保留在 HttpFailure 中，不能据 503 推断可安全重试。对外错误、cookie 与 CSRF 规则见 [HTTP 接入](../architecture/identity-http.md)。安全事件 schema 由 postgres 持有，不含凭据或上游 token。
 
-密钥重加密复用组件的租户事务接口与既有 storage fence，宿主最终提交或回滚；维护角色不因此扩权。参考部署的操作顺序见[恢复与轮换](../deployment/recovery.md)。
+`Federation::check_credential_keys(binding, deadline)` 只检查一个明确目标，宿主持有分页与全库覆盖结论。密钥重加密复用组件的租户事务接口与既有 storage fence，宿主最终提交或回滚；维护角色不因此扩权。参考部署的操作顺序见[恢复与轮换](../deployment/recovery.md)。
 
 ## Entra 浏览器与原生人员身份
 
@@ -125,7 +129,7 @@ JWKS 只从固定 Microsoft tenant 地址经有界、禁重定向的 HTTPS 取�
 ## 认证审计交付
 
 Identity 直接将内部安全事件映射成准备好的 Audit 记录，在原业务事务内批量追加。
-`AuthorityConfig::new(instance, tenants, sessions, integrity)` 必须显式选择完整性；参考宿主使用
+`AuthorityConfig::new(instance, sessions, integrity)` 必须显式选择完整性；参考宿主使用
 `rss_audit_postgres::Integrity::Plain`，不存在禁用审计分支。嵌入宿主可通过同源 Audit feature
 启用 Ledger，并注入其认证器。启动在实际业务连接上验证 Audit；无专用审计池、worker、通知或恢复密钥。
 
@@ -235,7 +239,7 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 
 `identity_session_references` 提供同租户、账户/成员 epoch、会话期限及来源当前性已筛选的定位关系，供产品按完整 SessionReference 坐标集合关联；它不是 AuthenticatedSession。平台来源的 `requires_platform_check` 为 true，产品必须再 JOIN 自己持有的当前平台绑定/来源资格关系，核对返回的绑定 ID/epoch 和来源 ID/version，不能仅凭该关系宣称平台资格有效。原请求 actor 的平台检查仍由既有 verifier 执行。
 
-没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(tenant, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用 admitted tenant、实例和执行 fencing，锁定现有租户 guard 后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，期限只受会话当前性和原调用预算限制。
+没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(binding, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用宿主提供的明确 binding、实例和执行 fencing，锁定现有租户 guard 后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，期限只受会话当前性和原调用预算限制。
 
 会话关系不公开滑动 idle expiry；它只供按完整定位坐标关联当前会话。普通 touch 延长存活时间不改变关系中的可排序值；cursor 到期上界沿用签发时的保守期限，过期后必须重新查询。人员回调本身也受同一资料/会话最早过期时间限制。
 
@@ -249,4 +253,4 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 
 新候选直接替换旧 step-up 签名与会话升级行为，仅接受当前全新 schema。旧 revision 的消费者继续使用其固定闭包；升级时同步适配新请求、结果和消费接口，不使用 alias、旧 DTO 或运行时降级。
 
-`WebauthnAuthority::connect` 将部署配置与 PG 中的当前 RP 指纹/代际核对；首次使用可登记，已有指纹不匹配则拒绝启动。改变 origin 或 RP 策略时，部署 owner 使用 tenant-scoped READ COMMITTED 事务调用 `activate_webauthn_rp_on`，提供预期旧代际，再重建组件。runtime 只有配置表 SELECT/INSERT 权限，不能推进或回退代际。配置切换撤销旧凭据；旧进程、挑战和操作证明不能跨代际继续使用，用户通过独立企业 MFA 或受权恢复重新登记。部署 owner 持有此次配置切换的授权、审计和结算。
+`WebauthnAuthority::new` 只构造 RP verifier，不枚举或预装租户。宿主为每次操作明确提供 `RpGeneration`；首次合法使用在既有 tenant guard 下登记该代际，后续精确核对持久化指纹与代际。改变 origin 或 RP 策略时，部署 owner 在租户 READ COMMITTED 事务调用 `activate_webauthn_rp_on`，以预期旧代际推进配置；随后宿主明确选择新配置与新代际。runtime 只有 SELECT/INSERT 权限，不自动推进、回退或刷新代际。配置切换继续撤销凭据、挑战及旧操作证明。HTTP 宿主注入 `RpGeneration` extension，不从浏览器字段构造它。

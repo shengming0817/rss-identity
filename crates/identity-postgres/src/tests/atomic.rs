@@ -17,14 +17,25 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     assert_eq!(
         f.store
-            .initialize(f.key, login("admin"), password(), deadline())
+            .initialize(
+                crate::support::binding((f.key).tenant),
+                f.key,
+                login("admin"),
+                password(),
+                deadline()
+            )
             .await
             .unwrap_err(),
         AuthorityError::Rejected
     );
     assert_eq!(
         f.store
-            .recover_local_password(f.key, password(), deadline())
+            .recover_local_password(
+                crate::support::binding((f.key).tenant),
+                f.key,
+                password(),
+                deadline()
+            )
             .await
             .unwrap_err(),
         AuthorityError::Rejected
@@ -32,7 +43,7 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     assert!(
         f.maintenance
             .verify_password(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 login("admin"),
                 password(),
                 source(),
@@ -47,7 +58,13 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
         let key = f.system_key;
         jobs.push(tokio::spawn(async move {
             maintenance
-                .initialize(key, login("platform"), password(), deadline())
+                .initialize(
+                    crate::support::binding((key).tenant),
+                    key,
+                    login("platform"),
+                    password(),
+                    deadline(),
+                )
                 .await
         }));
     }
@@ -76,16 +93,27 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     };
     assert!(
         f.maintenance
-            .initialize(foreign, login("admin"), password(), deadline())
+            .initialize(
+                crate::support::binding((foreign).tenant),
+                foreign,
+                login("admin"),
+                password(),
+                deadline()
+            )
             .await
             .is_err()
     );
     assert_eq!(
         f.maintenance
-            .recover_local_password(foreign, password(), deadline())
+            .recover_local_password(
+                crate::support::binding((foreign).tenant),
+                foreign,
+                password(),
+                deadline()
+            )
             .await
             .unwrap_err(),
-        AuthorityError::Rejected
+        AuthorityError::Fenced
     );
     let absent = AccountKey {
         tenant: f.key.tenant,
@@ -93,7 +121,12 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     };
     assert_eq!(
         f.maintenance
-            .recover_local_password(absent, password(), deadline())
+            .recover_local_password(
+                crate::support::binding((absent).tenant),
+                absent,
+                password(),
+                deadline()
+            )
             .await
             .unwrap_err(),
         AuthorityError::Rejected
@@ -104,7 +137,12 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
         .await?;
     assert_eq!(
         f.maintenance
-            .recover_local_password(member.key(), password(), deadline())
+            .recover_local_password(
+                crate::support::binding((member.key()).tenant),
+                member.key(),
+                password(),
+                deadline()
+            )
             .await?
             .epoch(),
         2
@@ -131,7 +169,12 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     .await?;
     let recovered = f
         .maintenance
-        .recover_local_password(emergency.key(), password(), deadline())
+        .recover_local_password(
+            crate::support::binding((emergency.key()).tenant),
+            emergency.key(),
+            password(),
+            deadline(),
+        )
         .await?;
     assert_eq!(recovered, inactive.recover()?.0);
     assert!(!recovered.enabled());
@@ -148,7 +191,7 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     assert!(
         f.store
             .verify_password(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 login("emergency"),
                 password(),
                 source(),
@@ -163,11 +206,13 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     let second_password = "second maintenance password";
     let (first, second) = tokio::join!(
         f.maintenance.recover_local_password(
+            crate::support::binding((f.key).tenant),
             f.key,
             Password::new(first_password.into())?,
             deadline()
         ),
         f.maintenance.recover_local_password(
+            crate::support::binding((f.key).tenant),
             f.key,
             Password::new(second_password.into())?,
             deadline()
@@ -198,7 +243,7 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     assert!(
         f.store
             .verify_password(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 login("admin"),
                 Password::new(winning.into())?,
                 source(),
@@ -210,7 +255,7 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
     assert!(
         f.store
             .verify_password(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 login("admin"),
                 Password::new(losing.into())?,
                 source(),
@@ -263,6 +308,7 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
             if *mode == "recovery" {
                 f.maintenance
                     .recover_local_password(
+                        crate::support::binding((victim.key()).tenant),
                         victim.key(),
                         Password::new("a newly recovered password".into())?,
                         deadline(),
@@ -284,8 +330,13 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
             }
         };
         let (verified, changed) = tokio::join!(
-            f.store
-                .verify_password(f.key.tenant, login(&name), password(), source(), deadline()),
+            f.store.verify_password(
+                crate::support::binding(f.key.tenant),
+                login(&name),
+                password(),
+                source(),
+                deadline()
+            ),
             change
         );
         changed?;
@@ -311,7 +362,7 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
     let b = f
         .store
         .verify_password(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             login("second"),
             password(),
             source(),
@@ -377,7 +428,7 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
     assert!(
         f.store
             .verify_password(
-                other.tenant,
+                crate::support::binding(other.tenant),
                 login("admin"),
                 password(),
                 source(),
@@ -389,7 +440,7 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
     let other_actor = f
         .store
         .verify_password(
-            other.tenant,
+            crate::support::binding(other.tenant),
             login("ADMIN"),
             Password::new("other tenant secret password".into())?,
             source(),
@@ -418,7 +469,12 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
     let result=f.runtime.local_tx(binding(f.key.tenant),deadline(),|tx|Box::pin(async move {tx.with_connection(|c|Box::pin(async move {sqlx::query("UPDATE identity_authority.accounts SET auth_epoch=99 WHERE tenant_id='22222222-2222-4222-8222-222222222222'").execute(c).await.map(|r|r.rows_affected())})).await})).await.fold(Ok,Err,Err,Err,Err,Err)?;
     assert_eq!(result, 0);
     f.maintenance
-        .recover_local_password(f.key, password(), deadline())
+        .recover_local_password(
+            crate::support::binding((f.key).tenant),
+            f.key,
+            password(),
+            deadline(),
+        )
         .await?;
     let other_epoch: i64 = sqlx::query_scalar("SELECT auth_epoch FROM identity_authority.accounts WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
         .bind(B).bind(f.key.principal.as_uuid().to_string()).fetch_one(&f.owner).await?;
@@ -448,6 +504,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
             std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
         )?),
         f.config().with_authentication_policy(selected(8)?),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -457,7 +514,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
     let claim = f
         .store
         .claim_password(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             &login("admin"),
             &source(),
             rss_transactional_messaging::policy::OperationDeadline::from_remaining(
@@ -489,7 +546,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
         assert!(matches!(
             f.store
                 .verify_password(
-                    f.key.tenant,
+                    crate::support::binding(f.key.tenant),
                     login("unknown"),
                     password(),
                     source(),
@@ -515,6 +572,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
             std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
         )?),
         f.config().with_authentication_policy(selected(5)?),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -522,7 +580,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
     let denied = f
         .store
         .verify_password(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             login("unknown"),
             password(),
             AttemptSource::parse("another-source")?,
@@ -544,11 +602,17 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
         principal: PrincipalId::generate(),
     };
     f.maintenance
-        .initialize(other_key, login("unknown"), password(), deadline())
+        .initialize(
+            crate::support::binding((other_key).tenant),
+            other_key,
+            login("unknown"),
+            password(),
+            deadline(),
+        )
         .await?;
     f.store
         .login_local(
-            tenant_b,
+            crate::support::binding(tenant_b),
             login("unknown"),
             password(),
             source(),
@@ -561,7 +625,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
     assert!(matches!(
         f.store
             .verify_password(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 login("admin"),
                 password(),
                 source(),
@@ -687,7 +751,12 @@ async fn settlement_never_releases_uncertain_success() -> anyhow::Result<()> {
     };
     assert!(
         f.maintenance
-            .recover_local_password(foreign, password(), deadline())
+            .recover_local_password(
+                crate::support::binding((foreign).tenant),
+                foreign,
+                password(),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -800,6 +869,9 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
                             .unwrap(),
                         ),
                         f.config(),
+                        crate::support::binding(
+                            rss_request_context::TenantId::parse(crate::support::A).unwrap(),
+                        ),
                         f.policy.clone(),
                         deadline(),
                     )
@@ -816,6 +888,9 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
                             .unwrap(),
                         ),
                         f.config(),
+                        crate::support::binding(
+                            rss_request_context::TenantId::parse(crate::support::A).unwrap(),
+                        ),
                         deadline(),
                     )
                     .await
@@ -843,6 +918,9 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
                             .unwrap(),
                         ),
                         f.config(),
+                        crate::support::binding(
+                            rss_request_context::TenantId::parse(crate::support::A).unwrap(),
+                        ),
                         f.policy.clone(),
                         deadline(),
                     )
@@ -859,6 +937,9 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
                             .unwrap(),
                         ),
                         f.config(),
+                        crate::support::binding(
+                            rss_request_context::TenantId::parse(crate::support::A).unwrap(),
+                        ),
                         deadline(),
                     )
                     .await
@@ -912,6 +993,7 @@ async fn source_budgets_are_shared() -> anyhow::Result<()> {
             .unwrap(),
         ),
         f.config(),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -927,7 +1009,7 @@ async fn source_budgets_are_shared() -> anyhow::Result<()> {
         tasks.push(tokio::spawn(async move {
             store
                 .verify_password(
-                    t,
+                    crate::support::binding(t),
                     login(&format!("distinct-{i}")),
                     password(),
                     source(),
@@ -1119,7 +1201,7 @@ async fn account_transition_matrix_and_events() -> anyhow::Result<()> {
         let old = f
             .store
             .verify_password(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 login("member"),
                 password(),
                 source(),
@@ -1159,7 +1241,7 @@ async fn account_transition_matrix_and_events() -> anyhow::Result<()> {
         assert_eq!(
             f.store
                 .verify_password(
-                    f.key.tenant,
+                    crate::support::binding(f.key.tenant),
                     login("member"),
                     password(),
                     source(),
@@ -1266,6 +1348,7 @@ async fn maintenance_races_preserve_current_state() -> anyhow::Result<()> {
             let maintenance_write = async move {
                 maintenance
                     .recover_local_password(
+                        crate::support::binding((key).tenant),
                         key,
                         Password::new("maintenance replacement password".into()).unwrap(),
                         deadline(),
@@ -1532,6 +1615,7 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
     assert!(
         f.maintenance
             .initialize(
+                crate::support::binding((f.key).tenant),
                 f.key,
                 login("admin"),
                 password(),
@@ -1545,6 +1629,7 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
     assert!(
         f.maintenance
             .recover_local_password(
+                crate::support::binding((f.key).tenant),
                 f.key,
                 password(),
                 OperationDeadline::from_remaining(Duration::ZERO)
@@ -1560,7 +1645,12 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
         .await?;
         assert_eq!(
             f.maintenance
-                .recover_local_password(f.key, password(), deadline())
+                .recover_local_password(
+                    crate::support::binding((f.key).tenant),
+                    f.key,
+                    password(),
+                    deadline()
+                )
                 .await
                 .unwrap_err(),
             AuthorityError::RuleRejected(AccountRuleError::EpochExhausted)
@@ -1575,14 +1665,25 @@ async fn maintenance_deadline_fencing_and_overflow() -> anyhow::Result<()> {
         .await?;
     assert_eq!(
         f.maintenance
-            .recover_local_password(f.key, password(), deadline())
+            .recover_local_password(
+                crate::support::binding((f.key).tenant),
+                f.key,
+                password(),
+                deadline()
+            )
             .await
             .unwrap_err(),
         AuthorityError::Fenced
     );
     assert_eq!(
         f.maintenance
-            .initialize(f.system_key, login("platform"), password(), deadline())
+            .initialize(
+                crate::support::binding((f.system_key).tenant),
+                f.system_key,
+                login("platform"),
+                password(),
+                deadline()
+            )
             .await
             .unwrap_err(),
         AuthorityError::Fenced
@@ -1602,7 +1703,13 @@ async fn maintenance_runbook_respects_forced_rls() -> anyhow::Result<()> {
         principal: f.key.principal,
     };
     f.maintenance
-        .initialize(other, login("admin"), password(), deadline())
+        .initialize(
+            crate::support::binding((other).tenant),
+            other,
+            login("admin"),
+            password(),
+            deadline(),
+        )
         .await?;
     let rows = f
         .maintenance_runtime
@@ -1629,7 +1736,12 @@ async fn maintenance_runbook_respects_forced_rls() -> anyhow::Result<()> {
         .await?;
     let reset = f
         .maintenance
-        .recover_local_password(f.key, password(), deadline())
+        .recover_local_password(
+            crate::support::binding((f.key).tenant),
+            f.key,
+            password(),
+            deadline(),
+        )
         .await?;
     assert!(!reset.enabled());
     assert_eq!(reset.epoch(), old.epoch() + 1);
@@ -1661,6 +1773,7 @@ async fn password_failures_reset_and_claims_are_fenced() -> anyhow::Result<()> {
             .unwrap(),
         ),
         f.config(),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -1668,16 +1781,31 @@ async fn password_failures_reset_and_claims_are_fenced() -> anyhow::Result<()> {
     // Different Authority instances share one in-flight claim, but not a tenant-wide KDF lock.
     let claim = f
         .store
-        .claim_password(f.key.tenant, &login("admin"), &source(), deadline())
+        .claim_password(
+            crate::support::binding(f.key.tenant),
+            &login("admin"),
+            &source(),
+            deadline(),
+        )
         .await?;
     assert!(matches!(
         other
-            .claim_password(f.key.tenant, &login("admin"), &source(), deadline())
+            .claim_password(
+                crate::support::binding(f.key.tenant),
+                &login("admin"),
+                &source(),
+                deadline()
+            )
             .await,
         Err(AuthorityError::Busy)
     ));
     let independent = other
-        .claim_password(f.key.tenant, &login("unknown"), &source(), deadline())
+        .claim_password(
+            crate::support::binding(f.key.tenant),
+            &login("unknown"),
+            &source(),
+            deadline(),
+        )
         .await?;
     assert_eq!(
         other
@@ -1689,7 +1817,12 @@ async fn password_failures_reset_and_claims_are_fenced() -> anyhow::Result<()> {
     // Expiry/replacement fences late completion: the old owner cannot clear the new claim.
     sqlx::query("UPDATE identity_authority.password_attempts SET claim_until=clock_timestamp()-interval '1 second' WHERE claim_token IS NOT NULL").execute(&f.owner).await?;
     let replacement = other
-        .claim_password(f.key.tenant, &login("admin"), &source(), deadline())
+        .claim_password(
+            crate::support::binding(f.key.tenant),
+            &login("admin"),
+            &source(),
+            deadline(),
+        )
         .await?;
     assert_eq!(
         f.store
@@ -1716,7 +1849,7 @@ async fn password_failures_reset_and_claims_are_fenced() -> anyhow::Result<()> {
         assert_eq!(
             f.store
                 .verify_password(
-                    f.key.tenant,
+                    crate::support::binding(f.key.tenant),
                     login("admin"),
                     Password::new("incorrect password value".into())?,
                     source(),
@@ -1734,7 +1867,7 @@ async fn password_failures_reset_and_claims_are_fenced() -> anyhow::Result<()> {
         assert_eq!(
             other
                 .verify_password(
-                    f.key.tenant,
+                    crate::support::binding(f.key.tenant),
                     login("admin"),
                     Password::new("incorrect password value".into())?,
                     source(),
@@ -1748,17 +1881,27 @@ async fn password_failures_reset_and_claims_are_fenced() -> anyhow::Result<()> {
     // Both source and account blocking use the latest active deadline, with ceiling rounding.
     sqlx::raw_sql("UPDATE identity_authority.password_attempts SET window_until=clock_timestamp()+interval '1.5 seconds' WHERE login_digest=sha256(convert_to('admin','UTF8')); UPDATE identity_authority.attempts SET count=30,expires_at=clock_timestamp()+interval '2.5 seconds' WHERE key='s:local-test'").execute(&f.owner).await?;
     assert!(
-        matches!(f.store.verify_password(f.key.tenant,login("admin"),password(),source(),deadline()).await,Err(AuthorityError::RateLimited {retry_after_seconds}) if retry_after_seconds.get()==3)
+        matches!(f.store.verify_password(crate::support::binding(f.key.tenant), login("admin"), password(), source(), deadline()).await,Err(AuthorityError::RateLimited {retry_after_seconds}) if retry_after_seconds.get()==3)
     );
     sqlx::raw_sql("UPDATE identity_authority.password_attempts SET window_until=clock_timestamp()-interval '1 second'; UPDATE identity_authority.attempts SET expires_at=clock_timestamp()-interval '1 second'").execute(&f.owner).await?;
     f.login().await?;
     // Controlled recovery invalidates in-flight work and clears the failed-password window.
     let claim = f
         .store
-        .claim_password(f.key.tenant, &login("admin"), &source(), deadline())
+        .claim_password(
+            crate::support::binding(f.key.tenant),
+            &login("admin"),
+            &source(),
+            deadline(),
+        )
         .await?;
     f.maintenance
-        .recover_local_password(f.key, password(), deadline())
+        .recover_local_password(
+            crate::support::binding((f.key).tenant),
+            f.key,
+            password(),
+            deadline(),
+        )
         .await?;
     assert_eq!(
         f.store
@@ -1788,7 +1931,13 @@ async fn password_claim_cancellation_and_unknown_settlement() -> anyhow::Result<
     let tenant = f.key.tenant;
     let task = tokio::spawn(async move {
         store
-            .verify_password(tenant, login("admin"), password(), source(), deadline())
+            .verify_password(
+                crate::support::binding(tenant),
+                login("admin"),
+                password(),
+                source(),
+                deadline(),
+            )
             .await
     });
     let observed=tokio::time::timeout(Duration::from_secs(5),async {
@@ -1806,7 +1955,12 @@ async fn password_claim_cancellation_and_unknown_settlement() -> anyhow::Result<
     assert!(cancelled.unwrap_err().is_cancelled());
     assert!(matches!(
         f.store
-            .claim_password(tenant, &login("admin"), &source(), deadline())
+            .claim_password(
+                crate::support::binding(tenant),
+                &login("admin"),
+                &source(),
+                deadline()
+            )
             .await,
         Err(AuthorityError::Busy)
     ));
@@ -1825,20 +1979,36 @@ async fn password_claim_cancellation_and_unknown_settlement() -> anyhow::Result<
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     assert!(matches!(
         f.store
-            .verify_password(tenant, login("admin"), password(), source(), deadline())
+            .verify_password(
+                crate::support::binding(tenant),
+                login("admin"),
+                password(),
+                source(),
+                deadline()
+            )
             .await,
         Err(AuthorityError::CommitUnknown(_))
     ));
     assert!(matches!(
         f.store
-            .claim_password(tenant, &login("admin"), &source(), deadline())
+            .claim_password(
+                crate::support::binding(tenant),
+                &login("admin"),
+                &source(),
+                deadline()
+            )
             .await,
         Err(AuthorityError::Busy)
     ));
     sqlx::query("UPDATE identity_authority.password_attempts SET claim_until=clock_timestamp()-interval '1 second'").execute(&f.owner).await?;
     let claim = f
         .store
-        .claim_password(tenant, &login("admin"), &source(), deadline())
+        .claim_password(
+            crate::support::binding(tenant),
+            &login("admin"),
+            &source(),
+            deadline(),
+        )
         .await?;
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
@@ -1859,7 +2029,12 @@ async fn password_claim_cancellation_and_unknown_settlement() -> anyhow::Result<
     let candidate = f.candidate().await?;
     let claim = f
         .store
-        .claim_password(tenant, &login("admin"), &source(), deadline())
+        .claim_password(
+            crate::support::binding(tenant),
+            &login("admin"),
+            &source(),
+            deadline(),
+        )
         .await?;
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);

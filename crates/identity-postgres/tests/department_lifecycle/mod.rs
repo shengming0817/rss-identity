@@ -76,7 +76,11 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
         );
         let actor = f
             .store
-            .inspect_session(f.key.tenant, secret(&session), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&session),
+                deadline(),
+            )
             .await?;
         let VerifiedDepartmentSnapshot::Available(department) = actor.department_snapshot()? else {
             anyhow::bail!("department unavailable");
@@ -101,7 +105,11 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
         let reference = actor.reference()?;
         let checked = f
             .store
-            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .recheck_session_reference(
+                crate::support::binding(f.key.tenant),
+                &reference,
+                deadline(),
+            )
             .await?;
         let VerifiedDepartmentSnapshot::Available(checked_department) =
             checked.department_snapshot()?
@@ -124,6 +132,9 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
                 .unwrap(),
             ),
             f.config(),
+            crate::support::binding(
+                rss_request_context::TenantId::parse(crate::support::A).unwrap(),
+            ),
             Arc::new(DepartmentPolicy {
                 expected: expected.map(str::to_owned),
             }),
@@ -134,7 +145,11 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
         managed
             .list_accounts(
                 managed
-                    .inspect_session(f.key.tenant, secret(&session), deadline())
+                    .inspect_session(
+                        crate::support::binding(f.key.tenant),
+                        secret(&session),
+                        deadline(),
+                    )
                     .await?,
                 rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
                 None,
@@ -143,11 +158,19 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
             .await?;
         let refreshed = f
             .store
-            .refresh_session(f.key.tenant, secret(&session), deadline())
+            .refresh_session(
+                crate::support::binding(f.key.tenant),
+                secret(&session),
+                deadline(),
+            )
             .await?;
         assert_eq!(facts(&f, &refreshed).await?, before);
         let reloaded = managed
-            .inspect_session(f.key.tenant, secret(&refreshed), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&refreshed),
+                deadline(),
+            )
             .await?;
         let VerifiedDepartmentSnapshot::Available(reloaded_department) =
             reloaded.department_snapshot()?
@@ -157,7 +180,11 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
         assert_eq!(reloaded_department.snapshot_id(), department.snapshot_id());
         clock.advance_to(department.expires_at())?;
         let expired = controlled
-            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .recheck_session_reference(
+                crate::support::binding(f.key.tenant),
+                &reference,
+                deadline(),
+            )
             .await?;
         assert!(expired.assurance().is_ok());
         assert!(matches!(
@@ -169,7 +196,11 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
             managed
                 .list_accounts(
                     managed
-                        .inspect_session(f.key.tenant, secret(&refreshed), deadline())
+                        .inspect_session(
+                            crate::support::binding(f.key.tenant),
+                            secret(&refreshed),
+                            deadline()
+                        )
                         .await?,
                     rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
                     None,
@@ -180,11 +211,19 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
         );
         let again = f
             .store
-            .refresh_session(f.key.tenant, secret(&refreshed), deadline())
+            .refresh_session(
+                crate::support::binding(f.key.tenant),
+                secret(&refreshed),
+                deadline(),
+            )
             .await?;
         assert!(matches!(
             controlled
-                .inspect_session(f.key.tenant, secret(&again), deadline())
+                .inspect_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&again),
+                    deadline()
+                )
                 .await?
                 .department_snapshot()?,
             VerifiedDepartmentSnapshot::Expired
@@ -202,7 +241,11 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
     );
     assert!(matches!(
         f.store
-            .inspect_session(f.key.tenant, secret(&missing), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&missing),
+                deadline()
+            )
             .await?
             .department_snapshot()?,
         VerifiedDepartmentSnapshot::Unavailable(DepartmentUnavailableReason::ClaimMissing)
@@ -218,7 +261,11 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
     );
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     assert!(matches!(
         actor.department_snapshot()?,
@@ -253,7 +300,11 @@ async fn department_configuration_revokes_sessions_and_pending_attempts() -> any
     let old = login_department(&f, &federation, &provider).await?;
     let reference = f
         .store
-        .inspect_session(f.key.tenant, secret(&old), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&old),
+            deadline(),
+        )
         .await?
         .reference()?;
     let pending = begin(&f, &federation, &provider).await?;
@@ -280,20 +331,32 @@ async fn department_configuration_revokes_sessions_and_pending_attempts() -> any
     assert!(finish(&federation, pending, "alice").await.is_err());
     assert!(
         f.store
-            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .recheck_session_reference(
+                crate::support::binding(f.key.tenant),
+                &reference,
+                deadline()
+            )
             .await
             .is_err()
     );
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&old), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&old),
+                deadline()
+            )
             .await
             .is_err()
     );
     let session = login_department(&f, &federation, &next).await?;
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     let VerifiedDepartmentSnapshot::Available(d) = actor.department_snapshot()? else {
         anyhow::bail!("department missing");
@@ -314,13 +377,17 @@ async fn department_source_is_instance_tenant_principal_and_provider_bound() -> 
     let session = login_department(&f, &federation, &provider).await?;
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     let key = actor.account();
     assert!(
         f.store
             .inspect_session(
-                rss_request_context::TenantId::parse(B)?,
+                crate::support::binding(rss_request_context::TenantId::parse(B)?),
                 secret(&session),
                 deadline()
             )
@@ -346,7 +413,11 @@ async fn department_source_is_instance_tenant_principal_and_provider_bound() -> 
     let other_session = login_department(&f, &federation, &other_provider).await?;
     let other_actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&other_session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&other_session),
+            deadline(),
+        )
         .await?;
     assert_ne!(other_actor.account(), key);
     let VerifiedDepartmentSnapshot::Available(d) = other_actor.department_snapshot()? else {
@@ -375,7 +446,11 @@ async fn revoke_case(kind: u8) -> anyhow::Result<()> {
     let session = login_department(&f, &federation, &provider).await?;
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     match kind {
         0 => {
@@ -406,7 +481,11 @@ async fn revoke_case(kind: u8) -> anyhow::Result<()> {
     }
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&session), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&session),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -435,6 +514,7 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
         )?),
         f.config()
             .with_auth_facts_budget(std::num::NonZeroU32::new(8192).unwrap()),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -455,7 +535,11 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
     let session = login_department(&f, &federation, &provider).await?;
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     assert!(actor.assurance().is_ok());
     assert!(matches!(actor.groups()?, VerifiedGroups::Available(_)));
@@ -485,7 +569,11 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
             .await?;
         assert!(
             f.store
-                .inspect_session(f.key.tenant, secret(&session), deadline())
+                .inspect_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&session),
+                    deadline()
+                )
                 .await
                 .is_err()
         );
@@ -499,6 +587,7 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
         )?),
         f.config()
             .with_auth_facts_budget(std::num::NonZeroU32::new(1024 * 1024).unwrap()),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -515,7 +604,11 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
     let session = login_department(&f, &federation, &provider).await?;
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     let VerifiedDepartmentSnapshot::Available(snapshot) = actor.department_snapshot()? else {
         anyhow::bail!("full snapshot withheld");

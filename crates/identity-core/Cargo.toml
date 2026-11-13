@@ -18,7 +18,6 @@ zeroize.workspace = true
 sha2.workspace = true
 subtle = "2.6"
 base64 = "0.22"
-hmac = "0.12"
 url = "2.5"
 [dev-dependencies]
 [lints]

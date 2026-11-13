@@ -2,7 +2,7 @@
 use crate::{AccountKey, Authority, AuthorityError};
 use futures::future::BoxFuture;
 
-use rss_request_context::TenantId;
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     policy::OperationDeadline,
@@ -162,7 +162,7 @@ pub(crate) fn corrupt() -> PgError {
 impl Authority {
     pub(crate) async fn read<T: Send, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         operation: F,
     ) -> Result<T, AuthorityError>
@@ -172,11 +172,11 @@ impl Authority {
             + 'static,
     {
         let bundle = self.runtime.clone();
-        Self::read_bundle(bundle, tenant, deadline, true, operation).await
+        Self::read_bundle(bundle, binding, deadline, true, operation).await
     }
     pub(crate) async fn read_bundle<T: Send, F>(
         bundle: std::sync::Arc<crate::runtime::RuntimeBundle>,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         verify_instance: bool,
         operation: F,
@@ -186,7 +186,6 @@ impl Authority {
             + Send
             + 'static,
     {
-        let binding = bundle.binding(tenant).ok_or(AuthorityError::Rejected)?;
         let instance = bundle.instance;
         if deadline.timeout().is_zero() {
             return Err(AuthorityError::NotStarted(
@@ -226,7 +225,7 @@ impl Authority {
     }
     pub(crate) async fn read_sql<T: Send + 'static, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         work: F,
     ) -> Result<T, AuthorityError>
@@ -238,7 +237,7 @@ impl Authority {
         let reason = std::sync::Arc::new(std::sync::OnceLock::new());
         let slot = reason.clone();
         let result = self
-            .read(tenant, deadline, move |tx| {
+            .read(binding, deadline, move |tx| {
                 Box::pin(async move {
                     connection(tx, work)
                         .await
@@ -250,7 +249,7 @@ impl Authority {
     }
     pub(crate) async fn write_sql<T: Send + 'static, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         work: F,
     ) -> Result<T, AuthorityError>
@@ -262,14 +261,14 @@ impl Authority {
             + Send
             + 'static,
     {
-        self.mutate_events(tenant, deadline, move |tx| {
+        self.mutate_events(binding, deadline, move |tx| {
             Box::pin(async move { connection(tx, work).await })
         })
         .await
     }
     pub(crate) async fn mutate<T: Send, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         operation: F,
     ) -> Result<T, AuthorityError>
@@ -280,7 +279,7 @@ impl Authority {
             + Send
             + 'static,
     {
-        self.mutate_events(tenant, deadline, move |tx| {
+        self.mutate_events(binding, deadline, move |tx| {
             Box::pin(async move {
                 let (value, event) = operation(tx).await?;
                 Ok((value, vec![event]))
@@ -290,7 +289,7 @@ impl Authority {
     }
     pub(crate) async fn mutate_events<T: Send, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         operation: F,
     ) -> Result<T, AuthorityError>
@@ -302,12 +301,12 @@ impl Authority {
             + Send
             + 'static,
     {
-        self.settle_events(tenant, deadline, operation, true).await
+        self.settle_events(binding, deadline, operation, true).await
     }
     /// Conditional domain transition: empty events are permitted only for unchanged business state.
     pub(crate) async fn conditional_write_sql<T: Send + 'static, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         work: F,
     ) -> Result<T, AuthorityError>
@@ -320,7 +319,7 @@ impl Authority {
             + 'static,
     {
         self.settle_events(
-            tenant,
+            binding,
             deadline,
             move |tx| Box::pin(async move { connection(tx, work).await }),
             false,
@@ -329,7 +328,7 @@ impl Authority {
     }
     async fn settle_events<T: Send, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         operation: F,
         require_event: bool,
@@ -347,7 +346,7 @@ impl Authority {
         let instance = bundle.instance;
         let reason = std::sync::Arc::new(std::sync::OnceLock::new());
         let reason_slot = reason.clone();
-        let result = Self::read_bundle(bundle, tenant, deadline, true, move |tx| {
+        let result = Self::read_bundle(bundle, binding, deadline, true, move |tx| {
             Box::pin(async move {
                 if !matches!(&audit, rss_audit_postgres::Integrity::Plain) {
                     rss_audit_postgres::lock_head_in(tx, &audit)
@@ -360,13 +359,31 @@ impl Authority {
                 if (require_event && events.is_empty()) || events.len() > MAX_MUTATION_EVENTS {
                     return Err(corrupt());
                 }
-                crate::audit::append_events(tx, &audit, instance, tenant, events).await?;
+                crate::audit::append_events(tx, &audit, instance, binding.tenant(), events).await?;
                 Ok(result)
             })
         })
         .await;
         domain_result(result, reason.get().copied())
     }
+}
+
+/// Compare the existing transaction context with the proof's original execution coordinates.
+/// This never replaces the context or discovers a newer epoch.
+pub(crate) async fn check_binding(
+    c: &mut sqlx::PgConnection,
+    binding: ExecutionBinding,
+) -> Result<(), PgError> {
+    let matches: Option<bool> = sqlx::query_scalar("SELECT current_setting('rss.tenant_id',true)=$1 AND decode(NULLIF(current_setting('rss.storage_target',true),''),'hex')=$2 AND decode(NULLIF(current_setting('rss.storage_lineage',true),''),'hex')=$3 AND NULLIF(current_setting('rss.execution_epoch',true),'')::bigint=$4")
+        .bind(binding.tenant().to_string())
+        .bind(binding.storage().target().as_slice())
+        .bind(binding.storage().lineage().as_slice())
+        .bind(binding.epoch().get())
+        .fetch_one(c).await?;
+    if matches != Some(true) {
+        return Err(reject());
+    }
+    Ok(())
 }
 
 // Carry domain rejection through SQLx's connection callback, then abort the outer transaction.

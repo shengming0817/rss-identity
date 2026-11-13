@@ -32,12 +32,8 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         serde_json::from_value(value["database"].clone())?;
     let mut owner = sqlx::PgConnection::connect_with(&owner_db.sqlx()?).await?;
     sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE host_runtime LOGIN PASSWORD 'fixture-runtime'; CREATE ROLE host_maintenance LOGIN PASSWORD 'fixture-maintenance'; CREATE ROLE host_audit_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; GRANT CREATE ON DATABASE postgres TO host_audit_owner; CREATE ROLE unsafe_parent NOLOGIN BYPASSRLS").execute(&mut owner).await?;
-    value["storage"]["tenants"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!("33333333-3333-4333-8333-333333333333"));
     value["bootstrapAccounts"].as_array_mut().unwrap().push(json!({"tenantId":"33333333-3333-4333-8333-333333333333","principalId":"44444444-4444-4444-8444-444444444444"}));
-    let install_value = json!({"formatVersion":5,"audit":{"ownerRole":"host_audit_owner"},"budgets":value["budgets"],"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
+    let install_value = json!({"formatVersion":5,"audit":{"ownerRole":"host_audit_owner"},"budgets":value["budgets"],"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance","targets":value["bootstrapAccounts"].as_array().unwrap().iter().map(|a|json!({"tenantId":a["tenantId"],"generation":1})).collect::<Vec<_>>()});
     let install_config =
         || serde_json::from_value::<MigrationConfig>(install_value.clone()).unwrap();
     for (corrupt, restore) in [
@@ -83,6 +79,8 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         sqlx::raw_sql(restore).execute(&mut owner).await?;
     }
     migration::install(install_config()).await?;
+    migration::verify(install_config()).await?;
+    sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES('55555555-5555-4555-8555-555555555555',1)").execute(&mut owner).await?;
     migration::verify(install_config()).await?;
     for (corrupt, restore) in [
         (
@@ -146,13 +144,20 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         maintenance_runtime.clone(),
         kdf.clone(),
         assembly::authority_config(&config)?,
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         deadline(),
     )
     .await?;
     let keys = config.bootstrap_keys()?;
     for key in &keys {
         maintenance
-            .initialize(*key, LoginKey::parse("operator")?, password(), deadline())
+            .initialize(
+                crate::support::binding(key.tenant),
+                *key,
+                LoginKey::parse("operator")?,
+                password(),
+                deadline(),
+            )
             .await?;
     }
     value["database"]["user"] = json!("host_runtime");
@@ -182,7 +187,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
         authority.clone(),
         upstream.clone(),
-        rss_identity_core::federation::StateSigner::new([7; 32], &config.public_origin)?,
+        rss_identity_postgres::StateSigner::new([7; 32], &config.public_origin)?,
         FederationConfig {
             callback: format!("{}/api/v1/identity/oidc/callback", config.public_origin),
             credential_keys: support::credential_keys(),
@@ -195,7 +200,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     for key in &keys {
         let issued = authority
             .login_local(
-                key.tenant,
+                crate::support::binding(key.tenant),
                 LoginKey::parse("operator")?,
                 password(),
                 AttemptSource::parse("fixture")?,
@@ -215,7 +220,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             use tower::ServiceExt;
             let response = context
                 .clone()
-                .oneshot(
+                .oneshot(crate::request_support::scoped(
                     axum::http::Request::builder()
                         .uri(format!(
                             "/api/v1/identity-host/tenants/{}/context",
@@ -229,7 +234,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                             ),
                         )
                         .body(axum::body::Body::empty())?,
-                )
+                ))
                 .await?;
             assert_eq!(response.status(), expected);
             assert_eq!(response.headers()["cache-control"], "no-store");
@@ -248,7 +253,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 .unwrap()
         };
         let manager = authority
-            .inspect_session(key.tenant, actor(), deadline())
+            .inspect_session(crate::support::binding(key.tenant), actor(), deadline())
             .await?;
         let provider = federation
             .create_provider(
@@ -262,21 +267,21 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             )
             .await?;
         let manager = authority
-            .inspect_session(key.tenant, actor(), deadline())
+            .inspect_session(crate::support::binding(key.tenant), actor(), deadline())
             .await?;
         federation
             .enable_provider(manager, provider.id, provider.version, true, deadline())
             .await?;
 
         let manager = authority
-            .inspect_session(key.tenant, actor(), deadline())
+            .inspect_session(crate::support::binding(key.tenant), actor(), deadline())
             .await?;
         let member = authority
             .create_local_account(manager, LoginKey::parse("member")?, password(), deadline())
             .await?;
         assert_eq!(member.key().tenant, key.tenant);
         let manager = authority
-            .inspect_session(key.tenant, actor(), deadline())
+            .inspect_session(crate::support::binding(key.tenant), actor(), deadline())
             .await?;
         assert!(matches!(
             authority
@@ -286,7 +291,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         ));
         let member_session = authority
             .login_local(
-                key.tenant,
+                crate::support::binding(key.tenant),
                 LoginKey::parse("member")?,
                 password(),
                 AttemptSource::parse("fixture")?,
@@ -296,7 +301,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             .await?;
         let member_actor = authority
             .inspect_session(
-                key.tenant,
+                crate::support::binding(key.tenant),
                 rss_identity_core::session::SessionSecret::parse(
                     member_session.secret().expose().into(),
                 )?,
@@ -316,7 +321,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         );
         let member_actor = authority
             .inspect_session(
-                key.tenant,
+                crate::support::binding(key.tenant),
                 rss_identity_core::session::SessionSecret::parse(
                     member_session.secret().expose().into(),
                 )?,
@@ -355,9 +360,14 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     assert_eq!(before.len(), 2);
     sqlx::query("UPDATE identity_authority.provider_credentials SET credential_version=credential_version+1 WHERE tenant_id=$1::uuid").bind(keys[1].tenant.to_string()).execute(&mut owner).await?;
     assert!(
-        rss_identity_app::rekey::run(install_config(), ring(false), false)
-            .await
-            .is_err()
+        rss_identity_app::rekey::run(
+            install_config(),
+            ring(false),
+            install_config().targets,
+            false
+        )
+        .await
+        .is_err()
     );
     let after: Vec<serde_json::Value> = sqlx::query_scalar(
         "SELECT sealed FROM identity_authority.provider_credentials ORDER BY tenant_id",
@@ -365,14 +375,28 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     .fetch_all(&mut owner)
     .await?;
     assert_eq!(before, after, "partial tenant updates must roll back");
+    rss_identity_app::rekey::run(
+        install_config(),
+        ring(false),
+        vec![install_config().targets[0].clone()],
+        false,
+    )
+    .await?;
     sqlx::query("UPDATE identity_authority.provider_credentials SET credential_version=credential_version-1 WHERE tenant_id=$1::uuid").bind(keys[1].tenant.to_string()).execute(&mut owner).await?;
     assert!(
-        rss_identity_app::rekey::run(install_config(), ring(true), true)
+        rss_identity_app::rekey::run(install_config(), ring(true), install_config().targets, true)
             .await
             .is_err()
     );
-    rss_identity_app::rekey::run(install_config(), ring(false), false).await?;
-    rss_identity_app::rekey::run(install_config(), ring(true), true).await?;
+    rss_identity_app::rekey::run(
+        install_config(),
+        ring(false),
+        install_config().targets,
+        false,
+    )
+    .await?;
+    rss_identity_app::rekey::run(install_config(), ring(true), install_config().targets, true)
+        .await?;
     runtime.close().await;
     maintenance_runtime.close().await;
     kdf.close();
@@ -608,3 +632,6 @@ fn deadline() -> rss_transactional_messaging::policy::OperationDeadline {
         std::time::Duration::from_secs(10),
     )
 }
+
+#[path = "../../../crates/identity-http-axum/tests/request_support/mod.rs"]
+mod request_support;

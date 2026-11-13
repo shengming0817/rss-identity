@@ -51,29 +51,14 @@ fn binary_help_uses_identity_name() {
 }
 
 #[test]
-fn runtime_config_is_explicit_local_and_rejects_central_configuration() {
+fn runtime_config_validates_host_policy_and_coordinates() {
     use rss_identity_app::config::RuntimeConfig;
     let example: serde_json::Value =
         serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
     let parsed: RuntimeConfig = serde_json::from_value(example.clone()).unwrap();
     parsed.validate().unwrap();
     assert!(parsed.oidc.is_none());
-    let mut missing_manager = example.clone();
-    missing_manager["storage"]["tenants"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!("33333333-3333-4333-8333-333333333333"));
-    assert!(
-        serde_json::from_value::<RuntimeConfig>(missing_manager)
-            .unwrap()
-            .validate()
-            .is_err()
-    );
     let mut complete = example.clone();
-    complete["storage"]["tenants"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!("33333333-3333-4333-8333-333333333333"));
     complete["bootstrapAccounts"].as_array_mut().unwrap().push(serde_json::json!({"tenantId":"33333333-3333-4333-8333-333333333333", "principalId":"44444444-4444-4444-8444-444444444444"}));
     assert!(
         serde_json::from_value::<RuntimeConfig>(complete.clone())
@@ -88,20 +73,6 @@ fn runtime_config_is_explicit_local_and_rejects_central_configuration() {
             .validate()
             .is_err()
     );
-    for key in [
-        "format_version",
-        "bootstrap",
-        "public_origin",
-        "maintenance_password_file",
-        "private_gateway",
-        "hydra",
-        "system_tenant",
-        "runtime_source",
-    ] {
-        let mut value = example.clone();
-        value[key] = serde_json::json!("retired");
-        assert!(serde_json::from_value::<RuntimeConfig>(value).is_err());
-    }
     for (key, value) in [
         ("formatVersion", serde_json::json!(2)),
         (
@@ -119,15 +90,6 @@ fn runtime_config_is_explicit_local_and_rejects_central_configuration() {
                 .is_err()
         );
     }
-    let mut wrong_tenant = example.clone();
-    wrong_tenant["bootstrapAccounts"][0]["tenantId"] =
-        serde_json::json!("22222222-2222-4222-8222-222222222222");
-    assert!(
-        serde_json::from_value::<RuntimeConfig>(wrong_tenant)
-            .unwrap()
-            .validate()
-            .is_err()
-    );
 }
 
 #[test]
@@ -180,7 +142,6 @@ fn configured_directories_load_at_the_supported_capacity() {
         .map(|_| uuid::Uuid::new_v4().to_string())
         .collect();
     let issuer = format!("https://idp.example.test/{}", "a".repeat(2000));
-    value["storage"]["tenants"] = json!(tenants);
     value["bootstrapAccounts"] = json!(
         tenants
             .iter()
@@ -197,7 +158,6 @@ fn configured_directories_load_at_the_supported_capacity() {
     std::fs::write(&path, bytes).unwrap();
     let config = RuntimeConfig::load(&path).unwrap();
     std::fs::remove_file(path).unwrap();
-    assert_eq!(config.storage.tenants().unwrap().len(), 1024);
     let oidc = config.oidc.as_ref().unwrap();
     let profiles = oidc
         .assurance_profiles
@@ -212,8 +172,7 @@ fn configured_directories_load_at_the_supported_capacity() {
     assert!(
         rss_identity_oidc::HttpOidc::new(
             profiles,
-            oidc.private_access(&config.storage.tenants().unwrap())
-                .unwrap(),
+            oidc.private_access().unwrap(),
             oidc.transport().unwrap()
         )
         .is_ok()

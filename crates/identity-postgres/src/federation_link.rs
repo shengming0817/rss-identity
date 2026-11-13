@@ -90,12 +90,13 @@ impl Federation {
         }
 
         check_browser(&browser)?;
-        let tenant = actor.key.tenant;
+        let binding = actor.binding;
+        let tenant = binding.tenant();
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.shortened_to(actor.expires);
         let return_url = self.target(&target)?;
         let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
-        let (actor,account,origin,login)=self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
+        let (actor,account,origin,login)=self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
                     let origin = db::origin(c, tenant, actor.view.id).await?;
                     let login: Option<String> = sqlx::query_scalar(concat!(
@@ -112,7 +113,7 @@ impl Federation {
             let candidate = self
                 .authority
                 .verify_password(
-                    tenant,
+                    binding,
                     LoginKey::parse(&login).map_err(|_| AuthorityError::Rejected)?,
                     password.ok_or(AuthorityError::Rejected)?,
                     source,
@@ -129,7 +130,7 @@ impl Federation {
             }
             self.authority
                 .reserve(
-                    tenant,
+                    binding,
                     format!("link:{}", actor.key.principal.as_uuid()),
                     &source,
                     budget.remaining(),
@@ -137,8 +138,13 @@ impl Federation {
                 .await?;
             None
         };
-        let target =
-            db::read_provider(&self.authority, tenant, target_provider, budget.remaining()).await?;
+        let target = db::read_provider(
+            &self.authority,
+            binding,
+            target_provider,
+            budget.remaining(),
+        )
+        .await?;
         if !target.enabled {
             return Err(AuthorityError::Rejected);
         }
@@ -148,22 +154,24 @@ impl Federation {
             let origin = origin.as_ref().ok_or(AuthorityError::Rejected)?.clone();
             let id = self
                 .authority
-                .read_sql(tenant, budget.remaining(), move |c| {
+                .read_sql(binding, budget.remaining(), move |c| {
                     Box::pin(async move { Ok(db::identity(c, tenant, origin.identity).await?.0) })
                 })
                 .await?;
             (
-                db::read_provider(&self.authority, tenant, id, budget.remaining()).await?,
+                db::read_provider(&self.authority, binding, id, budget.remaining()).await?,
                 Purpose::Reauthenticate,
             )
         };
-        let state = self.signer.issue(tenant, purpose)?;
-        let locator = self.signer.verify(&state)?;
+        let state = self
+            .signer
+            .issue(self.authority.instance(), binding, purpose)?;
+        let locator = self.signer.verify(self.authority.instance(), &state)?;
         let material = ProtocolMaterial::new(state)?;
         self.check_assurance_profile(tenant, &provider)?;
         let credentials = self
             .provider_credentials(
-                tenant,
+                binding,
                 provider.id,
                 provider.credential_version,
                 budget.remaining(),
@@ -186,7 +194,7 @@ impl Federation {
                 ),
             )
             .await?;
-        self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
+        self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
                     if !loaded.state.matches_verification(account) {
                         return Err(reject().into());
@@ -262,12 +270,13 @@ impl Federation {
             source,
             claims,
         } = input;
-        let locator = self.signer.verify(&state)?;
-        let tenant = locator.tenant();
+        let locator = self.signer.verify(self.authority.instance(), &state)?;
+        let binding = locator.binding();
+        let tenant = binding.tenant();
         let intent_id = old.link.ok_or(AuthorityError::Rejected)?;
         let target = self
             .authority
-            .read_sql(tenant, budget.remaining(), move |c| {
+            .read_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
                     let i = intent(c, tenant, intent_id).await?;
                     let target = db::provider(c, tenant, i.target).await?;
@@ -276,13 +285,15 @@ impl Federation {
                 })
             })
             .await?;
-        let new_state = self.signer.issue(tenant, Purpose::Link)?;
-        let new_locator = self.signer.verify(&new_state)?;
+        let new_state = self
+            .signer
+            .issue(self.authority.instance(), binding, Purpose::Link)?;
+        let new_locator = self.signer.verify(self.authority.instance(), &new_state)?;
         let material = ProtocolMaterial::new(new_state)?;
         self.check_assurance_profile(tenant, &target)?;
         let credentials = self
             .provider_credentials(
-                tenant,
+                binding,
                 target.id,
                 target.credential_version,
                 budget.remaining(),
@@ -305,7 +316,7 @@ impl Federation {
         let future_skew_seconds = self.authority.future_skew_seconds;
         let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
         self.authority
-            .write_sql(tenant, budget.remaining(), move |c| {
+            .write_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;

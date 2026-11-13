@@ -10,7 +10,7 @@ const ORIGIN: &str = "https://identity.example.test";
 async fn actor(f: &Fixture, s: &IssuedSession) -> anyhow::Result<AuthenticatedSession> {
     Ok(f.store
         .inspect_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             rss_identity_core::session::SessionSecret::parse(s.secret().expose().into())?,
             deadline(),
         )
@@ -25,10 +25,7 @@ async fn consume(
 ) -> anyhow::Result<bool> {
     let proof = actor(f, s).await?;
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(f.key.tenant.to_string())
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, binding(f.key.tenant)).await?;
     sqlx::query("SET LOCAL ROLE identity_runtime")
         .execute(&mut *tx)
         .await?;
@@ -48,17 +45,16 @@ async fn webauthn_self_service_and_atomic_operation_proofs() -> anyhow::Result<(
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let s = f.login().await?;
-    let w = WebauthnAuthority::connect(
+    let w = WebauthnAuthority::new(
         f.store.clone(),
         "identity.example.test".into(),
         Url::parse(ORIGIN)?,
-        deadline(),
-    )
-    .await?;
+    )?;
     let mut key = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let registration = w
         .begin_registration(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             "laptop".into(),
             false,
             RegistrationAuthorization::First,
@@ -67,12 +63,24 @@ async fn webauthn_self_service_and_atomic_operation_proofs() -> anyhow::Result<(
         .await?;
     let response = key.do_registration(Url::parse(ORIGIN)?, registration.options)?;
     let credential = w
-        .finish_registration(actor(&f, &s).await?, registration.id, response, deadline())
+        .finish_registration(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            registration.id,
+            response,
+            deadline(),
+        )
         .await?;
-    assert_eq!(w.list(actor(&f, &s).await?, deadline()).await?.len(), 1);
+    assert_eq!(
+        w.list(actor(&f, &s).await?, RpGeneration::new(1)?, deadline())
+            .await?
+            .len(),
+        1
+    );
     assert!(
         w.begin_registration(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             "bypass".into(),
             false,
             RegistrationAuthorization::First,
@@ -83,13 +91,30 @@ async fn webauthn_self_service_and_atomic_operation_proofs() -> anyhow::Result<(
     );
     let context = StepUpContext::new("device.erase".into(), [9; 32]).unwrap();
     let a = w
-        .begin_authentication(actor(&f, &s).await?, context.clone(), deadline())
+        .begin_authentication(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            context.clone(),
+            deadline(),
+        )
         .await?;
     let response = key.do_authentication(Url::parse(ORIGIN)?, a.options)?;
     let copy = serde_json::from_value(serde_json::to_value(&response)?)?;
     let (left, right) = tokio::join!(
-        w.finish_authentication(actor(&f, &s).await?, a.id, response, deadline()),
-        w.finish_authentication(actor(&f, &s).await?, a.id, copy, deadline())
+        w.finish_authentication(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            a.id,
+            response,
+            deadline()
+        ),
+        w.finish_authentication(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            a.id,
+            copy,
+            deadline()
+        )
     );
     assert_ne!(left.is_ok(), right.is_ok());
     let grant = left.or(right)?;
@@ -103,23 +128,40 @@ async fn webauthn_self_service_and_atomic_operation_proofs() -> anyhow::Result<(
     assert!(!consume(&f, &s, &context, grant.expose(), true).await?);
     let remove = webauthn_management_context(f.key, "remove", Some(credential.id))?;
     let a = w
-        .begin_authentication(actor(&f, &s).await?, remove, deadline())
+        .begin_authentication(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            remove,
+            deadline(),
+        )
         .await?;
     let response = key.do_authentication(Url::parse(ORIGIN)?, a.options)?;
     let grant = w
-        .finish_authentication(actor(&f, &s).await?, a.id, response, deadline())
+        .finish_authentication(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            a.id,
+            response,
+            deadline(),
+        )
         .await?;
     w.remove(
         actor(&f, &s).await?,
+        RpGeneration::new(1)?,
         credential.id,
         grant.expose().into(),
         deadline(),
     )
     .await?;
-    assert!(w.list(actor(&f, &s).await?, deadline()).await?.is_empty());
+    assert!(
+        w.list(actor(&f, &s).await?, RpGeneration::new(1)?, deadline())
+            .await?
+            .is_empty()
+    );
     assert!(
         w.begin_registration(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             "reset bypass".into(),
             false,
             RegistrationAuthorization::First,
@@ -142,17 +184,16 @@ async fn webauthn_cancellation_expiry_revocation_and_origin() -> anyhow::Result<
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let s = f.login().await?;
-    let w = WebauthnAuthority::connect(
+    let w = WebauthnAuthority::new(
         f.store.clone(),
         "identity.example.test".into(),
         Url::parse(ORIGIN)?,
-        deadline(),
-    )
-    .await?;
+    )?;
     let mut key = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let start = w
         .begin_registration(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             "key".into(),
             false,
             RegistrationAuthorization::First,
@@ -160,15 +201,28 @@ async fn webauthn_cancellation_expiry_revocation_and_origin() -> anyhow::Result<
         )
         .await?;
     let response = key.do_registration(Url::parse(ORIGIN)?, start.options)?;
-    w.cancel(actor(&f, &s).await?, start.id, deadline()).await?;
+    w.cancel(
+        actor(&f, &s).await?,
+        RpGeneration::new(1)?,
+        start.id,
+        deadline(),
+    )
+    .await?;
     assert!(
-        w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())
-            .await
-            .is_err()
+        w.finish_registration(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            start.id,
+            response,
+            deadline()
+        )
+        .await
+        .is_err()
     );
     let start = w
         .begin_registration(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             "key".into(),
             false,
             RegistrationAuthorization::First,
@@ -181,6 +235,7 @@ async fn webauthn_cancellation_expiry_revocation_and_origin() -> anyhow::Result<
     assert!(
         w.finish_registration(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             start.id,
             serde_json::from_value(bad)?,
             deadline()
@@ -188,25 +243,53 @@ async fn webauthn_cancellation_expiry_revocation_and_origin() -> anyhow::Result<
         .await
         .is_err()
     );
-    w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())
-        .await?;
+    w.finish_registration(
+        actor(&f, &s).await?,
+        RpGeneration::new(1)?,
+        start.id,
+        response,
+        deadline(),
+    )
+    .await?;
     let context = StepUpContext::new("test".into(), [1; 32]).unwrap();
     let start = w
-        .begin_authentication(actor(&f, &s).await?, context.clone(), deadline())
+        .begin_authentication(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            context.clone(),
+            deadline(),
+        )
         .await?;
     let response = key.do_authentication(Url::parse(ORIGIN)?, start.options)?;
     sqlx::query("UPDATE identity_authority.webauthn_ceremonies SET created_at=created_at-121,expires_at=expires_at-121").execute(&f.owner).await?;
     assert!(
-        w.finish_authentication(actor(&f, &s).await?, start.id, response, deadline())
-            .await
-            .is_err()
+        w.finish_authentication(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            start.id,
+            response,
+            deadline()
+        )
+        .await
+        .is_err()
     );
     let start = w
-        .begin_authentication(actor(&f, &s).await?, context.clone(), deadline())
+        .begin_authentication(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            context.clone(),
+            deadline(),
+        )
         .await?;
     let response = key.do_authentication(Url::parse(ORIGIN)?, start.options)?;
     let grant = w
-        .finish_authentication(actor(&f, &s).await?, start.id, response, deadline())
+        .finish_authentication(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            start.id,
+            response,
+            deadline(),
+        )
         .await?;
     let another = f.login().await?;
     assert!(!consume(&f, &another, &context, grant.expose(), true).await?);
@@ -224,16 +307,15 @@ async fn webauthn_uv_and_registration_event_rollback() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let session = f.login().await?;
-    let w = WebauthnAuthority::connect(
+    let w = WebauthnAuthority::new(
         f.store.clone(),
         "identity.example.test".into(),
         Url::parse(ORIGIN)?,
-        deadline(),
-    )
-    .await?;
+    )?;
     let start = w
         .begin_registration(
             actor(&f, &session).await?,
+            RpGeneration::new(1)?,
             "no UV".into(),
             false,
             RegistrationAuthorization::First,
@@ -246,15 +328,27 @@ async fn webauthn_uv_and_registration_event_rollback() -> anyhow::Result<()> {
     let mut no_uv = WebauthnAuthenticator::new(SoftPasskey::new(false));
     let response = no_uv.do_registration(Url::parse(ORIGIN)?, serde_json::from_value(options)?)?;
     assert!(
-        w.finish_registration(actor(&f, &session).await?, start.id, response, deadline())
-            .await
-            .is_err()
+        w.finish_registration(
+            actor(&f, &session).await?,
+            RpGeneration::new(1)?,
+            start.id,
+            response,
+            deadline()
+        )
+        .await
+        .is_err()
     );
-    w.cancel(actor(&f, &session).await?, start.id, deadline())
-        .await?;
+    w.cancel(
+        actor(&f, &session).await?,
+        RpGeneration::new(1)?,
+        start.id,
+        deadline(),
+    )
+    .await?;
     let start = w
         .begin_registration(
             actor(&f, &session).await?,
+            RpGeneration::new(1)?,
             "atomic".into(),
             false,
             RegistrationAuthorization::First,
@@ -266,9 +360,15 @@ async fn webauthn_uv_and_registration_event_rollback() -> anyhow::Result<()> {
     let copy = serde_json::from_value(serde_json::to_value(&response)?)?;
     sqlx::raw_sql("CREATE FUNCTION public.fail_webauthn_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_webauthn_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.fail_webauthn_event();").execute(&f.owner).await?;
     assert!(
-        w.finish_registration(actor(&f, &session).await?, start.id, response, deadline())
-            .await
-            .is_err()
+        w.finish_registration(
+            actor(&f, &session).await?,
+            RpGeneration::new(1)?,
+            start.id,
+            response,
+            deadline()
+        )
+        .await
+        .is_err()
     );
     let count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM identity_authority.webauthn_credentials")
@@ -276,8 +376,14 @@ async fn webauthn_uv_and_registration_event_rollback() -> anyhow::Result<()> {
             .await?;
     assert_eq!(count, 0);
     sqlx::raw_sql("DROP TRIGGER fail_webauthn_event ON rss_audit.records; DROP FUNCTION public.fail_webauthn_event();").execute(&f.owner).await?;
-    w.finish_registration(actor(&f, &session).await?, start.id, copy, deadline())
-        .await?;
+    w.finish_registration(
+        actor(&f, &session).await?,
+        RpGeneration::new(1)?,
+        start.id,
+        copy,
+        deadline(),
+    )
+    .await?;
     f.close().await;
     Ok(())
 }
@@ -291,13 +397,22 @@ async fn management_grant(
 ) -> anyhow::Result<StepUpGrant> {
     let context = webauthn_management_context(f.key, operation, None)?;
     let start = w
-        .begin_authentication(actor(f, s).await?, context, deadline())
+        .begin_authentication(
+            actor(f, s).await?,
+            RpGeneration::new(1)?,
+            context,
+            deadline(),
+        )
         .await?;
     let response = key.do_authentication(Url::parse(ORIGIN)?, start.options)?;
-    Ok(
-        w.finish_authentication(actor(f, s).await?, start.id, response, deadline())
-            .await?,
+    Ok(w.finish_authentication(
+        actor(f, s).await?,
+        RpGeneration::new(1)?,
+        start.id,
+        response,
+        deadline(),
     )
+    .await?)
 }
 #[tokio::test]
 #[ignore = "requires make test-pg"]
@@ -305,16 +420,15 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let s = f.login().await?;
-    let w = WebauthnAuthority::connect(
+    let w = WebauthnAuthority::new(
         f.store.clone(),
         "identity.example.test".into(),
         Url::parse(ORIGIN)?,
-        deadline(),
-    )
-    .await?;
+    )?;
     let mut first = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let start = Box::pin(w.begin_registration(
         actor(&f, &s).await?,
+        RpGeneration::new(1)?,
         "first".into(),
         false,
         RegistrationAuthorization::First,
@@ -322,11 +436,19 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     ))
     .await?;
     let response = first.do_registration(Url::parse(ORIGIN)?, start.options)?;
-    Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())).await?;
+    Box::pin(w.finish_registration(
+        actor(&f, &s).await?,
+        RpGeneration::new(1)?,
+        start.id,
+        response,
+        deadline(),
+    ))
+    .await?;
     let grant = Box::pin(management_grant(&f, &w, &s, &mut first, "register")).await?;
     assert!(
         Box::pin(w.begin_registration(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             "wrong purpose".into(),
             true,
             RegistrationAuthorization::StepUp(grant.expose().into()),
@@ -337,6 +459,7 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     );
     let start = Box::pin(w.begin_registration(
         actor(&f, &s).await?,
+        RpGeneration::new(1)?,
         "second".into(),
         false,
         RegistrationAuthorization::StepUp(grant.expose().into()),
@@ -346,6 +469,7 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     assert!(
         Box::pin(w.begin_registration(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             "replay".into(),
             false,
             RegistrationAuthorization::StepUp(grant.expose().into()),
@@ -356,10 +480,18 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     );
     let mut second = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let response = second.do_registration(Url::parse(ORIGIN)?, start.options)?;
-    Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())).await?;
+    Box::pin(w.finish_registration(
+        actor(&f, &s).await?,
+        RpGeneration::new(1)?,
+        start.id,
+        response,
+        deadline(),
+    ))
+    .await?;
     let old = Box::pin(management_grant(&f, &w, &s, &mut first, "register")).await?;
     let pending = Box::pin(w.begin_authentication(
         actor(&f, &s).await?,
+        RpGeneration::new(1)?,
         StepUpContext::new("pending".into(), [4; 32]).unwrap(),
         deadline(),
     ))
@@ -368,6 +500,7 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     let recovery = Box::pin(management_grant(&f, &w, &s, &mut second, "recover")).await?;
     let start = Box::pin(w.begin_registration(
         actor(&f, &s).await?,
+        RpGeneration::new(1)?,
         "recovered".into(),
         true,
         RegistrationAuthorization::StepUp(recovery.expose().into()),
@@ -379,14 +512,37 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     let copy = serde_json::from_value(serde_json::to_value(&response)?)?;
     sqlx::raw_sql("CREATE FUNCTION public.fail_recovery_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_recovery_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.fail_recovery_event();").execute(&f.owner).await?;
     assert!(
-        Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline()))
-            .await
-            .is_err()
+        Box::pin(w.finish_registration(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            start.id,
+            response,
+            deadline()
+        ))
+        .await
+        .is_err()
     );
-    assert_eq!(w.list(actor(&f, &s).await?, deadline()).await?.len(), 2);
+    assert_eq!(
+        w.list(actor(&f, &s).await?, RpGeneration::new(1)?, deadline())
+            .await?
+            .len(),
+        2
+    );
     sqlx::raw_sql("DROP TRIGGER fail_recovery_event ON rss_audit.records;DROP FUNCTION public.fail_recovery_event();").execute(&f.owner).await?;
-    Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, copy, deadline())).await?;
-    assert_eq!(w.list(actor(&f, &s).await?, deadline()).await?.len(), 1);
+    Box::pin(w.finish_registration(
+        actor(&f, &s).await?,
+        RpGeneration::new(1)?,
+        start.id,
+        copy,
+        deadline(),
+    ))
+    .await?;
+    assert_eq!(
+        w.list(actor(&f, &s).await?, RpGeneration::new(1)?, deadline())
+            .await?
+            .len(),
+        1
+    );
     assert!(
         !consume(
             &f,
@@ -400,6 +556,7 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     assert!(
         Box::pin(w.finish_authentication(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             pending.id,
             pending_response,
             deadline()
@@ -410,6 +567,7 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     assert!(
         Box::pin(w.begin_registration(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             "first bypass".into(),
             false,
             RegistrationAuthorization::First,
@@ -423,6 +581,7 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     assert!(
         Box::pin(w.begin_registration(
             actor(&f, &s).await?,
+            RpGeneration::new(1)?,
             "host recovery".into(),
             true,
             RegistrationAuthorization::HostRecovery,
@@ -434,6 +593,7 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     f.policy.allow(f.key);
     let start = Box::pin(w.begin_registration(
         actor(&f, &s).await?,
+        RpGeneration::new(1)?,
         "host recovery".into(),
         true,
         RegistrationAuthorization::HostRecovery,
@@ -445,13 +605,31 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     f.policy.revoke(f.key);
     let copy = serde_json::from_value(serde_json::to_value(&response)?)?;
     assert!(
-        Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline()))
-            .await
-            .is_err()
+        Box::pin(w.finish_registration(
+            actor(&f, &s).await?,
+            RpGeneration::new(1)?,
+            start.id,
+            response,
+            deadline()
+        ))
+        .await
+        .is_err()
     );
     f.policy.allow(f.key);
-    Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, copy, deadline())).await?;
-    assert_eq!(w.list(actor(&f, &s).await?, deadline()).await?.len(), 1);
+    Box::pin(w.finish_registration(
+        actor(&f, &s).await?,
+        RpGeneration::new(1)?,
+        start.id,
+        copy,
+        deadline(),
+    ))
+    .await?;
+    assert_eq!(
+        w.list(actor(&f, &s).await?, RpGeneration::new(1)?, deadline())
+            .await?
+            .len(),
+        1
+    );
     f.close().await;
     Ok(())
 }
@@ -462,17 +640,12 @@ async fn webauthn_rp_generation_fences_old_processes_and_proofs() -> anyhow::Res
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let session = f.login().await?;
-    let w = WebauthnAuthority::connect(
-        f.store.clone(),
-        "example.test".into(),
-        Url::parse(ORIGIN)?,
-        deadline(),
-    )
-    .await?;
+    let w = WebauthnAuthority::new(f.store.clone(), "example.test".into(), Url::parse(ORIGIN)?)?;
     let mut key = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let start = w
         .begin_registration(
             actor(&f, &session).await?,
+            RpGeneration::new(1)?,
             "old origin".into(),
             false,
             RegistrationAuthorization::First,
@@ -480,19 +653,25 @@ async fn webauthn_rp_generation_fences_old_processes_and_proofs() -> anyhow::Res
         )
         .await?;
     let response = key.do_registration(Url::parse(ORIGIN)?, start.options)?;
-    w.finish_registration(actor(&f, &session).await?, start.id, response, deadline())
-        .await?;
+    w.finish_registration(
+        actor(&f, &session).await?,
+        RpGeneration::new(1)?,
+        start.id,
+        response,
+        deadline(),
+    )
+    .await?;
     let grant = management_grant(&f, &w, &session, &mut key, "register").await?;
     let newer = Url::parse("https://new.example.test")?;
     assert!(
-        WebauthnAuthority::connect(
-            f.store.clone(),
-            "example.test".into(),
-            newer.clone(),
-            deadline()
-        )
-        .await
-        .is_err(),
+        WebauthnAuthority::new(f.store.clone(), "example.test".into(), newer.clone())?
+            .list(
+                actor(&f, &session).await?,
+                RpGeneration::new(1)?,
+                deadline()
+            )
+            .await
+            .is_err(),
         "runtime cannot silently change active configuration"
     );
     let mut tx = f.owner.begin().await?;
@@ -533,38 +712,19 @@ async fn webauthn_rp_generation_fences_old_processes_and_proofs() -> anyhow::Res
     assert!(
         w.begin_authentication(
             actor(&f, &session).await?,
+            RpGeneration::new(1)?,
             StepUpContext::new("old.process".into(), [2; 32]).unwrap(),
             deadline()
         )
         .await
         .is_err()
     );
-    // Uninitialized admitted tenants also have a pinned RP row; change their deployment settings.
-    for tenant in [SYSTEM, B] {
-        let mut tx = f.owner.begin().await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(tenant)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT INTO identity_authority.guard(tenant_id) VALUES($1::uuid) ON CONFLICT DO NOTHING").bind(tenant).execute(&mut *tx).await?;
-        activate_webauthn_rp_on(
-            &mut tx,
-            f.instance,
-            rss_request_context::TenantId::parse(tenant)?,
-            "example.test",
-            &newer,
-            1,
-        )
-        .await?;
-        tx.commit().await?;
-    }
-    let current =
-        WebauthnAuthority::connect(f.store.clone(), "example.test".into(), newer, deadline())
-            .await?;
+    let current = WebauthnAuthority::new(f.store.clone(), "example.test".into(), newer)?;
     assert!(
         current
             .begin_registration(
                 actor(&f, &session).await?,
+                RpGeneration::new(2)?,
                 "old proof".into(),
                 false,
                 RegistrationAuthorization::StepUp(grant.expose().into()),
@@ -577,6 +737,7 @@ async fn webauthn_rp_generation_fences_old_processes_and_proofs() -> anyhow::Res
         current
             .begin_registration(
                 actor(&f, &session).await?,
+                RpGeneration::new(2)?,
                 "first bypass".into(),
                 false,
                 RegistrationAuthorization::First,
@@ -595,13 +756,11 @@ async fn expired_other_subject_backlog_does_not_lock_out_self_service() -> anyho
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let session = f.login().await?;
-    let w = WebauthnAuthority::connect(
+    let w = WebauthnAuthority::new(
         f.store.clone(),
         "identity.example.test".into(),
         Url::parse(ORIGIN)?,
-        deadline(),
-    )
-    .await?;
+    )?;
     let other = uuid::Uuid::new_v4();
     sqlx::query(
         "INSERT INTO identity_authority.accounts(tenant_id,principal_id) VALUES($1::uuid,$2)",
@@ -613,6 +772,7 @@ async fn expired_other_subject_backlog_does_not_lock_out_self_service() -> anyho
     let initial = w
         .begin_registration(
             actor(&f, &session).await?,
+            RpGeneration::new(1)?,
             "initial".into(),
             false,
             RegistrationAuthorization::First,
@@ -625,18 +785,30 @@ async fn expired_other_subject_backlog_does_not_lock_out_self_service() -> anyho
     let retry = w
         .begin_registration(
             actor(&f, &session).await?,
+            RpGeneration::new(1)?,
             "available".into(),
             false,
             RegistrationAuthorization::First,
             deadline(),
         )
         .await?;
-    w.cancel(actor(&f, &session).await?, initial.id, deadline())
-        .await?;
+    w.cancel(
+        actor(&f, &session).await?,
+        RpGeneration::new(1)?,
+        initial.id,
+        deadline(),
+    )
+    .await?;
     let mut key = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let response = key.do_registration(Url::parse(ORIGIN)?, retry.options)?;
-    w.finish_registration(actor(&f, &session).await?, retry.id, response, deadline())
-        .await?;
+    w.finish_registration(
+        actor(&f, &session).await?,
+        RpGeneration::new(1)?,
+        retry.id,
+        response,
+        deadline(),
+    )
+    .await?;
     let grant = management_grant(&f, &w, &session, &mut key, "register").await?;
     for (principal, count, age) in [(other, 129, 900), (f.key.principal.as_uuid(), 32, 600)] {
         sqlx::query("INSERT INTO identity_authority.step_up_grants(tenant_id,token_hash,principal_id,session_id,auth_epoch,membership_epoch,context,source,authenticated_at,expires_at) SELECT tenant_id,decode(md5(random()::text)||md5(random()::text),'hex'),$2,session_id,auth_epoch,membership_epoch,context,source,authenticated_at-$4,expires_at-$4 FROM identity_authority.step_up_grants CROSS JOIN generate_series(1,$3) WHERE token_hash=$1").bind(rss_identity_core::federation::digest(grant.expose()).as_slice()).bind(principal).bind(count).bind(age).execute(&f.owner).await?;
@@ -653,16 +825,11 @@ async fn same_configuration_rotation_invalidates_pending_first_enrollment() -> a
     f.bootstrap().await?;
     let session = f.login().await?;
     let origin = Url::parse(ORIGIN)?;
-    let w = WebauthnAuthority::connect(
-        f.store.clone(),
-        "example.test".into(),
-        origin.clone(),
-        deadline(),
-    )
-    .await?;
+    let w = WebauthnAuthority::new(f.store.clone(), "example.test".into(), origin.clone())?;
     let start = w
         .begin_registration(
             actor(&f, &session).await?,
+            RpGeneration::new(1)?,
             "pending".into(),
             false,
             RegistrationAuthorization::First,
@@ -689,30 +856,78 @@ async fn same_configuration_rotation_invalidates_pending_first_enrollment() -> a
         2
     );
     tx.commit().await?;
-    let current =
-        WebauthnAuthority::connect(f.store.clone(), "example.test".into(), origin, deadline())
-            .await?;
+    let current = WebauthnAuthority::new(f.store.clone(), "example.test".into(), origin)?;
     assert!(
         current
-            .finish_registration(actor(&f, &session).await?, start.id, response, deadline())
+            .finish_registration(
+                actor(&f, &session).await?,
+                RpGeneration::new(2)?,
+                start.id,
+                response,
+                deadline()
+            )
             .await
             .is_err()
     );
     assert!(
         current
-            .list(actor(&f, &session).await?, deadline())
+            .list(
+                actor(&f, &session).await?,
+                RpGeneration::new(2)?,
+                deadline()
+            )
             .await?
             .is_empty()
     );
     current
         .begin_registration(
             actor(&f, &session).await?,
+            RpGeneration::new(2)?,
             "fresh".into(),
             false,
             RegistrationAuthorization::First,
             deadline(),
         )
         .await?;
+    let tenant_b = rss_request_context::TenantId::parse(B)?;
+    let key_b = rss_identity_core::account::AccountKey {
+        tenant: tenant_b,
+        principal: f.key.principal,
+    };
+    f.maintenance
+        .initialize(
+            binding(tenant_b),
+            key_b,
+            login("admin"),
+            password(),
+            deadline(),
+        )
+        .await?;
+    let session_b = f
+        .store
+        .login_local(
+            binding(tenant_b),
+            login("admin"),
+            password(),
+            source(),
+            None,
+            deadline(),
+        )
+        .await?;
+    let actor_b = f
+        .store
+        .inspect_session(
+            binding(tenant_b),
+            rss_identity_core::session::SessionSecret::parse(session_b.secret().expose().into())?,
+            deadline(),
+        )
+        .await?;
+    assert!(
+        current
+            .list(actor_b, RpGeneration::new(1)?, deadline())
+            .await?
+            .is_empty()
+    );
     f.close().await;
     Ok(())
 }

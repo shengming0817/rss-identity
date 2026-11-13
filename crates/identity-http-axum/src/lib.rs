@@ -24,7 +24,7 @@ struct AppState {
 }
 
 /// Mount behind TLS at the configured origin. Host middleware must insert [`ClientAddress`]
-/// from its trusted transport before entering these routes. Axum `ConnectInfo<SocketAddr>`
+/// from its trusted transport, and an explicit `ExecutionBinding` extension, before entering these routes. Axum `ConnectInfo<SocketAddr>`
 /// alone is insufficient. For a direct connection use the accepted peer's IP; behind a
 /// proxy validate the peer before interpreting any forwarded header. See the embedding guide.
 pub fn router(authority: Authority, config: HttpConfig) -> Result<Router, AuthorityError> {
@@ -169,7 +169,7 @@ pub enum SessionActivity {
 pub async fn authenticate_request(
     authority: &Authority,
     config: &HttpConfig,
-    tenant: rss_request_context::TenantId,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     headers: &axum::http::HeaderMap,
     activity: SessionActivity,
     deadline: rss_transactional_messaging::policy::OperationDeadline,
@@ -201,12 +201,12 @@ pub async fn authenticate_request(
         let proof = match activity {
             SessionActivity::Passive => {
                 authority
-                    .inspect_session(tenant, secret, budget.remaining())
+                    .inspect_session(binding, secret, budget.remaining())
                     .await
             }
             SessionActivity::Active => {
                 authority
-                    .authenticate_session(tenant, secret, budget.remaining())
+                    .authenticate_session(binding, secret, budget.remaining())
                     .await
             }
         }?;

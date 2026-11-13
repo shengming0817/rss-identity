@@ -9,6 +9,7 @@ use crate::{
 };
 use rss_identity_core::{InstanceId, PrincipalId, SessionId};
 use rss_request_context::TenantId;
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::policy::OperationDeadline;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -100,10 +101,11 @@ impl Authority {
     /// Hosts must not accept locators from an untrusted caller as authentication.
     pub async fn recheck_session_reference(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         reference: &SessionReference,
         deadline: OperationDeadline,
     ) -> Result<RevalidatedSession, AuthorityError> {
+        let tenant = binding.tenant();
         self.require_runtime()?;
         if reference.instance != self.instance().as_uuid()
             || reference.tenant.to_string() != tenant.to_string()
@@ -122,7 +124,7 @@ impl Authority {
         let session = SessionId::parse(&reference.session.to_string())
             .map_err(|_| AuthorityError::Rejected)?;
         let session_checks = self.session_checks.clone();
-        self.read(tenant, budget.remaining(), move |tx| {
+        self.read(binding, budget.remaining(), move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
@@ -162,7 +164,7 @@ impl Authority {
     /// Platform rows additionally require the host's current binding/credential qualification.
     pub async fn with_session_references_read<T: Send + 'static, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         query: F,
     ) -> Result<T, AuthorityError>
@@ -173,6 +175,7 @@ impl Authority {
             + Send
             + 'static,
     {
+        let tenant = binding.tenant();
         self.require_runtime()?;
         let budget = Budget::new(deadline)?;
         let instance = self.instance;
@@ -184,7 +187,7 @@ impl Authority {
         let failure = std::sync::Arc::new(std::sync::OnceLock::new());
         let capture = failure.clone();
         let result = self
-            .read_sql(tenant, budget.remaining(), move |c| {
+            .read_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let window = crate::personnel::read_window(

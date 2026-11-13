@@ -264,6 +264,7 @@ pub(crate) async fn recheck_on(
     {
         return Err(reject());
     }
+    crate::transaction::check_binding(c, actor.binding).await?;
     lock_guard(c, actor.key.tenant).await?;
     recheck(c, actor).await
 }
@@ -275,6 +276,7 @@ pub(crate) async fn recheck(
     if std::time::Instant::now() >= proof.expires || authority_id(c).await? != proof.authority {
         return Err(reject());
     }
+    crate::transaction::check_binding(c, proof.binding).await?;
     let mut loaded = lookup(
         c,
         proof.key.tenant,

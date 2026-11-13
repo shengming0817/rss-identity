@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 /// Internal password verification evidence.
 pub(crate) struct AuthenticationCandidate {
+    pub(crate) binding: rss_transactional_messaging::fence::ExecutionBinding,
     pub(crate) state: AccountState,
     pub(crate) authority: Uuid,
     pub(crate) expires: Instant,

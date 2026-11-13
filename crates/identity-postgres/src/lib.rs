@@ -12,6 +12,9 @@ mod session_checks;
 pub use session_checks::ControlledFactTime;
 mod account_directory;
 mod federation;
+mod federation_state;
+pub use federation_state::StateSigner;
+pub(crate) use federation_state::{Purpose, StateLocator};
 mod federation_link;
 mod federation_login;
 mod federation_storage;
@@ -76,7 +79,6 @@ pub use types::*;
 #[derive(Clone)]
 pub struct AuthorityConfig {
     instance: InstanceId,
-    bindings: Vec<ExecutionBinding>,
     sessions: SessionPolicy,
     audit: rss_audit_postgres::Integrity,
     platform: Option<Arc<dyn platform::PlatformVerifier>>,
@@ -140,22 +142,11 @@ impl AuthorityConfig {
     }
     pub fn new(
         instance: InstanceId,
-        mut bindings: Vec<ExecutionBinding>,
         sessions: SessionPolicy,
         audit: rss_audit_postgres::Integrity,
     ) -> Result<Self, AuthorityError> {
-        bindings.sort_by_key(|binding| binding.tenant().to_string());
-        if bindings.is_empty()
-            || bindings.len() > 1024
-            || bindings.windows(2).any(|pair| {
-                pair[0].tenant() == pair[1].tenant() || pair[0].storage() != pair[1].storage()
-            })
-        {
-            return Err(AuthorityError::Configuration);
-        }
         Ok(Self {
             instance,
-            bindings,
             sessions,
             audit,
             platform: None,
@@ -196,6 +187,7 @@ impl Authority {
         runtime: Arc<PgRuntime>,
         kdf: Arc<rss_identity_core::account::PasswordKdf>,
         config: AuthorityConfig,
+        probe: ExecutionBinding,
         policy: Arc<dyn ManagementPolicy>,
         deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
@@ -203,6 +195,7 @@ impl Authority {
             runtime,
             kdf,
             config,
+            probe,
             AuthorityProfile::Runtime,
             policy,
             deadline,
@@ -213,12 +206,14 @@ impl Authority {
         runtime: Arc<PgRuntime>,
         kdf: Arc<rss_identity_core::account::PasswordKdf>,
         config: AuthorityConfig,
+        probe: ExecutionBinding,
         deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
         Self::connect(
             runtime,
             kdf,
             config,
+            probe,
             AuthorityProfile::Maintenance,
             Arc::new(management::DenyManagement),
             deadline,
@@ -229,12 +224,12 @@ impl Authority {
         runtime: Arc<PgRuntime>,
         kdf: Arc<rss_identity_core::account::PasswordKdf>,
         config: AuthorityConfig,
+        probe: ExecutionBinding,
         profile: AuthorityProfile,
         policy: Arc<dyn ManagementPolicy>,
         deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
         let budget = Budget::new(deadline)?;
-        let tenant = config.bindings[0].tenant();
         let instance = config.instance;
         let authority = Self {
             enterprise: config.enterprise,
@@ -246,7 +241,6 @@ impl Authority {
             runtime: Arc::new(runtime::RuntimeBundle {
                 runtime,
                 audit: config.audit,
-                bindings: config.bindings,
                 instance,
             }),
             profile,
@@ -264,7 +258,7 @@ impl Authority {
         let integrity = authority.runtime.audit.clone();
         let valid = Self::read_bundle(
             authority.runtime.clone(),
-            tenant,
+            probe,
             budget.remaining(),
             false,
             move |tx| {
@@ -281,33 +275,10 @@ impl Authority {
         )
         .await;
         check_probe(valid)?;
-        let bundle = authority.runtime.clone();
-        // Schema/profile are global, but every declared tenant has its own runtime fence.
-        for binding in bundle.bindings.iter().skip(1) {
-            Self::read_bundle(
-                bundle.clone(),
-                binding.tenant(),
-                budget.remaining(),
-                true,
-                |_| Box::pin(async { Ok(()) }),
-            )
-            .await?;
-        }
         Ok(authority)
     }
     pub fn instance(&self) -> InstanceId {
         self.instance
-    }
-    pub fn active_tenants(&self) -> Result<Vec<TenantId>, AuthorityError> {
-        Ok(self
-            .runtime
-            .bindings
-            .iter()
-            .map(|binding| binding.tenant())
-            .collect())
-    }
-    pub fn tenant_active(&self, tenant: TenantId) -> bool {
-        self.runtime.binding(tenant).is_some()
     }
     fn require_maintenance(&self) -> Result<(), AuthorityError> {
         if self.profile != AuthorityProfile::Maintenance {
@@ -404,7 +375,7 @@ impl support::Fixture {
         Ok(self
             .store
             .verify_password(
-                self.key.tenant,
+                support::binding(self.key.tenant),
                 support::login("admin"),
                 support::password(),
                 support::source(),
@@ -419,13 +390,13 @@ async fn session_actor(
     store: &Authority,
     candidate: AuthenticationCandidate,
 ) -> anyhow::Result<AuthenticatedSession> {
-    let tenant = candidate.account().tenant;
+    let binding = candidate.binding;
     let issued = store
         .create_session(candidate, None, support::deadline())
         .await?;
     Ok(store
         .inspect_session(
-            tenant,
+            binding,
             rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
             support::deadline(),
         )
@@ -445,6 +416,6 @@ mod step_up;
 pub use step_up::{ConsumedStepUp, StepUpGrant, consume_step_up_on};
 mod webauthn;
 pub use webauthn::{
-    RegistrationAuthorization, WebauthnAuthority, WebauthnChallenge, WebauthnCredentialView,
-    activate_webauthn_rp_on, webauthn_management_context,
+    RegistrationAuthorization, RpGeneration, WebauthnAuthority, WebauthnChallenge,
+    WebauthnCredentialView, activate_webauthn_rp_on, webauthn_management_context,
 };

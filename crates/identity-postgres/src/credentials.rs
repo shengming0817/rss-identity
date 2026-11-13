@@ -11,6 +11,7 @@ use ring::{
 use rss_identity_core::federation::MAX_PROVIDERS;
 use rss_identity_core::federation::{FederationError, ProviderCredentials, ProviderId};
 use rss_request_context::TenantId;
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::policy::OperationDeadline;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -244,25 +245,17 @@ impl CredentialKeys {
     }
 }
 impl crate::Federation {
-    /// Read-only authentication check of every stored provider credential in all active tenants.
-    ///
-    /// Uses this federation's configured keyring and authority/tenant/provider/version AAD.
-    /// No credential, key version, epoch or audit state is changed. Each tenant is read in
-    /// its own transaction; this is not a cross-tenant snapshot or proof against later writes.
-    /// The provider directory capacity applies to credentials; an extra row detects overflow.
-    /// Missing keys, malformed/authentication-failed ciphertext and overflow fail closed.
-    /// The caller's absolute deadline is shared by every tenant read; timeout or storage
-    /// failure returns an error without asserting that all tenants were checked.
-    /// Close concurrent credential writers before using success to retire an old key.
+    /// Authenticate provider credentials for this exact target only. The host owns paging,
+    /// concurrent-writer exclusion and the decision to retire an old key.
     pub async fn check_credential_keys(
         &self,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
         let keys = self.credential_keys.clone();
         let budget = crate::Budget::new(deadline)?;
-        for tenant in self.authority.active_tenants()? {
-            let keys = keys.clone();
-            self.authority.read_sql(tenant,budget.remaining(),move|c|Box::pin(async move {
+        let tenant = binding.tenant();
+        self.authority.read_sql(binding,budget.remaining(),move|c|Box::pin(async move {
                 let authority=authority_id(c).await?;
                 let rows:Vec<(Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid LIMIT $2").bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(c).await?;
                 if rows.len() > usize::from(MAX_PROVIDERS) {return Err(corrupt().into());}
@@ -273,18 +266,18 @@ impl crate::Federation {
                 }
                 Ok(())
             })).await?;
-        }
         Ok(())
     }
     pub(crate) async fn provider_credentials(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         provider: ProviderId,
         version: i64,
         deadline: OperationDeadline,
     ) -> Result<ProviderCredentials, AuthorityError> {
+        let tenant = binding.tenant();
         let keys = self.credential_keys.clone();
-        self.authority.read_sql(tenant,deadline,move|c|Box::pin(async move {
+        self.authority.read_sql(binding,deadline,move|c|Box::pin(async move {
             let authority=authority_id(c).await?;
             let row:Option<(i64,serde_json::Value)>=sqlx::query_as("SELECT credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(tenant.to_string()).bind(provider.to_string()).fetch_optional(c).await?;
             let (current,sealed)=row.ok_or(FederationError::Rejected)?;

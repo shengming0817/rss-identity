@@ -10,6 +10,7 @@ use axum::{
 };
 use rss_identity_core::{PrincipalId, account::AccountKey};
 use rss_identity_postgres::{Authority, AuthorityError};
+use rss_transactional_messaging::fence::ExecutionBinding;
 use uuid::Uuid;
 mod dto;
 
@@ -38,7 +39,7 @@ pub(crate) fn router(
 }
 async fn actor(
     s: &AppState,
-    t: &str,
+    binding: ExecutionBinding,
     h: &HeaderMap,
     b: RequestBudget,
     write: bool,
@@ -51,7 +52,7 @@ async fn actor(
         csrf(h, &secret)?;
     }
     Ok(s.authority
-        .inspect_session(tenant(t)?, secret, b.remaining())
+        .inspect_session(binding, secret, b.remaining())
         .await?)
 }
 fn target(t: &str, p: &str) -> Result<AccountKey, Error> {
@@ -62,21 +63,22 @@ fn target(t: &str, p: &str) -> Result<AccountKey, Error> {
 }
 async fn current(
     State(s): State<AppState>,
-    Path(t): Path<String>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,
 ) -> Result<Response, Error> {
-    let actor = actor(&s, &t, &h, b, false).await?;
+    let actor = actor(&s, binding, &h, b, false).await?;
     let profile = s.authority.current_profile(&actor, b.remaining()).await?;
     Ok(Json(dto::Observation::from(profile.view()?)).into_response())
 }
 async fn local(
     State(s): State<AppState>,
     Path((t, p)): Path<(String, String)>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,
 ) -> Result<Response, Error> {
-    let actor = actor(&s, &t, &h, b, false).await?;
+    let actor = actor(&s, binding, &h, b, false).await?;
     Ok(Json(dto::Local::from(
         s.authority
             .read_local_profile(&actor, target(&t, &p)?, b.remaining())
@@ -87,10 +89,11 @@ async fn local(
 async fn update(
     State(s): State<AppState>,
     Path((t, p)): Path<(String, String)>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response, Error> {
-    let actor = actor(&s, &t, request.headers(), b, true).await?;
+    let actor = actor(&s, binding, request.headers(), b, true).await?;
     let bytes = tokio::time::timeout_at(
         b.cutoff(),
         axum::body::to_bytes(request.into_body(), 98_304),
@@ -110,10 +113,11 @@ async fn update(
 async fn receipt(
     State(s): State<AppState>,
     Path((t, p, o)): Path<(String, String, String)>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,
 ) -> Result<Response, Error> {
-    let actor = actor(&s, &t, &h, b, false).await?;
+    let actor = actor(&s, binding, &h, b, false).await?;
     let operation = Uuid::parse_str(&o).map_err(|_| BAD)?;
     Ok(Json(
         s.authority

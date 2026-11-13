@@ -42,6 +42,14 @@ impl HttpConfig {
 #[derive(Clone, Copy)]
 pub(crate) struct RequestBudget(rss_request_context::Deadline);
 impl RequestBudget {
+    pub(crate) fn for_request(request: &Request, timeout: Duration) -> Result<Self, HttpError> {
+        let mut budget = Self::new(timeout)?;
+        if let Some(cutoff) = request.extensions().get::<rss_request_context::Deadline>() {
+            budget.0 = budget.0.shortened_to(cutoff.instant());
+        }
+        Ok(budget)
+    }
+
     pub fn new(timeout: Duration) -> Result<Self, HttpError> {
         if timeout.is_zero() {
             return Err(HttpError::request_timeout());
@@ -254,7 +262,7 @@ pub(crate) async fn request_boundary(
 ) -> Response {
     let callback = request.method() == axum::http::Method::GET
         && original_uri.path() == "/api/v1/identity/oidc/callback";
-    let budget = match RequestBudget::new(state.config.timeout) {
+    let budget = match RequestBudget::for_request(&request, state.config.timeout) {
         Ok(budget) => budget,
         Err(error) => return error.into_response(),
     };
@@ -286,6 +294,32 @@ pub(crate) async fn request_boundary(
         header::HeaderValue::from_static("no-store"),
     );
     response
+}
+
+/// Host-installed execution identity, checked against the route before authentication.
+pub(crate) struct Execution(pub rss_transactional_messaging::fence::ExecutionBinding);
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Execution {
+    type Rejection = HttpError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::extract::Path;
+        let Path(params) =
+            Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
+                .await
+                .map_err(|_| BAD)?;
+        let selected = tenant(params.get("tenant").ok_or(BAD)?)?;
+        let binding = parts
+            .extensions
+            .get::<rss_transactional_messaging::fence::ExecutionBinding>()
+            .copied()
+            .ok_or_else(|| HttpError::from(AuthorityError::Unavailable))?;
+        if selected != binding.tenant() {
+            return Err(UNAUTH);
+        }
+        Ok(Self(binding))
+    }
 }
 
 #[cfg(test)]

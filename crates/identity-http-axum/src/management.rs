@@ -16,6 +16,7 @@ use rss_identity_core::{
 use rss_identity_postgres::{
     AccountView, AttemptSource, AuthenticatedSession, Authority, AuthorityError,
 };
+use rss_transactional_messaging::fence::ExecutionBinding;
 use serde::{Deserialize, de::DeserializeOwned};
 
 #[derive(Clone)]
@@ -117,7 +118,7 @@ pub fn management_router(
 }
 async fn actor(
     s: &Management,
-    t: &str,
+    binding: ExecutionBinding,
     h: &HeaderMap,
     b: RequestBudget,
     write: bool,
@@ -130,7 +131,7 @@ async fn actor(
         csrf(h, &secret)?;
     }
     Ok(s.authority
-        .inspect_session(tenant(t)?, secret, b.remaining())
+        .inspect_session(binding, secret, b.remaining())
         .await?)
 }
 pub(crate) async fn body<T: DeserializeOwned>(request: Request, b: RequestBudget) -> Result<T> {
@@ -165,7 +166,7 @@ struct AccountParameters {
 }
 async fn accounts(
     State(s): State<Management>,
-    Path(t): Path<String>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,
     q: std::result::Result<Query<AccountParameters>, axum::extract::rejection::QueryRejection>,
@@ -179,7 +180,7 @@ async fn accounts(
         page.limit.unwrap_or(50),
     )
     .map_err(|_| BAD)?;
-    let actor = actor(&s, &t, &h, b, false).await?;
+    let actor = actor(&s, binding, &h, b, false).await?;
     Ok(Json(crate::dto::AccountPage::from(
         s.authority
             .list_accounts(actor, query, page.cursor, b.remaining())
@@ -190,10 +191,11 @@ async fn accounts(
 async fn read_account(
     State(s): State<Management>,
     Path((t, p)): Path<(String, String)>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, &h, b, false).await?;
+    let actor = actor(&s, binding, &h, b, false).await?;
     Ok(Json(crate::dto::Account::from(
         s.authority
             .read_account(actor, target(&t, &p)?, b.remaining())
@@ -209,11 +211,11 @@ struct CreateAccount {
 }
 async fn create_account(
     State(s): State<Management>,
-    Path(t): Path<String>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
+    let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: CreateAccount = body(r, b).await?;
     let name = LoginKey::parse(&v.login).map_err(|_| BAD)?;
     let canonical_login = name.as_str().to_owned();
@@ -238,10 +240,11 @@ struct Toggle {
 async fn enabled(
     State(s): State<Management>,
     Path((t, p)): Path<(String, String)>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
+    let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: Toggle = body(r, b).await?;
     Ok(account(
         s.authority
@@ -252,10 +255,11 @@ async fn enabled(
 async fn membership(
     State(s): State<Management>,
     Path((t, p)): Path<(String, String)>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
+    let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: Toggle = body(r, b).await?;
     Ok(account(
         s.authority
@@ -271,10 +275,11 @@ struct Reset {
 async fn reset_password(
     State(s): State<Management>,
     Path((t, p)): Path<(String, String)>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
+    let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: Reset = body(r, b).await?;
     Ok(account(
         s.authority
@@ -290,11 +295,11 @@ struct ChangePassword {
 }
 async fn own_password(
     State(s): State<Management>,
-    Path(t): Path<String>,
+    Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
 ) -> Result<Response> {
-    let actor = actor(&s, &t, r.headers(), b, true).await?;
+    let actor = actor(&s, binding, r.headers(), b, true).await?;
     let peer = r
         .extensions()
         .get::<crate::ClientAddress>()
