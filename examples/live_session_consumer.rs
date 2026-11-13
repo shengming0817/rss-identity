@@ -48,7 +48,10 @@ impl ManagementPolicy for DenyManagement {
         Box::pin(async { Err(ManagementDenied) })
     }
 }
-async fn runtime(port: u16, role: &str, tenant: TenantId) -> anyhow::Result<Arc<PgRuntime>> {
+fn binding(tenant: TenantId) -> ExecutionBinding {
+    ExecutionBinding::new(StorageIdentity::new([1; 16], [2; 16]).unwrap(), tenant, Epoch::new(1).unwrap())
+}
+async fn runtime(port: u16, role: &str) -> anyhow::Result<Arc<PgRuntime>> {
     Ok(Arc::new(
         PgRuntime::connect_producer(
             PgConfig::new_for_test_plaintext(
@@ -59,10 +62,7 @@ async fn runtime(port: u16, role: &str, tenant: TenantId) -> anyhow::Result<Arc<
                 PgPassword::new("fixture-only"),
             ),
             Timer,
-            ExecutionBinding::new(
-                StorageIdentity::new([1; 16], [2; 16])?,
-                vec![(tenant, Epoch::new(1)?)],
-            )?,
+            StorageIdentity::new([1; 16], [2; 16])?,
         )
         .await?,
     ))
@@ -116,24 +116,24 @@ pub async fn run() -> anyhow::Result<()> {
         .execute(&owner)
         .await?;
     sqlx::raw_sql("CREATE TABLE public.host_binding(id integer PRIMARY KEY); GRANT INSERT,SELECT ON public.host_binding TO identity_runtime").execute(&owner).await?;
-    let runtime = runtime(port, "identity_runtime", tenant).await?;
-    let maintenance_runtime = self::runtime(port, "identity_maintenance", tenant).await?;
+    let runtime = runtime(port, "identity_runtime").await?;
+    let maintenance_runtime = self::runtime(port, "identity_maintenance").await?;
     let config = AuthorityConfig::new(
         instance,
-        vec![tenant],
+        vec![binding(tenant)],
         SessionPolicy::new(900, 14400)?,
         rss_audit_postgres::Integrity::Plain,
     )?;
     let maintenance = Authority::connect_maintenance(
         maintenance_runtime.clone(),
-        Arc::new(PasswordKdf::new()),
+        Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
         config.clone(),
         deadline(),
     )
     .await?;
     let authority = Authority::connect_runtime(
         runtime.clone(),
-        Arc::new(PasswordKdf::new()),
+        Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
         config,
         Arc::new(DenyManagement),
         deadline(),
@@ -173,7 +173,7 @@ pub async fn run() -> anyhow::Result<()> {
     for commit in [true, false] {
         let actor = actor.clone();
         let result = runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(binding(tenant), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.with_connection(move |c| {
                         Box::pin(
@@ -219,7 +219,7 @@ pub async fn run() -> anyhow::Result<()> {
         .revoke_current_session(revoker, deadline())
         .await?;
     let result = runtime
-        .local_tx(tenant, deadline(), move |tx| {
+        .local_tx(binding(tenant), deadline(), move |tx| {
             Box::pin(async move {
                 tx.with_connection(move |c| {
                     Box::pin(async move { Ok(recheck_authenticated_session_on(c, &actor).await) })

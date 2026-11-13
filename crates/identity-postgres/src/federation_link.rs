@@ -92,8 +92,9 @@ impl Federation {
         check_browser(&browser)?;
         let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         let return_url = self.target(&target)?;
+        let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
         let (actor,account,origin,login)=self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
                     let origin = db::origin(c, tenant, actor.view.id).await?;
@@ -181,6 +182,7 @@ impl Federation {
                     } else {
                         AuthenticationMode::Login
                     },
+                    budget.0,
                 ),
             )
             .await?;
@@ -213,7 +215,7 @@ impl Federation {
                     .bind(account.membership_epoch())
                     .bind(origin.as_ref().map(|o| o.identity))
                     .bind(origin.as_ref().map(|o| o.epoch))
-                    .bind(match &origin { Some(o) => Some(o.facts.encode(c).await?), None => None })
+                    .bind(match &origin { Some(o) => Some(o.facts.encode(c, max_auth_facts_bytes).await?), None => None })
                     .bind(target.id.to_string())
                     .bind(target.version)
                     .bind(digest(&browser).as_slice())
@@ -295,10 +297,13 @@ impl Federation {
                     &credentials,
                     &material,
                     AuthenticationMode::Login,
+                    budget.0,
                 ),
             )
             .await?;
         let group_policy = self.group_policy;
+        let future_skew_seconds = self.authority.future_skew_seconds;
+        let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
         self.authority
             .write_sql(tenant, budget.remaining(), move |c| {
                 Box::pin(async move {
@@ -326,7 +331,7 @@ impl Federation {
                         || subject != claims.subject.storage_key()
                         || claims
                             .assurance
-                            .check(AuthenticationMode::Reauthenticate, attempt.created, now)
+                            .check(AuthenticationMode::Reauthenticate, attempt.created, now, future_skew_seconds)
                             .is_err()
                     {
                         return Err(FederationError::Claims.into());
@@ -347,9 +352,8 @@ impl Federation {
                                 .claims()
                                 .department_snapshot
                                 .as_ref(),
-                            now,
-                        )?
-                        .encode(c)
+                            now, future_skew_seconds)?
+                        .encode(c, max_auth_facts_bytes)
                         .await?,
                     )
                     .bind(crate::profiles::sequence(c, tenant).await?)

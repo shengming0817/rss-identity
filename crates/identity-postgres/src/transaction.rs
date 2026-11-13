@@ -128,6 +128,8 @@ pub(crate) enum MutationError {
     Storage(#[from] PgError),
     #[error(transparent)]
     Rule(#[from] AccountRuleError),
+    #[error("profile receipt capacity reached")]
+    ProfileReceiptCapacityReached,
     #[error("profile revision conflict")]
     RevisionConflict,
     #[error("profile operation conflict")]
@@ -184,9 +186,7 @@ impl Authority {
             + Send
             + 'static,
     {
-        if !bundle.tenants.contains(&tenant) {
-            return Err(AuthorityError::Rejected);
-        }
+        let binding = bundle.binding(tenant).ok_or(AuthorityError::Rejected)?;
         let instance = bundle.instance;
         if deadline.timeout().is_zero() {
             return Err(AuthorityError::NotStarted(
@@ -195,7 +195,7 @@ impl Authority {
         }
         bundle
             .runtime
-            .local_tx(tenant, deadline, move |tx| {
+            .local_tx(binding, deadline, move |tx| {
                 Box::pin(async move {
                     if verify_instance {
                         let actual =
@@ -393,6 +393,10 @@ fn sql_failure(error: MutationError, reason: &std::sync::OnceLock<AuthorityError
         }
         MutationError::CursorInvalidated => {
             let _ = reason.set(AuthorityError::CursorInvalidated);
+            reject()
+        }
+        MutationError::ProfileReceiptCapacityReached => {
+            let _ = reason.set(AuthorityError::ProfileReceiptCapacityReached);
             reject()
         }
         MutationError::RevisionConflict => {

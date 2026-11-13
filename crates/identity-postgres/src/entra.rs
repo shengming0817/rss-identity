@@ -129,7 +129,7 @@ impl EntraAuthority {
             .await?;
         let claims = tokio::time::timeout(
             budget.remaining().timeout(),
-            self.verifier.verify(&self.profile, token),
+            self.verifier.verify(&self.profile, token, budget.0),
         )
         .await
         .map_err(|_| AuthorityError::DeadlineElapsed)??;
@@ -155,7 +155,7 @@ impl EntraAuthority {
         {
             return Err(AuthorityError::Rejected);
         }
-        let expires = proof_expiry(claims.expires_at, now_ms, sampled, budget.0)?;
+        let expires = proof_expiry(claims.expires_at, now_ms, sampled, budget.0.instant())?;
         let proof = VerifiedExternalSubject {
             instance: self.authority.instance(),
             tenant,

@@ -18,6 +18,6 @@ $('cancel').onclick=()=>run(async()=>{controller?.abort();if(ceremony){await api
 const query=new URLSearchParams(location.search);
 let navigation;try{navigation=JSON.parse(sessionStorage.getItem(NAVIGATION)||'null')}catch{}
 if(navigation && /^[0-9a-f-]{36}$/i.test(navigation.tenant) && ['register','recover'].includes(navigation.intent)){
- $('tenant').value=navigation.tenant;$('intent').value=navigation.intent;$('label').value=String(navigation.label||'我的认证器').slice(0,128);pending=true;
+ $('tenant').value=navigation.tenant;$('intent').value=navigation.intent;$('label').value=String(navigation.label||'我的认证器').slice(0,255);pending=true;
  run(async()=>{await load();status(navigation.intent==='recover'?'已返回账户恢复，请继续登记新认证器。':'已返回新增认证器，请继续登记。')});
 }else if(query.has('tenant')){$('tenant').value=query.get('tenant');run(load)}

@@ -102,8 +102,14 @@ impl Federation {
         let url = self
             .upstream(
                 &budget,
-                self.oidc
-                    .prepare(tenant, &view.settings, &credentials, &material, mode),
+                self.oidc.prepare(
+                    tenant,
+                    &view.settings,
+                    &credentials,
+                    &material,
+                    mode,
+                    budget.0,
+                ),
             )
             .await?;
         let oidc = self.oidc.clone();
@@ -244,7 +250,7 @@ impl Federation {
             .upstream(
                 &budget,
                 self.oidc
-                    .exchange(tenant, &view.settings, &credentials, material, code),
+                    .exchange(tenant, &view.settings, &credentials, material, code, budget.0),
             )
             .await?;
         claims.validate()?;
@@ -270,6 +276,9 @@ impl Federation {
         let locator = self.signer.verify(&state)?;
         let commit_oidc = self.oidc.clone();
         let group_policy = self.group_policy;
+        let future_skew_seconds = self.authority.future_skew_seconds;
+        let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
+        let operation_proof_seconds = self.authority.operation_proof_seconds;
         let session_policy = self.authority.session_policy;
         let limits = self.authority.profile_limits;
         self.authority.write_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
@@ -327,14 +336,14 @@ impl Federation {
                         return Err(reject().into());
                     }
                     let now = session_storage::now(c).await?;
-                    claims.assurance.check(attempt.mode, attempt.created, now)?;
+                    claims.assurance.check(attempt.mode, attempt.created, now, future_skew_seconds)?;
                     if attempt.mode == AuthenticationMode::StepUp {
                         let actor = actor.as_ref().ok_or_else(reject)?;
                         if actor.state.key()!=key {return Err(reject().into());}
                         let context=attempt.context.as_ref().ok_or_else(corrupt)?;
                         let grant=crate::step_up::issue(c,actor,context,crate::step_up::GrantSource::Oidc {
                             identity:identity_id,provider:Uuid::parse_str(&view.id.to_string()).map_err(|_|corrupt())?,version:view.version,epoch:view.revocation_epoch,
-                        },claims.assurance.auth_time().ok_or_else(reject)?).await?;
+                        },claims.assurance.auth_time().ok_or_else(reject)?, operation_proof_seconds).await?;
                         if session_storage::now(c).await?>=attempt.expiry {return Err(reject().into());}
                         db::consume(c,&locator).await?;
                         return Ok((FederatedOutcome::StepUp{grant,return_url:attempt.return_url},vec![crate::step_up::event(key,crate::step_up::AuthenticationAction::Verified)]));
@@ -361,7 +370,7 @@ impl Federation {
                         }
                         (match intent.origin {
                             Some(origin) => sessions::SessionAuthentication::Oidc(origin),
-                            None => sessions::SessionAuthentication::LocalPassword(intent.local_authenticated_at.ok_or_else(reject)?),
+                            None => sessions::SessionAuthentication::LocalPassword(intent.local_authenticated_at.ok_or_else(reject)?, rss_identity_core::session::CredentialKind::Cookie),
                         }, Some(intent.session))
                     } else {
                         if let Some(actor) = actor
@@ -374,13 +383,13 @@ impl Federation {
                                 identity: identity_id,
                                 epoch: view.revocation_epoch,
                                 facts_sequence: crate::profiles::sequence(c, tenant).await?,
-                                facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, view.settings.claims().department_snapshot.as_ref(), now)?,
+                                facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, view.settings.claims().department_snapshot.as_ref(), now, future_skew_seconds)?,
                             }),
                             attempt.replacement,
                         )
                     };
                     let observation = (!linked).then(|| crate::profiles::oidc_observation(&claims,&view,attempt.profile_sequence));
-                    let (issued, session_event) = sessions::insert(c, state, replaced, origin, now, session_policy, rss_identity_core::session::CredentialKind::Cookie).await?;
+                    let (issued, session_event) = sessions::insert(c, state, replaced, origin, now, session_policy, max_auth_facts_bytes).await?;
                     if linked {crate::profiles::retain_binding(c,key,replaced.ok_or_else(reject)?,issued.view().id).await?;}
                     if session_storage::now(c).await? >= attempt.expiry {
                         return Err(reject().into());

@@ -81,7 +81,7 @@ impl PersonnelRead<'_> {
         max_rows: usize,
     ) -> Result<Vec<PgRow>, AuthorityError> {
         self.live()?;
-        if !(1..=1001).contains(&max_rows) {
+        if !(1..=usize::from(rss_identity_core::directory::MAX_PAGE_SIZE) + 1).contains(&max_rows) {
             return Err(AuthorityError::Configuration);
         }
         let sql = format!(
@@ -139,8 +139,10 @@ impl Authority {
             .read_sql(reader.key.tenant, budget.remaining(), move |c| {
                 Box::pin(async move {
                     let loaded = reader.recheck(c).await?;
-                    let expires =
-                        crate::sessions::checked_expiry(&loaded, budget.0.min(reader.expires))?;
+                    let expires = crate::sessions::checked_expiry(
+                        &loaded,
+                        budget.0.instant().min(reader.expires),
+                    )?;
                     let login = permission(
                         crate::management::authorize(
                             policy.as_ref(),

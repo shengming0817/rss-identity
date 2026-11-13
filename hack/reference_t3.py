@@ -51,6 +51,7 @@ ORIGIN = "https://identity.example.test"
 
 def oidc_settings(issuer, address, state, key):
     return {
+        "requestSeconds": 5, "connectSeconds": 3, "maxResponseBytes": 1048576, "maxJwksKeys": 128,
         "groupFactsMaxAgeSeconds": 300,
         "stateKeyFile": state,
         "credentialKeyring": {
@@ -469,10 +470,11 @@ def validate_binary_profile(profile):
     }
 
 
-def image_probe(prefix, phase, image, entrypoint, *args):
+def image_probe(prefix, phase, image, entrypoint, *args, input=None):
     # outside() establishes this ownership and cleanup boundary before preflight.
     return docker(
         "run",
+        *(["-i"] if input is not None else []),
         "--rm",
         "--pull=never",
         "--network=none",
@@ -484,6 +486,7 @@ def image_probe(prefix, phase, image, entrypoint, *args):
         entrypoint,
         image,
         *args,
+        input=input,
     )
 
 
@@ -496,6 +499,7 @@ def binary_profile(image, prefix):
                 image,
                 "identity-server",
                 "--acceptance-profile",
+                input=json.dumps(runtime_template()).encode(),
             )
         )
     )

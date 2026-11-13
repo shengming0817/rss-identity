@@ -28,14 +28,15 @@ const ORIGIN: &str = "https://identity.example.test";
 const CALLBACK: &str = "https://identity.example.test/api/v1/identity/oidc/callback";
 const BROWSER: &str = "__Host-identity-oidc-browser=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 fn fixture_transport(keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
-    Ok(HttpOidc::for_loopback_test(vec![
-        TrustedAssuranceProfile {
+    Ok(HttpOidc::for_loopback_test(
+        vec![TrustedAssuranceProfile {
             keycloak_totp,
             tenant: tenant(),
             issuer: std::env::var("IDENTITY_TEST_FEDERATED_ISSUER")?,
             client_id: "identity-test".into(),
-        },
-    ])?)
+        }],
+        transport_policy(),
+    )?)
 }
 fn credentials(ca: bool) -> anyhow::Result<ProviderCredentials> {
     ProviderCredentials::new(
@@ -224,7 +225,19 @@ async fn successful(app: &Router, p: &ProviderView, user: &str) -> anyhow::Resul
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
+    f.store = Authority::connect_runtime(
+        f.runtime.clone(),
+        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?),
+        f.config()
+            .with_operation_proof_lifetime(std::num::NonZeroU32::new(600).unwrap()),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
     f.bootstrap().await?;
     let s = service(&f, Arc::new(fixture_transport(true)?));
     let p = provider(&f, &s).await?;
@@ -300,6 +313,13 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     let cb = authorize_factor(&url, "step-up", true).await?;
     let r = callback(&app, &cb, &browser).await?;
     assert_eq!(r.headers()["location"], format!("{ORIGIN}/done"));
+    let age: u64 = r.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .find_map(|p| p.trim().strip_prefix("Max-Age="))
+        .unwrap()
+        .parse()?;
+    assert!((590..=600).contains(&age));
     let operation_cookie = r.headers()["set-cookie"]
         .to_str()?
         .split(';')
@@ -424,12 +444,15 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
     let rejected = callback(&old_app, &cb, BROWSER).await?;
     assert_eq!(rejected.headers()["location"], "/auth/error?reason=failed");
     assert!(!rejected.headers().contains_key("set-cookie"));
-    let next = HttpOidc::for_loopback_test(vec![TrustedAssuranceProfile {
-        tenant: f.key.tenant,
-        issuer,
-        client_id: "identity-test".into(),
-        keycloak_totp: true,
-    }])?;
+    let next = HttpOidc::for_loopback_test(
+        vec![TrustedAssuranceProfile {
+            tenant: f.key.tenant,
+            issuer,
+            client_id: "identity-test".into(),
+            keycloak_totp: true,
+        }],
+        transport_policy(),
+    )?;
     let next = service(&f, Arc::new(next));
     let settings = p.settings.input();
     let updated = next
@@ -730,11 +753,21 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
 #[ignore = "requires make test-federated"]
 async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
     fixture_transport(true)?
-        .test(tenant(), &config()?, &credentials(true)?)
+        .test(
+            tenant(),
+            &config()?,
+            &credentials(true)?,
+            upstream_deadline(),
+        )
         .await?;
     assert_eq!(
         fixture_transport(true)?
-            .test(tenant(), &config()?, &credentials(false)?)
+            .test(
+                tenant(),
+                &config()?,
+                &credentials(false)?,
+                upstream_deadline()
+            )
             .await
             .unwrap_err(),
         FederationError::provider(ProviderStage::Discovery, ProviderReason::TlsRejected)
@@ -742,7 +775,7 @@ async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
     let mut private = config()?.input();
     private.issuer = "https://127.0.0.1".into();
     assert!(
-        HttpOidc::new(vec![], vec![])?
+        HttpOidc::new(vec![], vec![], transport_policy())?
             .validate(tenant(), &private.try_into()?, &credentials(false)?)
             .is_err()
     );
@@ -841,4 +874,22 @@ async fn real_provider_management_and_encrypted_credentials() -> anyhow::Result<
     );
     f.close().await;
     Ok(())
+}
+
+fn transport_policy() -> rss_identity_oidc::TransportPolicy {
+    rss_identity_oidc::TransportPolicy::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(3),
+        1024 * 1024,
+        128,
+    )
+    .unwrap()
+}
+
+fn upstream_deadline() -> rss_request_context::Deadline {
+    rss_request_context::Deadline::at(
+        std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(30))
+            .unwrap(),
+    )
 }

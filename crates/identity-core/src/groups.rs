@@ -1,10 +1,8 @@
 //! Bounded group observations. Values alone confer no authentication.
-use crate::facts::{
-    FactSource, FactUnavailableReason, MAX_TTL_SECONDS, MIN_TTL_SECONDS, acceptable_observation,
-    valid_max_age, valid_snapshot_window,
-};
+use crate::facts::{FactSource, FactUnavailableReason, valid_max_age, valid_snapshot_window};
 use serde::{Deserialize, Serialize};
 pub const VERSION: u32 = 1;
+pub const MAX_VALUES: usize = 1024;
 /// Only available contains values. Unknown states/fields fail deserialization;
 /// consumers must also validate the explicit version and metadata.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,7 +54,7 @@ impl Groups {
                 *version == VERSION
                     && !snapshot_id.is_nil()
                     && *provider_config_version > 0
-                    && acceptable_observation(*observed_at, now)
+                    && now > 0
                     && valid_snapshot_window(*observed_at, *expires_at)
                     && canonical_values(values)
             }
@@ -64,7 +62,7 @@ impl Groups {
     }
 }
 pub fn bounded_values(values: &[String]) -> bool {
-    values.len() <= 100
+    values.len() <= MAX_VALUES
         && values
             .iter()
             .all(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control))
@@ -79,8 +77,6 @@ use crate::federation::FederationError;
 #[derive(Clone, Copy)]
 pub struct GroupFactsMaxAge(i64);
 impl GroupFactsMaxAge {
-    pub const MIN_SECONDS: i64 = MIN_TTL_SECONDS;
-    pub const MAX_SECONDS: i64 = MAX_TTL_SECONDS;
     pub fn new(seconds: i64) -> Result<Self, FederationError> {
         if !valid_max_age(seconds) {
             return Err(FederationError::Configuration);
@@ -94,8 +90,9 @@ impl GroupFactsMaxAge {
         issued_at: i64,
         expires_at: i64,
         now: i64,
+        future_skew_seconds: u32,
     ) -> Result<i64, FederationError> {
-        crate::facts::expires_at(self.0, issued_at, expires_at, now)
+        crate::facts::expires_at(self.0, issued_at, expires_at, now, future_skew_seconds)
     }
 }
 

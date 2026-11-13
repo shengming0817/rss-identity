@@ -351,9 +351,13 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
         .bind(B)
         .execute(&f.owner)
         .await?;
-    let hash = PasswordKdf::new()
-        .hash(Password::new("other tenant secret password".into())?)
-        .await?;
+    let hash = PasswordKdf::new(
+        std::num::NonZeroUsize::new(4).unwrap(),
+        std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap()
+    .hash(Password::new("other tenant secret password".into())?)
+    .await?;
     sqlx::query(
         "INSERT INTO identity_authority.accounts(tenant_id,principal_id) VALUES($1::uuid,$2::uuid)",
     )
@@ -411,7 +415,7 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
     .fetch_one(&f.owner)
     .await?;
     assert_eq!(before, 1);
-    let result=f.runtime.local_tx(f.key.tenant,deadline(),|tx|Box::pin(async move {tx.with_connection(|c|Box::pin(async move {sqlx::query("UPDATE identity_authority.accounts SET auth_epoch=99 WHERE tenant_id='22222222-2222-4222-8222-222222222222'").execute(c).await.map(|r|r.rows_affected())})).await})).await.fold(Ok,Err,Err,Err,Err,Err)?;
+    let result=f.runtime.local_tx(binding(f.key.tenant),deadline(),|tx|Box::pin(async move {tx.with_connection(|c|Box::pin(async move {sqlx::query("UPDATE identity_authority.accounts SET auth_epoch=99 WHERE tenant_id='22222222-2222-4222-8222-222222222222'").execute(c).await.map(|r|r.rows_affected())})).await})).await.fold(Ok,Err,Err,Err,Err,Err)?;
     assert_eq!(result, 0);
     f.maintenance
         .recover_local_password(f.key, password(), deadline())
@@ -426,8 +430,50 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
+    let selected = |failures| {
+        AuthenticationPolicy::new(
+            AttemptWindow::new(80, 300)?,
+            AttemptWindow::new(7, 900)?,
+            AttemptWindow::new(failures, 420)?,
+            12000,
+            1024,
+            Duration::from_secs(120),
+        )
+    };
+    f.store = Authority::connect_runtime(
+        f.runtime.clone(),
+        std::sync::Arc::new(PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?),
+        f.config().with_authentication_policy(selected(8)?),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
     f.bootstrap().await?;
+    f.reset_attempts().await?;
+    let claim = f
+        .store
+        .claim_password(
+            f.key.tenant,
+            &login("admin"),
+            &source(),
+            rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+                Duration::from_secs(120),
+            ),
+        )
+        .await?;
+    let ttl: f64=sqlx::query_scalar("SELECT extract(epoch FROM claim_until-clock_timestamp())::float8 FROM identity_authority.password_attempts WHERE claim_token IS NOT NULL").fetch_one(&f.owner).await?;
+    assert!((110.0..=120.0).contains(&ttl));
+    assert_eq!(
+        f.store
+            .settle_password(claim, Err(AuthorityError::Unavailable), deadline())
+            .await
+            .err(),
+        Some(AuthorityError::Unavailable)
+    );
     f.reset_attempts().await?;
     // Successful verification never consumes the account failure allowance.
     for _ in 0..7 {
@@ -439,7 +485,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
             .await?;
     assert_eq!(failures, 0);
     let mut first_window = None;
-    for _ in 0..5 {
+    for _ in 0..8 {
         assert!(matches!(
             f.store
                 .verify_password(
@@ -460,7 +506,19 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
         );
     }
     let before:(i32,f64)=sqlx::query_as("SELECT failures,extract(epoch FROM window_until)::float8 FROM identity_authority.password_attempts").fetch_one(&f.owner).await?;
-    assert_eq!(before.0, 5);
+    assert_eq!(before.0, 8);
+    // A deployment threshold change compares the retained count, never equality only.
+    f.store = Authority::connect_runtime(
+        f.runtime.clone(),
+        std::sync::Arc::new(PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?),
+        f.config().with_authentication_policy(selected(5)?),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
     let denied = f
         .store
         .verify_password(
@@ -472,7 +530,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
         )
         .await;
     assert!(
-        matches!(denied,Err(AuthorityError::RateLimited {retry_after_seconds}) if retry_after_seconds.get()<=600 && retry_after_seconds.get()>590)
+        matches!(denied,Err(AuthorityError::RateLimited {retry_after_seconds}) if retry_after_seconds.get()<=420 && retry_after_seconds.get()>410)
     );
     let after: f64 = sqlx::query_scalar(
         "SELECT extract(epoch FROM window_until)::float8 FROM identity_authority.password_attempts",
@@ -499,7 +557,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
         )
         .await?;
     f.reset_attempts().await?;
-    sqlx::query("INSERT INTO identity_authority.attempts SELECT $1::uuid,'full:'||i,1,clock_timestamp()+interval '1 hour' FROM generate_series(1,10000) i").bind(A).execute(&f.owner).await?;
+    sqlx::query("INSERT INTO identity_authority.attempts SELECT $1::uuid,'full:'||i,1,clock_timestamp()+interval '1 hour' FROM generate_series(1,12000) i").bind(A).execute(&f.owner).await?;
     assert!(matches!(
         f.store
             .verify_password(
@@ -515,7 +573,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.attempts")
         .fetch_one(&f.owner)
         .await?;
-    assert_eq!(n, 10000);
+    assert_eq!(n, 12000);
     sqlx::query(
         "UPDATE identity_authority.attempts SET expires_at=clock_timestamp()-interval '1 second'",
     )
@@ -528,7 +586,7 @@ async fn attempts_are_shared_and_bounded() -> anyhow::Result<()> {
     )
     .fetch_one(&f.owner)
     .await?;
-    assert_eq!(remaining, 9_872);
+    assert_eq!(remaining, 12000 - 1024);
     f.close().await;
     Ok(())
 }
@@ -734,7 +792,13 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
                 rss_identity_postgres::AuthorityProfile::Runtime => {
                     Authority::connect_runtime(
                         runtime.clone(),
-                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        std::sync::Arc::new(
+                            rss_identity_core::account::PasswordKdf::new(
+                                std::num::NonZeroUsize::new(4).unwrap(),
+                                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                            )
+                            .unwrap(),
+                        ),
                         f.config(),
                         f.policy.clone(),
                         deadline(),
@@ -744,7 +808,13 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
                 rss_identity_postgres::AuthorityProfile::Maintenance => {
                     Authority::connect_maintenance(
                         runtime.clone(),
-                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        std::sync::Arc::new(
+                            rss_identity_core::account::PasswordKdf::new(
+                                std::num::NonZeroUsize::new(4).unwrap(),
+                                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                            )
+                            .unwrap(),
+                        ),
                         f.config(),
                         deadline(),
                     )
@@ -765,7 +835,13 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
                 rss_identity_postgres::AuthorityProfile::Runtime => {
                     Authority::connect_runtime(
                         runtime.clone(),
-                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        std::sync::Arc::new(
+                            rss_identity_core::account::PasswordKdf::new(
+                                std::num::NonZeroUsize::new(4).unwrap(),
+                                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                            )
+                            .unwrap(),
+                        ),
                         f.config(),
                         f.policy.clone(),
                         deadline(),
@@ -775,7 +851,13 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
                 rss_identity_postgres::AuthorityProfile::Maintenance => {
                     Authority::connect_maintenance(
                         runtime.clone(),
-                        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                        std::sync::Arc::new(
+                            rss_identity_core::account::PasswordKdf::new(
+                                std::num::NonZeroUsize::new(4).unwrap(),
+                                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                            )
+                            .unwrap(),
+                        ),
                         f.config(),
                         deadline(),
                     )
@@ -822,7 +904,13 @@ async fn source_budgets_are_shared() -> anyhow::Result<()> {
     let other_runtime = f.additional_runtime().await?;
     let other = Authority::connect_runtime(
         other_runtime.clone(),
-        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        std::sync::Arc::new(
+            rss_identity_core::account::PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         f.config(),
         f.policy.clone(),
         deadline(),
@@ -1242,12 +1330,16 @@ async fn maintenance_races_preserve_current_state() -> anyhow::Result<()> {
             let hash: String = sqlx::query_scalar("SELECT password_hash FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
                 .bind(key.tenant.to_string()).bind(key.principal.as_uuid().to_string()).fetch_one(&f.owner).await?;
             assert!(
-                PasswordKdf::new()
-                    .verify(
-                        Password::new(expected_password.into())?,
-                        rss_identity_core::account::PasswordEncoding::from_storage(hash)?
-                    )
-                    .await?
+                PasswordKdf::new(
+                    std::num::NonZeroUsize::new(4).unwrap(),
+                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()
+                )
+                .unwrap()
+                .verify(
+                    Password::new(expected_password.into())?,
+                    rss_identity_core::account::PasswordEncoding::from_storage(hash)?
+                )
+                .await?
             );
             let action = [
                 "account_disabled",
@@ -1331,7 +1423,7 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
     ] {
         let result = f
             .maintenance_runtime
-            .local_tx(f.key.tenant, deadline(), move |tx| {
+            .local_tx(binding(f.key.tenant), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.with_connection(move |c| {
                         Box::pin(async move { sqlx::query(query).execute(c).await.map(|_| ()) })
@@ -1345,7 +1437,7 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
     }
     let result = f
         .runtime
-        .local_tx(f.key.tenant, deadline(), |tx| {
+        .local_tx(binding(f.key.tenant), deadline(), |tx| {
             Box::pin(async move {
                 tx.with_connection(|c| {
                     Box::pin(async move {
@@ -1368,7 +1460,7 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
             StorageMismatch::SchemaVersion
         ))
     ));
-    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=17; ALTER TABLE identity_authority.schema_version ADD CHECK(version=17)").execute(&f.owner).await?;
+    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=18; ALTER TABLE identity_authority.schema_version ADD CHECK(version=18)").execute(&f.owner).await?;
     assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
     for (remove, restore, expected) in [
         (
@@ -1514,7 +1606,7 @@ async fn maintenance_runbook_respects_forced_rls() -> anyhow::Result<()> {
         .await?;
     let rows = f
         .maintenance_runtime
-        .local_tx(f.key.tenant, deadline(), |tx| {
+        .local_tx(binding(f.key.tenant), deadline(), |tx| {
             Box::pin(async move {
                 tx.with_connection(|c| {
                     Box::pin(async move {
@@ -1561,7 +1653,13 @@ async fn password_failures_reset_and_claims_are_fenced() -> anyhow::Result<()> {
     let other_runtime = f.additional_runtime().await?;
     let other = Authority::connect_runtime(
         other_runtime.clone(),
-        std::sync::Arc::new(PasswordKdf::new()),
+        std::sync::Arc::new(
+            PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         f.config(),
         f.policy.clone(),
         deadline(),

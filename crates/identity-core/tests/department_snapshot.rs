@@ -81,11 +81,11 @@ fn rejects_incomplete_ambiguous_and_unversioned_assertions() {
 #[test]
 fn tree_membership_and_depth_have_explicit_limits() {
     for (count, chain, members, valid) in [
-        (256, false, 16, true),
-        (257, false, 1, false),
+        (1024, false, 1024, true),
+        (1025, false, 1, false),
         (16, true, 1, true),
         (17, true, 1, false),
-        (20, false, 17, false),
+        (20, false, 17, true),
     ] {
         let nodes: Vec<_> = (0..count).map(|i| json!({"id":format!("n{i}"),"displayName":format!("Node {i}"),"parentId":if i == 0 {None} else {Some(format!("n{}",if chain {i-1} else {0}))}})).collect();
         let memberships: Vec<_> = (0..members).map(|i| format!("n{i}")).collect();

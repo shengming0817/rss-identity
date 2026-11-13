@@ -63,7 +63,11 @@ mod tests {
             "ACR must not manufacture AMR"
         );
         assert_eq!(facts.auth_time(), Some(100));
-        assert!(facts.check(AuthenticationMode::StepUp, 100, 101).is_ok());
+        assert!(
+            facts
+                .check(AuthenticationMode::StepUp, 100, 101, 30)
+                .is_ok()
+        );
         for (time, acr, trusted) in [
             (Some(100), Some("2"), false),
             (Some(100), Some("1"), true),
@@ -72,7 +76,11 @@ mod tests {
         ] {
             let facts = normalize(time, acr, vec![], trusted).unwrap();
             assert_eq!(facts.acr().as_str(), "unspecified");
-            assert!(facts.check(AuthenticationMode::StepUp, 100, 101).is_err());
+            assert!(
+                facts
+                    .check(AuthenticationMode::StepUp, 100, 101, 30)
+                    .is_err()
+            );
         }
     }
 
@@ -80,12 +88,24 @@ mod tests {
     fn refresh_or_callback_time_does_not_refresh_authentication() {
         for time in [None, Some(69), Some(132)] {
             let facts = normalize(time, Some("2"), vec![], true).unwrap();
-            assert!(facts.check(AuthenticationMode::StepUp, 100, 101).is_err());
+            assert!(
+                facts
+                    .check(AuthenticationMode::StepUp, 100, 101, 30)
+                    .is_err()
+            );
         }
         let facts = normalize(Some(70), Some("2"), vec!["otp".into()], true).unwrap();
-        assert!(facts.check(AuthenticationMode::StepUp, 100, 101).is_ok());
+        assert!(
+            facts
+                .check(AuthenticationMode::StepUp, 100, 101, 30)
+                .is_ok()
+        );
         assert_eq!(facts.auth_time(), Some(70));
-        assert!(facts.check(AuthenticationMode::StepUp, 100, 99).is_err());
+        assert!(
+            facts
+                .check(AuthenticationMode::StepUp, 100, 99, 30)
+                .is_err()
+        );
         assert!(normalize(Some(0), None, vec![], false).is_err());
     }
 

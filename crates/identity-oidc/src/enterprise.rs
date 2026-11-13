@@ -14,7 +14,7 @@ impl Es256EnterpriseSigner {
     /// Load a dedicated ES256 signing key and public key identifier.
     pub fn new(kid: String, pem: &[u8]) -> Result<Self, &'static str> {
         if kid.is_empty()
-            || kid.len() > 128
+            || kid.len() > 255
             || !kid
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
@@ -91,6 +91,7 @@ impl crate::HttpOidc {
     pub async fn exchange_enterprise(
         &self,
         input: EnterpriseExchange<'_>,
+        deadline: rss_request_context::Deadline,
     ) -> Result<EnterpriseAccess, rss_identity_core::federation::FederationError> {
         let EnterpriseExchange {
             tenant,
@@ -113,7 +114,9 @@ impl crate::HttpOidc {
         {
             return Err(FederationError::Configuration);
         }
-        let (metadata, transport) = self.discover(tenant, provider, credentials).await?;
+        let (metadata, transport) = self
+            .discover(tenant, provider, credentials, deadline)
+            .await?;
         if metadata
             .token_endpoint
             .as_ref()

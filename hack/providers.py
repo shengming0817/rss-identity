@@ -126,7 +126,7 @@ SUITES[("rss-identity-postgres", "entra")] = {
     "native_jit_commit_unknown_does_not_return_proof",
     "browser_and_native_share_one_canonical_identity",
 }
-SUITES[("rss-identity-oidc", "entra")] = {"signed_entra_resource_tokens"}
+SUITES[("rss-identity-oidc", "entra")] = {"signed_entra_resource_tokens", "jwks_refresh_cooldown_expiry_and_capacity"}
 
 SUITES[('rss-identity-postgres', 'provisioning')] = {'provisioned_account_and_event_share_host_commit_and_revalidate_source'}
 
@@ -147,6 +147,7 @@ SUITES[("rss-identity-postgres", "live_session")] = {
 SUITES[("rss-identity-postgres", "profile_platform")].add("live_session_admission_retains_platform_source_locks")
 
 SUITES[("rss-identity-postgres", "embedded")].update({
+    "account_directory::selected_account_page_capacity_round_trips_long_names",
     "account_directory::account_directory_filters_before_stable_pagination_and_invalidates_changes",
     "account_directory::account_directory_profiles_are_source_selected_and_authorized_for_predicates",
     "account_directory::department_directory_uses_latest_accepted_fact_without_resurrecting_older_memberships",

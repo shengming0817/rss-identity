@@ -25,13 +25,13 @@ fn values_remain_typed_and_cannot_become_security_facts() {
 }
 #[test]
 fn extension_budgets_and_sensitive_material_fail_closed() {
-    assert!(Extensions::try_from(json!({"a":vec![0;128]})).is_ok());
-    assert!(Extensions::try_from(json!({"a":vec![0;129]})).is_err());
+    assert!(Extensions::try_from(json!({"a":vec![0;1024]})).is_ok());
+    assert!(Extensions::try_from(json!({"a":vec![0;1025]})).is_err());
     assert!(Extensions::try_from(json!({"n":9007199254740992_u64})).is_err());
     assert!(Extensions::try_from(json!({"n":9007199254740991_u64})).is_ok());
     assert!(Extensions::try_from(json!({"n":1.25})).is_ok());
     let mut object = serde_json::Map::new();
-    for i in 0..256 {
+    for i in 0..1024 {
         object.insert(i.to_string(), json!(null));
     }
     assert!(Extensions::try_from(json!(object)).is_ok());
@@ -53,17 +53,15 @@ fn extension_budgets_and_sensitive_material_fail_closed() {
     ] {
         assert!(Extensions::try_from(json!({"nested":{name:"secret"}})).is_err());
     }
-    for age in [0, 59, 86401, u32::MAX] {
-        assert!(
-            ProfileSettings {
-                extensions_claim: None,
-                max_age_seconds: age
-            }
-            .validate()
-            .is_err()
-        );
-    }
-    for age in [60, 14400, 86400] {
+    assert!(
+        ProfileSettings {
+            extensions_claim: None,
+            max_age_seconds: 0
+        }
+        .validate()
+        .is_err()
+    );
+    for age in [1, 14400, u32::MAX] {
         assert!(
             ProfileSettings {
                 extensions_claim: None,
@@ -110,4 +108,21 @@ fn jsonb_unrepresentable_strings_are_invalid_at_every_depth() {
         assert!(matches!(profile.extensions, Attribute::Invalid));
     }
     assert!(Extensions::try_from(json!({"text":"line\nnormal Unicode 中文"})).is_ok());
+}
+
+#[test]
+fn expanded_members_and_arrays_round_trip_with_the_original_byte_budget() {
+    let mut object = serde_json::Map::new();
+    for i in 0..1023 {
+        object.insert(format!("key{i}"), json!(i));
+    }
+    object.insert("array".into(), json!(vec![0; 1024]));
+    let extensions = Extensions::try_from(json!(object)).unwrap();
+    let bytes = serde_json::to_vec(&extensions).unwrap();
+    assert!(bytes.len() < MAX_BYTES);
+    assert_eq!(
+        serde_json::from_slice::<Extensions>(&bytes).unwrap(),
+        extensions
+    );
+    assert!(Extensions::try_from(json!({"array":vec!["x".repeat(65);1024]})).is_err());
 }

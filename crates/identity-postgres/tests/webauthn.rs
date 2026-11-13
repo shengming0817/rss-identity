@@ -323,7 +323,7 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     .await?;
     let response = first.do_registration(Url::parse(ORIGIN)?, start.options)?;
     Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())).await?;
-    let grant = management_grant(&f, &w, &s, &mut first, "register").await?;
+    let grant = Box::pin(management_grant(&f, &w, &s, &mut first, "register")).await?;
     assert!(
         Box::pin(w.begin_registration(
             actor(&f, &s).await?,
@@ -357,7 +357,7 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     let mut second = WebauthnAuthenticator::new(SoftPasskey::new(true));
     let response = second.do_registration(Url::parse(ORIGIN)?, start.options)?;
     Box::pin(w.finish_registration(actor(&f, &s).await?, start.id, response, deadline())).await?;
-    let old = management_grant(&f, &w, &s, &mut first, "register").await?;
+    let old = Box::pin(management_grant(&f, &w, &s, &mut first, "register")).await?;
     let pending = Box::pin(w.begin_authentication(
         actor(&f, &s).await?,
         StepUpContext::new("pending".into(), [4; 32]).unwrap(),
@@ -365,7 +365,7 @@ async fn webauthn_add_and_recovery_revoke_prior_authorization_atomically() -> an
     ))
     .await?;
     let pending_response = first.do_authentication(Url::parse(ORIGIN)?, pending.options)?;
-    let recovery = management_grant(&f, &w, &s, &mut second, "recover").await?;
+    let recovery = Box::pin(management_grant(&f, &w, &s, &mut second, "recover")).await?;
     let start = Box::pin(w.begin_registration(
         actor(&f, &s).await?,
         "recovered".into(),

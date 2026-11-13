@@ -7,7 +7,7 @@ use crate::{
     transaction::{corrupt, reject},
 };
 use rss_identity_core::SessionId;
-use rss_identity_core::assurance::{Assurance, AuthenticationMode};
+use rss_identity_core::assurance::Assurance;
 use rss_identity_core::session::{CredentialKind, SessionLifetime, SessionPolicy};
 use rss_request_context::TenantId;
 use rss_transactional_messaging_postgres::PgError;
@@ -229,9 +229,8 @@ pub(crate) async fn by_id(
         "platform" => rss_identity_core::session::AuthenticationSource::Platform,
         _ => return Err(corrupt()),
     };
-    assurance
-        .check(AuthenticationMode::Login, lifetime.issued_at(), now)
-        .map_err(|_| reject())?;
+    // Signed-time skew was checked at issuance. Restoration retains frozen expiry
+    // instead of applying a new deployment policy to an already accepted fact.
     Ok(Loaded {
         source,
         assurance,

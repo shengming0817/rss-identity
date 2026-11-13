@@ -1,12 +1,11 @@
 //! Embeddable account/session services over a host-owned PostgreSQL runtime.
 mod attempts;
-mod password_attempts;
-pub use password_attempts::{PASSWORD_FAILURE_LIMIT, PASSWORD_FAILURE_SECONDS};
 mod audit;
 mod auth_facts;
 mod credentials;
 mod department;
 mod entra;
+mod password_attempts;
 pub use entra::{EntraAuthority, RevalidatedAccount, VerifiedExternalSubject};
 mod session_checks;
 #[cfg(feature = "test-support")]
@@ -37,9 +36,7 @@ mod sessions;
 mod storage;
 mod transaction;
 mod types;
-pub use attempts::{
-    ATTEMPT_SCOPE_LIMIT, ATTEMPT_SCOPE_SECONDS, ATTEMPT_SOURCE_LIMIT, ATTEMPT_SOURCE_SECONDS,
-};
+pub use attempts::{AttemptWindow, AuthenticationPolicy};
 pub use credentials::CredentialKeys;
 pub use department::{
     DepartmentAccessError, TrustedDepartmentSnapshot, VerifiedDepartmentSnapshot,
@@ -60,7 +57,7 @@ use rss_identity_core::{
     session::SessionPolicy,
 };
 use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::OperationDeadline;
+use rss_transactional_messaging::{fence::ExecutionBinding, policy::OperationDeadline};
 use rss_transactional_messaging_postgres::PgRuntime;
 pub use schema::{
     MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_SIGNATURE_SQL, SCHEMA_VERSION,
@@ -79,14 +76,52 @@ pub use types::*;
 #[derive(Clone)]
 pub struct AuthorityConfig {
     instance: InstanceId,
-    tenants: Vec<TenantId>,
+    bindings: Vec<ExecutionBinding>,
     sessions: SessionPolicy,
     audit: rss_audit_postgres::Integrity,
     platform: Option<Arc<dyn platform::PlatformVerifier>>,
     enterprise: Option<platform::EnterpriseConfig>,
     profile_limits: rss_identity_core::profile::ProfileLimits,
+    authentication: AuthenticationPolicy,
+    profile_receipt_capacity: std::num::NonZeroU32,
+    future_skew_seconds: u32,
+    operation_proof_seconds: std::num::NonZeroU32,
+    max_auth_facts_bytes: std::num::NonZeroU32,
+    provider_capacity: std::num::NonZeroU16,
 }
 impl AuthorityConfig {
+    pub fn with_provider_capacity(
+        mut self,
+        capacity: std::num::NonZeroU16,
+    ) -> Result<Self, AuthorityError> {
+        if capacity.get() > rss_identity_core::federation::MAX_PROVIDERS {
+            return Err(AuthorityError::Configuration);
+        }
+        self.provider_capacity = capacity;
+        Ok(self)
+    }
+
+    pub fn with_future_skew(mut self, seconds: u32) -> Self {
+        self.future_skew_seconds = seconds;
+        self
+    }
+    pub fn with_operation_proof_lifetime(mut self, seconds: std::num::NonZeroU32) -> Self {
+        self.operation_proof_seconds = seconds;
+        self
+    }
+    pub fn with_auth_facts_budget(mut self, bytes: std::num::NonZeroU32) -> Self {
+        self.max_auth_facts_bytes = bytes;
+        self
+    }
+
+    pub fn with_authentication_policy(mut self, policy: AuthenticationPolicy) -> Self {
+        self.authentication = policy;
+        self
+    }
+    pub fn with_profile_receipt_capacity(mut self, capacity: std::num::NonZeroU32) -> Self {
+        self.profile_receipt_capacity = capacity;
+        self
+    }
     pub fn with_enterprise(mut self, config: platform::EnterpriseConfig) -> Self {
         self.enterprise = Some(config);
         self
@@ -105,25 +140,36 @@ impl AuthorityConfig {
     }
     pub fn new(
         instance: InstanceId,
-        mut tenants: Vec<TenantId>,
+        mut bindings: Vec<ExecutionBinding>,
         sessions: SessionPolicy,
         audit: rss_audit_postgres::Integrity,
     ) -> Result<Self, AuthorityError> {
-        tenants.sort_by_key(|tenant| tenant.to_string());
-        if tenants.is_empty()
-            || tenants.len() > 128
-            || tenants.windows(2).any(|pair| pair[0] == pair[1])
+        bindings.sort_by_key(|binding| binding.tenant().to_string());
+        if bindings.is_empty()
+            || bindings.len() > 1024
+            || bindings.windows(2).any(|pair| {
+                pair[0].tenant() == pair[1].tenant() || pair[0].storage() != pair[1].storage()
+            })
         {
             return Err(AuthorityError::Configuration);
         }
         Ok(Self {
             instance,
-            tenants,
+            bindings,
             sessions,
             audit,
             platform: None,
             enterprise: None,
             profile_limits: Default::default(),
+            authentication: AuthenticationPolicy::standard(std::time::Duration::from_secs(60))?,
+            profile_receipt_capacity: std::num::NonZeroU32::new(4096).expect("positive default"),
+            future_skew_seconds: 30,
+            operation_proof_seconds: std::num::NonZeroU32::new(300).expect("positive default"),
+            max_auth_facts_bytes: std::num::NonZeroU32::new(32768).expect("positive default"),
+            provider_capacity: std::num::NonZeroU16::new(
+                rss_identity_core::federation::MAX_PROVIDERS,
+            )
+            .expect("positive capacity"),
         })
     }
 }
@@ -138,6 +184,12 @@ pub struct Authority {
     session_policy: SessionPolicy,
     policy: Arc<dyn ManagementPolicy>,
     profile_limits: rss_identity_core::profile::ProfileLimits,
+    authentication: AuthenticationPolicy,
+    profile_receipt_capacity: std::num::NonZeroU32,
+    future_skew_seconds: u32,
+    operation_proof_seconds: std::num::NonZeroU32,
+    max_auth_facts_bytes: std::num::NonZeroU32,
+    provider_capacity: std::num::NonZeroU16,
 }
 impl Authority {
     pub async fn connect_runtime(
@@ -182,7 +234,7 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
         let budget = Budget::new(deadline)?;
-        let tenant = config.tenants[0];
+        let tenant = config.bindings[0].tenant();
         let instance = config.instance;
         let authority = Self {
             enterprise: config.enterprise,
@@ -194,7 +246,7 @@ impl Authority {
             runtime: Arc::new(runtime::RuntimeBundle {
                 runtime,
                 audit: config.audit,
-                tenants: config.tenants,
+                bindings: config.bindings,
                 instance,
             }),
             profile,
@@ -202,6 +254,12 @@ impl Authority {
             session_policy: config.sessions,
             policy,
             profile_limits: config.profile_limits,
+            authentication: config.authentication,
+            profile_receipt_capacity: config.profile_receipt_capacity,
+            future_skew_seconds: config.future_skew_seconds,
+            operation_proof_seconds: config.operation_proof_seconds,
+            max_auth_facts_bytes: config.max_auth_facts_bytes,
+            provider_capacity: config.provider_capacity,
         };
         let integrity = authority.runtime.audit.clone();
         let valid = Self::read_bundle(
@@ -225,10 +283,14 @@ impl Authority {
         check_probe(valid)?;
         let bundle = authority.runtime.clone();
         // Schema/profile are global, but every declared tenant has its own runtime fence.
-        for tenant in bundle.tenants.iter().skip(1) {
-            Self::read_bundle(bundle.clone(), *tenant, budget.remaining(), true, |_| {
-                Box::pin(async { Ok(()) })
-            })
+        for binding in bundle.bindings.iter().skip(1) {
+            Self::read_bundle(
+                bundle.clone(),
+                binding.tenant(),
+                budget.remaining(),
+                true,
+                |_| Box::pin(async { Ok(()) }),
+            )
             .await?;
         }
         Ok(authority)
@@ -237,10 +299,15 @@ impl Authority {
         self.instance
     }
     pub fn active_tenants(&self) -> Result<Vec<TenantId>, AuthorityError> {
-        Ok(self.runtime.clone().tenants.clone())
+        Ok(self
+            .runtime
+            .bindings
+            .iter()
+            .map(|binding| binding.tenant())
+            .collect())
     }
     pub fn tenant_active(&self, tenant: TenantId) -> bool {
-        self.runtime.tenants.contains(&tenant)
+        self.runtime.binding(tenant).is_some()
     }
     fn require_maintenance(&self) -> Result<(), AuthorityError> {
         if self.profile != AuthorityProfile::Maintenance {

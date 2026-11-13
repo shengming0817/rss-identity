@@ -1,5 +1,7 @@
 mod credentials;
 pub use credentials::ProviderCredentials;
+/// Maximum admitted providers in one tenant directory.
+pub const MAX_PROVIDERS: u16 = 1024;
 // Federation values and narrow upstream port. Values are not authentication proofs.
 // ref: RustCrypto/MACs hmac/src/lib.rs @ hmac-v0.12.1.
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
@@ -144,7 +146,7 @@ impl ProviderSettingsInput {
             .flatten()
         {
             if s.is_empty()
-                || s.len() > 64
+                || s.len() > 255
                 || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
                 || ["sub", "iss", "aud", "nonce", "azp"].contains(&s.as_str())
             {
@@ -452,6 +454,7 @@ pub trait UpstreamOidc: Send + Sync {
         credentials: &'a ProviderCredentials,
         material: &'a ProtocolMaterial,
         mode: crate::assurance::AuthenticationMode,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String>;
     fn exchange<'a>(
         &'a self,
@@ -460,12 +463,14 @@ pub trait UpstreamOidc: Send + Sync {
         credentials: &'a ProviderCredentials,
         material: ProtocolMaterial,
         code: Zeroizing<String>,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims>;
     fn test<'a>(
         &'a self,
         tenant: TenantId,
         config: &'a ProviderSettings,
         credentials: &'a ProviderCredentials,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport>;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -127,15 +127,18 @@ async fn login(State(rp): State<Arc<Rp>>, Json(input): Json<Value>) -> axum::res
             return Err(());
         }
         rp.oidc
-            .exchange_enterprise(rss_identity_oidc::enterprise::EnterpriseExchange {
-                tenant: rp.tenant,
-                provider: &rp.provider,
-                credentials: &rp.credentials,
-                target: &rp.target,
-                assertion: assertion.expose(),
-                assertion_expires_at: assertion.expires_at,
-                expected_subject: &rp.subject,
-            })
+            .exchange_enterprise(
+                rss_identity_oidc::enterprise::EnterpriseExchange {
+                    tenant: rp.tenant,
+                    provider: &rp.provider,
+                    credentials: &rp.credentials,
+                    target: &rp.target,
+                    assertion: assertion.expose(),
+                    assertion_expires_at: assertion.expires_at,
+                    expected_subject: &rp.subject,
+                },
+                upstream_deadline(),
+            )
             .await
             .map_err(|_| ())?;
         let proof = rp
@@ -320,7 +323,13 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
         .with_enterprise(EnterpriseConfig::new(targets.clone(), signer)?);
     let authority = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        Arc::new(
+            rss_identity_core::account::PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         config,
         f.policy.clone(),
         deadline(),
@@ -351,7 +360,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
                 "fixture-enterprise-secret".into(),
                 Some(ca.clone()),
             )?,
-            oidc: HttpOidc::for_loopback_test(vec![])?,
+            oidc: HttpOidc::for_loopback_test(vec![], transport_policy())?,
             subject: user.clone(),
             tenant: f.key.tenant,
             sessions: Default::default(),
@@ -455,25 +464,34 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
     .await?;
     let credentials =
         ProviderCredentials::new("fixture-enterprise-secret".into(), Some(ca.clone()))?;
-    let transport = HttpOidc::for_loopback_test(vec![])?;
+    let transport = HttpOidc::for_loopback_test(vec![], transport_policy())?;
     let provider = rp_settings(&target, &issuer)?;
     assert!(
         transport
-            .exchange_enterprise(rss_identity_oidc::enterprise::EnterpriseExchange {
-                tenant: f.key.tenant,
-                provider: &provider,
-                credentials: &credentials,
-                target: &target,
-                assertion: stale.assertion.as_ref().unwrap().expose(),
-                assertion_expires_at: stale.assertion.as_ref().unwrap().expires_at,
-                expected_subject: &user
-            })
+            .exchange_enterprise(
+                rss_identity_oidc::enterprise::EnterpriseExchange {
+                    tenant: f.key.tenant,
+                    provider: &provider,
+                    credentials: &credentials,
+                    target: &target,
+                    assertion: stale.assertion.as_ref().unwrap().expose(),
+                    assertion_expires_at: stale.assertion.as_ref().unwrap().expires_at,
+                    expected_subject: &user
+                },
+                upstream_deadline()
+            )
             .await
             .is_err()
     );
     let rotated = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        Arc::new(
+            rss_identity_core::account::PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         support::config(f.instance)
             .with_platform(device.clone())
             .with_enterprise(EnterpriseConfig::new(
@@ -492,42 +510,51 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
     // A different confidential RP cannot exchange this issuer's assertion.
     assert!(
         transport
-            .exchange_enterprise(rss_identity_oidc::enterprise::EnterpriseExchange {
-                tenant: f.key.tenant,
-                provider: &rp_settings(&targets[1], &issuer)?,
-                credentials: &credentials,
-                target: &targets[1],
-                assertion: signed,
-                assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
-                expected_subject: &user
-            })
+            .exchange_enterprise(
+                rss_identity_oidc::enterprise::EnterpriseExchange {
+                    tenant: f.key.tenant,
+                    provider: &rp_settings(&targets[1], &issuer)?,
+                    credentials: &credentials,
+                    target: &targets[1],
+                    assertion: signed,
+                    assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
+                    expected_subject: &user
+                },
+                upstream_deadline()
+            )
             .await
             .is_err()
     );
     let fresh = assertion(&rotated, &device, &f, &target).await?;
     let signed = fresh.assertion.as_ref().unwrap().expose();
     transport
-        .exchange_enterprise(rss_identity_oidc::enterprise::EnterpriseExchange {
-            tenant: f.key.tenant,
-            provider: &provider,
-            credentials: &credentials,
-            target: &target,
-            assertion: signed,
-            assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
-            expected_subject: &user,
-        })
-        .await?;
-    assert!(
-        transport
-            .exchange_enterprise(rss_identity_oidc::enterprise::EnterpriseExchange {
+        .exchange_enterprise(
+            rss_identity_oidc::enterprise::EnterpriseExchange {
                 tenant: f.key.tenant,
                 provider: &provider,
                 credentials: &credentials,
                 target: &target,
                 assertion: signed,
                 assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
-                expected_subject: &user
-            })
+                expected_subject: &user,
+            },
+            upstream_deadline(),
+        )
+        .await?;
+    assert!(
+        transport
+            .exchange_enterprise(
+                rss_identity_oidc::enterprise::EnterpriseExchange {
+                    tenant: f.key.tenant,
+                    provider: &provider,
+                    credentials: &credentials,
+                    target: &target,
+                    assertion: signed,
+                    assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
+                    expected_subject: &user
+                },
+                upstream_deadline()
+            )
             .await
             .is_err()
     );
@@ -600,4 +627,22 @@ fn rp_settings(target: &EnterpriseTarget, issuer: &str) -> anyhow::Result<Provid
         jit: false,
     }
     .try_into()?)
+}
+
+fn transport_policy() -> rss_identity_oidc::TransportPolicy {
+    rss_identity_oidc::TransportPolicy::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(3),
+        1024 * 1024,
+        128,
+    )
+    .unwrap()
+}
+
+fn upstream_deadline() -> rss_request_context::Deadline {
+    rss_request_context::Deadline::at(
+        std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(30))
+            .unwrap(),
+    )
 }

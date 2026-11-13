@@ -4,7 +4,7 @@ use rss_identity_core::{
     InstanceId,
     account::AccountKey,
     department::{DepartmentSnapshot, DepartmentUnavailableReason},
-    facts::{FactSource, acceptable_observation},
+    facts::FactSource,
 };
 use rss_transactional_messaging_postgres::PgError;
 use std::time::Instant;
@@ -46,7 +46,7 @@ impl DepartmentFacts {
                 expires_at,
                 snapshot,
             } => {
-                if !acceptable_observation(observed_at, sample.seconds()) {
+                if observed_at <= 0 || sample.seconds() <= 0 {
                     return Err(reject());
                 }
                 if sample.seconds() < observed_at {

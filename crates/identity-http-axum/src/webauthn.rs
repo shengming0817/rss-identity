@@ -114,12 +114,25 @@ async fn body<T: serde::de::DeserializeOwned>(
             .map_err(|_| BAD)?;
     serde_json::from_slice(&bytes).map_err(|_| BAD)
 }
-pub(crate) fn grant_cookie(grant: &rss_identity_postgres::StepUpGrant) -> String {
-    format!(
-        "{GRANT_COOKIE}={}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=300",
+pub(crate) fn grant_cookie(
+    grant: &rss_identity_postgres::StepUpGrant,
+) -> Result<String, HttpError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|value| i64::try_from(value.as_secs()).ok())
+        .ok_or_else(HttpError::request_timeout)?;
+    let remaining = grant
+        .expires_at
+        .checked_sub(now)
+        .filter(|age| *age > 0)
+        .ok_or_else(|| HttpError::from(AuthorityError::InteractionRequired))?;
+    Ok(format!(
+        "{GRANT_COOKIE}={}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={remaining}",
         grant.expose()
-    )
+    ))
 }
+
 fn grant(headers: &HeaderMap) -> Result<Option<String>, HttpError> {
     Ok(named_cookie(headers, GRANT_COOKIE)?.map(str::to_owned))
 }
@@ -242,7 +255,7 @@ async fn auth_finish(
     let mut response = Json(serde_json::json!({"expiresAt":grant.expires_at})).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        grant_cookie(&grant).parse().map_err(|_| BAD)?,
+        grant_cookie(&grant)?.parse().map_err(|_| BAD)?,
     );
     Ok(response)
 }

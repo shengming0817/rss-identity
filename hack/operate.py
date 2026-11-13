@@ -17,9 +17,9 @@ class OperationError(RuntimeError):
 class Rejection(OperationError,ValueError):
     def __init__(self,reason):super().__init__('precondition',reason,True)
 
-def command(args,stage='inspect',mutating=False,**kwargs):
+def command(args,stage='inspect',mutating=False,timeout=180,**kwargs):
     # Never include subprocess arguments, stdout or stderr in public diagnostics.
-    try:result=subprocess.run(args,timeout=180,stderr=subprocess.PIPE,**kwargs)
+    try:result=subprocess.run(args,timeout=timeout,stderr=subprocess.PIPE,**kwargs)
     except (OSError,subprocess.SubprocessError):
         raise OperationError(stage,'process-unconfirmed',not mutating) from None
     if result.returncode:raise OperationError(stage,'process-failed',not mutating)
@@ -46,7 +46,7 @@ def check_backup(path,backend_version=None,config=None):
         if not isinstance(v,list) or len(v)!=16 or any(type(b) is not int or not 0<=b<=255 for b in v) or not any(v):raise Rejection('backup-storage-identity')
     if type(storage['generation']) is not int or not 0<storage['generation']<=2**63-1:raise Rejection('backup-epoch')
     tenants=storage['tenants']
-    if not isinstance(tenants,list) or not 1<=len(tenants)<=128:raise Rejection('backup-tenants')
+    if not isinstance(tenants,list) or not tenants:raise Rejection('backup-tenants')
     for tenant in tenants:identity(tenant)
     if len(set(tenants))!=len(tenants):raise Rejection('backup-tenants')
     if record['sha256']!=sha(path):raise Rejection('backup-digest')
@@ -114,7 +114,7 @@ def operate(args):
     if args.command in ['check-backup','restore']:
         record=check_backup(args.backup,backend_version,json.loads((directory/'migration.json').read_text()))
     if args.command=='check-backup':
-        with args.backup.open('rb') as stream:command(['docker','run','--pull=never','--rm','--network','none','--user','10001:10001','--interactive','--entrypoint','pg_restore',spec['services']['postgres']['image'],'--list'],stage='check-backup',stdin=stream,stdout=subprocess.DEVNULL)
+        with args.backup.open('rb') as stream:command(['docker','run','--pull=never','--rm','--network','none','--user','10001:10001','--interactive','--entrypoint','pg_restore',spec['services']['postgres']['image'],'--list'],stage='check-backup',stdin=stream,stdout=subprocess.DEVNULL,timeout=operation_timeout(directory,'backup'))
         return
     projects=[args.project]
     if args.command=='restore':
@@ -126,9 +126,17 @@ def operate(args):
     with project_locks(endpoint,projects):
         execute(args,backend_version,compose,directory,record)
 
+def operation_timeout(directory,operation):
+    budgets=json.loads((directory/'runtime.json').read_text())['budgets']
+    owner={'close':'drainSeconds','initialize':'maintenanceSeconds','recover':'maintenanceSeconds','open':'startupSeconds'}.get(operation,'migrationSeconds')
+    work,cleanup=budgets[owner],budgets['resourceSeconds']
+    if any(type(v) is not int or v<=0 for v in [work,cleanup]):raise Rejection('operation-budget')
+    # A maintenance process closes KDF and pool independently; Docker teardown also needs time.
+    return max(180,work+(2 if operation in ['initialize','recover'] else 1)*cleanup+15)
+
 def execute(args,backend_version,compose,directory,record):
-    def run(*words,**kwargs):return command(compose+list(words),stage=kwargs.pop('stage',args.command),mutating=kwargs.pop('mutating',True),stdout=kwargs.pop('stdout',subprocess.DEVNULL),**kwargs)
-    def migration(*words):run('run','--rm','migrate','--config','/run/config/migration.json',*words,stage=words[0].lstrip('-') if words else 'install',mutating=not words or words[0] not in ['--verify','--verify-keys'])
+    def run(*words,**kwargs):return command(compose+list(words),stage=kwargs.pop('stage',args.command),mutating=kwargs.pop('mutating',True),stdout=kwargs.pop('stdout',subprocess.DEVNULL),timeout=kwargs.pop('timeout',operation_timeout(directory,args.command)),**kwargs)
+    def migration(*words):run('run','--rm','migrate','--config','/run/config/migration.json',*words,stage=words[0].lstrip('-') if words else 'install',mutating=not words or words[0] not in ['--verify','--verify-keys'],timeout=operation_timeout(directory,'verify'))
     def closed():return require_closed(args.project)
     if args.command=='install':
         closed();run('run','--rm','volume-init');run('up','-d','--wait','postgres');migration()

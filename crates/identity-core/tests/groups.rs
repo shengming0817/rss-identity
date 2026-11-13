@@ -2,16 +2,16 @@ use rss_identity_core::groups::{GroupFactsMaxAge, UpstreamGroups};
 
 #[test]
 fn group_policy_bounds_signed_observation_without_callback_extension() {
-    for seconds in [0, 301, i64::MAX] {
+    for seconds in [0, -1] {
         assert!(GroupFactsMaxAge::new(seconds).is_err());
     }
     let policy = GroupFactsMaxAge::new(300).unwrap();
-    assert_eq!(policy.expires_at(1000, 1100, 1050).unwrap(), 1100);
-    assert_eq!(policy.expires_at(1000, 2000, 1500).unwrap(), 1300);
+    assert_eq!(policy.expires_at(1000, 1100, 1050, 30).unwrap(), 1100);
+    assert_eq!(policy.expires_at(1000, 2000, 1500, 30).unwrap(), 1300);
     assert_eq!(
         GroupFactsMaxAge::new(1)
             .unwrap()
-            .expires_at(1000, 2000, 1000)
+            .expires_at(1000, 2000, 1000, 30)
             .unwrap(),
         1001
     );
@@ -22,7 +22,7 @@ fn group_policy_bounds_signed_observation_without_callback_extension() {
         (100, 200, 200),
         (i64::MAX - 1, i64::MAX, i64::MAX - 1),
     ] {
-        assert!(policy.expires_at(iat, exp, now).is_err());
+        assert!(policy.expires_at(iat, exp, now, 30).is_err());
     }
 }
 
@@ -48,14 +48,14 @@ fn group_values_are_exact_bounded_sets_and_missing_is_not_empty() {
         vec!["".into()],
         vec!["\n".into()],
         vec!["x".repeat(257)],
-        vec!["x".into(); 101],
+        vec!["x".into(); 1025],
     ] {
         assert!(UpstreamGroups::present(values).is_err());
     }
     assert!(
         UpstreamGroups::present(
-            (0..100)
-                .map(|i| format!("{i:03}{}", "x".repeat(253)))
+            (0..1024)
+                .map(|i| format!("{i:04}{}", "x".repeat(252)))
                 .collect()
         )
         .is_ok()
@@ -67,9 +67,9 @@ fn signed_observation_tolerates_bounded_skew_without_extending_deadline() {
     let policy = GroupFactsMaxAge::new(10).unwrap();
     for ahead in [1, 30] {
         assert_eq!(
-            policy.expires_at(1000 + ahead, 2000, 1000).unwrap(),
+            policy.expires_at(1000 + ahead, 2000, 1000, 30).unwrap(),
             1010 + ahead
         );
     }
-    assert!(policy.expires_at(1031, 2000, 1000).is_err());
+    assert!(policy.expires_at(1031, 2000, 1000, 30).is_err());
 }

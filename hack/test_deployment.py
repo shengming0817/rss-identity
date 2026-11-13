@@ -87,6 +87,11 @@ class OperationTests(unittest.TestCase):
         with fixture() as (root,data,images):
             path=root/'cut.dump';valid=receipt(path,data,images)
             self.assertEqual(operate.check_backup(path,images['identity'],data['runtime']),valid)
+            import uuid
+            expanded=copy.deepcopy(data['runtime']);expanded['storage']['tenants']=[str(uuid.uuid4()) for _ in range(1024)]
+            full={**valid,'storage':expanded['storage']};path.with_suffix('.dump.json').write_text(json.dumps(full))
+            self.assertEqual(operate.check_backup(path,images['identity'],expanded),full)
+            with self.assertRaises(ValueError):operate.check_backup(path,images['identity'],data['runtime'])
             invalid=[{'schema':11,'sha256':valid['sha256']},{**valid,'backendVersion':'b'*40}, {**{k:v for k,v in valid.items() if k!='backendVersion'},'candidate':'a'*40},{**valid,'project':'../bad'},{**valid,'instanceId':'bad'},{**valid,'unknown':True},{**valid,'storage':{**valid['storage'],'generation':True}},{**valid,'storage':{**valid['storage'],'target':[True]*16}}]
             for value in invalid:
                 path.with_suffix('.dump.json').write_text(json.dumps(value))
@@ -207,3 +212,22 @@ class ImageContractTests(unittest.TestCase):
             result=subprocess.run(['make','image'],cwd=root,env=env,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr.decode());self.assertTrue((root/'called').exists())
 
+
+class OperationBudgetTests(unittest.TestCase):
+    def test_selected_budgets_reach_process_wait_and_healthcheck(self):
+        with fixture() as (root,data,images):
+            runtime=root/'output/runtime.json';value=json.loads(runtime.read_text())
+            value['budgets'].update(startupSeconds=120,drainSeconds=600,maintenanceSeconds=900,migrationSeconds=1200,resourceSeconds=30)
+            runtime.write_text(json.dumps(value))
+            self.assertEqual(operate.operation_timeout(root/'output','close'),645)
+            self.assertEqual(operate.operation_timeout(root/'output','recover'),975)
+            self.assertEqual(operate.operation_timeout(root/'output','rekey'),1245)
+            with patch('subprocess.run',return_value=subprocess.CompletedProcess([],0)) as run:
+                operate.command(['fixture'],timeout=1245)
+            self.assertEqual(run.call_args.kwargs['timeout'],1245)
+            data['runtime']['budgets']=value['budgets']
+            with patch('os.geteuid',return_value=0),patch('os.chown'),patch.object(deploy,'preflight'):
+                deploy.render(data,root/'long-budget',images)
+            health=json.loads((root/'long-budget/compose.json').read_text())['services']['identity']['healthcheck']
+            self.assertEqual(health['test'],['CMD','identity-server','--probe','127.0.0.1:8080','125'])
+            self.assertEqual((health['start_period'],health['timeout']),('125s','125s'))

@@ -24,7 +24,7 @@ fn credentials() -> ProviderCredentials {
 }
 #[test]
 fn self_service_rejects_special_network_destinations() {
-    let adapter = HttpOidc::new(vec![], vec![]).unwrap();
+    let adapter = HttpOidc::new(vec![], vec![], transport_policy()).unwrap();
     for issuer in ["https://idp.example.test", "https://8.8.8.8"] {
         let mut c = input();
         c.issuer = issuer.into();
@@ -72,7 +72,7 @@ fn self_service_rejects_special_network_destinations() {
 #[test]
 fn trusted_assurance_is_independent_and_exactly_scoped() {
     let c: ProviderSettings = input().try_into().unwrap();
-    let weak = HttpOidc::new(vec![], vec![]).unwrap();
+    let weak = HttpOidc::new(vec![], vec![], transport_policy()).unwrap();
     let trusted = HttpOidc::new(
         vec![TrustedAssuranceProfile {
             tenant: tenant(),
@@ -81,6 +81,7 @@ fn trusted_assurance_is_independent_and_exactly_scoped() {
             keycloak_totp: true,
         }],
         vec![],
+        transport_policy(),
     )
     .unwrap();
     let approved = trusted.assurance_profile(tenant(), &c);
@@ -110,4 +111,33 @@ fn trusted_assurance_is_independent_and_exactly_scoped() {
         trusted.assurance_profile(other, &c)
     );
     assert!(trusted.validate(other, &c, &credentials()).is_ok());
+}
+
+fn transport_policy() -> rss_identity_oidc::TransportPolicy {
+    rss_identity_oidc::TransportPolicy::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(3),
+        1024 * 1024,
+        128,
+    )
+    .unwrap()
+}
+
+#[test]
+fn transport_policy_validates_finite_resource_selections() {
+    use rss_identity_oidc::TransportPolicy;
+    use std::time::Duration;
+    assert!(
+        TransportPolicy::new(
+            Duration::from_secs(120),
+            Duration::from_secs(30),
+            2 * 1024 * 1024,
+            1024
+        )
+        .is_ok()
+    );
+    for timeout in [Duration::ZERO, Duration::MAX] {
+        assert!(TransportPolicy::new(timeout, Duration::from_secs(3), 1024, 128).is_err());
+    }
+    assert!(TransportPolicy::new(Duration::from_secs(5), Duration::from_secs(3), 0, 128).is_err());
 }

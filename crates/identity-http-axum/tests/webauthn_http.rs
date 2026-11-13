@@ -34,7 +34,19 @@ async fn json_body(r: axum::response::Response) -> anyhow::Result<Value> {
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
+    f.store = Authority::connect_runtime(
+        f.runtime.clone(),
+        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?),
+        f.config()
+            .with_operation_proof_lifetime(std::num::NonZeroU32::new(600).unwrap()),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
     f.bootstrap().await?;
     let session = f.login().await?;
     let cookie = format!("__Host-identity-session={}", session.secret().expose());
@@ -112,6 +124,13 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
         ))
         .await?;
     assert_eq!(r.status(), 200);
+    let age: u64 = r.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .find_map(|p| p.trim().strip_prefix("Max-Age="))
+        .unwrap()
+        .parse()?;
+    assert!((590..=600).contains(&age));
     let proof_cookie = r.headers()["set-cookie"]
         .to_str()?
         .split(';')

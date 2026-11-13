@@ -189,9 +189,11 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(
                 error.extensions().get::<HttpFailure>(),
-                Some(&HttpFailure::Authority(
-                    rss_identity_postgres::AuthorityError::DeadlineElapsed
-                ))
+                Some(&if remaining.is_zero() {
+                    HttpFailure::RequestTimeout
+                } else {
+                    HttpFailure::Authority(rss_identity_postgres::AuthorityError::DeadlineElapsed)
+                })
             );
         }
     }
@@ -335,7 +337,7 @@ fn login_request(cookie: Option<&str>, csrf: Option<&str>) -> Request<Body> {
 }
 async fn body(response: Response) -> anyhow::Result<Value> {
     Ok(serde_json::from_slice(
-        &to_bytes(response.into_body(), 16_384).await?,
+        &to_bytes(response.into_body(), 131_072).await?,
     )?)
 }
 async fn successful_login(app: &Router) -> anyhow::Result<(String, String, Value)> {
@@ -1293,7 +1295,13 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     let (cookie, csrf, _) = successful_login(&app).await?;
     let path = format!("accounts/{}/profile", f.key.principal.as_uuid());
     let operation = uuid::Uuid::new_v4();
-    let input = json!({"operationId":operation,"expectedRevision":0,"value":{"displayName":"Name","username":null,"email":null,"extensions":{"remote":false},"maxAgeSeconds":60}});
+    let mut extensions = serde_json::Map::new();
+    extensions.insert("remote".into(), json!(false));
+    for i in 0..1022 {
+        extensions.insert(format!("field{i}"), json!(i));
+    }
+    extensions.insert("array".into(), json!(vec![0; 1024]));
+    let input = json!({"operationId":operation,"expectedRevision":0,"value":{"displayName":"Name","username":null,"email":null,"extensions":extensions,"maxAgeSeconds":60}});
     assert_eq!(
         app.clone()
             .oneshot(request("PUT", &path, Some(&cookie), None, input.clone()))
@@ -1391,6 +1399,44 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
         .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
         .await?;
     assert_eq!(body(deleted).await?, json!({"revision":2,"value":null}));
+    // Compact JSON and PostgreSQL JSONB have different encoding overheads.
+    let mut arrays = vec![vec![0; 1023]; 32];
+    arrays.last_mut().unwrap().truncate(1019);
+    let expanded = json!({"x":arrays});
+    assert!(serde_json::to_vec(&expanded)?.len() <= rss_identity_core::profile::MAX_BYTES);
+    let value = json!({"displayName":"n".repeat(512),"username":"u".repeat(256),"email":"e".repeat(320),"extensions":expanded,"maxAgeSeconds":3600});
+    let write = app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            &path,
+            Some(&cookie),
+            Some(&csrf),
+            json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":2,"value":value}),
+        ))
+        .await?;
+    assert_eq!(write.status(), StatusCode::OK);
+    let read = app
+        .clone()
+        .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+        .await?;
+    assert_eq!(body(read).await?["value"], value);
+    let (fresh_cookie, _, _) = successful_login(&app).await?;
+    let observation = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "profile",
+            Some(&fresh_cookie),
+            None,
+            json!(null),
+        ))
+        .await?;
+    assert_eq!(observation.status(), StatusCode::OK);
+    assert_eq!(
+        body(observation).await?["profile"]["extensions"]["value"],
+        expanded
+    );
     f.policy.revoke(f.key);
     assert_eq!(
         app.clone()

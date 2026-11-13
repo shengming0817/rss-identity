@@ -416,7 +416,7 @@ async fn callback_result(
     let (location, cookie) = match outcome {
         FederatedOutcome::Redirect(redirect) => (redirect.url, None),
         FederatedOutcome::StepUp { grant, return_url } => {
-            (return_url, Some(crate::webauthn::grant_cookie(&grant)))
+            (return_url, Some(crate::webauthn::grant_cookie(&grant)?))
         }
         FederatedOutcome::Session {
             issued,

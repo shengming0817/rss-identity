@@ -207,7 +207,7 @@ fn event(
     })
 }
 pub(crate) enum SessionAuthentication {
-    LocalPassword(i64),
+    LocalPassword(i64, CredentialKind),
     Oidc(crate::federation_storage::Origin),
     Platform(crate::platform::PlatformAuthentication),
 }
@@ -218,23 +218,24 @@ pub(crate) async fn insert(
     authentication: SessionAuthentication,
     now: i64,
     policy: SessionPolicy,
-    kind: CredentialKind,
+    max_auth_facts_bytes: std::num::NonZeroU32,
 ) -> Result<(IssuedSession, SecurityEvent), transaction::MutationError> {
     let key = state.key();
-    let (source, local_authenticated_at, origin, platform) = match authentication {
-        SessionAuthentication::LocalPassword(time) if time > 0 && time <= now => {
-            ("local_password", Some(time), None, None)
+    let (source, local_authenticated_at, origin, platform, kind) = match authentication {
+        SessionAuthentication::LocalPassword(time, kind) if time > 0 && time <= now => {
+            ("local_password", Some(time), None, None, kind)
         }
-        SessionAuthentication::Oidc(origin) if kind == CredentialKind::Cookie => {
-            ("oidc", None, Some(origin), None)
+        SessionAuthentication::Oidc(origin) => {
+            ("oidc", None, Some(origin), None, CredentialKind::Cookie)
         }
-        SessionAuthentication::Platform(platform) if kind == CredentialKind::Cookie => {
+        SessionAuthentication::Platform(platform) => {
             platform.assurance()?;
             (
                 "platform",
                 None,
                 None,
                 Some(serde_json::to_value(platform).map_err(|_| corrupt())?),
+                CredentialKind::Cookie,
             )
         }
         _ => return Err(reject().into()),
@@ -246,7 +247,7 @@ pub(crate) async fn insert(
     }
     let id = SessionId::generate();
     let facts = match &origin {
-        Some(o) => Some(o.facts.encode(c).await?),
+        Some(o) => Some(o.facts.encode(c, max_auth_facts_bytes).await?),
         None => None,
     };
     sqlx::query(concat!(
@@ -310,14 +311,15 @@ impl Authority {
     ) -> Result<IssuedSession, AuthorityError> {
         self.require_runtime()?;
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(candidate.expires);
+        budget.0 = budget.0.shortened_to(candidate.expires);
         if let Some(old) = &replacement {
             if old.key != candidate.state.key() || old.view.credential_kind != kind {
                 return Err(AuthorityError::Rejected);
             }
-            budget.0 = budget.0.min(old.expires);
+            budget.0 = budget.0.shortened_to(old.expires);
         }
         let policy = self.session_policy;
+        let max_auth_facts_bytes = self.max_auth_facts_bytes;
         let limits = self.profile_limits;
         let key = candidate.state.key();
         self.mutate_events(key.tenant, budget.remaining(), move |tx| {
@@ -339,10 +341,10 @@ impl Authority {
                             c,
                             state,
                             replaced,
-                            SessionAuthentication::LocalPassword(candidate.authenticated_at),
+                            SessionAuthentication::LocalPassword(candidate.authenticated_at, kind),
                             now,
                             policy,
-                            kind,
+                            max_auth_facts_bytes,
                         )
                         .await?;
                         let observation = crate::profiles::local_observation(c, key, now).await?;
@@ -420,7 +422,7 @@ impl Authority {
                             db::touch(c, &mut loaded).await?;
                         }
                         let authority = authority_id(c).await?;
-                        let expires = checked_expiry(&loaded, budget.0)?;
+                        let expires = checked_expiry(&loaded, budget.0.instant())?;
                         Ok(AuthenticatedSession {
                             session_checks,
                             identity: SessionIdentity::from_state(loaded.state),
@@ -457,7 +459,7 @@ impl Authority {
                 db::touch(c,&mut loaded).await?;
                 sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
                     .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;
-                checked_expiry(&loaded, budget.0)?;
+                checked_expiry(&loaded, budget.0.instant())?;
                 let fact = event(SessionAction::Refreshed,loaded.state,loaded.view.id,None,loaded.source);
                 Ok((IssuedSession::new(secret,loaded.view,loaded.now,loaded.state),fact))
             })).await
@@ -485,7 +487,7 @@ impl Authority {
     ) -> Result<(), AuthorityError> {
         self.require_runtime()?;
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         self.mutate(actor.key.tenant,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let loaded = db::recheck(c,&actor).await?;
@@ -507,11 +509,11 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<SessionPage, AuthorityError> {
         self.require_runtime()?;
-        if !(1..=100).contains(&limit) {
+        if !(1..=rss_identity_core::directory::MAX_PAGE_SIZE).contains(&limit) {
             return Err(AuthorityError::InvalidInput);
         }
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         self.read(actor.key.tenant,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let loaded = db::recheck(c,&actor).await?;

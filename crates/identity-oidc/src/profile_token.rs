@@ -33,8 +33,9 @@ pub(super) fn verify(
     nonce: &str,
     client: &str,
     client_secret: &str,
+    future_skew_seconds: u32,
 ) -> Result<Claims, FederationError> {
-    if raw.is_empty() || raw.len() > 262_144 {
+    if raw.is_empty() {
         return Err(FederationError::Claims);
     }
     let header = decode_header(raw).map_err(|_| FederationError::Claims)?;
@@ -66,9 +67,6 @@ pub(super) fn verify(
             .get("keys")
             .and_then(|v| v.as_array())
             .ok_or(FederationError::Claims)?;
-        if keys.len() > 128 {
-            return Err(FederationError::Claims);
-        }
         let key_type = match header.alg {
             Algorithm::RS256
             | Algorithm::RS384
@@ -123,7 +121,7 @@ pub(super) fn verify(
     if claims.sub.is_empty()
         || claims.sub.len() > 256
         || claims.iat <= 0
-        || claims.iat > now.saturating_add(30)
+        || claims.iat > now.saturating_add(i64::from(future_skew_seconds))
         || claims.exp <= claims.iat
         || claims.exp <= now
         || claims.azp.as_ref().is_some_and(|v| v != client)

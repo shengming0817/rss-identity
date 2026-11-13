@@ -73,9 +73,10 @@ pub fn read_secret(path: &Path) -> Result<Zeroizing<String>, AppError> {
 }
 /// Bounded non-secret configuration/CA input; FIFO/devices and final symlinks are rejected.
 pub fn read_public_file(path: &Path, limit: usize) -> Result<Vec<u8>, AppError> {
-    if limit > 1024 * 1024 {
-        return Err(AppError::Configuration);
-    }
+    let read_limit = u64::try_from(limit)
+        .ok()
+        .and_then(|n| n.checked_add(1))
+        .ok_or(AppError::Configuration)?;
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -86,7 +87,7 @@ pub fn read_public_file(path: &Path, limit: usize) -> Result<Vec<u8>, AppError> 
         return Err(AppError::File);
     }
     let mut data = Vec::new();
-    file.take(limit as u64 + 1)
+    file.take(read_limit)
         .read_to_end(&mut data)
         .map_err(|_| AppError::File)?;
     if data.len() > limit {

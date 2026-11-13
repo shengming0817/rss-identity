@@ -1,7 +1,7 @@
--- Fresh schema v17 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v18 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=17));
-INSERT INTO identity_authority.schema_version VALUES(17);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=18));
+INSERT INTO identity_authority.schema_version VALUES(18);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),
@@ -23,7 +23,7 @@ CREATE TABLE identity_authority.accounts (
 -- Keep composite bounds flat: pg_dump/reparse must preserve structural attestation.
 CREATE TABLE identity_authority.local_credentials (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL,
- login_key text NOT NULL CHECK(octet_length(login_key)>=1 AND octet_length(login_key)<=128 AND login_key=lower(login_key COLLATE "C") AND login_key !~ '[^\x20-\x7e]' AND login_key=btrim(login_key)),
+ login_key text NOT NULL CHECK(octet_length(login_key)>=1 AND octet_length(login_key)<=255 AND login_key=lower(login_key COLLATE "C") AND login_key !~ '[^\x20-\x7e]' AND login_key=btrim(login_key)),
  password_hash text NOT NULL CHECK(octet_length(password_hash)>=80 AND octet_length(password_hash)<=256 AND password_hash ~ '^\$argon2id\$v=19\$m=19456,t=2,p=1\$[A-Za-z0-9+/]{21}[AQgw]\$[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$'),
  PRIMARY KEY(tenant_id,principal_id), UNIQUE(tenant_id,login_key),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts
@@ -43,7 +43,7 @@ CREATE INDEX attempts_expiry ON identity_authority.attempts(tenant_id,expires_at
 CREATE TABLE identity_authority.password_attempts (
  tenant_id uuid NOT NULL,
  login_digest bytea NOT NULL CHECK(octet_length(login_digest)=32),
- failures integer NOT NULL DEFAULT 0 CHECK(failures BETWEEN 0 AND 5),
+ failures integer NOT NULL DEFAULT 0 CHECK(failures>=0),
  window_until timestamptz,
  claim_token uuid CHECK(claim_token <> '00000000-0000-0000-0000-000000000000'),
  claim_until timestamptz,
@@ -103,7 +103,7 @@ CREATE TABLE identity_authority.sessions (
  CONSTRAINT authentication_kind CHECK (((authentication_source='local_password' AND local_authenticated_at>0 AND local_authenticated_at<=issued_at AND platform_authentication IS NULL AND external_identity_id IS NULL)
  OR (authentication_source='oidc' AND local_authenticated_at IS NULL AND platform_authentication IS NULL AND external_identity_id IS NOT NULL)
  OR (authentication_source='platform' AND local_authenticated_at IS NULL AND external_identity_id IS NULL AND jsonb_typeof(platform_authentication)='object' AND octet_length(platform_authentication::text)<=4096)) IS TRUE),
- CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL AND facts_sequence IS NULL) OR (external_identity_id IS NOT NULL AND facts_sequence IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND octet_length(auth_facts::text)<=32768 AND (auth_facts->'format_version'='3'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
+ CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL AND facts_sequence IS NULL) OR (external_identity_id IS NOT NULL AND facts_sequence IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND (auth_facts->'format_version'='3'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
  FOREIGN KEY(tenant_id,principal_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,principal_id,identity_id),
  PRIMARY KEY(tenant_id,session_id),
  UNIQUE(tenant_id,token_hash), UNIQUE(tenant_id,principal_id,session_id),
@@ -128,7 +128,7 @@ CREATE TABLE identity_authority.link_intents (
  FOREIGN KEY(tenant_id,session_id) REFERENCES identity_authority.sessions,
  FOREIGN KEY(tenant_id,target_provider) REFERENCES identity_authority.providers,
  FOREIGN KEY(tenant_id,source_identity) REFERENCES identity_authority.external_identities,
- CHECK((source_identity IS NULL AND source_epoch IS NULL AND source_facts IS NULL AND source_facts_sequence IS NULL) OR (source_identity IS NOT NULL AND source_facts_sequence IS NOT NULL AND source_epoch IS NOT NULL AND source_epoch>0 AND source_facts IS NOT NULL AND jsonb_typeof(source_facts)='object' AND octet_length(source_facts::text)<=32768 AND (source_facts->'format_version'='3'::jsonb AND jsonb_typeof(source_facts->'department_snapshot')='object') IS TRUE))
+ CHECK((source_identity IS NULL AND source_epoch IS NULL AND source_facts IS NULL AND source_facts_sequence IS NULL) OR (source_identity IS NOT NULL AND source_facts_sequence IS NOT NULL AND source_epoch IS NOT NULL AND source_epoch>0 AND source_facts IS NOT NULL AND jsonb_typeof(source_facts)='object' AND (source_facts->'format_version'='3'::jsonb AND jsonb_typeof(source_facts->'department_snapshot')='object') IS TRUE))
 );
 CREATE TABLE identity_authority.oidc_transactions (
  operation_context jsonb,
@@ -160,7 +160,7 @@ CREATE TABLE identity_authority.platform_challenges (
  audience text NOT NULL CHECK(octet_length(audience) BETWEEN 1 AND 256),
  nonce_hash bytea NOT NULL CHECK(octet_length(nonce_hash)=32), browser_hash bytea NOT NULL CHECK(octet_length(browser_hash)=32),
  auth_epoch bigint NOT NULL CHECK(auth_epoch>0), membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
- created_at bigint NOT NULL CHECK(created_at>0), expires_at bigint NOT NULL CHECK(expires_at>created_at AND expires_at-created_at<=120),
+ created_at bigint NOT NULL CHECK(created_at>0), expires_at bigint NOT NULL CHECK(expires_at>created_at),
  profile_sequence bigint NOT NULL CHECK(profile_sequence>0),
  PRIMARY KEY(tenant_id,challenge_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
@@ -168,7 +168,7 @@ CREATE TABLE identity_authority.platform_challenges (
 CREATE INDEX platform_challenge_expiry ON identity_authority.platform_challenges(tenant_id,expires_at);
 CREATE TABLE identity_authority.local_profiles (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL, revision bigint NOT NULL CHECK(revision>0),
- value jsonb CHECK(value IS NULL OR (jsonb_typeof(value)='object' AND octet_length(value::text)<=98304)),
+ value jsonb CHECK(value IS NULL OR (jsonb_typeof(value)='object')),
  PRIMARY KEY(tenant_id,principal_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
 );
@@ -177,8 +177,8 @@ CREATE TABLE identity_authority.profile_observations (
  provider_id uuid, config_version bigint, source_epoch bigint, source_revision bigint,
  snapshot_id uuid NOT NULL, sequence bigint NOT NULL CHECK(sequence>0),
  observed_at bigint NOT NULL CHECK(observed_at>0), collected_at bigint NOT NULL CHECK(collected_at>0),
- expires_at bigint NOT NULL CHECK(expires_at>observed_at AND expires_at-observed_at<=86400),
- value jsonb NOT NULL CHECK(jsonb_typeof(value)='object' AND octet_length(value::text)<=98304),
+ expires_at bigint NOT NULL CHECK(expires_at>observed_at),
+ value jsonb NOT NULL CHECK(jsonb_typeof(value)='object'),
  CHECK (((source='local' AND provider_id IS NULL AND config_version IS NULL AND source_epoch IS NULL)
  OR (provider_id IS NOT NULL AND source=provider_id::text AND config_version>0 AND source_epoch>0 AND source_revision IS NULL)) IS TRUE),
  PRIMARY KEY(tenant_id,principal_id,source),
@@ -207,7 +207,7 @@ CREATE TABLE identity_authority.webauthn_credentials (
  rp text NOT NULL CHECK(octet_length(rp)<=253), rp_config bytea NOT NULL CHECK(octet_length(rp_config)=32),
  credential_hash bytea NOT NULL CHECK(octet_length(credential_hash)=32),
  value jsonb NOT NULL CHECK(jsonb_typeof(value)='object' AND octet_length(value::text)<=16384),
- label text NOT NULL CHECK(octet_length(label) BETWEEN 1 AND 128),
+ label text NOT NULL CHECK(octet_length(label) BETWEEN 1 AND 255),
  epoch bigint NOT NULL DEFAULT 1 CHECK(epoch>0), version bigint NOT NULL DEFAULT 1 CHECK(version>0), revoked boolean NOT NULL DEFAULT false,
  PRIMARY KEY(tenant_id,id), UNIQUE(rp,credential_hash),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
@@ -224,7 +224,7 @@ CREATE TABLE identity_authority.step_up_grants (
  auth_epoch bigint NOT NULL CHECK(auth_epoch>0), membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
  context jsonb NOT NULL CHECK(jsonb_typeof(context)='object' AND octet_length(context::text)<=2048),
  source jsonb NOT NULL CHECK(jsonb_typeof(source)='object' AND octet_length(source::text)<=2048),
- authenticated_at bigint NOT NULL CHECK(authenticated_at>0), expires_at bigint NOT NULL CHECK(expires_at>authenticated_at AND expires_at-authenticated_at<=300),
+ authenticated_at bigint NOT NULL CHECK(authenticated_at>0), expires_at bigint NOT NULL CHECK(expires_at>authenticated_at),
  PRIMARY KEY(tenant_id,token_hash), FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
 );
 CREATE INDEX webauthn_ceremony_expiry ON identity_authority.webauthn_ceremonies(tenant_id,expires_at);

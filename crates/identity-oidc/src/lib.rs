@@ -22,6 +22,46 @@ use std::{
     time::Duration,
 };
 use zeroize::Zeroizing;
+/// Host-selected finite upstream time and document budgets.
+#[derive(Clone, Copy, Debug)]
+pub struct TransportPolicy {
+    request_timeout: Duration,
+    connect_timeout: Duration,
+    max_response_bytes: usize,
+    max_jwks_keys: usize,
+}
+impl TransportPolicy {
+    /// Validate technical ranges; callers choose deployment capacity.
+    pub fn new(
+        request_timeout: Duration,
+        connect_timeout: Duration,
+        max_response_bytes: usize,
+        max_jwks_keys: usize,
+    ) -> Result<Self, FederationError> {
+        let now = std::time::Instant::now();
+        if request_timeout.is_zero()
+            || connect_timeout.is_zero()
+            || now.checked_add(request_timeout).is_none()
+            || now.checked_add(connect_timeout).is_none()
+            || max_response_bytes == 0
+            || max_jwks_keys == 0
+        {
+            return Err(FederationError::Configuration);
+        }
+        Ok(Self {
+            request_timeout,
+            connect_timeout,
+            max_response_bytes,
+            max_jwks_keys,
+        })
+    }
+}
+fn remaining(deadline: rss_request_context::Deadline) -> Result<Duration, FederationError> {
+    deadline
+        .remaining(std::time::Instant::now())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| failure(ProviderStage::Exchange, ProviderReason::Timeout))
+}
 /// Host-approved interpretation of verified authentication facts. Not IdP admission.
 #[derive(Clone)]
 pub struct TrustedAssuranceProfile {
@@ -55,6 +95,8 @@ fn failure(stage: ProviderStage, reason: ProviderReason) -> FederationError {
 struct EgressDenied;
 /// Protocol transport with tenant credentials supplied for each exact provider version.
 pub struct HttpOidc {
+    future_skew_seconds: u32,
+    policy: TransportPolicy,
     profiles: Vec<TrustedAssuranceProfile>,
     private_access: Vec<PrivateProviderAccess>,
     loopback: bool,
@@ -62,27 +104,36 @@ pub struct HttpOidc {
     lookup: Option<std::sync::Arc<dyn reqwest::dns::Resolve>>,
 }
 impl HttpOidc {
+    /// Select the accepted signed-time skew; it never extends token expiry.
+    pub fn with_future_skew(mut self, seconds: u32) -> Self {
+        self.future_skew_seconds = seconds;
+        self
+    }
+
     /// Production uses HTTPS and vetted public or explicitly authorized private addresses.
     /// Every DNS answer is checked against the current tenant/issuer/client permission.
     pub fn new(
         profiles: Vec<TrustedAssuranceProfile>,
         private_access: Vec<PrivateProviderAccess>,
+        policy: TransportPolicy,
     ) -> Result<Self, FederationError> {
-        Self::build(profiles, private_access, false)
+        Self::build(profiles, private_access, false, policy)
     }
     /// Explicit loopback fixture (HTTP or HTTPS). Never enabled by production configuration.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_loopback_test(
         profiles: Vec<TrustedAssuranceProfile>,
+        policy: TransportPolicy,
     ) -> Result<Self, FederationError> {
-        Self::build(profiles, vec![], true)
+        Self::build(profiles, vec![], true, policy)
     }
     fn build(
         profiles: Vec<TrustedAssuranceProfile>,
         private_access: Vec<PrivateProviderAccess>,
         loopback: bool,
+        policy: TransportPolicy,
     ) -> Result<Self, FederationError> {
-        if profiles.len() > 128 || private_access.len() > 128 {
+        if profiles.len() > 1024 || private_access.len() > 1024 {
             return Err(FederationError::Configuration);
         }
         let mut grants = std::collections::BTreeSet::new();
@@ -109,6 +160,8 @@ impl HttpOidc {
             parse_url(&grant.issuer, false, &grant.cidrs)?;
         }
         let result = Self {
+            future_skew_seconds: 30,
+            policy,
             profiles,
             private_access,
             loopback,
@@ -150,6 +203,7 @@ impl HttpOidc {
         tenant: TenantId,
         c: &ProviderSettings,
         credentials: &ProviderCredentials,
+        deadline: rss_request_context::Deadline,
     ) -> Result<Transport, FederationError> {
         self.validate(tenant, c, credentials)?;
         let cidrs = self.private_for(tenant, c.issuer().as_str(), c.client_id().as_str());
@@ -166,12 +220,15 @@ impl HttpOidc {
             .no_proxy()
             .dns_resolver(std::sync::Arc::new(resolver))
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(5))
-            .connect_timeout(Duration::from_secs(3));
+            .timeout(self.policy.request_timeout)
+            .connect_timeout(self.policy.connect_timeout);
         for root in certificates(credentials)? {
             builder = builder.add_root_certificate(root);
         }
+        remaining(deadline)?;
         Ok(Transport {
+            policy: self.policy,
+            deadline,
             origin,
             http: builder
                 .build()
@@ -185,8 +242,9 @@ impl HttpOidc {
         tenant: TenantId,
         c: &ProviderSettings,
         credentials: &ProviderCredentials,
+        deadline: rss_request_context::Deadline,
     ) -> Result<(Metadata, Transport), FederationError> {
-        let transport = self.transport(tenant, c, credentials)?;
+        let transport = self.transport(tenant, c, credentials, deadline)?;
         let metadata = discovery::discover(&transport, c.issuer().as_str()).await?;
         if metadata
             .authorization_endpoint
@@ -253,6 +311,8 @@ fn parse_url(value: &str, loopback: bool, cidrs: &[IpNet]) -> Result<Url, Federa
     Ok(u)
 }
 struct Transport {
+    policy: TransportPolicy,
+    deadline: rss_request_context::Deadline,
     http: reqwest::Client,
     origin: String,
     requests: AtomicU8,
@@ -317,13 +377,14 @@ impl<'a> AsyncHttpClient<'a> for Transport {
             {
                 return Err(failure(self.stage(), ProviderReason::EgressDenied));
             }
+            let mut request: reqwest::Request = request
+                .try_into()
+                .map_err(|_| failure(self.stage(), ProviderReason::InvalidResponse))?;
+            *request.timeout_mut() =
+                Some(remaining(self.deadline)?.min(self.policy.request_timeout));
             let mut response = self
                 .http
-                .execute(
-                    request
-                        .try_into()
-                        .map_err(|_| failure(self.stage(), ProviderReason::InvalidResponse))?,
-                )
+                .execute(request)
                 .await
                 .map_err(|e| self.request_error(e))?;
             let status = response.status();
@@ -333,7 +394,7 @@ impl<'a> AsyncHttpClient<'a> for Transport {
             let headers = response.headers().clone();
             let mut bytes = Vec::new();
             while let Some(chunk) = response.chunk().await.map_err(|e| self.request_error(e))? {
-                if bytes.len().saturating_add(chunk.len()) > 1024 * 1024 {
+                if bytes.len().saturating_add(chunk.len()) > self.policy.max_response_bytes {
                     return Err(failure(self.stage(), ProviderReason::InvalidResponse));
                 }
                 bytes.extend_from_slice(&chunk);
@@ -384,6 +445,7 @@ impl UpstreamOidc for HttpOidc {
         credentials: &'a ProviderCredentials,
         m: &'a ProtocolMaterial,
         mode: AuthenticationMode,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
             if mode == AuthenticationMode::StepUp
@@ -391,7 +453,7 @@ impl UpstreamOidc for HttpOidc {
             {
                 return Err(FederationError::Configuration);
             }
-            let (metadata, _) = self.discover(tenant, c, credentials).await?;
+            let (metadata, _) = self.discover(tenant, c, credentials, deadline).await?;
 
             let client =
                 oauth2::basic::BasicClient::new(ClientId::new(c.client_id().as_str().to_owned()))
@@ -428,7 +490,9 @@ impl UpstreamOidc for HttpOidc {
                 request = request.add_extra_param("acr_values", assurance::KEYCLOAK_TOTP_ACR);
             }
 
-            Ok(request.url().0.to_string())
+            let url = request.url().0.to_string();
+            remaining(deadline)?;
+            Ok(url)
         })
     }
 
@@ -439,13 +503,14 @@ impl UpstreamOidc for HttpOidc {
         credentials: &'a ProviderCredentials,
         m: ProtocolMaterial,
         code: Zeroizing<String>,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
             if code.is_empty() || code.len() > 4096 {
                 return Err(FederationError::Rejected);
             }
 
-            let (metadata, transport) = self.discover(tenant, c, credentials).await?;
+            let (metadata, transport) = self.discover(tenant, c, credentials, deadline).await?;
 
             let client_id = ClientId::new(c.client_id().as_str().to_owned());
 
@@ -482,6 +547,7 @@ impl UpstreamOidc for HttpOidc {
                 m.nonce.as_str(),
                 client_id.as_str(),
                 credentials.client_secret(),
+                self.future_skew_seconds,
             )?;
             let all = serde_json::to_value(&claims).map_err(|_| FederationError::Claims)?;
 
@@ -511,6 +577,7 @@ impl UpstreamOidc for HttpOidc {
 
             value.validate()?;
 
+            remaining(deadline)?;
             Ok(value)
         })
     }
@@ -520,15 +587,17 @@ impl UpstreamOidc for HttpOidc {
         tenant: TenantId,
         c: &'a ProviderSettings,
         credentials: &'a ProviderCredentials,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
-            let (metadata, _) = self.discover(tenant, c, credentials).await?;
+            let (metadata, _) = self.discover(tenant, c, credentials, deadline).await?;
             if !metadata.authorization_response_iss_parameter_supported {
                 return Err(failure(
                     ProviderStage::Discovery,
                     ProviderReason::IssuerResponseUnsupported,
                 ));
             }
+            remaining(deadline)?;
             Ok(ConnectionReport {
                 checks: vec![
                     ProviderStage::Binding,

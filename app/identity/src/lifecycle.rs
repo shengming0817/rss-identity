@@ -117,8 +117,13 @@ async fn ready(State(h): State<Arc<Health>>) -> StatusCode {
     let Ok(_probe) = h.probe.try_acquire() else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
-        if let Err(error) = assembly::authority(&h.config, h.pool.clone(), h.kdf.clone()).await {
+    let Ok(cutoff) = crate::config::cutoff(h.config.budgets.startup_seconds) else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    let result = tokio::time::timeout_at(cutoff.instant().into(), async {
+        if let Err(error) =
+            assembly::authority(&h.config, h.pool.clone(), h.kdf.clone(), cutoff).await
+        {
             eprintln!("component=postgres readiness=failed reason={error}");
             return Err(error);
         }
@@ -151,34 +156,40 @@ pub async fn serve(
         .drive(
             |mut startup| {
                 Box::pin(async move {
+                    let cutoff = crate::config::cutoff(config.budgets.startup_seconds)?;
                     // Register each owned resource before any subsequent cancellable await.
                     let pool = Arc::new(
-                        PgRuntime::connect_producer(
-                            config.database.pg()?,
-                            assembly::Timer,
-                            config.storage.binding()?,
+                        tokio::time::timeout_at(
+                            cutoff.instant().into(),
+                            PgRuntime::connect_producer(
+                                config.database.pg()?,
+                                assembly::Timer,
+                                config.storage.identity()?,
+                            ),
                         )
                         .await
+                        .map_err(|_| AppError::Connection)?
                         .map_err(|_| AppError::Connection)?,
                     );
                     startup.stage_resource(DynManagedResource::new_box(PoolResource {
                         pool: pool.clone(),
                         timeout: per,
                     }));
-                    let kdf = Arc::new(PasswordKdf::new());
+                    let kdf = Arc::new(config.password_work.build()?);
                     startup.stage_resource(DynManagedResource::new_box(KdfResource {
                         kdf: kdf.clone(),
                         timeout: per,
                     }));
-                    let authority = assembly::authority(&config, pool.clone(), kdf.clone()).await?;
+                    let authority =
+                        assembly::authority(&config, pool.clone(), kdf.clone(), cutoff).await?;
                     let federation = assembly::federation(&config, authority.clone())?;
                     if let Some(federation) = &federation {
                         federation
-                            .check_credential_keys(assembly::deadline())
+                            .check_credential_keys(assembly::deadline(cutoff))
                             .await?;
                         for tenant in authority.active_tenants()? {
                             federation
-                                .reconcile_assurance_profiles(tenant, assembly::deadline())
+                                .reconcile_assurance_profiles(tenant, assembly::deadline(cutoff))
                                 .await?;
                         }
                     }
@@ -193,7 +204,7 @@ pub async fn serve(
                         authority.clone(),
                         rp,
                         origin,
-                        crate::assembly::deadline(),
+                        crate::assembly::deadline(cutoff),
                     )
                     .await?;
                     let mut app = router(authority, http.clone())?
@@ -252,19 +263,7 @@ pub async fn serve(
                             app,
                             rss_axum::PlainTransport,
                             "identity-http",
-                            rss_axum::Http1ServePolicy::new(
-                                rss_axum::ServePolicy::new(
-                                    256,
-                                    config.budgets.request(),
-                                    config.budgets.request(),
-                                    per,
-                                )
-                                .map_err(|_| AppError::Budget)?,
-                                config.budgets.request(),
-                                64,
-                                32768,
-                            )
-                            .map_err(|_| AppError::Budget)?,
+                            config.http.policy(config.budgets)?,
                         )
                         .critical(),
                     );

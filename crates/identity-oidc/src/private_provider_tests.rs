@@ -63,11 +63,12 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
             client_id: "identity-test".into(),
             cidrs: vec![format!("{address}/32").parse()?],
         }],
+        transport_policy(),
     )?;
     controlled(&mut adapter, vec![endpoint], calls.clone());
     assert!(
         adapter
-            .test(tenant, &config, &credentials)
+            .test(tenant, &config, &credentials, upstream_deadline())
             .await?
             .tls_verified
     );
@@ -76,21 +77,38 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
         discovery_calls > 0,
         "real discovery must traverse the production resolver"
     );
-    let mut denied = HttpOidc::new(vec![], vec![])?;
+    let mut denied = HttpOidc::new(vec![], vec![], transport_policy())?;
     controlled(&mut denied, vec![endpoint], calls.clone());
-    assert!(denied.test(tenant, &config, &credentials).await.is_err());
+    assert!(
+        denied
+            .test(tenant, &config, &credentials, upstream_deadline())
+            .await
+            .is_err()
+    );
     controlled(
         &mut adapter,
         vec![endpoint, "169.254.169.254:0".parse()?],
         calls.clone(),
     );
-    assert!(adapter.test(tenant, &config, &credentials).await.is_err());
+    assert!(
+        adapter
+            .test(tenant, &config, &credentials, upstream_deadline())
+            .await
+            .is_err()
+    );
     controlled(&mut adapter, vec![endpoint], calls.clone());
     let other = TenantId::parse("22222222-2222-4222-8222-222222222222")?;
-    assert!(adapter.test(other, &config, &credentials).await.is_err());
+    assert!(
+        adapter
+            .test(other, &config, &credentials, upstream_deadline())
+            .await
+            .is_err()
+    );
     let untrusted = ProviderCredentials::new("fixture-secret".into(), None)?;
-    assert!(matches!(adapter.test(tenant, &config, &untrusted).await,
-        Err(FederationError::Provider(ref failure)) if failure.reason == ProviderReason::TlsRejected));
+    assert!(
+        matches!(adapter.test(tenant, &config, &untrusted, upstream_deadline()).await,
+        Err(FederationError::Provider(ref failure)) if failure.reason == ProviderReason::TlsRejected)
+    );
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let authorize = adapter
         .prepare(
@@ -99,6 +117,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
             &credentials,
             &material,
             AuthenticationMode::Login,
+            upstream_deadline(),
         )
         .await?;
     let client = Client::builder()
@@ -152,6 +171,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
             &credentials,
             material,
             query["code"].clone().into(),
+            upstream_deadline(),
         )
         .await?;
     assert!(
@@ -161,4 +181,22 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     assert_eq!(claims.issuer, issuer);
     assert!(claims.subject.validate().is_ok());
     Ok(())
+}
+
+fn transport_policy() -> crate::TransportPolicy {
+    crate::TransportPolicy::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(3),
+        1024 * 1024,
+        128,
+    )
+    .unwrap()
+}
+
+fn upstream_deadline() -> rss_request_context::Deadline {
+    rss_request_context::Deadline::at(
+        std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(30))
+            .unwrap(),
+    )
 }

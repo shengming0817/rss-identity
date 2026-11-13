@@ -368,7 +368,13 @@ async fn account_directory_filters_before_stable_pagination_and_invalidates_chan
     ));
     let second_authority = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        Arc::new(
+            rss_identity_core::account::PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         f.config(),
         f.policy.clone(),
         deadline(),
@@ -448,7 +454,13 @@ async fn account_directory_profiles_are_source_selected_and_authorized_for_predi
     }
     let restricted = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        Arc::new(
+            rss_identity_core::account::PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         f.config(),
         Arc::new(NoProfiles),
         deadline(),
@@ -610,6 +622,41 @@ async fn department_directory_uses_latest_accepted_fact_without_resurrecting_old
         .list_accounts(f.actor().await?, all()?, None, deadline())
         .await?;
     assert_eq!(page.accounts[0].department_status, "unavailable");
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn selected_account_page_capacity_round_trips_long_names() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    sqlx::query("WITH added AS (INSERT INTO identity_authority.accounts(tenant_id,principal_id) SELECT $1::uuid,gen_random_uuid() FROM generate_series(1,1024) RETURNING tenant_id,principal_id), members AS (INSERT INTO identity_authority.memberships(tenant_id,principal_id) SELECT tenant_id,principal_id FROM added) INSERT INTO identity_authority.local_credentials(tenant_id,principal_id,login_key,password_hash) SELECT tenant_id,principal_id,repeat('x',250)||lpad(row_number() OVER ()::text,5,'0'),(SELECT password_hash FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2) FROM added")
+        .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).execute(&f.owner).await?;
+    let query = AccountQuery::parse(None, Some("login"), Some("principalId,login"), None, 1024)?;
+    let first = f
+        .store
+        .list_accounts(f.actor().await?, query.clone(), None, deadline())
+        .await?;
+    assert_eq!(first.accounts.len(), 1024);
+    let next = first
+        .next_cursor
+        .ok_or_else(|| anyhow::anyhow!("missing continuation"))?;
+    let second = f
+        .store
+        .list_accounts(f.actor().await?, query, Some(next), deadline())
+        .await?;
+    assert_eq!(second.accounts.len(), 1);
+    assert!(second.next_cursor.is_none());
+    assert_eq!(
+        first
+            .accounts
+            .iter()
+            .chain(second.accounts.iter())
+            .filter(|a| a.login.as_ref().is_some_and(|v| v.len() == 255))
+            .count(),
+        1024
+    );
     f.close().await;
     Ok(())
 }

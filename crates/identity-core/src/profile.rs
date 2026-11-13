@@ -4,16 +4,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub const MAX_BYTES: usize = 65_536;
-pub const MAX_MEMBERS: usize = 256;
+pub const MAX_MEMBERS: usize = 1024;
 pub const MAX_DEPTH: usize = 8;
-pub const MAX_ARRAY: usize = 128;
+pub const MAX_ARRAY: usize = 1024;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("invalid profile value or budget")]
 pub struct ProfileError;
 
-/// Deployment may tighten the fixed upper bounds, never enlarge them.
+/// Deployment may tighten structural budgets and choose a finite positive profile lifetime.
 #[derive(Debug, Clone, Copy)]
 pub struct ProfileLimits {
     bytes: usize,
@@ -49,7 +49,7 @@ impl ProfileLimits {
             || depth > MAX_DEPTH
             || array == 0
             || array > MAX_ARRAY
-            || !(60..=86400).contains(&max_age)
+            || max_age == 0
         {
             return Err(ProfileError);
         }
@@ -279,12 +279,12 @@ impl Default for ProfileSettings {
 }
 impl ProfileSettings {
     pub fn validate(&self) -> Result<(), ProfileError> {
-        if !(60..=86_400).contains(&self.max_age_seconds) {
+        if self.max_age_seconds == 0 {
             return Err(ProfileError);
         }
         if self.extensions_claim.as_ref().is_some_and(|root| {
             root.is_empty()
-                || root.len() > 128
+                || root.len() > 255
                 || root.chars().any(char::is_control)
                 || matches!(
                     root.as_str(),

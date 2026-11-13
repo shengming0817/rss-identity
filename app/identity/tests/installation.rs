@@ -27,7 +27,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     let port: u16 = std::env::var("IDENTITY_TEST_PG_PORT")?.parse()?;
     let mut value: serde_json::Value =
         serde_json::from_str(include_str!("../../../deployment/example.json"))?;
-    value["database"] = json!({"host":"127.0.0.1","port":port,"database":"postgres","user":"postgres","passwordFile":root.join("owner"),"caFile":root.join("server.crt")});
+    value["database"] = json!({"host":"127.0.0.1","port":port,"database":"postgres","user":"postgres","passwordFile":root.join("owner"),"caFile":root.join("server.crt"),"minConnections":0,"maxConnections":10,"acquireSeconds":5});
     let owner_db: rss_identity_app::config::DatabaseConfig =
         serde_json::from_value(value["database"].clone())?;
     let mut owner = sqlx::PgConnection::connect_with(&owner_db.sqlx()?).await?;
@@ -37,7 +37,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .unwrap()
         .push(json!("33333333-3333-4333-8333-333333333333"));
     value["bootstrapAccounts"].as_array_mut().unwrap().push(json!({"tenantId":"33333333-3333-4333-8333-333333333333","principalId":"44444444-4444-4444-8444-444444444444"}));
-    let install_value = json!({"formatVersion":5,"audit":{"ownerRole":"host_audit_owner"},"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
+    let install_value = json!({"formatVersion":5,"audit":{"ownerRole":"host_audit_owner"},"budgets":value["budgets"],"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
     let install_config =
         || serde_json::from_value::<MigrationConfig>(install_value.clone()).unwrap();
     for (corrupt, restore) in [
@@ -66,8 +66,8 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             "ALTER DEFAULT PRIVILEGES REVOKE SELECT ON TABLES FROM host_runtime",
         ),
         (
-            "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC",
-            "ALTER DEFAULT PRIVILEGES REVOKE SELECT ON TABLES FROM PUBLIC",
+            "ALTER DEFAULT PRIVILEGES GRANT SELECT ON SEQUENCES TO PUBLIC",
+            "ALTER DEFAULT PRIVILEGES REVOKE SELECT ON SEQUENCES FROM PUBLIC",
         ),
     ] {
         sqlx::raw_sql(corrupt).execute(&mut owner).await?;
@@ -95,7 +95,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         ),
         (
             "DELETE FROM identity_authority.schema_version",
-            "INSERT INTO identity_authority.schema_version VALUES(17)",
+            "INSERT INTO identity_authority.schema_version VALUES(18)",
         ),
         (
             "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2",
@@ -131,32 +131,33 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         PgRuntime::connect_producer(
             maintenance_db.pg()?,
             assembly::Timer,
-            config.storage.binding()?,
+            config.storage.identity()?,
         )
         .await?,
     );
-    let kdf = Arc::new(PasswordKdf::new());
+    let kdf = Arc::new(
+        PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )
+        .unwrap(),
+    );
     let maintenance = Authority::connect_maintenance(
         maintenance_runtime.clone(),
         kdf.clone(),
         assembly::authority_config(&config)?,
-        assembly::deadline(),
+        deadline(),
     )
     .await?;
     let keys = config.bootstrap_keys()?;
     for key in &keys {
         maintenance
-            .initialize(
-                *key,
-                LoginKey::parse("operator")?,
-                password(),
-                assembly::deadline(),
-            )
+            .initialize(*key, LoginKey::parse("operator")?, password(), deadline())
             .await?;
     }
     value["database"]["user"] = json!("host_runtime");
     value["database"]["passwordFile"] = json!(root.join("runtime"));
-    value["budgets"] = json!({"requestSeconds":1,"drainSeconds":60,"resourceSeconds":30});
+    value["budgets"]["requestSeconds"] = json!(1);
     value["publicGateway"] = json!("127.0.0.1");
     let runtime_config = || serde_json::from_value::<RuntimeConfig>(value.clone()).unwrap();
     let config = runtime_config();
@@ -165,11 +166,17 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         PgRuntime::connect_producer(
             config.database.pg()?,
             assembly::Timer,
-            config.storage.binding()?,
+            config.storage.identity()?,
         )
         .await?,
     );
-    let authority = assembly::authority(&config, runtime.clone(), kdf.clone()).await?;
+    let authority = assembly::authority(
+        &config,
+        runtime.clone(),
+        kdf.clone(),
+        rss_identity_app::config::cutoff(config.budgets.startup_seconds)?,
+    )
+    .await?;
     let upstream = federation_support::ScriptedOidc::new();
     let federation = Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
@@ -193,7 +200,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 password(),
                 AttemptSource::parse("fixture")?,
                 None,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         let http = rss_identity_http_axum::HttpConfig::new(
@@ -241,7 +248,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 .unwrap()
         };
         let manager = authority
-            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .inspect_session(key.tenant, actor(), deadline())
             .await?;
         let provider = federation
             .create_provider(
@@ -251,40 +258,29 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                     "private-rotation-test".into(),
                     None,
                 )?,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         let manager = authority
-            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .inspect_session(key.tenant, actor(), deadline())
             .await?;
         federation
-            .enable_provider(
-                manager,
-                provider.id,
-                provider.version,
-                true,
-                assembly::deadline(),
-            )
+            .enable_provider(manager, provider.id, provider.version, true, deadline())
             .await?;
 
         let manager = authority
-            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .inspect_session(key.tenant, actor(), deadline())
             .await?;
         let member = authority
-            .create_local_account(
-                manager,
-                LoginKey::parse("member")?,
-                password(),
-                assembly::deadline(),
-            )
+            .create_local_account(manager, LoginKey::parse("member")?, password(), deadline())
             .await?;
         assert_eq!(member.key().tenant, key.tenant);
         let manager = authority
-            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .inspect_session(key.tenant, actor(), deadline())
             .await?;
         assert!(matches!(
             authority
-                .set_account_enabled(manager, *key, false, assembly::deadline())
+                .set_account_enabled(manager, *key, false, deadline())
                 .await,
             Err(AuthorityError::RuleRejected(_))
         ));
@@ -295,7 +291,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 password(),
                 AttemptSource::parse("fixture")?,
                 None,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         let member_actor = authority
@@ -304,7 +300,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 rss_identity_core::session::SessionSecret::parse(
                     member_session.secret().expose().into(),
                 )?,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         assert!(
@@ -313,7 +309,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                     member_actor,
                     rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
                     None,
-                    assembly::deadline()
+                    deadline()
                 )
                 .await
                 .is_err()
@@ -324,7 +320,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 rss_identity_core::session::SessionSecret::parse(
                     member_session.secret().expose().into(),
                 )?,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         authority
@@ -333,7 +329,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 password(),
                 password(),
                 AttemptSource::parse("fixture")?,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
     }
@@ -428,6 +424,17 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         }
     })
     .await?;
+    let probe_seconds = (value["budgets"]["startupSeconds"].as_u64().unwrap() + 5).to_string();
+    let probe = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_identity-server"))
+            .args(["--probe", &listen.to_string(), &probe_seconds])
+            .output()
+    })
+    .await??;
+    assert!(
+        probe.status.success(),
+        "configured loopback probe must reach real readiness"
+    );
     let response = client
         .post(format!(
             "{url}/api/v1/identity/tenants/{}/login",
@@ -594,4 +601,10 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     migration::verify(restored).await?;
     owner.close().await?;
     Ok(())
+}
+
+fn deadline() -> rss_transactional_messaging::policy::OperationDeadline {
+    rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+        std::time::Duration::from_secs(10),
+    )
 }

@@ -58,7 +58,7 @@ fn req(method: &str, path: &str, cookie: &str, csrf: &str, value: Value) -> Requ
 }
 async fn json_body(r: Response<Body>) -> anyhow::Result<Value> {
     Ok(serde_json::from_slice(
-        &to_bytes(r.into_body(), 65536).await?,
+        &to_bytes(r.into_body(), 2 * 1024 * 1024).await?,
     )?)
 }
 async fn login_as(app: &Router, name: &str, pw: &str) -> anyhow::Result<(String, String)> {
@@ -495,7 +495,7 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
         seen.len(),
         json_body(all).await?["accounts"].as_array().unwrap().len()
     );
-    for query in ["cursor=invalid", "limit=0", "limit=101"] {
+    for query in ["cursor=invalid", "limit=0", "limit=1025"] {
         let r = app
             .clone()
             .oneshot(req(
@@ -855,7 +855,7 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
     let (app, _, _) = app(&f);
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let settings = serde_json::to_value(federation_support::settings().input())?;
-    sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2,decode(repeat('00',32),'hex'),1 FROM generate_series(1,99)")
+    sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2,decode(repeat('00',32),'hex'),1 FROM generate_series(1,1023)")
         .bind(A).bind(&settings).execute(&f.owner).await?;
     let settings = json!({"settings":settings_wire(&federation_support::settings().input()),"clientSecret":"fixture-secret"});
     let path = format!("/api/v1/identity/tenants/{A}/providers");
@@ -884,7 +884,7 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
             .as_array()
             .unwrap()
             .len(),
-        100
+        1024
     );
     f.close().await;
     Ok(())

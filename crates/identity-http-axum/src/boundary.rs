@@ -29,7 +29,7 @@ impl HttpConfig {
             || url.host_str().is_none()
             || url.origin().ascii_serialization() != origin
             || timeout.is_zero()
-            || timeout > Duration::from_secs(60)
+            || Instant::now().checked_add(timeout).is_none()
         {
             return Err(HttpConfigError);
         }
@@ -40,16 +40,22 @@ impl HttpConfig {
     }
 }
 #[derive(Clone, Copy)]
-pub(crate) struct RequestBudget(Instant);
+pub(crate) struct RequestBudget(rss_request_context::Deadline);
 impl RequestBudget {
-    pub fn new(timeout: Duration) -> Self {
-        Self(Instant::now() + timeout)
+    pub fn new(timeout: Duration) -> Result<Self, HttpError> {
+        if timeout.is_zero() {
+            return Err(HttpError::request_timeout());
+        }
+        Instant::now()
+            .checked_add(timeout)
+            .map(|at| Self(rss_request_context::Deadline::at(at)))
+            .ok_or_else(HttpError::request_timeout)
     }
     pub fn cutoff(self) -> tokio::time::Instant {
-        self.0.into()
+        self.0.instant().into()
     }
     pub fn remaining(self) -> OperationDeadline {
-        OperationDeadline::from_remaining(self.0.saturating_duration_since(Instant::now()))
+        OperationDeadline::from_remaining(self.0.remaining(Instant::now()).unwrap_or_default())
     }
 }
 /// Non-secret response extension for host diagnostics; never included in the public body.
@@ -248,7 +254,10 @@ pub(crate) async fn request_boundary(
 ) -> Response {
     let callback = request.method() == axum::http::Method::GET
         && original_uri.path() == "/api/v1/identity/oidc/callback";
-    let budget = RequestBudget::new(state.config.timeout);
+    let budget = match RequestBudget::new(state.config.timeout) {
+        Ok(budget) => budget,
+        Err(error) => return error.into_response(),
+    };
     request.extensions_mut().insert(budget);
     let origin = if original_uri.to_string().len() > 8192
         || cookie_presentation(request.headers()).is_err()

@@ -360,9 +360,13 @@ impl Authority {
         actor: &AuthenticatedSession,
         target: AccountKey,
         after: Option<ProfileSource>,
+        limit: u16,
         deadline: OperationDeadline,
     ) -> Result<ProfileSourcePage, AuthorityError> {
         self.require_runtime()?;
+        if !(1..=rss_identity_core::directory::MAX_PAGE_SIZE).contains(&limit) {
+            return Err(AuthorityError::InvalidInput);
+        }
         let reader = Reader::new(actor)?;
         if target.tenant != reader.key.tenant {
             return Err(AuthorityError::Rejected);
@@ -373,10 +377,10 @@ impl Authority {
             let loaded=reader.recheck(c).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadLatestProfile,Some(target),c).await?;
             if !load(c,target).await?.state.active(){return Err(reject().into());}
-            let rows:Vec<String>=sqlx::query_scalar("SELECT source FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND principal_id=$2 AND ($3::text IS NULL OR source>$3) ORDER BY source LIMIT 101")
-                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(after.map(ProfileSource::key)).fetch_all(c).await?;
-            let more=rows.len()>100;
-            let sources=rows.into_iter().take(100).map(|source| if source=="local" {Ok(ProfileSource::IdentityLocal)} else {ProviderId::parse(&source).map(|provider|ProfileSource::Idp{provider}).map_err(|_|corrupt())}).collect::<Result<Vec<_>,_>>()?;
+            let rows:Vec<String>=sqlx::query_scalar("SELECT source FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND principal_id=$2 AND ($3::text IS NULL OR source>$3) ORDER BY source LIMIT $4")
+                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(after.map(ProfileSource::key)).bind(i64::from(limit) + 1).fetch_all(c).await?;
+            let more=rows.len()>usize::from(limit);
+            let sources=rows.into_iter().take(usize::from(limit)).map(|source| if source=="local" {Ok(ProfileSource::IdentityLocal)} else {ProviderId::parse(&source).map(|provider|ProfileSource::Idp{provider}).map_err(|_|corrupt())}).collect::<Result<Vec<_>,_>>()?;
             let next_cursor=if more {sources.last().copied()} else {None};
             Ok(ProfileSourcePage{sources,next_cursor})
         })).await
@@ -398,7 +402,7 @@ impl Authority {
         }
         self.read_sql(reader.key.tenant,budget.remaining(),move|c|Box::pin(async move {
             let loaded=reader.recheck(c).await?;
-            let mut expires=crate::sessions::checked_expiry(&loaded,budget.0.min(reader.expires)).map_err(transaction::MutationError::from)?;
+            let mut expires=crate::sessions::checked_expiry(&loaded,budget.0.instant().min(reader.expires)).map_err(transaction::MutationError::from)?;
             let (target,source,bound)=match latest {
                 Some((target,source))=>{
                     crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadLatestProfile,Some(target),c).await?;
@@ -495,6 +499,7 @@ impl Authority {
             return Err(AuthorityError::InvalidInput);
         }
         let policy = self.policy.clone();
+        let receipt_capacity = i64::from(self.profile_receipt_capacity.get());
         let instance = self.instance;
         let digest = rss_identity_core::federation::digest(
             &serde_json::to_string(&change).map_err(|_| AuthorityError::InvalidInput)?,
@@ -509,9 +514,9 @@ impl Authority {
                 return Ok((ProfileReceipt{operation_id:change.operation_id,revision:row.try_get("revision")?},vec![]));
             }
             // The tenant guard serializes admission with insertion; replay above remains available.
-            let operations:i64=sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND principal_id=$2 LIMIT 4096) AS bounded")
-                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).fetch_one(&mut *c).await?;
-            if operations>=4096{return Err(reject().into());}
+            let operations:i64=sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND principal_id=$2 LIMIT $3) AS bounded")
+                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(receipt_capacity).fetch_one(&mut *c).await?;
+            if operations>=receipt_capacity{return Err(transaction::MutationError::ProfileReceiptCapacityReached);}
             let old=local_view(c,target).await?;
             if old.revision!=change.expected_revision{return Err(transaction::MutationError::RevisionConflict);}
             let revision=old.revision.checked_add(1).ok_or_else(corrupt)?;
@@ -596,9 +601,9 @@ impl Authority {
         self.read_sql(reader.key.tenant,deadline,move|c|Box::pin(async move{
             let loaded=reader.recheck(c).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadProfileSources,None,c).await?;
-            let rows=sqlx::query("SELECT provider_id,config_version,settings FROM identity_authority.providers WHERE tenant_id=$1::uuid AND enabled ORDER BY provider_id LIMIT 101")
-                .bind(reader.key.tenant.to_string()).fetch_all(c).await?;
-            if rows.len()>100{return Err(reject().into());}
+            let rows=sqlx::query("SELECT provider_id,config_version,settings FROM identity_authority.providers WHERE tenant_id=$1::uuid AND enabled ORDER BY provider_id LIMIT $2")
+                .bind(reader.key.tenant.to_string()).bind(i64::from(rss_identity_core::federation::MAX_PROVIDERS) + 1).fetch_all(c).await?;
+            if rows.len()>usize::from(rss_identity_core::federation::MAX_PROVIDERS){return Err(reject().into());}
             let mut sources=vec![ProfileSourceView{source:ProfileSource::IdentityLocal,provider_config_version:None,extensions_root:Some("extensions".into()),max_age_seconds:14400}];
             for row in rows {
                 let settings:rss_identity_core::federation::ProviderSettings=serde_json::from_value(row.try_get("settings")?).map_err(|_|corrupt())?;

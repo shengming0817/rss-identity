@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 RSS_FEATURES = {
     'rss-audit-core': {'default'}, 'rss-audit-postgres': {'default','messaging'},
+    # Cargo metadata retains inactive optional Ledger nodes; production artifacts exclude them.
     'rss-ledger': set(), 'rss-ledger-postgres': {'messaging'},
     'rss-runtime': {'default'}, 'rss-axum': {'http1','managed-server'},
     'rss-contract': {'default'}, 'rss-request-context': {'default'},
@@ -34,6 +35,7 @@ def check_features(actual, profile):
 def check_advisory_policy(policy):
     require(policy.get('advisories', {}).get('ignore') == [], 'unreviewed advisory exception')
     require(policy['advisories'].get('unused-ignored-advisory') == 'deny', 'stale exception must fail')
+
 
 def check(metadata, manifest):
     declarations = manifest["workspace"]["dependencies"]

@@ -182,7 +182,13 @@ impl Fixture {
         });
         let store = Authority::connect_runtime(
             runtime.clone(),
-            Arc::new(rss_identity_core::account::PasswordKdf::new()),
+            Arc::new(
+                rss_identity_core::account::PasswordKdf::new(
+                    std::num::NonZeroUsize::new(4).unwrap(),
+                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                )
+                .unwrap(),
+            ),
             config(instance),
             policy.clone(),
             deadline(),
@@ -190,7 +196,13 @@ impl Fixture {
         .await?;
         let maintenance = Authority::connect_maintenance(
             maintenance_runtime.clone(),
-            Arc::new(rss_identity_core::account::PasswordKdf::new()),
+            Arc::new(
+                rss_identity_core::account::PasswordKdf::new(
+                    std::num::NonZeroUsize::new(4).unwrap(),
+                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                )
+                .unwrap(),
+            ),
             config(instance),
             deadline(),
         )
@@ -221,7 +233,13 @@ impl Fixture {
         connect(self.port, &self.database, "identity_runtime").await
     }
     pub async fn probe(&self, profile: AuthorityProfile) -> Result<Authority, AuthorityError> {
-        let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new());
+        let kdf = Arc::new(
+            rss_identity_core::account::PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        );
         match profile {
             AuthorityProfile::Provisioning => Err(AuthorityError::Configuration),
             AuthorityProfile::Runtime => {
@@ -338,12 +356,19 @@ impl Fixture {
         self.admin.close().await;
     }
 }
+pub fn binding(tenant: TenantId) -> ExecutionBinding {
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).unwrap(),
+        tenant,
+        Epoch::new(1).unwrap(),
+    )
+}
 pub fn config(instance: InstanceId) -> AuthorityConfig {
     AuthorityConfig::new(
         instance,
         [SYSTEM, A, B]
             .into_iter()
-            .map(|t| TenantId::parse(t).unwrap())
+            .map(|t| binding(TenantId::parse(t).unwrap()))
             .collect(),
         SessionPolicy::new(900, 14400).unwrap(),
         rss_audit_postgres::Integrity::Plain,
@@ -351,13 +376,6 @@ pub fn config(instance: InstanceId) -> AuthorityConfig {
     .unwrap()
 }
 async fn connect(port: u16, database: &str, role: &str) -> anyhow::Result<Arc<PgRuntime>> {
-    let binding = ExecutionBinding::new(
-        StorageIdentity::new([1; 16], [2; 16])?,
-        [SYSTEM, A, B]
-            .into_iter()
-            .map(|t| Ok((TenantId::parse(t)?, Epoch::new(1)?)))
-            .collect::<anyhow::Result<Vec<_>>>()?,
-    )?;
     Ok(Arc::new(
         PgRuntime::connect_producer(
             PgConfig::new_for_test_plaintext(
@@ -368,7 +386,7 @@ async fn connect(port: u16, database: &str, role: &str) -> anyhow::Result<Arc<Pg
                 PgPassword::new("fixture-only"),
             ),
             Timer,
-            binding,
+            StorageIdentity::new([1; 16], [2; 16])?,
         )
         .await?,
     ))

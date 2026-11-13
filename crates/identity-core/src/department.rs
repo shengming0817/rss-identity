@@ -98,7 +98,7 @@ impl DepartmentSnapshotClaim {
             "updated_at",
         ];
         if claim.is_empty()
-            || claim.len() > 64
+            || claim.len() > 255
             || !claim
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_')
@@ -124,8 +124,15 @@ impl DepartmentSnapshotClaim {
         issued_at: i64,
         expires_at: i64,
         now: i64,
+        future_skew_seconds: u32,
     ) -> Result<i64, FederationError> {
-        crate::facts::expires_at(self.max_age_seconds, issued_at, expires_at, now)
+        crate::facts::expires_at(
+            self.max_age_seconds,
+            issued_at,
+            expires_at,
+            now,
+            future_skew_seconds,
+        )
     }
 }
 
@@ -236,8 +243,8 @@ impl DepartmentSnapshot {
             memberships,
         };
         if input.nodes.is_empty()
-            || input.nodes.len() > 256
-            || input.memberships.len() > 16
+            || input.nodes.len() > 1024
+            || input.memberships.len() > 1024
             || DepartmentId::new(input.source_revision.clone()).is_err()
         {
             return Err(FederationError::Claims);

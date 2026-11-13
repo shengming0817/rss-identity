@@ -25,6 +25,8 @@ impl StepUpGrant {
 /// Returned only inside the transaction consuming the proof. Not a session or reusable permission.
 pub struct ConsumedStepUp {
     pub authenticated_at: i64,
+    /// Frozen proof deadline, retained when another ceremony consumes this authorization.
+    pub expires_at: i64,
     pub(crate) source: GrantSource,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -71,13 +73,19 @@ pub(crate) async fn issue(
     context: &StepUpContext,
     source: GrantSource,
     authenticated_at: i64,
+    lifetime: std::num::NonZeroU32,
 ) -> Result<StepUpGrant, MutationError> {
     let now = session_storage::now(c).await?;
-    if authenticated_at <= 0 || authenticated_at > now || now - authenticated_at >= 300 {
+    if authenticated_at <= 0
+        || authenticated_at > now
+        || now - authenticated_at >= i64::from(lifetime.get())
+    {
         return Err(reject().into());
     }
     let key = loaded.state.key();
-    let expires_at = (authenticated_at + 300)
+    let expires_at = authenticated_at
+        .checked_add(i64::from(lifetime.get()))
+        .ok_or_else(reject)?
         .min(loaded.view.idle_expires_at)
         .min(loaded.view.absolute_expires_at);
     if expires_at <= now {
@@ -138,6 +146,7 @@ pub async fn consume_step_up_on(
     .await?;
     Ok(ConsumedStepUp {
         authenticated_at: row.try_get("authenticated_at")?,
+        expires_at: row.try_get("expires_at")?,
         source,
     })
 }

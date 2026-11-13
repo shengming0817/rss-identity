@@ -26,7 +26,7 @@ pub struct AttemptSource(String);
 impl AttemptSource {
     pub fn parse(value: &str) -> Result<Self, AuthorityError> {
         if value.is_empty()
-            || value.len() > 128
+            || value.len() > 255
             || !value.is_ascii()
             || value.chars().any(char::is_control)
         {
@@ -49,6 +49,8 @@ pub enum AuthorityError {
     Cancelled,
     #[error("invalid authority configuration")]
     Configuration,
+    #[error("profile receipt capacity reached")]
+    ProfileReceiptCapacityReached,
     #[error("profile revision conflict")]
     RevisionConflict,
     #[error("operation identifier reused with different input")]
@@ -117,7 +119,7 @@ impl From<PasswordError> for AuthorityError {
     }
 }
 
-pub(crate) struct Budget(pub Instant);
+pub(crate) struct Budget(pub rss_request_context::Deadline);
 impl Budget {
     pub fn new(deadline: OperationDeadline) -> Result<Self, AuthorityError> {
         if deadline.timeout().is_zero() {
@@ -125,17 +127,17 @@ impl Budget {
         }
         Instant::now()
             .checked_add(deadline.timeout())
-            .map(Self)
+            .map(|at| Self(rss_request_context::Deadline::at(at)))
             .ok_or(AuthorityError::InvalidInput)
     }
     pub fn remaining(&self) -> OperationDeadline {
-        OperationDeadline::from_remaining(self.0.saturating_duration_since(Instant::now()))
+        OperationDeadline::from_remaining(self.0.remaining(Instant::now()).unwrap_or_default())
     }
     pub async fn password<T>(
         &self,
         future: impl std::future::Future<Output = Result<T, PasswordError>>,
     ) -> Result<T, AuthorityError> {
-        tokio::time::timeout_at(self.0.into(), future)
+        tokio::time::timeout_at(self.0.instant().into(), future)
             .await
             .map_err(|_| AuthorityError::DeadlineElapsed)?
             .map_err(Into::into)

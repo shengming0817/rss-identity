@@ -55,33 +55,40 @@ pub async fn trusted(State(ingress): State<Ingress>, mut request: Request, next:
     request.extensions_mut().insert(ClientAddress(source));
     next.run(request).await
 }
-/// Fixed loopback-only health probe for the server image; no config or secret access.
-pub fn probe(address: SocketAddr) -> bool {
+/// Loopback-only health probe sharing one explicit deadline; no config or secret access.
+pub fn probe(address: SocketAddr, cutoff: rss_request_context::Deadline) -> bool {
     use std::io::{Read, Write};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     if !address.ip().is_loopback() {
         return false;
     }
-    let Ok(mut socket) = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2))
-    else {
+    let remaining = || {
+        cutoff
+            .remaining(Instant::now())
+            .filter(|left| !left.is_zero())
+    };
+    let Some(left) = remaining() else {
         return false;
     };
-    if socket
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .is_err()
+    let Ok(mut socket) = std::net::TcpStream::connect_timeout(&address, left) else {
+        return false;
+    };
+    let Some(left) = remaining() else {
+        return false;
+    };
+    if socket.set_write_timeout(Some(left)).is_err()
         || socket
             .write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .is_err()
     {
         return false;
     }
-    let cutoff = Instant::now() + Duration::from_secs(10);
     let mut line = Vec::new();
     while line.len() < 128 && !line.ends_with(b"\r\n") {
-        let Some(left) = cutoff.checked_duration_since(Instant::now()) else {
+        let Some(left) = remaining() else {
             return false;
         };
-        if left.is_zero() || socket.set_read_timeout(Some(left)).is_err() {
+        if socket.set_read_timeout(Some(left)).is_err() {
             return false;
         }
         let mut byte = [0];

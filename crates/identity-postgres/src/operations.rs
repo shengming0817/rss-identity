@@ -75,7 +75,7 @@ impl Authority {
         let candidate = AuthenticationCandidate {
             state: stored.state,
             authority,
-            expires: budget.0,
+            expires: budget.0.instant(),
             authenticated_at,
         };
         self.read(tenant, budget.remaining(), move |tx| {
@@ -101,7 +101,7 @@ impl Authority {
     ) -> Result<AccountState, AuthorityError> {
         self.require_runtime()?;
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
 
         let hash = budget.password(self.kdf.hash(password)).await?;
         let key = AccountKey {
@@ -197,7 +197,7 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<AccountState, AuthorityError> {
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         let key = actor.key;
         let (actor, login) = self.local_login_key(actor, budget.remaining()).await?;
         let candidate = self
@@ -237,7 +237,7 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<IssuedSession, AuthorityError> {
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         let key = actor.key;
         let (actor, login) = self.local_login_key(actor, budget.remaining()).await?;
         Box::pin(self.login_local(
@@ -278,9 +278,9 @@ impl Authority {
             return Err(AuthorityError::Rejected);
         }
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         if let Some(proof) = &reauthentication {
-            budget.0 = budget.0.min(proof.expires);
+            budget.0 = budget.0.shortened_to(proof.expires);
         }
         let (change, hash) = match change {
             AccountChange::Password(password) => (
