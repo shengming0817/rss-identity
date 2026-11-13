@@ -424,6 +424,17 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         }
     })
     .await?;
+    let probe_seconds = (value["budgets"]["startupSeconds"].as_u64().unwrap() + 5).to_string();
+    let probe = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_identity-server"))
+            .args(["--probe", &listen.to_string(), &probe_seconds])
+            .output()
+    })
+    .await??;
+    assert!(
+        probe.status.success(),
+        "configured loopback probe must reach real readiness"
+    );
     let response = client
         .post(format!(
             "{url}/api/v1/identity/tenants/{}/login",

@@ -223,7 +223,9 @@ impl Budgets {
         }
         finite_seconds(self.startup_seconds)?;
         finite_seconds(self.maintenance_seconds)?;
-        finite_seconds(self.migration_seconds)?;
+        // PostgreSQL statement_timeout and lock_timeout are signed millisecond integers.
+        i32::try_from(finite_seconds(self.migration_seconds)?.as_millis())
+            .map_err(|_| AppError::Budget)?;
         Ok(self)
     }
     pub fn request(self) -> Duration {

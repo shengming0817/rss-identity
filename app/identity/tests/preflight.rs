@@ -136,6 +136,16 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
         &migration,
         true,
     );
+    for (seconds, valid) in [(3600, true), (30 * 24 * 3600, false)] {
+        let mut selected = migration.clone();
+        selected["budgets"]["migrationSeconds"] = json!(seconds);
+        check(
+            env!("CARGO_BIN_EXE_identity-migrate"),
+            &path,
+            &selected,
+            valid,
+        );
+    }
     migration["audit"] = json!({"ownerRole":"identity_audit_owner"});
     migration["runtimeRole"] = json!("x".repeat(64));
     check(

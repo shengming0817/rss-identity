@@ -154,7 +154,8 @@ http {{
     app=services['identity'];app.update(restart='unless-stopped',stop_grace_period=str(c['budgets']['drainSeconds']+15)+'s',depends_on={'postgres':{'condition':'service_healthy'}})
     app['networks']={'backend':{'ipv4_address':identity}}
     if c['oidc'] is not None:app['networks']['egress']={}
-    app['healthcheck']={'test':['CMD','identity-server','--probe','127.0.0.1:8080'],'interval':'10s','timeout':'15s','start_period':'15s','retries':3}
+    probe_seconds=c['budgets']['startupSeconds']+5
+    app['healthcheck']={'test':['CMD','identity-server','--probe','127.0.0.1:8080',str(probe_seconds)],'interval':'10s','timeout':str(probe_seconds)+'s','start_period':str(probe_seconds)+'s','retries':3}
     services['gateway']=service(images['web'],['gateway.conf','ui.json','public-cert','public-key'],['-c','/run/config/gateway.conf'])
     services['gateway'].update(ports=['443:8443'],networks={'backend':{'ipv4_address':gateway},'public':{}},depends_on={'identity':{'condition':'service_healthy'}})
     services['volume-init']={'image':images['runtime'],'pull_policy':'never','user':'0:0','network_mode':'none','profiles':['operator'],'entrypoint':['sh','-ec'],'command':['if [ -z "$(ls -A /volume)" ]; then chown 10001:10001 /volume; chmod 700 /volume; else test "$(stat -c %u:%g /volume)" = 10001:10001; fi'],'volumes':[{'type':'volume','source':'pg','target':'/volume','volume':{'nocopy':True}}]}
