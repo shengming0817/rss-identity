@@ -136,7 +136,7 @@ impl Authority {
         let failure = std::sync::Arc::new(std::sync::OnceLock::new());
         let capture = failure.clone();
         let result = self
-            .read_sql(reader.key.tenant, budget.remaining(), move |c| {
+            .read_sql(reader.binding, budget.remaining(), move |c| {
                 Box::pin(async move {
                     let loaded = reader.recheck(c).await?;
                     let expires = crate::sessions::checked_expiry(

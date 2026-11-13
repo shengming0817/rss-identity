@@ -2,6 +2,7 @@
 //! ref: sqlx sqlx-core/src/transaction.rs@v0.9.0 (borrowed transaction ownership).
 use crate::{
     AuthenticatedSession, Authority, AuthorityConfig, AuthorityError, AuthorityProfile, Budget,
+    ExecutionBinding,
     ManagementOperation, ManagementPolicy,
     storage::{authority_id, insert_account, load_for_maintenance},
     transaction::{self, MutationError, SecurityEvent},
@@ -60,22 +61,17 @@ impl AccountProvisioner {
         runtime: Arc<PgRuntime>,
         kdf: Arc<PasswordKdf>,
         config: AuthorityConfig,
+        probe: ExecutionBinding,
         source: TenantId,
         policy: Arc<dyn ManagementPolicy>,
         deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
-        if !config
-            .bindings
-            .iter()
-            .any(|binding| binding.tenant() == source)
-        {
-            return Err(AuthorityError::Configuration);
-        }
         Ok(Self {
             authority: Authority::connect(
                 runtime,
                 kdf,
                 config,
+                probe,
                 AuthorityProfile::Provisioning,
                 policy,
                 deadline,
@@ -112,16 +108,10 @@ impl AccountProvisioner {
         if actor.key.tenant != self.source
             || target == self.source
             || actor.authority != self.authority.instance.as_uuid()
-            || bundle.binding(target).is_none()
         {
             return Err(ProvisioningError::Rejected);
         }
-        let target_binding = bundle.binding(target).ok_or(ProvisioningError::Rejected)?;
-        tx.with_tenant_connection(target_binding, |_| Box::pin(async { Ok(()) }))
-            .await?;
-        let source = bundle
-            .binding(self.source)
-            .ok_or(ProvisioningError::Rejected)?;
+        let source = actor.binding;
         let instance = self.authority.instance;
         let policy = self.authority.policy.clone();
         tx.with_tenant_connection(source, move |c| {

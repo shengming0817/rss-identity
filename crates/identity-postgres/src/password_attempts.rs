@@ -7,7 +7,7 @@ use sqlx::{PgConnection, Row};
 
 /// Private, database-fenced permission to perform one password verification.
 pub(crate) struct PasswordClaim {
-    tenant: TenantId,
+    binding: ExecutionBinding,
     login: Vec<u8>,
     token: uuid::Uuid,
 }
@@ -15,16 +15,17 @@ pub(crate) struct PasswordClaim {
 impl Authority {
     pub(crate) async fn claim_password(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         login: &LoginKey,
         source: &AttemptSource,
         deadline: OperationDeadline,
     ) -> Result<PasswordClaim, AuthorityError> {
+        let tenant = binding.tenant();
         let digest = Sha256::digest(login.as_str().as_bytes()).to_vec();
         let source = format!("s:{}", source.value());
         let policy = self.authentication;
         let seconds = policy.claim_ttl.as_secs_f64();
-        self.read(tenant, deadline, move |tx| Box::pin(async move {
+        self.read(binding, deadline, move |tx| Box::pin(async move {
             crate::transaction::connection(tx, move |c| Box::pin(async move {
                 lock_guard(c, tenant).await?;
                 cleanup(c, tenant, policy.cleanup_batch).await?;
@@ -43,7 +44,7 @@ impl Authority {
                 let token = uuid::Uuid::new_v4();
                 sqlx::query("INSERT INTO identity_authority.password_attempts(tenant_id,login_digest,claim_token,claim_until) VALUES($1::uuid,$2,$3,clock_timestamp()+make_interval(secs=>$4)) ON CONFLICT(tenant_id,login_digest) DO UPDATE SET failures=CASE WHEN password_attempts.window_until>clock_timestamp() THEN password_attempts.failures ELSE 0 END,window_until=CASE WHEN password_attempts.window_until>clock_timestamp() THEN password_attempts.window_until ELSE NULL END,claim_token=excluded.claim_token,claim_until=excluded.claim_until")
                     .bind(tenant.to_string()).bind(&digest).bind(token).bind(seconds).execute(c).await?;
-                Ok(Ok(PasswordClaim {tenant,login:digest,token}))
+                Ok(Ok(PasswordClaim {binding,login:digest,token}))
             })).await
         })).await?
     }
@@ -56,26 +57,26 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<AuthenticationCandidate, AuthorityError> {
         let policy = self.authentication;
-        self.read(claim.tenant, deadline, move |tx| Box::pin(async move {
+        self.read(claim.binding, deadline, move |tx| Box::pin(async move {
             crate::transaction::connection(tx, move |c| Box::pin(async move {
-                lock_guard(c, claim.tenant).await?;
+                lock_guard(c, claim.binding.tenant()).await?;
                 let owned:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid AND login_digest=$2 AND claim_token=$3 AND claim_until>clock_timestamp())")
-                    .bind(claim.tenant.to_string()).bind(&claim.login).bind(claim.token).fetch_one(&mut *c).await?;
+                    .bind(claim.binding.tenant().to_string()).bind(&claim.login).bind(claim.token).fetch_one(&mut *c).await?;
                 if !owned {return Ok(Err(AuthorityError::Rejected));}
                 match outcome {
                     Ok(candidate) => {
                         storage::current(c, &candidate).await?;
                         sqlx::query("DELETE FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid AND login_digest=$2 AND claim_token=$3")
-                            .bind(claim.tenant.to_string()).bind(claim.login).bind(claim.token).execute(c).await?;
+                            .bind(claim.binding.tenant().to_string()).bind(claim.login).bind(claim.token).execute(c).await?;
                         Ok(Ok(candidate))
                     }
                     Err(error) => {
                         if error == AuthorityError::Rejected {
                             sqlx::query("UPDATE identity_authority.password_attempts SET failures=CASE WHEN window_until>clock_timestamp() THEN failures+1 ELSE 1 END,window_until=CASE WHEN window_until>clock_timestamp() THEN window_until ELSE clock_timestamp()+make_interval(secs=>$4) END,claim_token=NULL,claim_until=NULL WHERE tenant_id=$1::uuid AND login_digest=$2 AND claim_token=$3")
-                                .bind(claim.tenant.to_string()).bind(claim.login).bind(claim.token).bind(f64::from(policy.password.seconds)).execute(c).await?;
+                                .bind(claim.binding.tenant().to_string()).bind(claim.login).bind(claim.token).bind(f64::from(policy.password.seconds)).execute(c).await?;
                         } else {
                             sqlx::query("UPDATE identity_authority.password_attempts SET claim_token=NULL,claim_until=NULL WHERE tenant_id=$1::uuid AND login_digest=$2 AND claim_token=$3")
-                                .bind(claim.tenant.to_string()).bind(claim.login).bind(claim.token).execute(c).await?;
+                                .bind(claim.binding.tenant().to_string()).bind(claim.login).bind(claim.token).execute(c).await?;
                         }
                         Ok(Err(error))
                     }

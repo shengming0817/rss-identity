@@ -103,6 +103,7 @@ impl IssuedSession {
 /// fn copy(p: rss_identity_postgres::AuthenticatedSession) { let _ = p.clone(); }
 /// ```
 pub struct AuthenticatedSession {
+    pub(crate) binding: rss_transactional_messaging::fence::ExecutionBinding,
     pub(crate) session_checks: crate::session_checks::SessionChecks,
     pub(crate) key: AccountKey,
     pub(crate) digest: [u8; 32],
@@ -313,7 +314,7 @@ impl Authority {
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.shortened_to(candidate.expires);
         if let Some(old) = &replacement {
-            if old.key != candidate.state.key() || old.view.credential_kind != kind {
+            if old.key != candidate.state.key() || old.binding != candidate.binding || old.view.credential_kind != kind {
                 return Err(AuthorityError::Rejected);
             }
             budget.0 = budget.0.shortened_to(old.expires);
@@ -322,7 +323,7 @@ impl Authority {
         let max_auth_facts_bytes = self.max_auth_facts_bytes;
         let limits = self.profile_limits;
         let key = candidate.state.key();
-        self.mutate_events(key.tenant, budget.remaining(), move |tx| {
+        self.mutate_events(candidate.binding, budget.remaining(), move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
@@ -370,12 +371,12 @@ impl Authority {
     /// Validate without extending idle, for login replacement before its CSRF check.
     pub async fn inspect_session(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         secret: SessionSecret,
         deadline: OperationDeadline,
     ) -> Result<AuthenticatedSession, AuthorityError> {
         self.session_proof(
-            tenant,
+            binding,
             secret.digest(),
             CredentialKind::Cookie,
             deadline,
@@ -388,12 +389,12 @@ impl Authority {
     /// This does not rotate the credential. `refresh_session` performs explicit rotation.
     pub async fn authenticate_session(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         secret: SessionSecret,
         deadline: OperationDeadline,
     ) -> Result<AuthenticatedSession, AuthorityError> {
         self.session_proof(
-            tenant,
+            binding,
             secret.digest(),
             CredentialKind::Cookie,
             deadline,
@@ -403,16 +404,17 @@ impl Authority {
     }
     pub(crate) async fn session_proof(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         digest: [u8; 32],
         kind: CredentialKind,
         deadline: OperationDeadline,
         touch: bool,
     ) -> Result<AuthenticatedSession, AuthorityError> {
+        let tenant = binding.tenant();
         self.require_runtime()?;
         let budget = Budget::new(deadline)?;
         let session_checks = self.session_checks.clone();
-        self.read(tenant, budget.remaining(), move |tx| {
+        self.read(binding, budget.remaining(), move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
@@ -424,6 +426,7 @@ impl Authority {
                         let authority = authority_id(c).await?;
                         let expires = checked_expiry(&loaded, budget.0.instant())?;
                         Ok(AuthenticatedSession {
+                            binding,
                             session_checks,
                             identity: SessionIdentity::from_state(loaded.state),
                             assurance: loaded.assurance,
@@ -445,15 +448,16 @@ impl Authority {
     }
     pub async fn refresh_session(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         old: SessionSecret,
         deadline: OperationDeadline,
     ) -> Result<IssuedSession, AuthorityError> {
+        let tenant = binding.tenant();
         self.require_runtime()?;
         let budget = Budget::new(deadline)?;
         let secret = SessionSecret::generate().map_err(|_| AuthorityError::Unavailable)?;
         let session_checks = self.session_checks.clone();
-        self.mutate(tenant,budget.remaining(),move|tx|Box::pin(async move {
+        self.mutate(binding,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let mut loaded = db::lookup(c,tenant,&old.digest(), CredentialKind::Cookie, &session_checks).await?;
                 db::touch(c,&mut loaded).await?;
@@ -488,7 +492,7 @@ impl Authority {
         self.require_runtime()?;
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.shortened_to(actor.expires);
-        self.mutate(actor.key.tenant,budget.remaining(),move|tx|Box::pin(async move {
+        self.mutate(actor.binding,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let loaded = db::recheck(c,&actor).await?;
                 let state = if all {
@@ -514,7 +518,7 @@ impl Authority {
         }
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.shortened_to(actor.expires);
-        self.read(actor.key.tenant,budget.remaining(),move|tx|Box::pin(async move {
+        self.read(actor.binding,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let loaded = db::recheck(c,&actor).await?;
                 let ids: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT session_id FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND principal_id=$2 AND auth_epoch=$3 AND membership_epoch=$4 AND revoked_at IS NULL AND issued_at<=$5 AND idle_expires_at>$5 AND absolute_expires_at>$5 AND ($6::uuid IS NULL OR session_id>$6::uuid) ORDER BY session_id LIMIT $7")

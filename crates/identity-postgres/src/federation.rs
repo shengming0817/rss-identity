@@ -493,7 +493,7 @@ impl Federation {
         deadline: OperationDeadline,
     ) -> Result<SessionSecurity, AuthorityError> {
         let oidc = self.oidc.clone();
-        self.authority.read_sql(actor.key.tenant, deadline, move |c| Box::pin(async move {
+        self.authority.read_sql(actor.binding, deadline, move |c| Box::pin(async move {
             lock_guard(c, actor.key.tenant).await?;
             let loaded = crate::session_storage::recheck(c, &actor).await?;
             // A persisted authentication fact must still match this process's approved interpretation.

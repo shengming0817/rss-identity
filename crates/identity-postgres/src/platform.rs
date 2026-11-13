@@ -1,3 +1,4 @@
+use rss_transactional_messaging::fence::ExecutionBinding;
 //! Trusted host platform adapter and Identity-owned one-use browser challenges.
 //! The host verifies devices and platform cryptography; Identity alone issues sessions.
 //! ref: webauthn-rs 0.5.3 src/lib.rs (server-owned, one-use ceremony state).
@@ -218,13 +219,14 @@ async fn external_valid(
 impl Authority {
     pub async fn begin_platform_login(
         &self,
-        tenant: TenantId,
+        execution: ExecutionBinding,
         binding: Uuid,
         purpose: PlatformPurpose,
         browser: String,
         source: AttemptSource,
         deadline: OperationDeadline,
     ) -> Result<PlatformChallenge, AuthorityError> {
+        let tenant = execution.tenant();
         self.require_runtime()?;
         crate::federation_login::check_browser(&browser)?;
         let verifier = self
@@ -241,7 +243,7 @@ impl Authority {
         }
         let budget = Budget::new(deadline)?;
         self.reserve(
-            tenant,
+            execution,
             format!("platform:{binding}"),
             &source,
             budget.remaining(),
@@ -253,7 +255,7 @@ impl Authority {
             None => return Err(AuthorityError::Configuration),
         };
         let instance = self.instance;
-        self.read_sql(tenant,budget.remaining(),move|c|Box::pin(async move{
+        self.read_sql(execution,budget.remaining(),move|c|Box::pin(async move{
             lock_guard(c,tenant).await?;
             let resolved=verifier.resolve(instance,tenant,binding,c).await.map_err(failure)?;
             if !resolved.valid() || resolved.instance!=instance || resolved.account.tenant!=tenant || resolved.binding_id!=binding || !load(c,resolved.account).await?.state.active(){return Err(reject().into());}
@@ -276,13 +278,14 @@ impl Authority {
     /// No principal/assurance DTO is accepted. Only the installed verifier can supply evidence.
     pub async fn complete_platform_login(
         &self,
-        tenant: TenantId,
+        execution: ExecutionBinding,
         id: Uuid,
         nonce: String,
         browser: String,
         evidence: Vec<u8>,
         deadline: OperationDeadline,
     ) -> Result<PlatformLogin, AuthorityError> {
+        let tenant = execution.tenant();
         self.require_runtime()?;
         crate::federation_login::check_browser(&browser)?;
         if nonce.len() != 43 || evidence.is_empty() || evidence.len() > 65_536 || id.is_nil() {
@@ -297,7 +300,7 @@ impl Authority {
         let expected_nonce = digest(&nonce);
         let expected_browser = digest(&browser);
         let context = self
-            .read_sql(tenant, budget.remaining(), move |c| {
+            .read_sql(execution, budget.remaining(), move |c| {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let row = challenge(c, tenant, id, &expected_nonce, &expected_browser).await?;
@@ -345,7 +348,7 @@ impl Authority {
         let max_auth_facts_bytes = self.max_auth_facts_bytes;
         let future_skew_seconds = self.future_skew_seconds;
         let limits = self.profile_limits;
-        self.write_sql(tenant,budget.remaining(),move|c|Box::pin(async move{
+        self.write_sql(execution,budget.remaining(),move|c|Box::pin(async move{
             lock_guard(c,tenant).await?;
             let row=challenge(c,tenant,id,&expected_nonce,&expected_browser).await?;
             let actual:PlatformBinding=serde_json::from_value(row.try_get("binding")?).map_err(|_|corrupt())?;

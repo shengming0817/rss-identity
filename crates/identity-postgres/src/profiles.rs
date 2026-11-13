@@ -292,6 +292,7 @@ pub(crate) async fn retain_binding(
 }
 
 pub(crate) struct Reader {
+    pub(crate) binding: crate::ExecutionBinding,
     pub(crate) key: AccountKey,
     digest: [u8; 32],
     session: SessionId,
@@ -304,6 +305,7 @@ impl Reader {
     pub(crate) fn new(actor: &AuthenticatedSession) -> Result<Self, AuthorityError> {
         actor.assurance()?;
         Ok(Self {
+            binding: actor.binding,
             key: actor.key,
             digest: actor.digest,
             session: actor.view.id,
@@ -320,6 +322,7 @@ impl Reader {
         if Instant::now() >= self.expires || authority_id(c).await? != self.instance {
             return Err(reject().into());
         }
+        crate::transaction::check_binding(c, self.binding).await?;
         let loaded = crate::session_storage::lookup(
             c,
             self.key.tenant,
@@ -373,7 +376,7 @@ impl Authority {
         }
         let policy = self.policy.clone();
         let instance = self.instance;
-        self.read_sql(target.tenant,deadline,move|c|Box::pin(async move {
+        self.read_sql(actor.binding,deadline,move|c|Box::pin(async move {
             let loaded=reader.recheck(c).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadLatestProfile,Some(target),c).await?;
             if !load(c,target).await?.state.active(){return Err(reject().into());}
@@ -400,7 +403,7 @@ impl Authority {
         if latest.is_some_and(|(target, _)| target.tenant != reader.key.tenant) {
             return Err(AuthorityError::Rejected);
         }
-        self.read_sql(reader.key.tenant,budget.remaining(),move|c|Box::pin(async move {
+        self.read_sql(reader.binding,budget.remaining(),move|c|Box::pin(async move {
             let loaded=reader.recheck(c).await?;
             let mut expires=crate::sessions::checked_expiry(&loaded,budget.0.instant().min(reader.expires)).map_err(transaction::MutationError::from)?;
             let (target,source,bound)=match latest {
@@ -460,7 +463,7 @@ impl Authority {
         if target.tenant != reader.key.tenant {
             return Err(AuthorityError::Rejected);
         }
-        self.read_sql(target.tenant, deadline, move |c| {
+        self.read_sql(actor.binding, deadline, move |c| {
             Box::pin(async move {
                 let loaded = reader.recheck(c).await?;
                 crate::management::authorize(
@@ -504,7 +507,7 @@ impl Authority {
         let digest = rss_identity_core::federation::digest(
             &serde_json::to_string(&change).map_err(|_| AuthorityError::InvalidInput)?,
         );
-        self.conditional_write_sql(target.tenant,deadline,move|c|Box::pin(async move{
+        self.conditional_write_sql(actor.binding,deadline,move|c|Box::pin(async move{
             let loaded=crate::session_storage::recheck(c,&actor).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::UpdateLocalProfile,Some(target),c).await?;
             if !load(c,target).await?.state.active(){return Err(reject().into());}
@@ -546,7 +549,7 @@ impl Authority {
         if target.tenant != reader.key.tenant {
             return Err(AuthorityError::Rejected);
         }
-        self.read_sql(target.tenant,deadline,move|c|Box::pin(async move{
+        self.read_sql(actor.binding,deadline,move|c|Box::pin(async move{
             let loaded=reader.recheck(c).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::UpdateLocalProfile,Some(target),c).await?;
             let revision:Option<i64>=sqlx::query_scalar("SELECT revision FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND principal_id=$2 AND actor=$3 AND operation_id=$4")
@@ -598,7 +601,7 @@ impl Authority {
         let reader = Reader::new(actor)?;
         let policy = self.policy.clone();
         let instance = self.instance;
-        self.read_sql(reader.key.tenant,deadline,move|c|Box::pin(async move{
+        self.read_sql(reader.binding,deadline,move|c|Box::pin(async move{
             let loaded=reader.recheck(c).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadProfileSources,None,c).await?;
             let rows=sqlx::query("SELECT provider_id,config_version,settings FROM identity_authority.providers WHERE tenant_id=$1::uuid AND enabled ORDER BY provider_id LIMIT $2")

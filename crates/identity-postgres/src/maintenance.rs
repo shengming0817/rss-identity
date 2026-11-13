@@ -12,15 +12,17 @@ impl Authority {
     /// Initialize an admitted tenant once using its independently held maintenance identity.
     pub async fn initialize(
         &self,
+        binding: ExecutionBinding,
         key: AccountKey,
         login: LoginKey,
         password: Password,
         deadline: OperationDeadline,
     ) -> Result<AccountState, AuthorityError> {
         self.require_maintenance()?;
+        if binding.tenant() != key.tenant { return Err(AuthorityError::Rejected); }
         let budget = Budget::new(deadline)?;
         let hash = budget.password(self.kdf.hash(password)).await?;
-        self.mutate(key.tenant, budget.remaining(), move |tx| {
+        self.mutate(binding, budget.remaining(), move |tx| {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {
@@ -42,14 +44,16 @@ impl Authority {
     /// Concurrent maintenance writes serialize; the last committed password wins.
     pub async fn recover_local_password(
         &self,
+        binding: ExecutionBinding,
         key: AccountKey,
         password: Password,
         deadline: OperationDeadline,
     ) -> Result<AccountState, AuthorityError> {
         self.require_maintenance()?;
+        if binding.tenant() != key.tenant { return Err(AuthorityError::Rejected); }
         let budget = Budget::new(deadline)?;
         let hash = budget.password(self.kdf.hash(password)).await?;
-        self.mutate(key.tenant, budget.remaining(), move |tx| {
+        self.mutate(binding, budget.remaining(), move |tx| {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {

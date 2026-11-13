@@ -1,3 +1,4 @@
+use rss_transactional_messaging::fence::ExecutionBinding;
 //! Native Entra personnel proofs. Never issues a browser session or device permission.
 use crate::{
     Authority, AuthorityError, Budget,
@@ -36,6 +37,7 @@ pub struct EntraAuthority {
 /// fn bypass() { let _ = rss_identity_postgres::VerifiedExternalSubject {}; }
 /// ```
 pub struct VerifiedExternalSubject {
+    binding: ExecutionBinding,
     instance: InstanceId,
     tenant: TenantId,
     provider: ProviderId,
@@ -95,9 +97,6 @@ impl EntraAuthority {
     ) -> Result<Self, AuthorityError> {
         authority.require_runtime()?;
         profile.validate()?;
-        if !authority.tenant_active(tenant) {
-            return Err(AuthorityError::Rejected);
-        }
         Ok(Self {
             authority,
             verifier,
@@ -109,16 +108,18 @@ impl EntraAuthority {
     /// The product must check its scope/consent/device policy before calling resolve.
     pub async fn verify(
         &self,
+        binding: ExecutionBinding,
         token: Zeroizing<String>,
         deadline: OperationDeadline,
     ) -> Result<VerifiedExternalSubject, AuthorityError> {
+        if binding.tenant() != self.tenant { return Err(AuthorityError::Rejected); }
         let budget = Budget::new(deadline)?;
         let tenant = self.tenant;
         let provider = self.provider;
         let profile = self.profile.clone();
         let view = self
             .authority
-            .read_sql(tenant, budget.remaining(), move |c| {
+            .read_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
                     storage::lock_guard(c, tenant).await?;
                     let view = db::provider(c, tenant, provider).await?;
@@ -138,7 +139,7 @@ impl EntraAuthority {
         let sampled = Instant::now();
         let now_ms: i64 = self
             .authority
-            .read_sql(tenant, budget.remaining(), |c| {
+            .read_sql(binding, budget.remaining(), |c| {
                 Box::pin(async move {
                     Ok(sqlx::query_scalar(
                         "SELECT ceil(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
@@ -157,6 +158,7 @@ impl EntraAuthority {
         }
         let expires = proof_expiry(claims.expires_at, now_ms, sampled, budget.0.instant())?;
         let proof = VerifiedExternalSubject {
+            binding,
             instance: self.authority.instance(),
             tenant,
             provider: self.provider,
@@ -176,9 +178,10 @@ impl EntraAuthority {
         deadline: OperationDeadline,
     ) -> Result<RevalidatedAccount, AuthorityError> {
         self.bound(&subject)?;
+        let binding = subject.binding;
         let budget = Budget::new(deadline)?;
         let tenant = self.tenant;
-        let result = self.authority.conditional_write_sql(tenant, budget.remaining(), move |c| Box::pin(async move {
+        let result = self.authority.conditional_write_sql(binding, budget.remaining(), move |c| Box::pin(async move {
             subject.check_live().map_err(|_| reject())?;
             storage::lock_guard(c, tenant).await?;
             let view = db::provider(c, tenant, subject.provider).await?;
@@ -215,8 +218,9 @@ impl EntraAuthority {
         deadline: OperationDeadline,
     ) -> Result<RevalidatedAccount, AuthorityError> {
         self.bound(&proof.subject)?;
+        let binding = proof.subject.binding;
         let tenant = self.tenant;
-        let result = self.authority.read_sql(tenant, deadline, move |c| Box::pin(async move {
+        let result = self.authority.read_sql(binding, deadline, move |c| Box::pin(async move {
             proof.check_live().map_err(|_| reject())?;
             storage::lock_guard(c, tenant).await?;
             let view = db::provider(c, tenant, proof.subject.provider).await?;

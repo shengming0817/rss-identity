@@ -168,7 +168,7 @@ impl WebauthnAuthority {
         let this = self.clone();
         let rp = self.rp.clone();
         let config = self.config;
-        self.authority.read_sql(actor.key.tenant,deadline,move|c|Box::pin(async move{
+        self.authority.read_sql(actor.binding,deadline,move|c|Box::pin(async move{
             session_storage::recheck(c,&actor).await?;
             this.check_configuration(c,actor.key.tenant).await?;
             let rows=sqlx::query("SELECT id,label FROM identity_authority.webauthn_credentials WHERE tenant_id=$1::uuid AND principal_id=$2 AND rp=$3 AND rp_config=$4 AND NOT revoked ORDER BY id LIMIT 32").bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(rp).bind(config.as_slice()).fetch_all(c).await?;
@@ -193,7 +193,7 @@ impl WebauthnAuthority {
             None,
         )?;
         self.authority
-            .read_sql(actor.key.tenant, deadline, move |c| {
+            .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
                     this.check_configuration(c, actor.key.tenant).await?;
@@ -318,7 +318,7 @@ impl WebauthnAuthority {
             })
             .await?;
         let this = self.clone();
-        self.authority.write_sql(actor.key.tenant,budget.remaining(),move|c|Box::pin(async move{
+        self.authority.write_sql(actor.binding,budget.remaining(),move|c|Box::pin(async move{
             let loaded=session_storage::recheck(c,&actor).await?;
             this.check_configuration(c,actor.key.tenant).await?;
             let current=read(c,&actor,id,this.config).await?;
@@ -344,7 +344,7 @@ impl WebauthnAuthority {
     ) -> Result<WebauthnChallenge<RequestChallengeResponse>, AuthorityError> {
         let this = self.clone();
         self.authority
-            .read_sql(actor.key.tenant, deadline, move |c| {
+            .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
                     this.check_configuration(c, actor.key.tenant).await?;
@@ -423,7 +423,7 @@ impl WebauthnAuthority {
             .update_credential(&result)
             .ok_or(AuthorityError::Rejected)?;
         let this = self.clone();
-        self.authority.write_sql(actor.key.tenant,budget.remaining(),move|c|Box::pin(async move{
+        self.authority.write_sql(actor.binding,budget.remaining(),move|c|Box::pin(async move{
             let loaded=session_storage::recheck(c,&actor).await?;
             this.check_configuration(c,actor.key.tenant).await?;
             let current=read(c,&actor,id,this.config).await?;
@@ -447,7 +447,7 @@ impl WebauthnAuthority {
     ) -> Result<(), AuthorityError> {
         let this = self.clone();
         let context = webauthn_management_context(actor.key, "remove", Some(id))?;
-        self.authority.write_sql(actor.key.tenant,deadline,move|c|Box::pin(async move{
+        self.authority.write_sql(actor.binding,deadline,move|c|Box::pin(async move{
             let loaded=session_storage::recheck(c,&actor).await?;
             this.check_configuration(c,actor.key.tenant).await?;
             management::authorize(this.authority.policy.as_ref(),this.authority.instance,&loaded,ManagementOperation::RemoveWebauthn,Some(actor.key),c).await?;
@@ -467,7 +467,7 @@ impl WebauthnAuthority {
         let config = self.config;
         let this = self.clone();
         self.authority
-            .read_sql(actor.key.tenant, deadline, move |c| {
+            .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
                     read(c, &actor, id, config).await?;
                     this.check_configuration(c, actor.key.tenant).await?;

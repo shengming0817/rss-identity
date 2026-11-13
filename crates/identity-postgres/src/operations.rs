@@ -11,7 +11,7 @@ impl Authority {
     /// Verify credentials and issue a session only after the atomic security event commits.
     pub async fn login_local(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         login: LoginKey,
         password: Password,
         source: AttemptSource,
@@ -20,14 +20,14 @@ impl Authority {
     ) -> Result<IssuedSession, AuthorityError> {
         let budget = Budget::new(deadline)?;
         let candidate =
-            Box::pin(self.verify_password(tenant, login, password, source, budget.remaining()))
+            Box::pin(self.verify_password(binding, login, password, source, budget.remaining()))
                 .await?;
         Box::pin(self.create_session(candidate, replacement, budget.remaining())).await
     }
 
     pub(crate) async fn verify_password(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         login: LoginKey,
         password: Password,
         source: AttemptSource,
@@ -36,10 +36,10 @@ impl Authority {
         self.require_runtime()?;
         let budget = Budget::new(deadline)?;
         let claim = self
-            .claim_password(tenant, &login, &source, budget.remaining())
+            .claim_password(binding, &login, &source, budget.remaining())
             .await?;
         let outcome = self
-            .check_password(tenant, login, password, budget.remaining())
+            .check_password(binding, login, password, budget.remaining())
             .await;
         self.settle_password(claim, outcome, budget.remaining())
             .await
@@ -47,13 +47,14 @@ impl Authority {
 
     async fn check_password(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         login: LoginKey,
         password: Password,
         deadline: OperationDeadline,
     ) -> Result<AuthenticationCandidate, AuthorityError> {
+        let tenant = binding.tenant();
         let budget = Budget::new(deadline)?;
-        let snapshot=self.read(tenant,budget.remaining(),move|tx|Box::pin(async move {
+        let snapshot=self.read(binding,budget.remaining(),move|tx|Box::pin(async move {
             crate::transaction::connection(tx,move|c|Box::pin(async move {
                 let id:Option<String>=sqlx::query_scalar(concat!("SELECT principal_id::text FROM identity_authority.local_credentials WHERE tenant","_id=$1::uuid AND login_key=$2")).bind(tenant.to_string()).bind(login.as_str()).fetch_optional(&mut *c).await?;
                 match id {
@@ -73,12 +74,13 @@ impl Authority {
             return Err(AuthorityError::Rejected);
         }
         let candidate = AuthenticationCandidate {
+            binding,
             state: stored.state,
             authority,
             expires: budget.0.instant(),
             authenticated_at,
         };
-        self.read(tenant, budget.remaining(), move |tx| {
+        self.read(binding, budget.remaining(), move |tx| {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {
@@ -110,7 +112,7 @@ impl Authority {
         };
         let policy = self.policy.clone();
         let instance = self.instance;
-        self.write_sql(key.tenant, budget.remaining(), move |c| {
+        self.write_sql(actor.binding, budget.remaining(), move |c| {
             Box::pin(async move {
                 let loaded = crate::session_storage::recheck(c, &actor).await?;
                 crate::management::authorize(
@@ -202,7 +204,7 @@ impl Authority {
         let (actor, login) = self.local_login_key(actor, budget.remaining()).await?;
         let candidate = self
             .verify_password(
-                key.tenant,
+                actor.binding,
                 login,
                 current_password,
                 source,
@@ -241,7 +243,7 @@ impl Authority {
         let key = actor.key;
         let (actor, login) = self.local_login_key(actor, budget.remaining()).await?;
         Box::pin(self.login_local(
-            key.tenant,
+            actor.binding,
             login,
             password,
             source,
@@ -256,7 +258,7 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<(AuthenticatedSession, LoginKey), AuthorityError> {
         let key = actor.key;
-        let (actor, name) = self.read_sql(key.tenant, deadline, move |c|Box::pin(async move {
+        let (actor, name) = self.read_sql(actor.binding, deadline, move |c|Box::pin(async move {
             crate::session_storage::recheck(c,&actor).await?;
             let name:Option<String> = sqlx::query_scalar("SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2")
                 .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_optional(c).await?;
@@ -300,7 +302,7 @@ impl Authority {
             LocalChange::Enabled(v) => ManagementOperation::SetAccountEnabled(v),
             LocalChange::Membership(v) => ManagementOperation::SetMembership(v),
         };
-        self.write_sql(target.tenant, budget.remaining(), move |c| Box::pin(async move {
+        self.write_sql(actor.binding, budget.remaining(), move |c| Box::pin(async move {
             let loaded = crate::session_storage::recheck(c, &actor).await?;
             if let Some(proof) = reauthentication {
                 if proof.account() != actor.key || target != actor.key { return Err(crate::transaction::reject().into()); }
