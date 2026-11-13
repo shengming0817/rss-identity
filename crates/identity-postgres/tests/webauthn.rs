@@ -25,10 +25,7 @@ async fn consume(
 ) -> anyhow::Result<bool> {
     let proof = actor(f, s).await?;
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(f.key.tenant.to_string())
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, binding(f.key.tenant)).await?;
     sqlx::query("SET LOCAL ROLE identity_runtime")
         .execute(&mut *tx)
         .await?;

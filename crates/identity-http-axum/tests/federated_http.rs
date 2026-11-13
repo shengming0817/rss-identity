@@ -374,10 +374,7 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
         .await?;
     let context = webauthn_management_context(current.account(), "register", None)?;
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(A)
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, crate::support::binding(f.key.tenant)).await?;
     consume_step_up_on(&mut tx, &current, &context, handle).await?;
     tx.rollback().await?;
     let replay = callback(&app, &cb, &browser).await?;

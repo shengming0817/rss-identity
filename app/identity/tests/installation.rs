@@ -152,7 +152,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     for key in &keys {
         maintenance
             .initialize(
-                crate::support::binding((*key).tenant),
+                crate::support::binding(key.tenant),
                 *key,
                 LoginKey::parse("operator")?,
                 password(),

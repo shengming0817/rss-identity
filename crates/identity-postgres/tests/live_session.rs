@@ -13,10 +13,13 @@ async fn transaction<'a>(
     tenant: &str,
 ) -> anyhow::Result<Transaction<'a, Postgres>> {
     let mut tx = c.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(tenant)
-        .execute(&mut *tx)
-        .await?;
+    if let Ok(tenant) = rss_request_context::TenantId::parse(tenant) {
+        crate::support::fence(&mut tx, binding(tenant)).await?;
+    } else {
+        sqlx::query("SELECT set_config('rss.tenant_id','',true)")
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("SET LOCAL ROLE identity_runtime")
         .execute(&mut *tx)
         .await?;
@@ -149,10 +152,7 @@ async fn host_admission_is_passive_and_transaction_scoped() -> anyhow::Result<()
         sqlx::query(sqlx::AssertSqlSafe(isolation))
             .execute(&mut *tx)
             .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(A)
-            .execute(&mut *tx)
-            .await?;
+        crate::support::fence(&mut tx, binding(rss_request_context::TenantId::parse(A)?)).await?;
         assert!(
             recheck_authenticated_session_on(&mut tx, &cookie_actor)
                 .await
@@ -287,10 +287,7 @@ async fn host_admission_rejects_stale_credentials_and_subjects() -> anyhow::Resu
         sqlx::query(sqlx::AssertSqlSafe(mutation))
             .execute(&mut *tx)
             .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(A)
-            .execute(&mut *tx)
-            .await?;
+        crate::support::fence(&mut tx, binding(rss_request_context::TenantId::parse(A)?)).await?;
         assert!(
             recheck_authenticated_session_on(&mut tx, &proof)
                 .await
@@ -399,10 +396,7 @@ async fn host_admission_rechecks_federated_source() -> anyhow::Result<()> {
         sqlx::query(sqlx::AssertSqlSafe(mutation))
             .execute(&mut *tx)
             .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(A)
-            .execute(&mut *tx)
-            .await?;
+        crate::support::fence(&mut tx, binding(rss_request_context::TenantId::parse(A)?)).await?;
         assert!(
             recheck_authenticated_session_on(&mut tx, &proof)
                 .await

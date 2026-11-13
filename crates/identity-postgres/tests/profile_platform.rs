@@ -2241,10 +2241,7 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
         .session;
     let actor = proof(&store, &f, &issued).await?;
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(A)
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, binding(f.key.tenant)).await?;
     sqlx::query("SET LOCAL ROLE identity_runtime")
         .execute(&mut *tx)
         .await?;
@@ -2274,10 +2271,7 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
     tx.rollback().await?;
     revoke.await??;
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(A)
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, binding(f.key.tenant)).await?;
     assert!(
         recheck_authenticated_session_on(&mut tx, &actor)
             .await
@@ -2291,10 +2285,7 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
         .unavailable
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(A)
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, binding(f.key.tenant)).await?;
     assert!(
         recheck_authenticated_session_on(&mut tx, &actor)
             .await
@@ -2312,10 +2303,7 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
         sqlx::query(sqlx::AssertSqlSafe(change))
             .execute(&mut *tx)
             .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(A)
-            .execute(&mut *tx)
-            .await?;
+        crate::support::fence(&mut tx, binding(f.key.tenant)).await?;
         assert!(
             recheck_authenticated_session_on(&mut tx, &actor)
                 .await

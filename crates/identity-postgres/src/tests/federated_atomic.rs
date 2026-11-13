@@ -379,10 +379,7 @@ async fn federation_step_up_binding_and_settlement() -> anyhow::Result<()> {
     let context =
         rss_identity_core::step_up::StepUpContext::new("test.operation".into(), [7; 32]).unwrap();
     let mut tx = f.owner.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(f.key.tenant.to_string())
-        .execute(&mut *tx)
-        .await?;
+    crate::support::fence(&mut tx, crate::support::binding(f.key.tenant)).await?;
     rss_identity_postgres::consume_step_up_on(&mut tx, &proof, &context, grant.expose()).await?;
     tx.rollback().await?;
     // A config edit after beginning the flow invalidates the exact persisted binding.

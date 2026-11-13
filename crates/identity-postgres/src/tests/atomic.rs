@@ -113,7 +113,7 @@ async fn initialization_and_recovery() -> anyhow::Result<()> {
             )
             .await
             .unwrap_err(),
-        AuthorityError::Rejected
+        AuthorityError::Fenced
     );
     let absent = AccountKey {
         tenant: f.key.tenant,

@@ -440,3 +440,20 @@ pub async fn apply_change(
         AccountChange::Password(v) => store.reset_local_password(actor, target, v, deadline).await,
     }
 }
+
+/// The fixture host establishes the same complete fence as a real host transaction.
+pub async fn fence(c: &mut sqlx::PgConnection, binding: ExecutionBinding) -> anyhow::Result<()> {
+    let hex = |bytes: [u8; 16]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target',$2,true),set_config('rss.storage_lineage',$3,true),set_config('rss.execution_epoch',$4,true)")
+        .bind(binding.tenant().to_string()).bind(hex(binding.storage().target())).bind(hex(binding.storage().lineage())).bind(binding.epoch().get().to_string())
+        .execute(&mut *c).await?;
+    sqlx::query("SELECT rss_transactional_messaging.check_execution()")
+        .execute(c)
+        .await?;
+    Ok(())
+}

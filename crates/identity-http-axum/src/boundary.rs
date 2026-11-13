@@ -296,6 +296,32 @@ pub(crate) async fn request_boundary(
     response
 }
 
+/// Host-installed execution identity, checked against the route before authentication.
+pub(crate) struct Execution(pub rss_transactional_messaging::fence::ExecutionBinding);
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Execution {
+    type Rejection = HttpError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::extract::Path;
+        let Path(params) =
+            Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
+                .await
+                .map_err(|_| BAD)?;
+        let selected = tenant(params.get("tenant").ok_or(BAD)?)?;
+        let binding = parts
+            .extensions
+            .get::<rss_transactional_messaging::fence::ExecutionBinding>()
+            .copied()
+            .ok_or_else(|| HttpError::from(AuthorityError::Unavailable))?;
+        if selected != binding.tenant() {
+            return Err(UNAUTH);
+        }
+        Ok(Self(binding))
+    }
+}
+
 #[cfg(test)]
 mod rate_limit_tests {
     use super::*;
@@ -322,31 +348,5 @@ mod rate_limit_tests {
                 serde_json::json!({"code":"rate_limited"})
             );
         }
-    }
-}
-
-/// Host-installed execution identity, checked against the route before authentication.
-pub(crate) struct Execution(pub rss_transactional_messaging::fence::ExecutionBinding);
-impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Execution {
-    type Rejection = HttpError;
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        use axum::extract::Path;
-        let Path(params) =
-            Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
-                .await
-                .map_err(|_| BAD)?;
-        let selected = tenant(params.get("tenant").ok_or(BAD)?)?;
-        let binding = parts
-            .extensions
-            .get::<rss_transactional_messaging::fence::ExecutionBinding>()
-            .copied()
-            .ok_or_else(|| HttpError::from(AuthorityError::Unavailable))?;
-        if selected != binding.tenant() {
-            return Err(UNAUTH);
-        }
-        Ok(Self(binding))
     }
 }
