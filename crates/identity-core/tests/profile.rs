@@ -53,16 +53,14 @@ fn extension_budgets_and_sensitive_material_fail_closed() {
     ] {
         assert!(Extensions::try_from(json!({"nested":{name:"secret"}})).is_err());
     }
-    for age in [0] {
-        assert!(
-            ProfileSettings {
-                extensions_claim: None,
-                max_age_seconds: age
-            }
-            .validate()
-            .is_err()
-        );
-    }
+    assert!(
+        ProfileSettings {
+            extensions_claim: None,
+            max_age_seconds: 0
+        }
+        .validate()
+        .is_err()
+    );
     for age in [1, 14400, u32::MAX] {
         assert!(
             ProfileSettings {

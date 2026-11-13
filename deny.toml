@@ -21,8 +21,5 @@ allow-git = ["https://dev.azure.com/shengming0923/rss/_git/rss", "https://dev.az
 # Exact revision and the resolved RSS closure are checked by check_dependencies.py.
 
 [advisories]
-# #3184: exact inactive identities, parent graph and UTC expiry are checked by the existing dependency gate.
-ignore = [
-  { id = "RUSTSEC-2026-0459", reason = "#3184: RSS dependency owner accepts inactive SQLx SQLite lock entries only; expires 2026-12-13 UTC; revoke on activation or a compatible SQLx fix." },
-]
+ignore = []
 unused-ignored-advisory = "deny"

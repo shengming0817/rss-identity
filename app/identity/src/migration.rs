@@ -121,8 +121,8 @@ pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
         sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
             .execute(&mut *tx)
             .await?;
-        // RSS leaves host default table/sequence ACLs to its migrator. Reject ambient PUBLIC
-        // grants before committing a producer installation; Identity revokes its own PUBLIC ACLs.
+        // RSS revokes PUBLIC table grants; reject any residual ambient grants (including
+        // sequences) before committing. Identity revokes its own PUBLIC ACLs.
         let public_grants: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE n.nspname='rss_transactional_messaging' AND a.grantee=0)",
         ).fetch_one(&mut *tx).await?;

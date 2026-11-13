@@ -27,7 +27,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     let port: u16 = std::env::var("IDENTITY_TEST_PG_PORT")?.parse()?;
     let mut value: serde_json::Value =
         serde_json::from_str(include_str!("../../../deployment/example.json"))?;
-    value["database"] = json!({"host":"127.0.0.1","port":port,"database":"postgres","user":"postgres","passwordFile":root.join("owner"),"caFile":root.join("server.crt")});
+    value["database"] = json!({"host":"127.0.0.1","port":port,"database":"postgres","user":"postgres","passwordFile":root.join("owner"),"caFile":root.join("server.crt"),"minConnections":0,"maxConnections":10,"acquireSeconds":5});
     let owner_db: rss_identity_app::config::DatabaseConfig =
         serde_json::from_value(value["database"].clone())?;
     let mut owner = sqlx::PgConnection::connect_with(&owner_db.sqlx()?).await?;
@@ -66,8 +66,8 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             "ALTER DEFAULT PRIVILEGES REVOKE SELECT ON TABLES FROM host_runtime",
         ),
         (
-            "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC",
-            "ALTER DEFAULT PRIVILEGES REVOKE SELECT ON TABLES FROM PUBLIC",
+            "ALTER DEFAULT PRIVILEGES GRANT SELECT ON SEQUENCES TO PUBLIC",
+            "ALTER DEFAULT PRIVILEGES REVOKE SELECT ON SEQUENCES FROM PUBLIC",
         ),
     ] {
         sqlx::raw_sql(corrupt).execute(&mut owner).await?;
@@ -95,7 +95,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         ),
         (
             "DELETE FROM identity_authority.schema_version",
-            "INSERT INTO identity_authority.schema_version VALUES(17)",
+            "INSERT INTO identity_authority.schema_version VALUES(18)",
         ),
         (
             "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2",

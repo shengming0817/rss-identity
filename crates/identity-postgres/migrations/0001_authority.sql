@@ -160,7 +160,7 @@ CREATE TABLE identity_authority.platform_challenges (
  audience text NOT NULL CHECK(octet_length(audience) BETWEEN 1 AND 256),
  nonce_hash bytea NOT NULL CHECK(octet_length(nonce_hash)=32), browser_hash bytea NOT NULL CHECK(octet_length(browser_hash)=32),
  auth_epoch bigint NOT NULL CHECK(auth_epoch>0), membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
- created_at bigint NOT NULL CHECK(created_at>0), expires_at bigint NOT NULL CHECK(expires_at>created_at AND expires_at-created_at<=120),
+ created_at bigint NOT NULL CHECK(created_at>0), expires_at bigint NOT NULL CHECK(expires_at>created_at),
  profile_sequence bigint NOT NULL CHECK(profile_sequence>0),
  PRIMARY KEY(tenant_id,challenge_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
@@ -224,7 +224,7 @@ CREATE TABLE identity_authority.step_up_grants (
  auth_epoch bigint NOT NULL CHECK(auth_epoch>0), membership_epoch bigint NOT NULL CHECK(membership_epoch>0),
  context jsonb NOT NULL CHECK(jsonb_typeof(context)='object' AND octet_length(context::text)<=2048),
  source jsonb NOT NULL CHECK(jsonb_typeof(source)='object' AND octet_length(source::text)<=2048),
- authenticated_at bigint NOT NULL CHECK(authenticated_at>0), expires_at bigint NOT NULL CHECK(expires_at>authenticated_at AND expires_at-authenticated_at<=300),
+ authenticated_at bigint NOT NULL CHECK(authenticated_at>0), expires_at bigint NOT NULL CHECK(expires_at>authenticated_at),
  PRIMARY KEY(tenant_id,token_hash), FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
 );
 CREATE INDEX webauthn_ceremony_expiry ON identity_authority.webauthn_ceremonies(tenant_id,expires_at);

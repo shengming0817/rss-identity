@@ -298,6 +298,10 @@ struct Verifier {
     fault: std::sync::Mutex<Option<PgTransactionFault>>,
 }
 impl PlatformVerifier for Verifier {
+    fn challenge_seconds(&self) -> u32 {
+        600
+    }
+
     fn authorize_purpose<'a>(
         &'a self,
         _binding: &'a PlatformBinding,
@@ -474,6 +478,9 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
             deadline(),
         )
         .await?;
+    let stored: (i64, i64) = sqlx::query_as("SELECT created_at,expires_at FROM identity_authority.platform_challenges WHERE challenge_id=$1")
+        .bind(challenge.id).fetch_one(&f.owner).await?;
+    assert_eq!(stored.1 - stored.0, i64::from(verifier.challenge_seconds()));
     let signature = verifier
         .key
         .sign(&challenge.signing_payload)
@@ -904,7 +911,7 @@ async fn platform_external_identity_and_fresh_profile_are_bound_and_revocable() 
             0 => source = ProviderId::parse(&Uuid::new_v4().to_string())?,
             1 => value.subject = ExternalSubject::Oidc("different-user".into()),
             2 => value.issuer = "https://other.example.test".into(),
-            _ => value.issued_at = challenge.expires_at - 120 - 31,
+            _ => value.issued_at = now - i64::from(verifier.challenge_seconds()),
         }
         *verifier.idp.lock().unwrap() = Some((source, value));
         assert!(

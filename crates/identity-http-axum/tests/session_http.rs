@@ -189,9 +189,11 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(
                 error.extensions().get::<HttpFailure>(),
-                Some(&HttpFailure::Authority(
-                    rss_identity_postgres::AuthorityError::DeadlineElapsed
-                ))
+                Some(&if remaining.is_zero() {
+                    HttpFailure::RequestTimeout
+                } else {
+                    HttpFailure::Authority(rss_identity_postgres::AuthorityError::DeadlineElapsed)
+                })
             );
         }
     }

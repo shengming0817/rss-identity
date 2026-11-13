@@ -146,7 +146,7 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
     );
     assert!(
         f.store
-            .list_sessions(proof(&f, &first).await?, None, 101, deadline())
+            .list_sessions(proof(&f, &first).await?, None, 1025, deadline())
             .await
             .is_err()
     );

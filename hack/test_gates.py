@@ -108,13 +108,3 @@ class Gates(unittest.TestCase):
         with patch.dict(os.environ,{'PATH':'/usr/bin'},clear=True),patch('subprocess.run',side_effect=subprocess.CalledProcessError(1,'cargo')) as run:
             with self.assertRaises(subprocess.CalledProcessError): runpy.run_path('hack/ci.py',run_name='__main__')
         self.assertEqual(run.call_count,1)
-
-    def test_sqlite_acceptance_rejects_activation_expiry_and_identity_drift(self):
-        packages=tomllib.loads(Path('Cargo.lock').read_text())['package']
-        today=deps.date(2026,11,13)
-        deps.check_sqlite_lock(packages, {'sqlx'}, today)
-        for active,day in [({'sqlx','sqlx-sqlite'},today),({'sqlx'},deps.date(2026,12,13))]:
-            with self.assertRaises(ValueError): deps.check_sqlite_lock(packages,active,day)
-        changed=copy.deepcopy(packages)
-        next(p for p in changed if p['name']=='libsqlite3-sys')['checksum']='unapproved'
-        with self.assertRaises(ValueError): deps.check_sqlite_lock(changed,{'sqlx'},today)

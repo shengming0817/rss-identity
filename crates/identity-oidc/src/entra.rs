@@ -159,10 +159,9 @@ impl HttpEntra {
         let now = Instant::now();
         if let Some(cached) = &entry.cached
             && cached.until > now
+            && let Some(key) = select_key(&cached.keys, p, kid)?
         {
-            if let Some(key) = select_key(&cached.keys, p, kid)? {
-                return Ok(key);
-            }
+            return Ok(key);
         }
         if entry.next_fetch_at > now {
             return Err(FederationError::Unavailable);

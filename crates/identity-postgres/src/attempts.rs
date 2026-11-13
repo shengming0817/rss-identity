@@ -56,7 +56,7 @@ impl AuthenticationPolicy {
         if record_capacity == 0
             || !(1..=1024).contains(&cleanup_batch)
             || claim_ttl.is_zero()
-            || claim_ttl.subsec_nanos() % 1000 != 0
+            || !claim_ttl.subsec_nanos().is_multiple_of(1000)
             || claim_ttl
                 .as_micros()
                 .checked_add(now.as_micros())
