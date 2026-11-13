@@ -35,7 +35,9 @@ pub struct Password(Zeroizing<String>);
 impl Password {
     pub fn new(value: String) -> Result<Self, PasswordError> {
         let value = Zeroizing::new(value);
-        if value.len() > PasswordPolicy::MAX_PASSWORD_BYTES || value.chars().count() < PasswordPolicy::MIN_CHARACTERS {
+        if value.len() > PasswordPolicy::MAX_PASSWORD_BYTES
+            || value.chars().count() < PasswordPolicy::MIN_CHARACTERS
+        {
             return Err(PasswordError::Invalid);
         }
         Ok(Self(value))
@@ -88,23 +90,51 @@ impl PasswordPolicy {
     pub const SALT_BYTES: usize = 16;
     pub const HASH_BYTES: usize = 32;
     fn argon2() -> Argon2<'static> {
-        Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13,
-            argon2::Params::new(Self::MEMORY_KIB, Self::ITERATIONS, Self::PARALLELISM, Some(Self::HASH_BYTES))
-                .expect("fixed Argon2 policy"))
+        Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(
+                Self::MEMORY_KIB,
+                Self::ITERATIONS,
+                Self::PARALLELISM,
+                Some(Self::HASH_BYTES),
+            )
+            .expect("fixed Argon2 policy"),
+        )
     }
     fn validate_encoding(value: &str) -> Result<(), PasswordError> {
         use base64::Engine;
-        if value.len() > 256 { return Err(PasswordError::Unavailable); }
-        let hash=PasswordHash::new(value).map_err(|_|PasswordError::Unavailable)?;
-        let salt=hash.salt.ok_or(PasswordError::Unavailable)?;
-        let output=hash.hash.ok_or(PasswordError::Unavailable)?;
-        let decoded=base64::engine::general_purpose::STANDARD_NO_PAD.decode(salt.as_str()).map_err(|_|PasswordError::Unavailable)?;
-        if hash.algorithm.as_str() != "argon2id" || hash.version != Some(19)
-            || hash.params.to_string() != format!("m={},t={},p={}",Self::MEMORY_KIB,Self::ITERATIONS,Self::PARALLELISM)
-            || decoded.len() != Self::SALT_BYTES || output.len() != Self::HASH_BYTES
+        if value.len() > 256 {
+            return Err(PasswordError::Unavailable);
+        }
+        let hash = PasswordHash::new(value).map_err(|_| PasswordError::Unavailable)?;
+        let salt = hash.salt.ok_or(PasswordError::Unavailable)?;
+        let output = hash.hash.ok_or(PasswordError::Unavailable)?;
+        let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(salt.as_str())
+            .map_err(|_| PasswordError::Unavailable)?;
+        if hash.algorithm.as_str() != "argon2id"
+            || hash.version != Some(19)
+            || hash.params.to_string()
+                != format!(
+                    "m={},t={},p={}",
+                    Self::MEMORY_KIB,
+                    Self::ITERATIONS,
+                    Self::PARALLELISM
+                )
+            || decoded.len() != Self::SALT_BYTES
+            || output.len() != Self::HASH_BYTES
             || base64::engine::general_purpose::STANDARD_NO_PAD.encode(&decoded) != salt.as_str()
-            || value != format!("$argon2id$v=19$m={},t={},p={}${}${}",Self::MEMORY_KIB,Self::ITERATIONS,Self::PARALLELISM,
-                salt,base64::engine::general_purpose::STANDARD_NO_PAD.encode(output.as_bytes())) {
+            || value
+                != format!(
+                    "$argon2id$v=19$m={},t={},p={}${}${}",
+                    Self::MEMORY_KIB,
+                    Self::ITERATIONS,
+                    Self::PARALLELISM,
+                    salt,
+                    base64::engine::general_purpose::STANDARD_NO_PAD.encode(output.as_bytes())
+                )
+        {
             return Err(PasswordError::Unavailable);
         }
         Ok(())
@@ -123,10 +153,17 @@ impl PasswordKdf {
     /// Reserve a finite number of equal-cost jobs in this process. All clones share the gate.
     /// Memory above the nominal Argon2 working sets is a host reservation for overhead,
     /// not an allocator limit or a process RSS guarantee.
-    pub fn new(max_concurrency: std::num::NonZeroUsize, reserved_memory_bytes: std::num::NonZeroU64) -> Result<Self, PasswordError> {
+    pub fn new(
+        max_concurrency: std::num::NonZeroUsize,
+        reserved_memory_bytes: std::num::NonZeroU64,
+    ) -> Result<Self, PasswordError> {
         let count = max_concurrency.get();
-        let nominal = u64::try_from(count).ok().and_then(|n| n.checked_mul(PasswordPolicy::MEMORY_BYTES));
-        if count > Semaphore::MAX_PERMITS || nominal.is_none_or(|bytes| bytes >= reserved_memory_bytes.get()) {
+        let nominal = u64::try_from(count)
+            .ok()
+            .and_then(|n| n.checked_mul(PasswordPolicy::MEMORY_BYTES));
+        if count > Semaphore::MAX_PERMITS
+            || nominal.is_none_or(|bytes| bytes >= reserved_memory_bytes.get())
+        {
             return Err(PasswordError::Invalid);
         }
         Ok(Self {
@@ -208,7 +245,13 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn closing_kdf_waits_for_actual_work_and_rejects_new_work() {
-        let kdf = Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
+        let kdf = Arc::new(
+            PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        );
         let (started, seen) = tokio::sync::oneshot::channel();
         let (release, wait) = std::sync::mpsc::channel();
         let worker = kdf.clone();
@@ -243,7 +286,13 @@ mod tests {
     async fn cancelled_waiter_does_not_release_running_work() {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (end_tx, end_rx) = std::sync::mpsc::channel();
-        let kdf = Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
+        let kdf = Arc::new(
+            PasswordKdf::new(
+                std::num::NonZeroUsize::new(2).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        );
         let worker = kdf.clone();
         let task = tokio::spawn(async move {
             worker
@@ -258,7 +307,7 @@ mod tests {
         });
         started_rx.await.unwrap();
         task.abort();
-        let remaining = kdf.gate.clone().try_acquire_many_owned(3).unwrap();
+        let remaining = kdf.gate.clone().try_acquire_many_owned(1).unwrap();
         assert!(matches!(
             kdf.compute(|| Ok(())).await,
             Err(PasswordError::Busy)
@@ -266,7 +315,7 @@ mod tests {
         end_tx.send(()).unwrap();
         drop(remaining);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while kdf.gate.available_permits() != 4 {
+            while kdf.gate.available_permits() != 2 {
                 tokio::task::yield_now().await;
             }
         })
@@ -276,7 +325,7 @@ mod tests {
             kdf.compute::<()>(|| panic!("test worker failure")).await,
             Err(PasswordError::Unavailable)
         ));
-        assert_eq!(kdf.gate.available_permits(), 4);
+        assert_eq!(kdf.gate.available_permits(), 2);
     }
 }
 

@@ -13,13 +13,23 @@
 
 ## 密码防护与资源预算
 
-Cookie 登录、Bearer 登录、密码重认证及本人改密共用密码防护。每租户／规范化登录名的错误凭据从首次失败起累计固定 10 分钟，允许 5 次失败；第 5 次仍是认证失败，随后等待该窗口剩余时间。成功密码认证清零，拒绝请求不延长窗口；密码重置和受控维护恢复清理失败状态并作废在途验证。未知、禁用账号使用相同公开行为。多来源共享账号窗口，故恶意失败仍可能暂时阻止合法登录；现有会话不因此撤销。宿主应保留可用的管理会话及受控维护恢复路径。
+Cookie 登录、Bearer 登录、密码重认证及本人改密共用密码防护。默认每租户／规范化登录名的认证拒绝从首次失败起累计 10 分钟，允许 5 次；达到所选阈值后等待该窗口剩余时间。成功密码认证清零，拒绝请求不延长窗口；密码重置和受控维护恢复清理失败状态并作废在途验证。未知、禁用账号使用相同公开行为。多来源共享账号窗口，故恶意失败仍可能暂时阻止合法登录；现有会话不因此撤销。宿主应保留可用的管理会话及受控维护恢复路径。
 
-来源预算独立计算全部准入认证尝试，成功不退款；每租户／可信来源仍为 30 次／300 秒。来源来自真实连接或已验证网关链，不接受调用者自选。账号额度修复不绕过此资源保护；KDF 仍共享最多 4 个在执行的计算，计算取消后容量由真正完成的任务释放。这些数值为固定策略，无运行时覆盖或关闭开关：账号阈值和窗口为产品选择，来源和 KDF 延续既有资源预算，不表示已完成特定部署的容量验证。定义见 [密码失败策略](../../crates/identity-postgres/src/password_attempts.rs)、[来源预算](../../crates/identity-postgres/src/attempts.rs) 和 [KDF](../../crates/identity-core/src/account.rs)。
+来源预算独立计算全部准入认证尝试，成功不退款；来源来自真实连接或已验证网关链。`AuthenticationPolicy` 由宿主通过 `AuthorityConfig::with_authentication_policy` 选择三类阈值、窗口、两表合计记录容量、清理批次和有限 claim TTL。阈值调整直接比较保留的历史计数；窗口变更只影响新窗口，已有 expiry 不改写。各实例须由宿主协调使用一致策略，数据库锁只保证共享计数的串行更新。
 
-同一登录名的并发校验返回暂不可用；数据库校验许可最多 60 秒且受请求剩余期限约束，过期结果不得签发会话。密码计算期间不持有租户锁。取消和基础设施失败不计作密码错误，来源额度不退回。数据库状态有界，耗尽或计算忙碌返回 503，不伪造恢复时间。
+`PasswordKdf::new(concurrency, reserved_memory_bytes)` 要求非零参数和名义 Argon2 工作区之外的开销余量；该预留不是进程 RSS 硬限制。全部克隆共享 gate，调用取消后 permit/tracker 仍由真正执行完毕的 blocking 工作释放。密码强度和 PHC 格式固定在 `PasswordPolicy`，不能通过容量配置降低。
+
+同一登录名的并发校验返回暂不可用；claim TTL 与原请求截止分别生效，过期 owner 不能结算或签发会话。参考宿主从操作预算提供 TTL，不保留另一个隐藏截断。密码计算期间不持有租户锁。取消和基础设施失败不计作认证拒绝，已提交的来源额度不退回。容量耗尽返回明确的忙碌结果，不伪造恢复时间。过期接管可能与旧进程尚未结束的 blocking 工作重叠，fencing 保护结算，本地 gate 保护本进程资源。
 
 正常会话内调用复用已有凭据，不重复密码登录。无人值守接入优先使用消费产品提供的最小权限机器凭据；Identity Bearer 仍通过密码签发并受相同防护，不能作为反复使用管理员密码的后台任务设计。
+
+## 执行与事实预算
+
+HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` 及 enterprise exchange 显式接收 RSS `Deadline`；整个调用链只消耗该绝对截止，`OperationDeadline` 仅在数据库等边界提供当时的剩余时长。
+
+组与部门快照各数量支持 1024；部门树深仍为 16。`with_auth_facts_budget` 选择完整 JSONB 表示的字节预算，数量合法不保证任意长名称组合都能装入预算。普通资料的 raw JSON、HTTP 包络与 JSONB 预算各有表示含义，不共用一个数值。
+
+`with_future_skew`、`with_operation_proof_lifetime` 和 `PlatformVerifier::challenge_seconds` 持有相应时间选择。策略只决定新签发内容，已有事实、证明和在途登记执行冻结期限；任何本地预算都不能延长签名 exp、会话或已存 expiry。
 
 ## 请求与管理授权
 
@@ -72,7 +82,7 @@ Keycloak 使用内置 JSON UserAttributeMapper，把管理员维护的单个完�
 
 ## 可选 OIDC 与 HTTP 装配
 
-Federation 接收 Authority、上游适配器、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
+Federation 接收 Authority、上游适配器、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。`AuthorityConfig` 接收宿主明确给定的各租户 `ExecutionBinding`；连接只绑定 storage，每次事务绑定 tenant/epoch，不从数据库自动更新代际。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
 
 ```rust,ignore
 let routes = rss_identity_http_axum::router(authority, http.clone())?
@@ -110,7 +120,7 @@ async fn client_address(
 
 `RevalidatedAccount` 是短期、不可序列化的人员事实，不能替代 `AuthenticatedSession`。在业务最终绑定前通过 `recheck` 检查账户、成员、provider epoch 与关联当前状态；它不会延长原证明期限。长期业务任务须用当前 token 重新验证，不保存此证明或借其延长身份。宿主持有资源权限、设备身份、同意及注册事务；Identity 不对设备授权。
 
-JWKS 只从固定 Microsoft tenant 地址经有界、禁重定向的 HTTPS 取回，公共 key 缓存最多 60 秒，过期后重新获取；缓存期间的新 key 或移除 key 可能分别被拒绝或继续用于验签，最长受该缓存期限约束。token 有效期与本地 proof 期限仍单独检查。外部 Entra 撤权依赖签名 token 的剩余期限，本接口不承诺即时 CAE；本地禁用及配置变更在复核时立即拒绝。TOU 阶段可没有设备 claim，实际设备注册必须由 MDM 的操作 profile 要求并绑定设备 claim。原生 access token 不使用浏览器 OIDC nonce。
+JWKS 只从固定 Microsoft tenant 地址经有界、禁重定向的 HTTPS 取回。`TransportPolicy` 选择请求、连接、响应字节和键数预算；`JwksCachePolicy` 选择 TTL、租户容量和刷新冷却，原生 token 输入预算单独提供。有效缓存遇到未知 kid 时，在每租户锁内按冷却规则刷新一次并完整验签；失败和取消同样进入冷却，有效旧键可以继续使用，过期失败则拒绝。冷却是实例内语义，不承诺跨实例全局单次刷新。token 有效期与本地 proof 期限仍单独检查。外部 Entra 撤权依赖签名 token 的剩余期限，本接口不承诺即时 CAE；本地禁用及配置变更在复核时立即拒绝。TOU 阶段可没有设备 claim，实际设备注册必须由 MDM 的操作 profile 要求并绑定设备 claim。原生 access token 不使用浏览器 OIDC nonce。
 
 ## 认证审计交付
 
@@ -153,8 +163,8 @@ RSS schema/权限保留，不代表 Identity 仍发布审计 Outbox 消息。Led
 Provider claims 使用当前结构 `profile: {"extensionsClaim": "attributes", "maxAgeSeconds": 14400}`，
 常用资料读取标准 `name/preferred_username/email/email_verified`，不再配置任意 email 映射。
 `extensionsClaim` 指向管理员批准的非凭据发布对象，不能指向原始 token 或安全声明；没有配置时不采集扩展。
-动态对象默认最多 64 KiB、256 个成员、8 层、每数组 128 项；宿主可通过 `AuthorityConfig::with_profile_limits`
-进一步收紧预算及 TTL。业务 key 不需要增加 Rust 字段或数据库列。
+动态对象支持 1024 个成员、每数组 1024 项，仍受 64 KiB 和 8 层约束；宿主通过 `AuthorityConfig::with_profile_limits`
+选择更小资源预算及有限正 TTL。成员/数组与字节预算共同生效。业务 key 不需要增加 Rust 字段或数据库列。
 
 成功登录原子提交资料观察、会话绑定和安全事件。普通资料非法或缺失不默认拒绝登录；签名、主体绑定、存储损坏与持久化失败仍拒绝。
 `Authority::current_profile(&session, deadline)` 只提供该会话本次接受的观察；平台未取得属性时返回 unavailable。
@@ -171,7 +181,7 @@ refresh、idle 和 GET 不重新采集。组与部门的独立短期合同不变
 HTTP 本地资料位于 `/api/v1/identity/tenants/{tenant}/accounts/{principal}/profile`，
 PUT 使用 operationId、expectedRevision、value（必须出现，显式 null 删除），GET 返回 revision 与 value。
 响应丢失时查询其 `/operations/{operationId}`；409 后重新读取，不自动重放写。
-每账户最多保留 4096 条本地资料操作回执；达到容量后新操作拒绝（Rejected），原回执仍可查询和精确重放。
+每账户回执容量由 `AuthorityConfig::with_profile_receipt_capacity` 选择，默认 4096。达到容量返回 `ProfileReceiptCapacityReached`（HTTP 409，`profile_receipt_capacity_reached`）；降低容量保留旧回放，提高容量恢复新操作。
 回执不按时间删除，不重用 operationId；账户删除时随账户清理。
 本地修改只更新本地 authority，下次成功登录才产生新观察；首期没有本地邮箱验证声明。
 
@@ -214,7 +224,7 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 调用方保持同一事务直至提交或回滚，不能在已持有宿主授权锁后调用该接口。
 
 
-聚合某个账户的 latest 资料时，先用 `latest_profile_sources` 按目标账户分页发现观察来源，再调用 `latest_profile`。
+聚合某个账户的 latest 资料时，先用 `latest_profile_sources` 提供显式 limit、按目标账户分页发现观察来源，再调用 `latest_profile`。
 来源发现与值读取均执行 `ReadLatestProfile` 策略；不从查看者登录来源、业务字段映射或邮箱猜测目标来源。
 来源定位符不是认证证明，也不保证观察仍有效；值读取继续执行当前来源、账户和有效期限复核。
 

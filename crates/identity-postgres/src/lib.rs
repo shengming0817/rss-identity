@@ -1,11 +1,11 @@
 //! Embeddable account/session services over a host-owned PostgreSQL runtime.
 mod attempts;
-mod password_attempts;
 mod audit;
 mod auth_facts;
 mod credentials;
 mod department;
 mod entra;
+mod password_attempts;
 pub use entra::{EntraAuthority, RevalidatedAccount, VerifiedExternalSubject};
 mod session_checks;
 #[cfg(feature = "test-support")]
@@ -90,14 +90,29 @@ pub struct AuthorityConfig {
     provider_capacity: std::num::NonZeroU16,
 }
 impl AuthorityConfig {
-    pub fn with_provider_capacity(mut self, capacity: std::num::NonZeroU16) -> Result<Self,AuthorityError> {
-        if capacity.get()>rss_identity_core::federation::MAX_PROVIDERS {return Err(AuthorityError::Configuration);}
-        self.provider_capacity=capacity; Ok(self)
+    pub fn with_provider_capacity(
+        mut self,
+        capacity: std::num::NonZeroU16,
+    ) -> Result<Self, AuthorityError> {
+        if capacity.get() > rss_identity_core::federation::MAX_PROVIDERS {
+            return Err(AuthorityError::Configuration);
+        }
+        self.provider_capacity = capacity;
+        Ok(self)
     }
 
-    pub fn with_future_skew(mut self, seconds: u32) -> Self { self.future_skew_seconds=seconds; self }
-    pub fn with_operation_proof_lifetime(mut self, seconds: std::num::NonZeroU32) -> Self { self.operation_proof_seconds=seconds; self }
-    pub fn with_auth_facts_budget(mut self, bytes: std::num::NonZeroU32) -> Self { self.max_auth_facts_bytes=bytes; self }
+    pub fn with_future_skew(mut self, seconds: u32) -> Self {
+        self.future_skew_seconds = seconds;
+        self
+    }
+    pub fn with_operation_proof_lifetime(mut self, seconds: std::num::NonZeroU32) -> Self {
+        self.operation_proof_seconds = seconds;
+        self
+    }
+    pub fn with_auth_facts_budget(mut self, bytes: std::num::NonZeroU32) -> Self {
+        self.max_auth_facts_bytes = bytes;
+        self
+    }
 
     pub fn with_authentication_policy(mut self, policy: AuthenticationPolicy) -> Self {
         self.authentication = policy;
@@ -132,8 +147,9 @@ impl AuthorityConfig {
         bindings.sort_by_key(|binding| binding.tenant().to_string());
         if bindings.is_empty()
             || bindings.len() > 1024
-            || bindings.windows(2).any(|pair| pair[0].tenant() == pair[1].tenant()
-                || pair[0].storage() != pair[1].storage())
+            || bindings.windows(2).any(|pair| {
+                pair[0].tenant() == pair[1].tenant() || pair[0].storage() != pair[1].storage()
+            })
         {
             return Err(AuthorityError::Configuration);
         }
@@ -150,7 +166,10 @@ impl AuthorityConfig {
             future_skew_seconds: 30,
             operation_proof_seconds: std::num::NonZeroU32::new(300).expect("positive default"),
             max_auth_facts_bytes: std::num::NonZeroU32::new(32768).expect("positive default"),
-            provider_capacity: std::num::NonZeroU16::new(rss_identity_core::federation::MAX_PROVIDERS).expect("positive capacity"),
+            provider_capacity: std::num::NonZeroU16::new(
+                rss_identity_core::federation::MAX_PROVIDERS,
+            )
+            .expect("positive capacity"),
         })
     }
 }
@@ -265,9 +284,13 @@ impl Authority {
         let bundle = authority.runtime.clone();
         // Schema/profile are global, but every declared tenant has its own runtime fence.
         for binding in bundle.bindings.iter().skip(1) {
-            Self::read_bundle(bundle.clone(), binding.tenant(), budget.remaining(), true, |_| {
-                Box::pin(async { Ok(()) })
-            })
+            Self::read_bundle(
+                bundle.clone(),
+                binding.tenant(),
+                budget.remaining(),
+                true,
+                |_| Box::pin(async { Ok(()) }),
+            )
             .await?;
         }
         Ok(authority)
@@ -276,7 +299,12 @@ impl Authority {
         self.instance
     }
     pub fn active_tenants(&self) -> Result<Vec<TenantId>, AuthorityError> {
-        Ok(self.runtime.bindings.iter().map(|binding| binding.tenant()).collect())
+        Ok(self
+            .runtime
+            .bindings
+            .iter()
+            .map(|binding| binding.tenant())
+            .collect())
     }
     pub fn tenant_active(&self, tenant: TenantId) -> bool {
         self.runtime.binding(tenant).is_some()

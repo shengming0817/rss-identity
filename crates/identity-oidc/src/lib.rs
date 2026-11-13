@@ -32,20 +32,34 @@ pub struct TransportPolicy {
 }
 impl TransportPolicy {
     /// Validate technical ranges; callers choose deployment capacity.
-    pub fn new(request_timeout: Duration, connect_timeout: Duration,
-        max_response_bytes: usize, max_jwks_keys: usize) -> Result<Self, FederationError> {
+    pub fn new(
+        request_timeout: Duration,
+        connect_timeout: Duration,
+        max_response_bytes: usize,
+        max_jwks_keys: usize,
+    ) -> Result<Self, FederationError> {
         let now = std::time::Instant::now();
-        if request_timeout.is_zero() || connect_timeout.is_zero()
+        if request_timeout.is_zero()
+            || connect_timeout.is_zero()
             || now.checked_add(request_timeout).is_none()
             || now.checked_add(connect_timeout).is_none()
-            || max_response_bytes == 0 || max_jwks_keys == 0 {
+            || max_response_bytes == 0
+            || max_jwks_keys == 0
+        {
             return Err(FederationError::Configuration);
         }
-        Ok(Self { request_timeout, connect_timeout, max_response_bytes, max_jwks_keys })
+        Ok(Self {
+            request_timeout,
+            connect_timeout,
+            max_response_bytes,
+            max_jwks_keys,
+        })
     }
 }
 fn remaining(deadline: rss_request_context::Deadline) -> Result<Duration, FederationError> {
-    deadline.remaining(std::time::Instant::now()).filter(|d| !d.is_zero())
+    deadline
+        .remaining(std::time::Instant::now())
+        .filter(|d| !d.is_zero())
         .ok_or_else(|| failure(ProviderStage::Exchange, ProviderReason::Timeout))
 }
 /// Host-approved interpretation of verified authentication facts. Not IdP admission.
@@ -91,7 +105,10 @@ pub struct HttpOidc {
 }
 impl HttpOidc {
     /// Select the accepted signed-time skew; it never extends token expiry.
-    pub fn with_future_skew(mut self, seconds: u32) -> Self { self.future_skew_seconds=seconds; self }
+    pub fn with_future_skew(mut self, seconds: u32) -> Self {
+        self.future_skew_seconds = seconds;
+        self
+    }
 
     /// Production uses HTTPS and vetted public or explicitly authorized private addresses.
     /// Every DNS answer is checked against the current tenant/issuer/client permission.
@@ -360,10 +377,16 @@ impl<'a> AsyncHttpClient<'a> for Transport {
             {
                 return Err(failure(self.stage(), ProviderReason::EgressDenied));
             }
-            let mut request: reqwest::Request = request.try_into()
+            let mut request: reqwest::Request = request
+                .try_into()
                 .map_err(|_| failure(self.stage(), ProviderReason::InvalidResponse))?;
-            *request.timeout_mut() = Some(remaining(self.deadline)?.min(self.policy.request_timeout));
-            let mut response = self.http.execute(request).await.map_err(|e| self.request_error(e))?;
+            *request.timeout_mut() =
+                Some(remaining(self.deadline)?.min(self.policy.request_timeout));
+            let mut response = self
+                .http
+                .execute(request)
+                .await
+                .map_err(|e| self.request_error(e))?;
             let status = response.status();
             if status.is_server_error() || status.as_u16() == 429 {
                 return Err(failure(self.stage(), ProviderReason::Unavailable));
@@ -523,7 +546,9 @@ impl UpstreamOidc for HttpOidc {
                 &metadata,
                 m.nonce.as_str(),
                 client_id.as_str(),
-                credentials.client_secret(), self.future_skew_seconds)?;
+                credentials.client_secret(),
+                self.future_skew_seconds,
+            )?;
             let all = serde_json::to_value(&claims).map_err(|_| FederationError::Claims)?;
 
             let groups = mapped_groups(c.claims().groups.as_deref(), &all)?;

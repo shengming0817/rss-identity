@@ -28,7 +28,7 @@ python3 hack/operate.py --deployment /private/rendered --project identity-main o
 
 操作输出是脱敏 JSON：`operation`、`stage`、`reason`、`outcomeKnown`、`status`。前置拒绝与只读核验失败标识已知结果；写入进程超时/失败或排空未确认标识未知，先运行 `verify`、`verify-keys` 或只读 `docker inspect`，不可自动重试写入。原始 stderr、配置和秘密值不进入诊断。
 
-配置形状以 [RuntimeConfig](../../app/identity/src/config.rs) 和 [部署示例](../../deployment/deploy.example.json) 为准。镜像内 `identity-migrate --describe` 查询该版本 schema，`identity-server --acceptance-profile` 查询实际策略；已安装状态使用上述 `verify`，不能只比较版本号。旧配置和不匹配安装直接拒绝。
+配置形状以 [RuntimeConfig](../../app/identity/src/config.rs) 和 [部署示例](../../deployment/deploy.example.json) 为准。镜像内 `identity-migrate --describe` 查询该版本 schema，`identity-server --acceptance-profile < runtime.json` 从所选配置查询非秘密策略（不读取凭据文件）；已安装状态使用上述 `verify`，不能只比较版本号。旧配置和不匹配安装直接拒绝。
 
 OIDC 存在时必须显式提供 `privateProviders`，空数组表示仅公网。宿主可按 `tenantId`、完整 `issuer`、`clientId` 精确授权 RFC1918/IPv6 ULA CIDR；数量与格式边界由配置校验持有；网段须规范化且不重复。租户必须属于本实例配置。CIDR 不携带主机位，不接受通配 issuer；租户 ProviderSettings 无网络授权字段。例：
 
@@ -56,3 +56,7 @@ DNS 的全部 A/AAAA 必须属于公网基线或该绑定授权的私网；reqwe
 仅支持全新安装；Audit 结构或权限不匹配时启动失败。追加失败使业务事务失败，提交未知不能解释为
 回滚或自动重试许可。关闭时由原 HTTP/业务事务及 runtime 生命周期排空，不存在审计 worker。
 Plain 提供事务可靠性，不宣称 HMAC、WORM 或对数据库管理员的独立防篡改。
+
+参考配置中的 `authority`、`passwordWork`、`http`、数据库池参数及 `budgets` 直接进入各 owner；必填字段见现有部署示例，不接受旧字段或缺省旧配置。配置文件预算为 16 MiB，CA 与秘密文件继续使用各自限制。网关期限由请求和资源预算生成，资料包络允许 96 KiB；它们不改变普通资料 64 KiB 约束。
+
+调整共享认证策略时，由部署 owner 协调各实例排空并使用一致配置。维护、安装和 rekey 各自只有一次操作截止，未知结算不自动重试；连接关闭结果与业务结算分别记录。只有新 schema 安装受支持，旧库迁移属于消费产品的独立交付。

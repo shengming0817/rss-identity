@@ -335,7 +335,7 @@ fn login_request(cookie: Option<&str>, csrf: Option<&str>) -> Request<Body> {
 }
 async fn body(response: Response) -> anyhow::Result<Value> {
     Ok(serde_json::from_slice(
-        &to_bytes(response.into_body(), 16_384).await?,
+        &to_bytes(response.into_body(), 131_072).await?,
     )?)
 }
 async fn successful_login(app: &Router) -> anyhow::Result<(String, String, Value)> {
@@ -1293,7 +1293,13 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     let (cookie, csrf, _) = successful_login(&app).await?;
     let path = format!("accounts/{}/profile", f.key.principal.as_uuid());
     let operation = uuid::Uuid::new_v4();
-    let input = json!({"operationId":operation,"expectedRevision":0,"value":{"displayName":"Name","username":null,"email":null,"extensions":{"remote":false},"maxAgeSeconds":60}});
+    let mut extensions = serde_json::Map::new();
+    extensions.insert("remote".into(), json!(false));
+    for i in 0..1022 {
+        extensions.insert(format!("field{i}"), json!(i));
+    }
+    extensions.insert("array".into(), json!(vec![0; 1024]));
+    let input = json!({"operationId":operation,"expectedRevision":0,"value":{"displayName":"Name","username":null,"email":null,"extensions":extensions,"maxAgeSeconds":60}});
     assert_eq!(
         app.clone()
             .oneshot(request("PUT", &path, Some(&cookie), None, input.clone()))

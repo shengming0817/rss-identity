@@ -114,12 +114,17 @@ fn jsonb_unrepresentable_strings_are_invalid_at_every_depth() {
 
 #[test]
 fn expanded_members_and_arrays_round_trip_with_the_original_byte_budget() {
-    let mut object=serde_json::Map::new();
-    for i in 0..1023 { object.insert(format!("key{i}"),json!(i)); }
-    object.insert("array".into(),json!(vec![0;1024]));
-    let extensions=Extensions::try_from(json!(object)).unwrap();
-    let bytes=serde_json::to_vec(&extensions).unwrap();
-    assert!(bytes.len()<MAX_BYTES);
-    assert_eq!(serde_json::from_slice::<Extensions>(&bytes).unwrap(),extensions);
+    let mut object = serde_json::Map::new();
+    for i in 0..1023 {
+        object.insert(format!("key{i}"), json!(i));
+    }
+    object.insert("array".into(), json!(vec![0; 1024]));
+    let extensions = Extensions::try_from(json!(object)).unwrap();
+    let bytes = serde_json::to_vec(&extensions).unwrap();
+    assert!(bytes.len() < MAX_BYTES);
+    assert_eq!(
+        serde_json::from_slice::<Extensions>(&bytes).unwrap(),
+        extensions
+    );
     assert!(Extensions::try_from(json!({"array":vec!["x".repeat(65);1024]})).is_err());
 }

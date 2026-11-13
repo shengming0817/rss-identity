@@ -187,9 +187,15 @@ impl Authority {
             .read_sql(tenant, budget.remaining(), move |c| {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
-                    let window =
-                        crate::personnel::read_window(c, tenant, None, None, budget.0.instant(), None)
-                            .await?;
+                    let window = crate::personnel::read_window(
+                        c,
+                        tenant,
+                        None,
+                        None,
+                        budget.0.instant(),
+                        None,
+                    )
+                    .await?;
                     let expires = window.expires;
                     let relation = crate::personnel::session_relation(
                         instance,

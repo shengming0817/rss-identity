@@ -28,12 +28,15 @@ fn browser() -> anyhow::Result<Client> {
         .build()?)
 }
 fn provider(issuer: &str) -> anyhow::Result<(HttpOidc, ProviderSettings)> {
-    let p = HttpOidc::for_loopback_test(vec![TrustedAssuranceProfile {
-        keycloak_totp: false,
-        tenant: tenant(),
-        issuer: issuer.into(),
-        client_id: "identity-test".into(),
-    }], transport_policy())?;
+    let p = HttpOidc::for_loopback_test(
+        vec![TrustedAssuranceProfile {
+            keycloak_totp: false,
+            tenant: tenant(),
+            issuer: issuer.into(),
+            client_id: "identity-test".into(),
+        }],
+        transport_policy(),
+    )?;
     let c = (rss_identity_core::federation::ProviderSettingsInput {
         issuer: issuer.into(),
         client_id: "identity-test".into(),
@@ -89,7 +92,9 @@ async fn prepare(p: &HttpOidc, c: &ProviderSettings) -> anyhow::Result<(Url, Pro
             &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
                 .unwrap(),
             &material,
-            rss_identity_core::assurance::AuthenticationMode::Login, upstream_deadline())
+            rss_identity_core::assurance::AuthenticationMode::Login,
+            upstream_deadline(),
+        )
         .await?;
     Ok((Url::parse(&url)?, material))
 }
@@ -113,7 +118,9 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
             &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
                 .unwrap(),
             material,
-            Zeroizing::new(code.clone()), upstream_deadline())
+            Zeroizing::new(code.clone()),
+            upstream_deadline(),
+        )
         .await?;
     assert_eq!(claims.issuer, issuer);
     assert!(claims.subject.validate().is_ok());
@@ -128,7 +135,9 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
             &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
                 .unwrap(),
             material,
-            Zeroizing::new(code), upstream_deadline())
+            Zeroizing::new(code),
+            upstream_deadline()
+        )
         .await
         .is_err()
     );
@@ -188,7 +197,9 @@ async fn real_provider_flows() -> anyhow::Result<()> {
                     "fixture-secret".into(),
                     None
                 )
-                .unwrap(), upstream_deadline())
+                .unwrap(),
+                upstream_deadline()
+            )
             .await
             .is_err()
         );
@@ -202,9 +213,19 @@ fn tenant() -> rss_request_context::TenantId {
 }
 
 fn transport_policy() -> rss_identity_oidc::TransportPolicy {
-    rss_identity_oidc::TransportPolicy::new(std::time::Duration::from_secs(5),std::time::Duration::from_secs(3),1024*1024,128).unwrap()
+    rss_identity_oidc::TransportPolicy::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(3),
+        1024 * 1024,
+        128,
+    )
+    .unwrap()
 }
 
 fn upstream_deadline() -> rss_request_context::Deadline {
-    rss_request_context::Deadline::at(std::time::Instant::now().checked_add(std::time::Duration::from_secs(30)).unwrap())
+    rss_request_context::Deadline::at(
+        std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(30))
+            .unwrap(),
+    )
 }

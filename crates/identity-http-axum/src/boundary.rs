@@ -43,8 +43,11 @@ impl HttpConfig {
 pub(crate) struct RequestBudget(rss_request_context::Deadline);
 impl RequestBudget {
     pub fn new(timeout: Duration) -> Result<Self, HttpError> {
-        if timeout.is_zero() { return Err(HttpError::request_timeout()); }
-        Instant::now().checked_add(timeout)
+        if timeout.is_zero() {
+            return Err(HttpError::request_timeout());
+        }
+        Instant::now()
+            .checked_add(timeout)
             .map(|at| Self(rss_request_context::Deadline::at(at)))
             .ok_or_else(HttpError::request_timeout)
     }

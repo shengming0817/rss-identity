@@ -30,28 +30,44 @@ pub fn preflight(config: &MigrationConfig) -> Result<(), AppError> {
 /// Read-only snapshot verification; never installs, initializes, repairs or increments a fence.
 pub async fn verify(config: MigrationConfig) -> Result<(), AppError> {
     let instance = validate(&config)?;
-    let cutoff=crate::config::cutoff(config.budgets.migration_seconds)?;
-    let mut c = tokio::time::timeout_at(cutoff.instant().into(),PgConnection::connect_with(&config.database.sqlx()?))
-        .await.map_err(|_|AppError::Connection)?
-        .map_err(|_| AppError::Connection)?;
+    let cutoff = crate::config::cutoff(config.budgets.migration_seconds)?;
+    let mut c = tokio::time::timeout_at(
+        cutoff.instant().into(),
+        PgConnection::connect_with(&config.database.sqlx()?),
+    )
+    .await
+    .map_err(|_| AppError::Connection)?
+    .map_err(|_| AppError::Connection)?;
     let result = tokio::time::timeout_at(cutoff.instant().into(), async {
         let mut tx = c.begin().await?;
-        sqlx::raw_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY").execute(&mut *tx).await?;
-        watchdog(&mut tx,cutoff).await?;
+        sqlx::raw_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+        watchdog(&mut tx, cutoff).await?;
         verify_storage(&mut tx, &config.storage).await?;
         crate::audit::verify(&mut tx, &config).await?;
-        for (role, profile) in [(&config.runtime_role, AuthorityProfile::Runtime), (&config.maintenance_role, AuthorityProfile::Maintenance)] {
+        for (role, profile) in [
+            (&config.runtime_role, AuthorityProfile::Runtime),
+            (&config.maintenance_role, AuthorityProfile::Maintenance),
+        ] {
             let switch = format!("SET LOCAL ROLE \"{}\"", role.replace('"', "\"\""));
-            sqlx::raw_sql(sqlx::AssertSqlSafe(switch)).execute(&mut *tx).await?;
-            rss_identity_postgres::verify_profile(&mut tx, profile, instance).await.map_err(|_| sqlx::Error::Protocol("installation verification failed".into()))?;
-            sqlx::raw_sql("SET LOCAL ROLE NONE").execute(&mut *tx).await?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(switch))
+                .execute(&mut *tx)
+                .await?;
+            rss_identity_postgres::verify_profile(&mut tx, profile, instance)
+                .await
+                .map_err(|_| sqlx::Error::Protocol("installation verification failed".into()))?;
+            sqlx::raw_sql("SET LOCAL ROLE NONE")
+                .execute(&mut *tx)
+                .await?;
         }
         tx.rollback().await
-    }).await;
+    })
+    .await;
     let outcome = result
         .map_err(|_| AppError::Migration)
         .and_then(|r| r.map_err(|_| AppError::Migration));
-    finish_installation(outcome, c.close(),config.budgets.resource()).await
+    finish_installation(outcome, c.close(), config.budgets.resource()).await
 }
 pub(crate) async fn verify_storage(
     c: &mut PgConnection,
@@ -87,10 +103,14 @@ pub(crate) async fn verify_storage(
 pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
     let instance = validate(&config)?;
     let tenants = config.storage.tenants()?;
-    let cutoff=crate::config::cutoff(config.budgets.migration_seconds)?;
-    let mut c = tokio::time::timeout_at(cutoff.instant().into(),PgConnection::connect_with(&config.database.sqlx()?))
-        .await.map_err(|_|AppError::Connection)?
-        .map_err(|_| AppError::Connection)?;
+    let cutoff = crate::config::cutoff(config.budgets.migration_seconds)?;
+    let mut c = tokio::time::timeout_at(
+        cutoff.instant().into(),
+        PgConnection::connect_with(&config.database.sqlx()?),
+    )
+    .await
+    .map_err(|_| AppError::Connection)?
+    .map_err(|_| AppError::Connection)?;
     let result = tokio::time::timeout_at(cutoff.instant().into(), async {
         let mut tx = c.begin().await?;
         watchdog(&mut tx,cutoff).await?;
@@ -149,14 +169,27 @@ pub async fn install(config: MigrationConfig) -> Result<(), AppError> {
     let outcome = result
         .map_err(|_| AppError::Migration)
         .and_then(|r| r.map_err(|_| AppError::Migration));
-    finish_installation(outcome, c.close(),config.budgets.resource()).await
+    finish_installation(outcome, c.close(), config.budgets.resource()).await
 }
 
-pub(crate) async fn watchdog(c: &mut PgConnection, cutoff: rss_request_context::Deadline) -> Result<(),sqlx::Error> {
-    let remaining=cutoff.remaining(std::time::Instant::now()).filter(|d|!d.is_zero()).ok_or_else(||sqlx::Error::Protocol("operation deadline elapsed".into()))?;
-    let millis=i32::try_from(remaining.as_micros().div_ceil(1000)).map_err(|_|sqlx::Error::Protocol("SQL watchdog cannot represent remaining budget".into()))?;
-    let value=format!("{millis}ms");
-    sqlx::query("SELECT set_config('statement_timeout',$1,true),set_config('lock_timeout',$1,true)").bind(value).execute(c).await?;
+pub(crate) async fn watchdog(
+    c: &mut PgConnection,
+    cutoff: rss_request_context::Deadline,
+) -> Result<(), sqlx::Error> {
+    let remaining = cutoff
+        .remaining(std::time::Instant::now())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| sqlx::Error::Protocol("operation deadline elapsed".into()))?;
+    let millis = i32::try_from(remaining.as_micros().div_ceil(1000)).map_err(|_| {
+        sqlx::Error::Protocol("SQL watchdog cannot represent remaining budget".into())
+    })?;
+    let value = format!("{millis}ms");
+    sqlx::query(
+        "SELECT set_config('statement_timeout',$1,true),set_config('lock_timeout',$1,true)",
+    )
+    .bind(value)
+    .execute(c)
+    .await?;
     Ok(())
 }
 
@@ -166,10 +199,7 @@ async fn finish_installation(
     close_timeout: std::time::Duration,
 ) -> Result<(), AppError> {
     // Connection shutdown is independent of commit acknowledgement. Never rewrite settlement.
-    if !matches!(
-        tokio::time::timeout(close_timeout, close).await,
-        Ok(Ok(()))
-    ) {
+    if !matches!(tokio::time::timeout(close_timeout, close).await, Ok(Ok(()))) {
         eprintln!("component=migration cleanup=unconfirmed");
     }
     outcome
@@ -185,7 +215,7 @@ mod tests {
         for role in ["".to_owned(), "x".repeat(64), "bad\0role".to_owned()] {
             let config = serde_json::from_value(serde_json::json!({
                 "formatVersion": 5, "audit": {"ownerRole":"identity_audit_owner"}, "instanceId": runtime["instanceId"],
-                "storage": runtime["storage"], "database": runtime["database"],
+                "storage": runtime["storage"], "database": runtime["database"], "budgets": runtime["budgets"],
                 "runtimeRole": role, "maintenanceRole": "maintenance"
             }))
             .unwrap();
@@ -198,18 +228,31 @@ mod tests {
     #[tokio::test]
     async fn cleanup_failure_preserves_confirmed_and_unknown_installation_outcomes() {
         assert!(
-            finish_installation(Ok(()), async { Err(sqlx::Error::PoolClosed) }, std::time::Duration::from_millis(20))
-                .await
-                .is_ok()
+            finish_installation(
+                Ok(()),
+                async { Err(sqlx::Error::PoolClosed) },
+                std::time::Duration::from_millis(20)
+            )
+            .await
+            .is_ok()
         );
         assert!(matches!(
-            finish_installation(Err(AppError::Migration), async { Ok(()) }, std::time::Duration::from_millis(20)).await,
+            finish_installation(
+                Err(AppError::Migration),
+                async { Ok(()) },
+                std::time::Duration::from_millis(20)
+            )
+            .await,
             Err(AppError::Migration)
         ));
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                finish_installation(Ok(()), std::future::pending(), std::time::Duration::from_millis(20))
+                finish_installation(
+                    Ok(()),
+                    std::future::pending(),
+                    std::time::Duration::from_millis(20)
+                )
             )
             .await
             .unwrap()

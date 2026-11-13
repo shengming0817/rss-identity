@@ -181,7 +181,9 @@ impl Federation {
                         AuthenticationMode::Reauthenticate
                     } else {
                         AuthenticationMode::Login
-                    }, budget.0),
+                    },
+                    budget.0,
+                ),
             )
             .await?;
         self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
@@ -294,7 +296,9 @@ impl Federation {
                     &target.settings,
                     &credentials,
                     &material,
-                    AuthenticationMode::Login, budget.0),
+                    AuthenticationMode::Login,
+                    budget.0,
+                ),
             )
             .await?;
         let group_policy = self.group_policy;

@@ -114,7 +114,9 @@ impl crate::HttpOidc {
         {
             return Err(FederationError::Configuration);
         }
-        let (metadata, transport) = self.discover(tenant, provider, credentials, deadline).await?;
+        let (metadata, transport) = self
+            .discover(tenant, provider, credentials, deadline)
+            .await?;
         if metadata
             .token_endpoint
             .as_ref()

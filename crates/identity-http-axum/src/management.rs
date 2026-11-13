@@ -34,7 +34,9 @@ impl From<AuthorityError> for Error {
             AuthorityError::CursorInvalidated => {
                 (StatusCode::CONFLICT, "account_cursor_invalidated")
             }
-            AuthorityError::ProfileReceiptCapacityReached => (StatusCode::CONFLICT, "profile_receipt_capacity_reached"),
+            AuthorityError::ProfileReceiptCapacityReached => {
+                (StatusCode::CONFLICT, "profile_receipt_capacity_reached")
+            }
             AuthorityError::RevisionConflict => (StatusCode::CONFLICT, "revision_conflict"),
             AuthorityError::OperationConflict => (StatusCode::CONFLICT, "operation_conflict"),
             AuthorityError::Rejected => (StatusCode::UNAUTHORIZED, "invalid_credential"),

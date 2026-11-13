@@ -139,8 +139,10 @@ impl Authority {
             .read_sql(reader.key.tenant, budget.remaining(), move |c| {
                 Box::pin(async move {
                     let loaded = reader.recheck(c).await?;
-                    let expires =
-                        crate::sessions::checked_expiry(&loaded, budget.0.instant().min(reader.expires))?;
+                    let expires = crate::sessions::checked_expiry(
+                        &loaded,
+                        budget.0.instant().min(reader.expires),
+                    )?;
                     let login = permission(
                         crate::management::authorize(
                             policy.as_ref(),

@@ -181,7 +181,8 @@ pub async fn authenticate_request(
     axum::response::Response,
 > {
     use axum::response::IntoResponse;
-    let budget = boundary::RequestBudget::new(deadline.timeout().min(config.timeout)).map_err(IntoResponse::into_response)?;
+    let budget = boundary::RequestBudget::new(deadline.timeout().min(config.timeout))
+        .map_err(IntoResponse::into_response)?;
     let result = async {
         authority.require_runtime()?;
         boundary::cookie_presentation(headers)?;
@@ -256,13 +257,13 @@ mod budget_tests {
     use super::*;
     #[test]
     fn request_budget_validates_finite_time_and_overflow() {
-        for seconds in [120,3600] {
-            let duration=std::time::Duration::from_secs(seconds);
-            assert!(HttpConfig::new("https://identity.example.test",duration).is_ok());
+        for seconds in [120, 3600] {
+            let duration = std::time::Duration::from_secs(seconds);
+            assert!(HttpConfig::new("https://identity.example.test", duration).is_ok());
             assert!(boundary::RequestBudget::new(duration).is_ok());
         }
-        for duration in [std::time::Duration::ZERO,std::time::Duration::MAX] {
-            assert!(HttpConfig::new("https://identity.example.test",duration).is_err());
+        for duration in [std::time::Duration::ZERO, std::time::Duration::MAX] {
+            assert!(HttpConfig::new("https://identity.example.test", duration).is_err());
             assert!(boundary::RequestBudget::new(duration).is_err());
         }
     }

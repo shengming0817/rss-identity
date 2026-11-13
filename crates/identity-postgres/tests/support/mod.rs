@@ -182,7 +182,13 @@ impl Fixture {
         });
         let store = Authority::connect_runtime(
             runtime.clone(),
-            Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+            Arc::new(
+                rss_identity_core::account::PasswordKdf::new(
+                    std::num::NonZeroUsize::new(4).unwrap(),
+                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                )
+                .unwrap(),
+            ),
             config(instance),
             policy.clone(),
             deadline(),
@@ -190,7 +196,13 @@ impl Fixture {
         .await?;
         let maintenance = Authority::connect_maintenance(
             maintenance_runtime.clone(),
-            Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+            Arc::new(
+                rss_identity_core::account::PasswordKdf::new(
+                    std::num::NonZeroUsize::new(4).unwrap(),
+                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                )
+                .unwrap(),
+            ),
             config(instance),
             deadline(),
         )
@@ -221,7 +233,13 @@ impl Fixture {
         connect(self.port, &self.database, "identity_runtime").await
     }
     pub async fn probe(&self, profile: AuthorityProfile) -> Result<Authority, AuthorityError> {
-        let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
+        let kdf = Arc::new(
+            rss_identity_core::account::PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        );
         match profile {
             AuthorityProfile::Provisioning => Err(AuthorityError::Configuration),
             AuthorityProfile::Runtime => {
@@ -339,7 +357,11 @@ impl Fixture {
     }
 }
 pub fn binding(tenant: TenantId) -> ExecutionBinding {
-    ExecutionBinding::new(StorageIdentity::new([1; 16], [2; 16]).unwrap(), tenant, Epoch::new(1).unwrap())
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).unwrap(),
+        tenant,
+        Epoch::new(1).unwrap(),
+    )
 }
 pub fn config(instance: InstanceId) -> AuthorityConfig {
     AuthorityConfig::new(

@@ -1,5 +1,4 @@
 //! Provider credential storage. ref: ring 0.17.14 src/aead/less_safe_key.rs.
-use rss_identity_core::federation::MAX_PROVIDERS;
 use crate::{
     AuthorityError,
     storage::authority_id,
@@ -9,6 +8,7 @@ use ring::{
     aead,
     rand::{SecureRandom, SystemRandom},
 };
+use rss_identity_core::federation::MAX_PROVIDERS;
 use rss_identity_core::federation::{FederationError, ProviderCredentials, ProviderId};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;

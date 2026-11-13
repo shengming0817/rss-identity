@@ -135,7 +135,13 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         )
         .await?,
     );
-    let kdf = Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
+    let kdf = Arc::new(
+        PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )
+        .unwrap(),
+    );
     let maintenance = Authority::connect_maintenance(
         maintenance_runtime.clone(),
         kdf.clone(),
@@ -146,12 +152,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     let keys = config.bootstrap_keys()?;
     for key in &keys {
         maintenance
-            .initialize(
-                *key,
-                LoginKey::parse("operator")?,
-                password(),
-                deadline(),
-            )
+            .initialize(*key, LoginKey::parse("operator")?, password(), deadline())
             .await?;
     }
     value["database"]["user"] = json!("host_runtime");
@@ -169,7 +170,13 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         )
         .await?,
     );
-    let authority = assembly::authority(&config, runtime.clone(), kdf.clone()).await?;
+    let authority = assembly::authority(
+        &config,
+        runtime.clone(),
+        kdf.clone(),
+        rss_identity_app::config::cutoff(config.budgets.startup_seconds)?,
+    )
+    .await?;
     let upstream = federation_support::ScriptedOidc::new();
     let federation = Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
@@ -258,25 +265,14 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             .inspect_session(key.tenant, actor(), deadline())
             .await?;
         federation
-            .enable_provider(
-                manager,
-                provider.id,
-                provider.version,
-                true,
-                deadline(),
-            )
+            .enable_provider(manager, provider.id, provider.version, true, deadline())
             .await?;
 
         let manager = authority
             .inspect_session(key.tenant, actor(), deadline())
             .await?;
         let member = authority
-            .create_local_account(
-                manager,
-                LoginKey::parse("member")?,
-                password(),
-                deadline(),
-            )
+            .create_local_account(manager, LoginKey::parse("member")?, password(), deadline())
             .await?;
         assert_eq!(member.key().tenant, key.tenant);
         let manager = authority
@@ -597,5 +593,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
 }
 
 fn deadline() -> rss_transactional_messaging::policy::OperationDeadline {
-    rss_transactional_messaging::policy::OperationDeadline::from_remaining(std::time::Duration::from_secs(10))
+    rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+        std::time::Duration::from_secs(10),
+    )
 }

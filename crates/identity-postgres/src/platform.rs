@@ -17,7 +17,6 @@ use futures::future::BoxFuture;
 use rss_identity_core::{
     assurance::{Acr, Assurance},
     federation::{ProviderId, UpstreamClaims, digest, random_secret},
-    session::CredentialKind,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};

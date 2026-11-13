@@ -88,12 +88,15 @@ pub fn session_policy() -> Result<SessionPolicy, AppError> {
     SessionPolicy::new(900, 14400).map_err(|_| AppError::Configuration)
 }
 pub fn authority_config(config: &RuntimeConfig) -> Result<AuthorityConfig, AppError> {
-    config.authority.apply(AuthorityConfig::new(
-        config.instance()?,
-        config.storage.bindings()?,
-        session_policy()?,
-        rss_audit_postgres::Integrity::Plain,
-    )?, config.budgets.request())
+    config.authority.apply(
+        AuthorityConfig::new(
+            config.instance()?,
+            config.storage.bindings()?,
+            session_policy()?,
+            rss_audit_postgres::Integrity::Plain,
+        )?,
+        config.budgets.request(),
+    )
 }
 pub async fn authority(
     config: &RuntimeConfig,
@@ -105,7 +108,12 @@ pub async fn authority(
         runtime,
         kdf,
         authority_config(config)?,
-        Arc::new(BootstrapPolicy(config.bootstrap_keys()?, std::time::Duration::from_secs(u64::from(config.authority.operation_proof_seconds.get())))),
+        Arc::new(BootstrapPolicy(
+            config.bootstrap_keys()?,
+            std::time::Duration::from_secs(u64::from(
+                config.authority.operation_proof_seconds.get(),
+            )),
+        )),
         deadline(cutoff),
     )
     .await?)
@@ -155,8 +163,13 @@ fn federation_inputs(config: &RuntimeConfig) -> Result<Option<FederationInputs>,
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
-    let oidc = HttpOidc::new(profiles, c.private_access(&config.storage.tenants()?)?, c.transport()?)
-        .map_err(|_| AppError::Provider)?.with_future_skew(config.authority.future_skew_seconds);
+    let oidc = HttpOidc::new(
+        profiles,
+        c.private_access(&config.storage.tenants()?)?,
+        c.transport()?,
+    )
+    .map_err(|_| AppError::Provider)?
+    .with_future_skew(config.authority.future_skew_seconds);
     let raw = read_secret(Path::new(&c.state_key_file))?;
     let mut key = zeroize::Zeroizing::new([0; 32]);
     hex::decode_to_slice(raw.as_str(), key.as_mut()).map_err(|_| AppError::Configuration)?;

@@ -102,8 +102,14 @@ impl Federation {
         let url = self
             .upstream(
                 &budget,
-                self.oidc
-                    .prepare(tenant, &view.settings, &credentials, &material, mode, budget.0),
+                self.oidc.prepare(
+                    tenant,
+                    &view.settings,
+                    &credentials,
+                    &material,
+                    mode,
+                    budget.0,
+                ),
             )
             .await?;
         let oidc = self.oidc.clone();

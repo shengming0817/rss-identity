@@ -33,7 +33,12 @@ pub fn router(
         )
         .with_state(Context {
             authority,
-            policy: Arc::new(BootstrapPolicy(config.bootstrap_keys()?, std::time::Duration::from_secs(u64::from(config.authority.operation_proof_seconds.get())))),
+            policy: Arc::new(BootstrapPolicy(
+                config.bootstrap_keys()?,
+                std::time::Duration::from_secs(u64::from(
+                    config.authority.operation_proof_seconds.get(),
+                )),
+            )),
             timeout: config.budgets.request(),
             http,
         }))

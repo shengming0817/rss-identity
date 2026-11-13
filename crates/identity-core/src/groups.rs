@@ -1,8 +1,5 @@
 //! Bounded group observations. Values alone confer no authentication.
-use crate::facts::{
-    FactSource, FactUnavailableReason,
-    valid_max_age, valid_snapshot_window,
-};
+use crate::facts::{FactSource, FactUnavailableReason, valid_max_age, valid_snapshot_window};
 use serde::{Deserialize, Serialize};
 pub const VERSION: u32 = 1;
 pub const MAX_VALUES: usize = 1024;

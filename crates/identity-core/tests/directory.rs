@@ -76,7 +76,12 @@ fn field_types_and_budgets_reject_unsupported_queries() {
         );
     }
     for limit in [1024] {
-        assert_eq!(AccountQuery::parse(None, None, None, None, limit).unwrap().limit(), limit);
+        assert_eq!(
+            AccountQuery::parse(None, None, None, None, limit)
+                .unwrap()
+                .limit(),
+            limit
+        );
     }
     for limit in [0, 1025] {
         assert!(AccountQuery::parse(None, None, None, None, limit).is_err());

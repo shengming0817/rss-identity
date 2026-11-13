@@ -1,7 +1,7 @@
--- Fresh schema v17 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v18 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=17));
-INSERT INTO identity_authority.schema_version VALUES(17);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=18));
+INSERT INTO identity_authority.schema_version VALUES(18);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),

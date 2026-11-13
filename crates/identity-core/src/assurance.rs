@@ -139,7 +139,9 @@ impl Assurance {
     ) -> Result<(), FederationError> {
         if started <= 0
             || now < started
-            || self.auth_time.is_some_and(|t| t > now.saturating_add(i64::from(future_skew_seconds)))
+            || self
+                .auth_time
+                .is_some_and(|t| t > now.saturating_add(i64::from(future_skew_seconds)))
             || (mode != AuthenticationMode::Login
                 && self
                     .auth_time

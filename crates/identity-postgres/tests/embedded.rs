@@ -191,7 +191,13 @@ async fn instances_tenants_and_borrowed_pool_are_separate() -> anyhow::Result<()
     );
     let wrong = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+        Arc::new(
+            PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         config(InstanceId::generate()),
         f.policy.clone(),
         deadline(),
@@ -234,7 +240,13 @@ async fn instances_tenants_and_borrowed_pool_are_separate() -> anyhow::Result<()
     );
     let clone = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+        Arc::new(
+            PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         f.config(),
         f.policy.clone(),
         deadline(),
@@ -271,7 +283,13 @@ async fn host_role_names_and_session_policy_survive_composition() -> anyhow::Res
     )?;
     let changed = Authority::connect_runtime(
         runtime.clone(),
-        Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+        Arc::new(
+            PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         config,
         f.policy.clone(),
         deadline(),
@@ -372,7 +390,13 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     let controlled = f.store.clone().with_fact_time(clock.clone());
     let managed = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+        Arc::new(
+            PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         f.config(),
         Arc::new(StaffPolicy),
         deadline(),
@@ -460,7 +484,13 @@ async fn construction_verifies_every_declared_tenant_fence() -> anyhow::Result<(
     assert!(matches!(
         Authority::connect_runtime(
             f.runtime.clone(),
-            Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+            Arc::new(
+                PasswordKdf::new(
+                    std::num::NonZeroUsize::new(4).unwrap(),
+                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()
+                )
+                .unwrap()
+            ),
             f.config(),
             f.policy.clone(),
             deadline()
@@ -471,7 +501,13 @@ async fn construction_verifies_every_declared_tenant_fence() -> anyhow::Result<(
     assert!(matches!(
         Authority::connect_maintenance(
             f.maintenance_runtime.clone(),
-            Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+            Arc::new(
+                PasswordKdf::new(
+                    std::num::NonZeroUsize::new(4).unwrap(),
+                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()
+                )
+                .unwrap()
+            ),
             f.config(),
             deadline()
         )

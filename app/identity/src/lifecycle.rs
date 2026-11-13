@@ -117,9 +117,13 @@ async fn ready(State(h): State<Arc<Health>>) -> StatusCode {
     let Ok(_probe) = h.probe.try_acquire() else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
-    let Ok(cutoff) = crate::config::cutoff(h.config.budgets.startup_seconds) else { return StatusCode::SERVICE_UNAVAILABLE; };
+    let Ok(cutoff) = crate::config::cutoff(h.config.budgets.startup_seconds) else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
     let result = tokio::time::timeout_at(cutoff.instant().into(), async {
-        if let Err(error) = assembly::authority(&h.config, h.pool.clone(), h.kdf.clone(),cutoff).await {
+        if let Err(error) =
+            assembly::authority(&h.config, h.pool.clone(), h.kdf.clone(), cutoff).await
+        {
             eprintln!("component=postgres readiness=failed reason={error}");
             return Err(error);
         }
@@ -152,15 +156,19 @@ pub async fn serve(
         .drive(
             |mut startup| {
                 Box::pin(async move {
-                    let cutoff=crate::config::cutoff(config.budgets.startup_seconds)?;
+                    let cutoff = crate::config::cutoff(config.budgets.startup_seconds)?;
                     // Register each owned resource before any subsequent cancellable await.
                     let pool = Arc::new(
-                        tokio::time::timeout_at(cutoff.instant().into(),PgRuntime::connect_producer(
-                            config.database.pg()?,
-                            assembly::Timer,
-                            config.storage.identity()?,
-                        ))
-                        .await.map_err(|_|AppError::Connection)?
+                        tokio::time::timeout_at(
+                            cutoff.instant().into(),
+                            PgRuntime::connect_producer(
+                                config.database.pg()?,
+                                assembly::Timer,
+                                config.storage.identity()?,
+                            ),
+                        )
+                        .await
+                        .map_err(|_| AppError::Connection)?
                         .map_err(|_| AppError::Connection)?,
                     );
                     startup.stage_resource(DynManagedResource::new_box(PoolResource {
@@ -172,7 +180,8 @@ pub async fn serve(
                         kdf: kdf.clone(),
                         timeout: per,
                     }));
-                    let authority = assembly::authority(&config, pool.clone(), kdf.clone(),cutoff).await?;
+                    let authority =
+                        assembly::authority(&config, pool.clone(), kdf.clone(), cutoff).await?;
                     let federation = assembly::federation(&config, authority.clone())?;
                     if let Some(federation) = &federation {
                         federation

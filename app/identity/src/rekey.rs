@@ -18,7 +18,7 @@ pub async fn run(
     }
     let keys = keyring.load()?;
     let options = config.database.sqlx()?;
-    let cutoff=crate::config::cutoff(config.budgets.migration_seconds)?;
+    let cutoff = crate::config::cutoff(config.budgets.migration_seconds)?;
     let mut c = tokio::time::timeout_at(
         cutoff.instant().into(),
         PgConnection::connect_with(&options),

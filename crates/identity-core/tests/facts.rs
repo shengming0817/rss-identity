@@ -56,11 +56,11 @@ fn shared_observation_contract_keeps_existing_wire_and_time_semantics() {
             json!({"version":VERSION,"status":"unavailable","reason":wire})
         );
     }
-    for seconds in [1,3600] {
+    for seconds in [1, 3600] {
         assert!(valid_max_age(seconds));
         assert!(valid_snapshot_window(1000, 1000 + seconds));
     }
-    for seconds in [0,-1] {
+    for seconds in [0, -1] {
         assert!(!valid_max_age(seconds));
     }
     assert!(acceptable_observation(1030, 1000, 30));

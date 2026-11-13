@@ -80,7 +80,12 @@ impl DepartmentObservation {
         Ok(Self::Available {
             snapshot_id: Uuid::new_v4(),
             observed_at: claims.issued_at,
-            expires_at: mapping.expires_at(claims.issued_at, claims.expires_at, now, future_skew_seconds)?,
+            expires_at: mapping.expires_at(
+                claims.issued_at,
+                claims.expires_at,
+                now,
+                future_skew_seconds,
+            )?,
             snapshot,
         })
     }
@@ -115,7 +120,12 @@ impl AuthenticationFacts {
         future_skew_seconds: u32,
     ) -> Result<Self, FederationError> {
         claims.validate()?;
-        let expires_at = policy.expires_at(claims.issued_at, claims.expires_at, now, future_skew_seconds)?;
+        let expires_at = policy.expires_at(
+            claims.issued_at,
+            claims.expires_at,
+            now,
+            future_skew_seconds,
+        )?;
         if version < 1 {
             return Err(FederationError::Claims);
         }
@@ -175,7 +185,11 @@ impl AuthenticationFacts {
     }
     /// PostgreSQL jsonb::text is the storage constraint's exact representation,
     /// including JSON escaping and whitespace. Apply it to sessions, intents and grants.
-    pub async fn encode(&self, c: &mut sqlx::PgConnection, budget: std::num::NonZeroU32) -> Result<serde_json::Value, PgError> {
+    pub async fn encode(
+        &self,
+        c: &mut sqlx::PgConnection,
+        budget: std::num::NonZeroU32,
+    ) -> Result<serde_json::Value, PgError> {
         let mut value = serde_json::to_value(self).map_err(|_| corrupt())?;
         let size: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
             .bind(&value)
@@ -264,7 +278,9 @@ mod tests {
             1,
             GroupFactsMaxAge::new(300).unwrap(),
             None,
-            1000, 30)
+            1000,
+            30,
+        )
         .unwrap();
         let value = serde_json::to_value(facts).unwrap();
         assert_eq!(value["format_version"], 3);
@@ -301,7 +317,9 @@ mod tests {
                 1,
                 GroupFactsMaxAge::new(300).unwrap(),
                 Some(&mapping),
-                1000, 30)
+                1000,
+                30,
+            )
             .unwrap();
             let value = serde_json::to_value(&facts).unwrap();
             assert_eq!(value["groups"]["expires_at"], 1300);
@@ -323,7 +341,7 @@ mod tests {
                         serde_json::json!({"version":1,"sourceRevision":"r1","nodes":[],"memberships":[]}),
                     ),
                     ("assignment", serde_json::json!({"status":"no_department"})),
-                    ("expires_at", serde_json::json!(1301)),
+                    ("expires_at", serde_json::json!(1000)),
                     ("snapshot_id", serde_json::json!(Uuid::nil())),
                 ] {
                     let mut corrupted = value.clone();
@@ -339,7 +357,9 @@ mod tests {
                     1,
                     GroupFactsMaxAge::new(300).unwrap(),
                     None,
-                    1000, 30)
+                    1000,
+                    30
+                )
                 .is_err()
             );
         }
@@ -350,7 +370,9 @@ mod tests {
                 1,
                 GroupFactsMaxAge::new(300).unwrap(),
                 Some(&mapping),
-                1000, 30)
+                1000,
+                30
+            )
             .is_err()
         );
     }
@@ -362,7 +384,9 @@ mod tests {
             2,
             GroupFactsMaxAge::new(300).unwrap(),
             None,
-            1200, 30)
+            1200,
+            30,
+        )
         .unwrap();
         let value = serde_json::to_value(&facts).unwrap();
         let restored = AuthenticationFacts::decode(value.clone()).unwrap();
@@ -381,7 +405,13 @@ mod tests {
                 serde_json::json!({"version":1,"status":"expired"})
             );
         }
-        assert!(restored.project(source(), 969).is_err());
+        assert!(matches!(
+            restored.project(source(), 969).unwrap(),
+            Groups::Unavailable {
+                reason: FactUnavailableReason::NotYetValid,
+                ..
+            }
+        ));
         for (groups, reason) in [
             (
                 UpstreamGroups::NotConfigured,
@@ -394,7 +424,9 @@ mod tests {
                 2,
                 GroupFactsMaxAge::new(1).unwrap(),
                 None,
-                1200, 30)
+                1200,
+                30,
+            )
             .unwrap();
             assert_eq!(
                 facts.project(source(), 1600).unwrap(),
@@ -409,7 +441,9 @@ mod tests {
             2,
             GroupFactsMaxAge::new(300).unwrap(),
             None,
-            1000, 30)
+            1000,
+            30,
+        )
         .unwrap();
         let base = serde_json::to_value(facts).unwrap();
         for (key, value) in [
@@ -424,7 +458,7 @@ mod tests {
         for (key, value) in [
             ("status", serde_json::json!("expired")),
             ("snapshot_id", serde_json::json!(Uuid::nil())),
-            ("expires_at", serde_json::json!(1301)),
+            ("expires_at", serde_json::json!(1000)),
             ("values", serde_json::json!(["b", "a"])),
         ] {
             let mut input = base.clone();
@@ -457,7 +491,9 @@ mod tests {
                 1,
                 GroupFactsMaxAge::new(1).unwrap(),
                 None,
-                1000, 30)
+                1000,
+                30,
+            )
             .unwrap();
             let encoded = serde_json::to_value(&facts).unwrap();
             let restored = AuthenticationFacts::decode(encoded.clone()).unwrap();
@@ -485,7 +521,9 @@ mod tests {
                     1,
                     GroupFactsMaxAge::new(1).unwrap(),
                     None,
-                    999, 30)
+                    999,
+                    30
+                )
                 .is_err()
             );
         }

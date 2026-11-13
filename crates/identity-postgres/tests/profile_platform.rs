@@ -442,7 +442,13 @@ async fn platform_host_for(
     });
     let store = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+        Arc::new(
+            rss_identity_core::account::PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         f.config().with_platform(verifier.clone()),
         f.policy.clone(),
         deadline(),
@@ -1340,7 +1346,13 @@ async fn latest_source_discovery_is_target_bound_and_policy_checked() -> anyhow:
     assert!(page.next_cursor.is_none());
     assert!(
         f.store
-            .latest_profile_sources(&manager, target, page.sources.last().copied(), 50, deadline())
+            .latest_profile_sources(
+                &manager,
+                target,
+                page.sources.last().copied(),
+                50,
+                deadline()
+            )
             .await?
             .sources
             .is_empty()
@@ -1446,8 +1458,21 @@ async fn platform_evidence_admission_preserves_authentication_time() -> anyhow::
 #[ignore = "requires make test-pg"]
 async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()> {
     let mut f = Fixture::new().await?;
-    let selected=|capacity| f.config().with_profile_receipt_capacity(std::num::NonZeroU32::new(capacity).unwrap());
-    f.store=Authority::connect_runtime(f.runtime.clone(),std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(),std::num::NonZeroU64::new(128*1024*1024).unwrap())?),selected(8192),f.policy.clone(),deadline()).await?;
+    let selected = |capacity| {
+        f.config()
+            .with_profile_receipt_capacity(std::num::NonZeroU32::new(capacity).unwrap())
+    };
+    f.store = Authority::connect_runtime(
+        f.runtime.clone(),
+        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?),
+        selected(8192),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
     f.bootstrap().await?;
     let issued = f.login().await?;
     // Fill only the receipt resource, preserving normal account/session preparation.
@@ -1484,8 +1509,22 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
             deadline(),
         )
         .await;
-    assert!(matches!(result, Err(AuthorityError::ProfileReceiptCapacityReached)));
-    f.store=Authority::connect_runtime(f.runtime.clone(),std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(),std::num::NonZeroU64::new(128*1024*1024).unwrap())?),f.config().with_profile_receipt_capacity(std::num::NonZeroU32::new(1).unwrap()),f.policy.clone(),deadline()).await?;
+    assert!(matches!(
+        result,
+        Err(AuthorityError::ProfileReceiptCapacityReached)
+    ));
+    f.store = Authority::connect_runtime(
+        f.runtime.clone(),
+        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?),
+        f.config()
+            .with_profile_receipt_capacity(std::num::NonZeroU32::new(1).unwrap()),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
     let actor = proof(&f.store, &f, &issued).await?;
     let current = f
         .store
@@ -1523,8 +1562,34 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
             .await?;
     assert_eq!(count, 8192);
     // Raising the selected quota admits a new operation without deleting old receipts.
-    f.store=Authority::connect_runtime(f.runtime.clone(),std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(),std::num::NonZeroU64::new(128*1024*1024).unwrap())?),f.config().with_profile_receipt_capacity(std::num::NonZeroU32::new(8193).unwrap()),f.policy.clone(),deadline()).await?;
-    assert_eq!(f.store.update_local_profile(proof(&f.store,&f,&issued).await?,f.key,ProfileChange{operation_id:Uuid::new_v4(),expected_revision:1,value:None},deadline()).await?.revision,2);
+    f.store = Authority::connect_runtime(
+        f.runtime.clone(),
+        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?),
+        f.config()
+            .with_profile_receipt_capacity(std::num::NonZeroU32::new(8193).unwrap()),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
+    assert_eq!(
+        f.store
+            .update_local_profile(
+                proof(&f.store, &f, &issued).await?,
+                f.key,
+                ProfileChange {
+                    operation_id: Uuid::new_v4(),
+                    expected_revision: 1,
+                    value: None
+                },
+                deadline()
+            )
+            .await?
+            .revision,
+        2
+    );
     f.close().await;
     Ok(())
 }
@@ -1592,7 +1657,13 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
         .await?;
     let own_store = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+        Arc::new(
+            rss_identity_core::account::PasswordKdf::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
         f.config(),
         Arc::new(SelfProfiles),
         deadline(),

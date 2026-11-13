@@ -1,11 +1,11 @@
 //! Federation application service. One injected upstream port and the existing PG settlement owner.
-use rss_identity_core::federation::MAX_PROVIDERS;
 use crate::{
     federation_storage as db,
     storage::*,
     transaction::{SecurityEvent, reject},
     *,
 };
+use rss_identity_core::federation::MAX_PROVIDERS;
 use rss_identity_core::federation::*;
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
@@ -330,7 +330,12 @@ impl Federation {
         let upstream_deadline = budget.0.instant() - reserve;
         let result = tokio::time::timeout_at(
             upstream_deadline.into(),
-            test(tenant, view.settings.clone(), credentials, rss_request_context::Deadline::at(upstream_deadline)),
+            test(
+                tenant,
+                view.settings.clone(),
+                credentials,
+                rss_request_context::Deadline::at(upstream_deadline),
+            ),
         )
         .await
         .unwrap_or(Err(FederationError::Unavailable));

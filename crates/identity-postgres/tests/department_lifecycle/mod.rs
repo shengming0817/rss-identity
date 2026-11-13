@@ -116,7 +116,13 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
         let controlled = f.store.clone().with_fact_time(clock.clone());
         let managed = Authority::connect_runtime(
             f.runtime.clone(),
-            Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
+            Arc::new(
+                PasswordKdf::new(
+                    std::num::NonZeroUsize::new(4).unwrap(),
+                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                )
+                .unwrap(),
+            ),
             f.config(),
             Arc::new(DepartmentPolicy {
                 expected: expected.map(str::to_owned),
@@ -420,7 +426,19 @@ async fn department_subject_and_provider_revocations_are_current() -> anyhow::Re
 #[ignore = "requires make test-pg"]
 async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_identity()
 -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
+    f.store = Authority::connect_runtime(
+        f.runtime.clone(),
+        Arc::new(PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?),
+        f.config()
+            .with_auth_facts_budget(std::num::NonZeroU32::new(8192).unwrap()),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
     f.bootstrap().await?;
     let upstream = ScriptedOidc::new();
     let federation = service(&f, upstream.clone());
@@ -447,7 +465,7 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
     ));
     let size: i32 = sqlx::query_scalar("SELECT octet_length(auth_facts::text) FROM identity_authority.sessions WHERE session_id=$1")
         .bind(session.view().id.as_uuid()).fetch_one(&f.owner).await?;
-    assert!(size <= 32768);
+    assert!(size <= 8192);
     *upstream.department_snapshot.lock().unwrap() = UpstreamDepartmentSnapshot::Present(
         federation_support::department_snapshot(Some("dept-01")),
     );
@@ -472,6 +490,43 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
                 .is_err()
         );
     }
+    // A host-selected byte budget admits the full supported snapshot without truncation.
+    f.store = Authority::connect_runtime(
+        f.runtime.clone(),
+        Arc::new(PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(1024 * 1024 * 128).unwrap(),
+        )?),
+        f.config()
+            .with_auth_facts_budget(std::num::NonZeroU32::new(1024 * 1024).unwrap()),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?;
+    let federation = service(&f, upstream.clone());
+    let nodes:Vec<_>=(0..1024).map(|i|serde_json::json!({"id":format!("n{i:04}"),"displayName":format!("Node {i}"),"parentId":if i==0 {None}else{Some("n0000")}})).collect();
+    let memberships: Vec<_> = (0..1024).map(|i| format!("n{i:04}")).collect();
+    *upstream.department_snapshot.lock().unwrap() = UpstreamDepartmentSnapshot::Present(
+        serde_json::from_value(
+            serde_json::json!({"version":1,"sourceRevision":"selected-budget","nodes":nodes,"memberships":memberships}),
+        )?,
+    );
+    *upstream.groups.lock().unwrap() = (0..1024).map(|i| format!("group-{i:04}")).collect();
+    let session = login_department(&f, &federation, &provider).await?;
+    let actor = f
+        .store
+        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .await?;
+    let VerifiedDepartmentSnapshot::Available(snapshot) = actor.department_snapshot()? else {
+        anyhow::bail!("full snapshot withheld");
+    };
+    assert_eq!(snapshot.snapshot()?.nodes().len(), 1024);
+    assert_eq!(snapshot.snapshot()?.memberships().len(), 1024);
+    let persisted = facts(&f, &session).await?;
+    assert_eq!(
+        persisted["groups"]["values"].as_array().unwrap().len(),
+        1024
+    );
     f.close().await;
     Ok(())
 }

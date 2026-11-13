@@ -35,7 +35,7 @@ fn department_mapping_is_complete_validated_and_has_no_default_age() {
             1000 + seconds
         );
     }
-    for seconds in [0,-1] {
+    for seconds in [0, -1] {
         assert!(DepartmentSnapshotClaim::new("organization_snapshot".into(), seconds).is_err());
     }
     for claim in [

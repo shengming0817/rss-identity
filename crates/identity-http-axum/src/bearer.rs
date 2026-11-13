@@ -84,7 +84,8 @@ pub async fn authenticate_bearer_request(
     headers: &HeaderMap,
     deadline: OperationDeadline,
 ) -> Result<(AuthenticatedSession, BearerSecret), Response> {
-    let budget = RequestBudget::new(deadline.timeout().min(config.timeout)).map_err(|e| secure(e.into_response()))?;
+    let budget = RequestBudget::new(deadline.timeout().min(config.timeout))
+        .map_err(|e| secure(e.into_response()))?;
     let result = async {
         let retained = credential(headers)?;
         let secret = BearerSecret::parse(retained.expose().into()).map_err(|_| UNAUTH)?;

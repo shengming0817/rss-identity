@@ -1,7 +1,7 @@
 mod credentials;
-pub /// Maximum admitted providers in one tenant directory.
+pub use credentials::ProviderCredentials;
+/// Maximum admitted providers in one tenant directory.
 pub const MAX_PROVIDERS: u16 = 1024;
-use credentials::ProviderCredentials;
 // Federation values and narrow upstream port. Values are not authentication proofs.
 // ref: RustCrypto/MACs hmac/src/lib.rs @ hmac-v0.12.1.
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};

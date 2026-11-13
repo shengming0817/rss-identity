@@ -48,7 +48,9 @@ fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
                     &metadata,
                     "nonce",
                     "client",
-                    "fixture-secret", 30)
+                    "fixture-secret",
+                    30
+                )
                 .is_ok(),
                 valid && key,
                 "{field}"
@@ -116,12 +118,15 @@ fn config(issuer: &str) -> ProviderSettings {
     .unwrap()
 }
 fn adapter(issuer: &str) -> HttpOidc {
-    HttpOidc::for_loopback_test(vec![TrustedAssuranceProfile {
-        keycloak_totp: false,
-        tenant: tenant(),
-        issuer: issuer.into(),
-        client_id: "client".into(),
-    }], transport_policy())
+    HttpOidc::for_loopback_test(
+        vec![TrustedAssuranceProfile {
+            keycloak_totp: false,
+            tenant: tenant(),
+            issuer: issuer.into(),
+            client_id: "client".into(),
+        }],
+        transport_policy(),
+    )
     .unwrap()
 }
 fn transport(origin: &str) -> Transport {
@@ -130,7 +135,9 @@ fn transport(origin: &str) -> Transport {
             tenant(),
             &config(origin),
             &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
-                .unwrap(), upstream_deadline())
+                .unwrap(),
+            upstream_deadline(),
+        )
         .unwrap()
 }
 async fn get(t: &Transport, url: &str) -> Result<HttpResponse, FederationError> {
@@ -231,7 +238,9 @@ async fn discovery_rejects_external_authorization_and_jwks() {
                     "fixture-secret".into(),
                     None,
                 )
-                .unwrap(), upstream_deadline())
+                .unwrap(),
+                upstream_deadline(),
+            )
             .await;
         assert!(matches!(
             result,
@@ -263,7 +272,9 @@ async fn discovery_preserves_unavailable_and_protocol_failure() {
                     "fixture-secret".into(),
                     None,
                 )
-                .unwrap(), upstream_deadline())
+                .unwrap(),
+                upstream_deadline(),
+            )
             .await
             .err()
             .unwrap();
@@ -411,7 +422,9 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
                     &metadata,
                     "nonce",
                     "client",
-                    "fixture-secret", 30);
+                    "fixture-secret",
+                    30,
+                );
                 assert_eq!(verified.is_ok(), accepted && key);
                 if let Ok(claims) = verified {
                     assert_eq!(
@@ -438,7 +451,9 @@ fn malformed_profile_is_independent_of_verified_security_claims() {
         &metadata,
         "nonce",
         "client",
-        "fixture-secret", 30)
+        "fixture-secret",
+        30,
+    )
     .unwrap();
     let settings = rss_identity_core::profile::ProfileSettings {
         extensions_claim: Some("attributes".into()),
@@ -463,7 +478,9 @@ fn malformed_profile_is_independent_of_verified_security_claims() {
             &metadata,
             "nonce",
             "client",
-            "fixture-secret", 30)
+            "fixture-secret",
+            30
+        )
         .is_err()
     );
 }
@@ -572,7 +589,9 @@ async fn discovery_preserves_required_metadata_and_transport_boundaries() {
             .test(
                 tenant(),
                 &config(&issuer),
-                &ProviderCredentials::new("fixture-secret".into(), None).unwrap(), upstream_deadline())
+                &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
+                upstream_deadline(),
+            )
             .await;
         task.abort();
         let _ = task.await;
@@ -592,12 +611,15 @@ async fn discovery_preserves_required_metadata_and_transport_boundaries() {
 #[tokio::test]
 async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
     let (issuer, task) = discovery_server("valid").await;
-    let adapter = HttpOidc::for_loopback_test(vec![TrustedAssuranceProfile {
-        tenant: tenant(),
-        issuer: issuer.clone(),
-        client_id: "client".into(),
-        keycloak_totp: true,
-    }], transport_policy())
+    let adapter = HttpOidc::for_loopback_test(
+        vec![TrustedAssuranceProfile {
+            tenant: tenant(),
+            issuer: issuer.clone(),
+            client_id: "client".into(),
+            keycloak_totp: true,
+        }],
+        transport_policy(),
+    )
     .unwrap();
     let material = ProtocolMaterial::new(random_secret().unwrap().to_string()).unwrap();
     for mode in [
@@ -611,7 +633,9 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
                 &config(&issuer),
                 &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
                 &material,
-                mode, upstream_deadline())
+                mode,
+                upstream_deadline(),
+            )
             .await
             .unwrap();
         let url = Url::parse(&url).unwrap();
@@ -672,38 +696,71 @@ fn id_token_rejects_unadvertised_algorithm_and_ambiguous_key() {
     let raw = signed_token(&claims, true);
     let mut metadata = token_metadata();
     metadata.id_token_signing_alg_values_supported = vec!["HS256".into()];
-    assert!(profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err());
+    assert!(
+        profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err()
+    );
     let mut metadata = token_metadata();
     metadata.jwks.keys.push(metadata.jwks.keys[0].clone());
-    assert!(profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err());
+    assert!(
+        profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err()
+    );
 }
 
 fn transport_policy() -> crate::TransportPolicy {
-    crate::TransportPolicy::new(std::time::Duration::from_secs(5),std::time::Duration::from_secs(3),1024*1024,128).unwrap()
+    crate::TransportPolicy::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(3),
+        1024 * 1024,
+        128,
+    )
+    .unwrap()
 }
 
 fn upstream_deadline() -> rss_request_context::Deadline {
-    rss_request_context::Deadline::at(std::time::Instant::now().checked_add(std::time::Duration::from_secs(30)).unwrap())
+    rss_request_context::Deadline::at(
+        std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(30))
+            .unwrap(),
+    )
 }
 
 #[tokio::test]
 async fn one_upstream_deadline_covers_successive_requests() {
     use std::io::{Read, Write};
-    let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let origin=format!("http://{}",listener.local_addr().unwrap());
-    let worker=std::thread::spawn(move || {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let worker = std::thread::spawn(move || {
         for _ in 0..2 {
-            let (mut socket,_)=listener.accept().unwrap();
-            socket.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
-            let mut input=[0;4096];let _=socket.read(&mut input);
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut input = [0; 4096];
+            let _ = socket.read(&mut input);
             std::thread::sleep(std::time::Duration::from_millis(60));
-            let _=socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
         }
     });
-    let deadline=rss_request_context::Deadline::at(std::time::Instant::now()+std::time::Duration::from_millis(100));
-    let transport=adapter(&origin).transport(tenant(),&config(&origin),
-        &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(),None).unwrap(),deadline).unwrap();
-    assert!(get(&transport,&origin).await.is_ok());
-    assert!(matches!(get(&transport,&origin).await,Err(FederationError::Provider(ProviderFailure{reason:ProviderReason::Timeout,..}))));
+    let deadline = rss_request_context::Deadline::at(
+        std::time::Instant::now() + std::time::Duration::from_millis(100),
+    );
+    let transport = adapter(&origin)
+        .transport(
+            tenant(),
+            &config(&origin),
+            &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap(),
+            deadline,
+        )
+        .unwrap();
+    assert!(get(&transport, &origin).await.is_ok());
+    assert!(matches!(
+        get(&transport, &origin).await,
+        Err(FederationError::Provider(ProviderFailure {
+            reason: ProviderReason::Timeout,
+            ..
+        }))
+    ));
     worker.join().unwrap();
 }

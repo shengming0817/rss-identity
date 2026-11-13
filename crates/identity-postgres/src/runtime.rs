@@ -12,6 +12,9 @@ pub(crate) struct RuntimeBundle {
 
 impl RuntimeBundle {
     pub fn binding(&self, tenant: TenantId) -> Option<ExecutionBinding> {
-        self.bindings.iter().find(|binding| binding.tenant() == tenant).copied()
+        self.bindings
+            .iter()
+            .find(|binding| binding.tenant() == tenant)
+            .copied()
     }
 }

@@ -2,7 +2,7 @@ use rss_identity_core::groups::{GroupFactsMaxAge, UpstreamGroups};
 
 #[test]
 fn group_policy_bounds_signed_observation_without_callback_extension() {
-    for seconds in [0,-1] {
+    for seconds in [0, -1] {
         assert!(GroupFactsMaxAge::new(seconds).is_err());
     }
     let policy = GroupFactsMaxAge::new(300).unwrap();
@@ -55,7 +55,7 @@ fn group_values_are_exact_bounded_sets_and_missing_is_not_empty() {
     assert!(
         UpstreamGroups::present(
             (0..1024)
-                .map(|i| format!("{i:03}{}", "x".repeat(253)))
+                .map(|i| format!("{i:04}{}", "x".repeat(252)))
                 .collect()
         )
         .is_ok()

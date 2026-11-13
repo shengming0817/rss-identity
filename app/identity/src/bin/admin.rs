@@ -53,30 +53,42 @@ async fn run() -> Result<(), AppError> {
     let config: MaintenanceConfig = load(Path::new(&args[0]))?;
     config.validate()?;
     let cutoff = rss_identity_app::config::cutoff(config.budgets.maintenance_seconds)?;
-    let authority_config = config.authority.apply(AuthorityConfig::new(
-        rss_identity_core::InstanceId::parse(&config.instance_id)
-            .map_err(|_| AppError::Configuration)?,
-        config.storage.bindings()?,
-        rss_identity_core::session::SessionPolicy::new(900, 14400).map_err(|_| AppError::Budget)?,
-        rss_audit_postgres::Integrity::Plain,
-    )?,rss_identity_app::config::finite_seconds(config.budgets.maintenance_seconds)?)?;
+    let authority_config = config.authority.apply(
+        AuthorityConfig::new(
+            rss_identity_core::InstanceId::parse(&config.instance_id)
+                .map_err(|_| AppError::Configuration)?,
+            config.storage.bindings()?,
+            rss_identity_core::session::SessionPolicy::new(900, 14400)
+                .map_err(|_| AppError::Budget)?,
+            rss_audit_postgres::Integrity::Plain,
+        )?,
+        rss_identity_app::config::finite_seconds(config.budgets.maintenance_seconds)?,
+    )?;
     let database = config.database.pg()?;
     let binding = config.storage.identity()?;
     let runtime = Arc::new(
-        tokio::time::timeout_at(cutoff.instant().into(),rss_transactional_messaging_postgres::PgRuntime::connect_producer(
-            database,
-            assembly::Timer,
-            binding,
-        ))
-        .await.map_err(|_|AppError::Connection)?
+        tokio::time::timeout_at(
+            cutoff.instant().into(),
+            rss_transactional_messaging_postgres::PgRuntime::connect_producer(
+                database,
+                assembly::Timer,
+                binding,
+            ),
+        )
+        .await
+        .map_err(|_| AppError::Connection)?
         .map_err(|_| AppError::Connection)?,
     );
     let kdf = Arc::new(config.password_work.build()?);
-    let authority =
-        Authority::connect_maintenance(runtime.clone(), kdf.clone(), authority_config, assembly::deadline(cutoff))
-            .await;
+    let authority = Authority::connect_maintenance(
+        runtime.clone(),
+        kdf.clone(),
+        authority_config,
+        assembly::deadline(cutoff),
+    )
+    .await;
     let result = match authority {
-        Ok(authority) => execute(&authority, &config, command,cutoff).await,
+        Ok(authority) => execute(&authority, &config, command, cutoff).await,
         Err(error) => Err(error.into()),
     };
     kdf.close();
@@ -112,8 +124,12 @@ async fn execute(
             .await
         }
         Command::Recover(target, principal, pw) => {
-            a.recover_local_password(key(target, principal)?, password(pw)?, assembly::deadline(cutoff))
-                .await
+            a.recover_local_password(
+                key(target, principal)?,
+                password(pw)?,
+                assembly::deadline(cutoff),
+            )
+            .await
         }
     }?;
     println!(

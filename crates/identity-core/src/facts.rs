@@ -3,7 +3,9 @@ use crate::{ValidationError, federation::FederationError};
 use serde::{Deserialize, Serialize};
 
 /// Structural lifetime range; deployment freshness is selected at issuance.
-pub fn valid_max_age(seconds: i64) -> bool { seconds > 0 }
+pub fn valid_max_age(seconds: i64) -> bool {
+    seconds > 0
+}
 pub fn valid_snapshot_window(observed_at: i64, expires_at: i64) -> bool {
     observed_at > 0
         && expires_at
@@ -90,7 +92,10 @@ pub(crate) fn expires_at(
     now: i64,
     future_skew_seconds: u32,
 ) -> Result<i64, FederationError> {
-    if !acceptable_observation(issued_at, now, future_skew_seconds) || expires_at <= issued_at || expires_at <= now {
+    if !acceptable_observation(issued_at, now, future_skew_seconds)
+        || expires_at <= issued_at
+        || expires_at <= now
+    {
         return Err(FederationError::Claims);
     }
     Ok(issued_at

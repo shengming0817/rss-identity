@@ -21,10 +21,16 @@ fn main() {
     let result = (|| {
         if args == ["--acceptance-profile"] {
             use std::io::Read;
-            let mut bytes=Vec::new();
-            std::io::stdin().take(rss_identity_app::config::CONFIG_MAX_BYTES as u64+1).read_to_end(&mut bytes).map_err(|_|AppError::Configuration)?;
-            if bytes.len()>rss_identity_app::config::CONFIG_MAX_BYTES {return Err(AppError::Configuration);}
-            let config: RuntimeConfig=serde_json::from_slice(&bytes).map_err(|_|AppError::Json)?;
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .take(rss_identity_app::config::CONFIG_MAX_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| AppError::Configuration)?;
+            if bytes.len() > rss_identity_app::config::CONFIG_MAX_BYTES {
+                return Err(AppError::Configuration);
+            }
+            let config: RuntimeConfig =
+                serde_json::from_slice(&bytes).map_err(|_| AppError::Json)?;
             config.validate()?;
             let policy = rss_identity_app::assembly::session_policy()?;
             println!(

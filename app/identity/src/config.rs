@@ -29,7 +29,9 @@ impl DatabaseConfig {
         if self.host.is_empty()
             || self.database.is_empty()
             || self.user.is_empty()
-            || self.port == 0 || self.max_connections == 0 || self.min_connections > self.max_connections
+            || self.port == 0
+            || self.max_connections == 0
+            || self.min_connections > self.max_connections
             || finite_seconds(self.acquire_seconds).is_err()
         {
             return Err(AppError::Configuration);
@@ -42,8 +44,9 @@ impl DatabaseConfig {
             PgPassword::new(read_secret(Path::new(&self.password_file))?.to_string()),
             PgPrivateCa::from_pem(read_public_file(Path::new(&self.ca_file), 1024 * 1024)?)
                 .map_err(|_| AppError::Ca)?,
-        ).with_pool_limits(self.min_connections,self.max_connections)
-         .with_acquire_timeout(finite_seconds(self.acquire_seconds)?))
+        )
+        .with_pool_limits(self.min_connections, self.max_connections)
+        .with_acquire_timeout(finite_seconds(self.acquire_seconds)?))
     }
     pub fn sqlx(&self) -> Result<sqlx::postgres::PgConnectOptions, AppError> {
         // Validate the same file/CA boundary as the RSS pool before configuring the owner connection.
@@ -91,7 +94,11 @@ impl StorageConfig {
     pub fn bindings(&self) -> Result<Vec<ExecutionBinding>, AppError> {
         let storage = self.identity()?;
         let epoch = self.epoch()?;
-        Ok(self.tenants()?.into_iter().map(|tenant| ExecutionBinding::new(storage, tenant, epoch)).collect())
+        Ok(self
+            .tenants()?
+            .into_iter()
+            .map(|tenant| ExecutionBinding::new(storage, tenant, epoch))
+            .collect())
     }
 }
 #[derive(Deserialize)]
@@ -152,8 +159,14 @@ pub struct OidcConfig {
     pub return_targets: std::collections::BTreeMap<String, String>,
 }
 impl OidcConfig {
-    pub fn transport(&self) -> Result<rss_identity_oidc::TransportPolicy,AppError> {
-        rss_identity_oidc::TransportPolicy::new(finite_seconds(self.request_seconds)?,finite_seconds(self.connect_seconds)?,self.max_response_bytes,self.max_jwks_keys).map_err(|_|AppError::Configuration)
+    pub fn transport(&self) -> Result<rss_identity_oidc::TransportPolicy, AppError> {
+        rss_identity_oidc::TransportPolicy::new(
+            finite_seconds(self.request_seconds)?,
+            finite_seconds(self.connect_seconds)?,
+            self.max_response_bytes,
+            self.max_jwks_keys,
+        )
+        .map_err(|_| AppError::Configuration)
     }
 
     pub fn private_access(
@@ -199,7 +212,9 @@ impl Budgets {
     pub fn validate(self) -> Result<Self, AppError> {
         if self.request_seconds == 0
             || self.drain_seconds == 0
-            || std::time::Instant::now().checked_add(self.drain()).is_none()
+            || std::time::Instant::now()
+                .checked_add(self.drain())
+                .is_none()
             || self.resource_seconds == 0
             || self.resource_seconds > self.drain_seconds
             || self.request_seconds > self.drain_seconds
@@ -223,29 +238,36 @@ impl Budgets {
 }
 /// All non-secret configuration input shares this host-owned file budget.
 pub const CONFIG_MAX_BYTES: usize = 16 * 1024 * 1024;
-pub fn finite_seconds(seconds: u64) -> Result<Duration,AppError> {
-    let duration=Duration::from_secs(seconds);
-    if seconds == 0 || std::time::Instant::now().checked_add(duration).is_none() { return Err(AppError::Budget); }
+pub fn finite_seconds(seconds: u64) -> Result<Duration, AppError> {
+    let duration = Duration::from_secs(seconds);
+    if seconds == 0 || std::time::Instant::now().checked_add(duration).is_none() {
+        return Err(AppError::Budget);
+    }
     Ok(duration)
 }
-pub fn cutoff(seconds: u64) -> Result<rss_request_context::Deadline,AppError> {
-    let duration=finite_seconds(seconds)?;
-    Ok(rss_request_context::Deadline::at(std::time::Instant::now().checked_add(duration).ok_or(AppError::Budget)?))
+pub fn cutoff(seconds: u64) -> Result<rss_request_context::Deadline, AppError> {
+    let duration = finite_seconds(seconds)?;
+    Ok(rss_request_context::Deadline::at(
+        std::time::Instant::now()
+            .checked_add(duration)
+            .ok_or(AppError::Budget)?,
+    ))
 }
 
-#[derive(Clone,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PasswordWorkConfig {
     pub concurrency: std::num::NonZeroUsize,
     pub reserved_memory_bytes: std::num::NonZeroU64,
 }
 impl PasswordWorkConfig {
-    pub fn build(&self) -> Result<rss_identity_core::account::PasswordKdf,AppError> {
-        rss_identity_core::account::PasswordKdf::new(self.concurrency,self.reserved_memory_bytes).map_err(|_|AppError::Budget)
+    pub fn build(&self) -> Result<rss_identity_core::account::PasswordKdf, AppError> {
+        rss_identity_core::account::PasswordKdf::new(self.concurrency, self.reserved_memory_bytes)
+            .map_err(|_| AppError::Budget)
     }
 }
-#[derive(Clone,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuthoritySettings {
     pub source_limit: u32,
     pub source_seconds: u32,
@@ -267,34 +289,63 @@ pub struct AuthoritySettings {
     pub operation_proof_seconds: std::num::NonZeroU32,
 }
 impl AuthoritySettings {
-    pub fn apply(&self, config: rss_identity_postgres::AuthorityConfig, claim_ttl: Duration) -> Result<rss_identity_postgres::AuthorityConfig,AppError> {
-        use rss_identity_postgres::{AttemptWindow,AuthenticationPolicy};
-        Ok(config.with_authentication_policy(AuthenticationPolicy::new(
-            AttemptWindow::new(self.source_limit,self.source_seconds)?,
-            AttemptWindow::new(self.scope_limit,self.scope_seconds)?,
-            AttemptWindow::new(self.password_failure_limit,self.password_failure_seconds)?,
-            self.attempt_records,self.cleanup_batch,claim_ttl)?)
+    pub fn apply(
+        &self,
+        config: rss_identity_postgres::AuthorityConfig,
+        claim_ttl: Duration,
+    ) -> Result<rss_identity_postgres::AuthorityConfig, AppError> {
+        use rss_identity_postgres::{AttemptWindow, AuthenticationPolicy};
+        Ok(config
+            .with_authentication_policy(AuthenticationPolicy::new(
+                AttemptWindow::new(self.source_limit, self.source_seconds)?,
+                AttemptWindow::new(self.scope_limit, self.scope_seconds)?,
+                AttemptWindow::new(self.password_failure_limit, self.password_failure_seconds)?,
+                self.attempt_records,
+                self.cleanup_batch,
+                claim_ttl,
+            )?)
             .with_provider_capacity(self.provider_capacity)?
             .with_profile_receipt_capacity(self.profile_receipts)
-            .with_profile_limits(rss_identity_core::profile::ProfileLimits::new(self.profile_bytes,self.profile_members,self.profile_depth,self.profile_array,self.profile_max_age_seconds).map_err(|_|AppError::Configuration)?)
+            .with_profile_limits(
+                rss_identity_core::profile::ProfileLimits::new(
+                    self.profile_bytes,
+                    self.profile_members,
+                    self.profile_depth,
+                    self.profile_array,
+                    self.profile_max_age_seconds,
+                )
+                .map_err(|_| AppError::Configuration)?,
+            )
             .with_auth_facts_budget(self.max_auth_facts_bytes)
             .with_future_skew(self.future_skew_seconds)
             .with_operation_proof_lifetime(self.operation_proof_seconds))
     }
 }
-#[derive(Clone,Copy,Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpServerConfig {
     pub connections: usize,
     pub headers: usize,
     pub buffer_bytes: usize,
 }
 impl HttpServerConfig {
-    pub fn policy(self, budgets: Budgets) -> Result<rss_axum::Http1ServePolicy,AppError> {
-        self.connections.checked_mul(self.buffer_bytes).ok_or(AppError::Budget)?;
+    pub fn policy(self, budgets: Budgets) -> Result<rss_axum::Http1ServePolicy, AppError> {
+        self.connections
+            .checked_mul(self.buffer_bytes)
+            .ok_or(AppError::Budget)?;
         rss_axum::Http1ServePolicy::new(
-            rss_axum::ServePolicy::new(self.connections,budgets.request(),budgets.request(),budgets.resource()).map_err(|_|AppError::Budget)?,
-            budgets.request(),self.headers,self.buffer_bytes).map_err(|_|AppError::Budget)
+            rss_axum::ServePolicy::new(
+                self.connections,
+                budgets.request(),
+                budgets.request(),
+                budgets.resource(),
+            )
+            .map_err(|_| AppError::Budget)?,
+            budgets.request(),
+            self.headers,
+            self.buffer_bytes,
+        )
+        .map_err(|_| AppError::Budget)
     }
 }
 
@@ -391,8 +442,15 @@ impl MaintenanceConfig {
         bootstrap_keys(&self.bootstrap_accounts, &self.storage)?;
         self.budgets.validate()?;
         self.password_work.build()?;
-        self.authority.apply(rss_identity_postgres::AuthorityConfig::new(
-            InstanceId::parse(&self.instance_id).map_err(|_|AppError::Configuration)?,self.storage.bindings()?,crate::assembly::session_policy()?,rss_audit_postgres::Integrity::Plain)?,finite_seconds(self.budgets.maintenance_seconds)?)?;
+        self.authority.apply(
+            rss_identity_postgres::AuthorityConfig::new(
+                InstanceId::parse(&self.instance_id).map_err(|_| AppError::Configuration)?,
+                self.storage.bindings()?,
+                crate::assembly::session_policy()?,
+                rss_audit_postgres::Integrity::Plain,
+            )?,
+            finite_seconds(self.budgets.maintenance_seconds)?,
+        )?;
         Ok(())
     }
     pub fn bootstrap_key(&self, tenant: TenantId) -> Result<AccountKey, AppError> {

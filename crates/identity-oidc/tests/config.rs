@@ -80,7 +80,9 @@ fn trusted_assurance_is_independent_and_exactly_scoped() {
             client_id: c.client_id().as_str().into(),
             keycloak_totp: true,
         }],
-        vec![], transport_policy())
+        vec![],
+        transport_policy(),
+    )
     .unwrap();
     let approved = trusted.assurance_profile(tenant(), &c);
     assert!(approved.supports_step_up);
@@ -112,16 +114,30 @@ fn trusted_assurance_is_independent_and_exactly_scoped() {
 }
 
 fn transport_policy() -> rss_identity_oidc::TransportPolicy {
-    rss_identity_oidc::TransportPolicy::new(std::time::Duration::from_secs(5),std::time::Duration::from_secs(3),1024*1024,128).unwrap()
+    rss_identity_oidc::TransportPolicy::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(3),
+        1024 * 1024,
+        128,
+    )
+    .unwrap()
 }
 
 #[test]
 fn transport_policy_validates_finite_resource_selections() {
     use rss_identity_oidc::TransportPolicy;
     use std::time::Duration;
-    assert!(TransportPolicy::new(Duration::from_secs(120),Duration::from_secs(30),2*1024*1024,1024).is_ok());
-    for timeout in [Duration::ZERO,Duration::MAX] {
-        assert!(TransportPolicy::new(timeout,Duration::from_secs(3),1024,128).is_err());
+    assert!(
+        TransportPolicy::new(
+            Duration::from_secs(120),
+            Duration::from_secs(30),
+            2 * 1024 * 1024,
+            1024
+        )
+        .is_ok()
+    );
+    for timeout in [Duration::ZERO, Duration::MAX] {
+        assert!(TransportPolicy::new(timeout, Duration::from_secs(3), 1024, 128).is_err());
     }
-    assert!(TransportPolicy::new(Duration::from_secs(5),Duration::from_secs(3),0,128).is_err());
+    assert!(TransportPolicy::new(Duration::from_secs(5), Duration::from_secs(3), 0, 128).is_err());
 }
