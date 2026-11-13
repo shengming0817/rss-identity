@@ -375,7 +375,7 @@ impl support::Fixture {
         Ok(self
             .store
             .verify_password(
-                self.key.tenant,
+                support::binding(self.key.tenant),
                 support::login("admin"),
                 support::password(),
                 support::source(),
@@ -390,13 +390,13 @@ async fn session_actor(
     store: &Authority,
     candidate: AuthenticationCandidate,
 ) -> anyhow::Result<AuthenticatedSession> {
-    let tenant = candidate.account().tenant;
+    let binding = candidate.binding;
     let issued = store
         .create_session(candidate, None, support::deadline())
         .await?;
     Ok(store
         .inspect_session(
-            tenant,
+            binding,
             rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
             support::deadline(),
         )
@@ -416,6 +416,6 @@ mod step_up;
 pub use step_up::{ConsumedStepUp, StepUpGrant, consume_step_up_on};
 mod webauthn;
 pub use webauthn::{
-    RegistrationAuthorization, RpGeneration, WebauthnAuthority, WebauthnChallenge, WebauthnCredentialView,
-    activate_webauthn_rp_on, webauthn_management_context,
+    RegistrationAuthorization, RpGeneration, WebauthnAuthority, WebauthnChallenge,
+    WebauthnCredentialView, activate_webauthn_rp_on, webauthn_management_context,
 };

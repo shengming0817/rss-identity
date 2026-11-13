@@ -2,8 +2,7 @@
 //! ref: sqlx sqlx-core/src/transaction.rs@v0.9.0 (borrowed transaction ownership).
 use crate::{
     AuthenticatedSession, Authority, AuthorityConfig, AuthorityError, AuthorityProfile, Budget,
-    ExecutionBinding,
-    ManagementOperation, ManagementPolicy,
+    ExecutionBinding, ManagementOperation, ManagementPolicy,
     storage::{authority_id, insert_account, load_for_maintenance},
     transaction::{self, MutationError, SecurityEvent},
 };

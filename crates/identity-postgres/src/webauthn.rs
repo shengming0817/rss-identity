@@ -27,7 +27,9 @@ pub struct WebauthnAuthority {
 pub struct RpGeneration(i64);
 impl RpGeneration {
     pub fn new(value: i64) -> Result<Self, AuthorityError> {
-        if value <= 0 { return Err(AuthorityError::Configuration); }
+        if value <= 0 {
+            return Err(AuthorityError::Configuration);
+        }
         Ok(Self(value))
     }
 }
@@ -101,14 +103,10 @@ pub fn webauthn_management_context(
         .map_err(|_| AuthorityError::InvalidInput)
 }
 impl WebauthnAuthority {
-    pub fn new(
-        authority: Authority,
-        rp: String,
-        origin: url::Url,
-    ) -> Result<Self, AuthorityError> {
+    pub fn new(authority: Authority, rp: String, origin: url::Url) -> Result<Self, AuthorityError> {
         authority.require_runtime()?;
-        let (verifier, config) = rp_configuration(&rp, &origin)
-            .map_err(|_| AuthorityError::Configuration)?;
+        let (verifier, config) =
+            rp_configuration(&rp, &origin).map_err(|_| AuthorityError::Configuration)?;
         Ok(Self {
             authority,
             verifier: Arc::new(verifier),
@@ -132,7 +130,9 @@ impl WebauthnAuthority {
         let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.webauthn_rp WHERE tenant_id=$1::uuid AND rp=$2 AND fingerprint=$3 AND generation=$4)")
             .bind(tenant.to_string()).bind(&self.rp).bind(self.config.as_slice()).bind(expected.0)
             .fetch_one(c).await?;
-        if !valid { return Err(reject().into()); }
+        if !valid {
+            return Err(reject().into());
+        }
         Ok(expected.0)
     }
     pub fn authority(&self) -> Authority {
@@ -196,7 +196,8 @@ impl WebauthnAuthority {
             .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
-                    this.check_configuration(c, actor.key.tenant, generation).await?;
+                    this.check_configuration(c, actor.key.tenant, generation)
+                        .await?;
                     let (handle, enrolled, epoch) = account(c, actor.key).await?;
                     let host_recovery =
                         matches!(authorization, RegistrationAuthorization::HostRecovery);
@@ -294,7 +295,9 @@ impl WebauthnAuthority {
         deadline: OperationDeadline,
     ) -> Result<WebauthnCredentialView, AuthorityError> {
         let budget = Budget::new(deadline)?;
-        let snapshot = self.snapshot(&actor, generation, id, budget.remaining()).await?;
+        let snapshot = self
+            .snapshot(&actor, generation, id, budget.remaining())
+            .await?;
         let Ceremony::Register {
             state,
             label,
@@ -349,7 +352,8 @@ impl WebauthnAuthority {
             .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
-                    this.check_configuration(c, actor.key.tenant, generation).await?;
+                    this.check_configuration(c, actor.key.tenant, generation)
+                        .await?;
                     let (_, _, epoch) = account(c, actor.key).await?;
                     let keys = credentials(c, actor.key, &this.rp, &this.config).await?;
                     if keys.is_empty() {
@@ -391,7 +395,9 @@ impl WebauthnAuthority {
         deadline: OperationDeadline,
     ) -> Result<StepUpGrant, AuthorityError> {
         let budget = Budget::new(deadline)?;
-        let snapshot = self.snapshot(&actor, generation, id, budget.remaining()).await?;
+        let snapshot = self
+            .snapshot(&actor, generation, id, budget.remaining())
+            .await?;
         let Ceremony::Authenticate {
             state,
             context,
@@ -475,7 +481,8 @@ impl WebauthnAuthority {
             .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
                     read(c, &actor, id, config).await?;
-                    this.check_configuration(c, actor.key.tenant, generation).await?;
+                    this.check_configuration(c, actor.key.tenant, generation)
+                        .await?;
                     consume(c, actor.key, id).await?;
                     Ok(())
                 })

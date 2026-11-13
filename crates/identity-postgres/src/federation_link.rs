@@ -138,8 +138,13 @@ impl Federation {
                 .await?;
             None
         };
-        let target =
-            db::read_provider(&self.authority, binding, target_provider, budget.remaining()).await?;
+        let target = db::read_provider(
+            &self.authority,
+            binding,
+            target_provider,
+            budget.remaining(),
+        )
+        .await?;
         if !target.enabled {
             return Err(AuthorityError::Rejected);
         }
@@ -158,7 +163,9 @@ impl Federation {
                 Purpose::Reauthenticate,
             )
         };
-        let state = self.signer.issue(self.authority.instance(), binding, purpose)?;
+        let state = self
+            .signer
+            .issue(self.authority.instance(), binding, purpose)?;
         let locator = self.signer.verify(self.authority.instance(), &state)?;
         let material = ProtocolMaterial::new(state)?;
         self.check_assurance_profile(tenant, &provider)?;
@@ -278,7 +285,9 @@ impl Federation {
                 })
             })
             .await?;
-        let new_state = self.signer.issue(self.authority.instance(), binding, Purpose::Link)?;
+        let new_state = self
+            .signer
+            .issue(self.authority.instance(), binding, Purpose::Link)?;
         let new_locator = self.signer.verify(self.authority.instance(), &new_state)?;
         let material = ProtocolMaterial::new(new_state)?;
         self.check_assurance_profile(tenant, &target)?;

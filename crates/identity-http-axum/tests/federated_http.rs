@@ -1,5 +1,5 @@
-use rss_identity_postgres::StateSigner;
 //! Real PG + HTTPS Keycloak adapter with explicit loopback fixture transport + in-process Axum. No product binary/T3 claim.
+use rss_identity_postgres::StateSigner;
 mod department_lifecycle;
 #[path = "../../identity-postgres/tests/federation_support/mod.rs"]
 mod federation_support;
@@ -170,7 +170,7 @@ async fn begin(
     };
     let response = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "POST",
             &format!(
                 "/api/v1/identity/tenants/{A}/oidc/{}/{}",
@@ -180,7 +180,7 @@ async fn begin(
             cookie,
             csrf,
             payload,
-        ))
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     Ok(body(response).await?["authorizationUrl"]
@@ -199,7 +199,13 @@ async fn authorize_factor(url: &str, user: &str, totp: bool) -> anyhow::Result<S
 async fn callback(app: &Router, path: &str, cookie: &str) -> anyhow::Result<Response> {
     Ok(app
         .clone()
-        .oneshot(request("GET", path, cookie, None, Value::Null))
+        .oneshot(crate::request_support::scoped(request(
+            "GET",
+            path,
+            cookie,
+            None,
+            Value::Null,
+        )))
         .await?)
 }
 fn cookie(response: &Response) -> String {
@@ -235,6 +241,7 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
         )?),
         f.config()
             .with_operation_proof_lifetime(std::num::NonZeroU32::new(600).unwrap()),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -252,14 +259,26 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     for (cookies, token) in [(BROWSER, None), (browser.as_str(), None)] {
         let r = app
             .clone()
-            .oneshot(request("POST", &path, cookies, token, input.clone()))
+            .oneshot(crate::request_support::scoped(request(
+                "POST",
+                &path,
+                cookies,
+                token,
+                input.clone(),
+            )))
             .await?;
         assert!(r.status().is_client_error());
     }
     // Removing the requested ACR from the browser URL cannot weaken the stored requirement.
     let r = app
         .clone()
-        .oneshot(request("POST", &path, &browser, Some(&csrf), input.clone()))
+        .oneshot(crate::request_support::scoped(request(
+            "POST",
+            &path,
+            &browser,
+            Some(&csrf),
+            input.clone(),
+        )))
         .await?;
     assert_eq!(r.status(), StatusCode::OK);
     let url = body(r).await?["authorizationUrl"]
@@ -288,12 +307,22 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     assert_eq!(r.headers()["location"], "/auth/error?reason=failed");
     assert!(!r.headers().contains_key("set-cookie"));
     f.store
-        .inspect_session(f.key.tenant, secret(&original), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&original),
+            deadline(),
+        )
         .await?;
     // A different real Keycloak user cannot replace the current principal.
     let r = app
         .clone()
-        .oneshot(request("POST", &path, &browser, Some(&csrf), input.clone()))
+        .oneshot(crate::request_support::scoped(request(
+            "POST",
+            &path,
+            &browser,
+            Some(&csrf),
+            input.clone(),
+        )))
         .await?;
     let url = body(r).await?["authorizationUrl"]
         .as_str()
@@ -305,7 +334,13 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     assert!(!r.headers().contains_key("set-cookie"));
     let r = app
         .clone()
-        .oneshot(request("POST", &path, &browser, Some(&csrf), input))
+        .oneshot(crate::request_support::scoped(request(
+            "POST",
+            &path,
+            &browser,
+            Some(&csrf),
+            input,
+        )))
         .await?;
     let url = body(r).await?["authorizationUrl"]
         .as_str()
@@ -331,7 +366,11 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing operation proof"))?;
     let current = f
         .store
-        .inspect_session(f.key.tenant, secret(&original), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&original),
+            deadline(),
+        )
         .await?;
     let context = webauthn_management_context(current.account(), "register", None)?;
     let mut tx = f.owner.begin().await?;
@@ -360,11 +399,15 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     // A real adapter profile withdrawal is applied before startup opens HTTP admission.
     let withdrawn = service(&f, Arc::new(fixture_transport(false)?));
     withdrawn
-        .reconcile_assurance_profiles(f.key.tenant, deadline())
+        .reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&original), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&original),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -372,11 +415,15 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
         federation_support::begin(&f, &s, &p).await.is_err(),
         "stale approved process must not start flows"
     );
-    s.reconcile_assurance_profiles(f.key.tenant, deadline())
+    s.reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&original), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&original),
+                deadline()
+            )
             .await
             .is_err(),
         "restoring the assurance profile must not revive MFA"
@@ -495,11 +542,19 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
     let bob = successful(&app, &p, "bob").await?;
     let a = f
         .store
-        .inspect_session(f.key.tenant, secret(&alice), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&alice),
+            deadline(),
+        )
         .await?;
     let b = f
         .store
-        .inspect_session(f.key.tenant, secret(&bob), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&bob),
+            deadline(),
+        )
         .await?;
     assert_ne!(a.account(), b.account());
     let VerifiedDepartmentSnapshot::Available(department) = a.department_snapshot()? else {
@@ -566,7 +621,11 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
     let linked = cookie(&response);
     assert_eq!(
         f.store
-            .inspect_session(f.key.tenant, secret(&linked), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&linked),
+                deadline()
+            )
             .await?
             .account(),
         f.key
@@ -610,7 +669,11 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         f.store
-            .inspect_session(f.key.tenant, secret(&cookie(&response)), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&cookie(&response)),
+                deadline()
+            )
             .await?
             .account(),
         principal
@@ -668,7 +731,13 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
     assert!(!wrong.headers().contains_key("set-cookie"));
     let response = app
         .clone()
-        .oneshot(request("HEAD", &cb, BROWSER, None, Value::Null))
+        .oneshot(crate::request_support::scoped(request(
+            "HEAD",
+            &cb,
+            BROWSER,
+            None,
+            Value::Null,
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     let response = callback(&app, &cb, BROWSER).await?;
@@ -712,7 +781,7 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
     let scripted = federation_support::ScriptedOidc::new();
     let mocked = service(&f, scripted.clone());
     mocked
-        .reconcile_assurance_profiles(f.key.tenant, deadline())
+        .reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
     let mock_app = federated_router(
         mocked.clone(),
@@ -825,7 +894,11 @@ async fn real_invalid_department_preserves_authenticated_identity() -> anyhow::R
     let session = cookie(&response);
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     assert!(actor.assurance().is_ok());
     assert!(matches!(
@@ -894,3 +967,6 @@ fn upstream_deadline() -> rss_request_context::Deadline {
             .unwrap(),
     )
 }
+
+#[path = "request_support/mod.rs"]
+mod request_support;

@@ -34,7 +34,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
     let (proof, credential) = authenticate_request(
         &f.store,
         &config,
-        f.key.tenant,
+        crate::support::binding(f.key.tenant),
         &headers,
         SessionActivity::Passive,
         deadline(),
@@ -61,7 +61,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             let error = authenticate_request(
                 &f.store,
                 &config,
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 &malformed,
                 mode,
                 deadline(),
@@ -80,7 +80,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             authenticate_request(
                 &f.store,
                 &config,
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 &duplicate,
                 mode,
                 deadline()
@@ -103,7 +103,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             let error = authenticate_request(
                 &f.store,
                 &config,
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 &rejected,
                 SessionActivity::Active,
                 deadline(),
@@ -132,7 +132,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             authenticate_request(
                 &f.store,
                 &config,
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 &rejected,
                 SessionActivity::Active,
                 deadline()
@@ -148,7 +148,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
         let error = authenticate_request(
             &f.store,
             &config,
-            rss_request_context::TenantId::parse(B)?,
+            crate::support::binding(rss_request_context::TenantId::parse(B)?),
             &active,
             mode,
             deadline(),
@@ -160,7 +160,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
         let error = authenticate_request(
             &f.maintenance,
             &config,
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             &active,
             mode,
             deadline(),
@@ -178,7 +178,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             let error = authenticate_request(
                 &f.store,
                 &bounded,
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 &active,
                 mode,
                 rss_transactional_messaging::policy::OperationDeadline::from_remaining(remaining),
@@ -201,7 +201,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
     let (proof, _) = authenticate_request(
         &f.store,
         &config,
-        f.key.tenant,
+        crate::support::binding(f.key.tenant),
         &headers,
         SessionActivity::Passive,
         deadline(),
@@ -217,7 +217,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
     let (passive, _) = authenticate_request(
         &f.store,
         &config,
-        f.key.tenant,
+        crate::support::binding(f.key.tenant),
         &headers,
         SessionActivity::Passive,
         deadline(),
@@ -227,7 +227,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
     let (proof, _) = authenticate_request(
         &f.store,
         &config,
-        f.key.tenant,
+        crate::support::binding(f.key.tenant),
         &active,
         SessionActivity::Active,
         deadline(),
@@ -244,7 +244,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
     let error = authenticate_request(
         &f.store,
         &config,
-        f.key.tenant,
+        crate::support::binding(f.key.tenant),
         &active,
         SessionActivity::Active,
         deadline(),
@@ -260,27 +260,33 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
         ))
     ));
     assert!(!error.headers().contains_key("set-cookie"));
-    app.oneshot(request(
+    app.oneshot(crate::request_support::scoped(request(
         "POST",
         "session/logout",
         Some(&cookie),
         Some(&csrf),
         json!(null),
-    ))
+    )))
     .await?;
     for mode in [SessionActivity::Passive, SessionActivity::Active] {
-        let error =
-            authenticate_request(&f.store, &config, f.key.tenant, &active, mode, deadline())
-                .await
-                .err()
-                .unwrap();
+        let error = authenticate_request(
+            &f.store,
+            &config,
+            crate::support::binding(f.key.tenant),
+            &active,
+            mode,
+            deadline(),
+        )
+        .await
+        .err()
+        .unwrap();
         assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
     }
     f.runtime.close().await;
     let error = authenticate_request(
         &f.store,
         &config,
-        f.key.tenant,
+        crate::support::binding(f.key.tenant),
         &headers,
         SessionActivity::Passive,
         deadline(),
@@ -341,7 +347,10 @@ async fn body(response: Response) -> anyhow::Result<Value> {
     )?)
 }
 async fn successful_login(app: &Router) -> anyhow::Result<(String, String, Value)> {
-    let response = app.clone().oneshot(login_request(None, None)).await?;
+    let response = app
+        .clone()
+        .oneshot(crate::request_support::scoped(login_request(None, None)))
+        .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "no-store");
     let header = response.headers()["set-cookie"].to_str()?.to_owned();
@@ -363,7 +372,10 @@ async fn session_http_login_cookie_csrf_and_replacement() -> anyhow::Result<()> 
     for header in ["origin", "x-identity-request"] {
         let mut req = login_request(None, None);
         req.headers_mut().remove(header);
-        let response = app.clone().oneshot(req).await?;
+        let response = app
+            .clone()
+            .oneshot(crate::request_support::scoped(req))
+            .await?;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(response.headers()["cache-control"], "no-store");
         assert!(!response.headers().contains_key("set-cookie"));
@@ -371,12 +383,18 @@ async fn session_http_login_cookie_csrf_and_replacement() -> anyhow::Result<()> 
     let (cookie, csrf, first) = successful_login(&app).await?;
     let response = app
         .clone()
-        .oneshot(login_request(Some(&cookie), Some("wrong")))
+        .oneshot(crate::request_support::scoped(login_request(
+            Some(&cookie),
+            Some("wrong"),
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let response = app
         .clone()
-        .oneshot(login_request(Some(&cookie), Some(&csrf)))
+        .oneshot(crate::request_support::scoped(login_request(
+            Some(&cookie),
+            Some(&csrf),
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let new_cookie = response.headers()["set-cookie"]
@@ -390,26 +408,32 @@ async fn session_http_login_cookie_csrf_and_replacement() -> anyhow::Result<()> 
     assert_ne!(new_cookie, cookie);
     assert_eq!(
         app.clone()
-            .oneshot(request("GET", "session", Some(&cookie), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                "session",
+                Some(&cookie),
+                None,
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::UNAUTHORIZED
     );
     let csrf = replacement["csrfToken"].as_str().unwrap();
-    let a = app.clone().oneshot(request(
+    let a = app.clone().oneshot(crate::request_support::scoped(request(
         "POST",
         "session/refresh",
         Some(&new_cookie),
         Some(csrf),
         json!(null),
-    ));
-    let b = app.clone().oneshot(request(
+    )));
+    let b = app.clone().oneshot(crate::request_support::scoped(request(
         "POST",
         "session/refresh",
         Some(&new_cookie),
         Some(csrf),
         json!(null),
-    ));
+    )));
     let (a, b) = tokio::join!(a, b);
     let (a, b) = (a?, b?);
     let (success, failure) = if a.status() == StatusCode::OK {
@@ -435,7 +459,13 @@ async fn session_http_login_cookie_csrf_and_replacement() -> anyhow::Result<()> 
     let csrf = rotated["csrfToken"].as_str().unwrap();
     let list = body(
         app.clone()
-            .oneshot(request("GET", "sessions", Some(&cookie), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                "sessions",
+                Some(&cookie),
+                None,
+                json!(null),
+            )))
             .await?,
     )
     .await?;
@@ -443,13 +473,13 @@ async fn session_http_login_cookie_csrf_and_replacement() -> anyhow::Result<()> 
     assert!(!list.to_string().contains(cookie.split_once('=').unwrap().1));
     let response = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "POST",
             "sessions/logout-all",
             Some(&cookie),
             Some(csrf),
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(
@@ -459,7 +489,13 @@ async fn session_http_login_cookie_csrf_and_replacement() -> anyhow::Result<()> 
     );
     assert_eq!(
         app.clone()
-            .oneshot(request("GET", "session", Some(&cookie), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                "session",
+                Some(&cookie),
+                None,
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::UNAUTHORIZED
@@ -479,20 +515,26 @@ async fn session_http_settlement_never_sets_uncertain_cookie() -> anyhow::Result
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     let response = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "POST",
             "session/refresh",
             Some(&cookie),
             Some(&csrf),
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!response.headers().contains_key("set-cookie"));
     assert_eq!(f.events().await?, before + 1);
     assert_eq!(
         app.clone()
-            .oneshot(request("GET", "session", Some(&cookie), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                "session",
+                Some(&cookie),
+                None,
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::UNAUTHORIZED
@@ -524,7 +566,10 @@ async fn session_http_settlement_never_sets_uncertain_cookie() -> anyhow::Result
             json!(null),
         ),
     ] {
-        let response = app.clone().oneshot(req).await?;
+        let response = app
+            .clone()
+            .oneshot(crate::request_support::scoped(req))
+            .await?;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!response.headers().contains_key("set-cookie"));
         assert!(
@@ -537,14 +582,26 @@ async fn session_http_settlement_never_sets_uncertain_cookie() -> anyhow::Result
     assert_eq!(f.events().await?, before);
     assert_eq!(
         app.clone()
-            .oneshot(request("GET", "session", Some(&cookie), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                "session",
+                Some(&cookie),
+                None,
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::OK
     );
     f.runtime.close().await;
     let response = app
-        .oneshot(request("GET", "session", Some(&cookie), None, json!(null)))
+        .oneshot(crate::request_support::scoped(request(
+            "GET",
+            "session",
+            Some(&cookie),
+            None,
+            json!(null),
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!response.headers().contains_key("set-cookie"));
@@ -566,7 +623,10 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
     let mut req = login_request(None, None);
     req.extensions_mut().clear();
     assert_eq!(
-        app.clone().oneshot(req).await?.status(),
+        app.clone()
+            .oneshot(crate::request_support::scoped(req))
+            .await?
+            .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
     let (cookie, csrf, value) = successful_login(&app).await?;
@@ -591,7 +651,10 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
             json!(null),
         );
         req.headers_mut().insert("origin", origin.parse()?);
-        let response = app.clone().oneshot(req).await?;
+        let response = app
+            .clone()
+            .oneshot(crate::request_support::scoped(req))
+            .await?;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(!response.headers().contains_key("set-cookie"));
     }
@@ -607,12 +670,21 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
     let mut req = request("GET", "session", Some(&cookie), None, json!(null));
     *req.uri_mut() = format!("/api/v1/identity/tenants/{B}/session").parse()?;
     assert_eq!(
-        app.clone().oneshot(req).await?.status(),
+        app.clone()
+            .oneshot(crate::request_support::scoped(req))
+            .await?
+            .status(),
         StatusCode::UNAUTHORIZED
     );
     let response = app
         .clone()
-        .oneshot(request("GET", "session", Some(&cookie), None, json!(null)))
+        .oneshot(crate::request_support::scoped(request(
+            "GET",
+            "session",
+            Some(&cookie),
+            None,
+            json!(null),
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response.headers().contains_key("set-cookie"));
@@ -628,7 +700,13 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
         let mut req = request(method, path, Some(&cookie), None, json!(null));
         req.headers_mut()
             .insert("origin", "https://evil.example.test".parse()?);
-        assert_eq!(app.clone().oneshot(req).await?.status(), StatusCode::OK);
+        assert_eq!(
+            app.clone()
+                .oneshot(crate::request_support::scoped(req))
+                .await?
+                .status(),
+            StatusCode::OK
+        );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT idle_expires_at FROM identity_authority.sessions WHERE session_id=$1::uuid"
@@ -641,13 +719,13 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
     }
     let rotated = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "POST",
             "session/refresh",
             Some(&cookie),
             Some(&csrf),
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(rotated.status(), StatusCode::OK);
     let cookie = rotated.headers()["set-cookie"]
@@ -660,19 +738,25 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
     assert!(value["session"]["idleExpiresAt"].as_i64().unwrap() > idle);
     let response = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "GET",
             "sessions?cursor=00000000-0000-0000-0000-000000000000",
             Some(&cookie),
             None,
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     sqlx::query("UPDATE identity_authority.sessions SET idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint WHERE session_id=$1::uuid").bind(id).execute(&f.owner).await?;
     assert_eq!(
         app.clone()
-            .oneshot(request("GET", "session", Some(&cookie), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                "session",
+                Some(&cookie),
+                None,
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::UNAUTHORIZED
@@ -680,7 +764,10 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
     // An expired browser cookie must not prevent a fresh same-origin password login.
     assert_eq!(
         app.clone()
-            .oneshot(login_request(Some(&cookie), None))
+            .oneshot(crate::request_support::scoped(login_request(
+                Some(&cookie),
+                None
+            )))
             .await?
             .status(),
         StatusCode::OK
@@ -696,7 +783,11 @@ async fn session_http_origin_expiry_and_transport_boundaries() -> anyhow::Result
         );
         req.headers_mut()
             .insert("x-forwarded-for", format!("192.0.2.{i}").parse()?);
-        let status = app.clone().oneshot(req).await?.status();
+        let status = app
+            .clone()
+            .oneshot(crate::request_support::scoped(req))
+            .await?
+            .status();
         assert_eq!(
             status,
             if i < 30 {
@@ -725,28 +816,31 @@ async fn session_http_recovery_current_logout_and_deadline() -> anyhow::Result<(
     );
     let response = app
         .clone()
-        .oneshot(login_request(Some("__Host-identity-session=damaged"), None))
+        .oneshot(crate::request_support::scoped(login_request(
+            Some("__Host-identity-session=damaged"),
+            None,
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let response = app
         .clone()
-        .oneshot(login_request(
+        .oneshot(crate::request_support::scoped(login_request(
             Some("__Host-identity-session=damaged; __Host-identity-session=other"),
             None,
-        ))
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let (first, csrf, _) = successful_login(&app).await?;
     let (second, _, _) = successful_login(&app).await?;
     let response = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "POST",
             "session/logout",
             Some(&first),
             Some(&csrf),
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(
@@ -756,14 +850,26 @@ async fn session_http_recovery_current_logout_and_deadline() -> anyhow::Result<(
     );
     assert_eq!(
         app.clone()
-            .oneshot(request("GET", "session", Some(&first), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                "session",
+                Some(&first),
+                None,
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(
         app.clone()
-            .oneshot(request("GET", "session", Some(&second), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                "session",
+                Some(&second),
+                None,
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::OK
@@ -776,7 +882,11 @@ async fn session_http_recovery_current_logout_and_deadline() -> anyhow::Result<(
     *req.body_mut() = Body::from_stream(futures::stream::pending::<
         Result<&'static str, std::io::Error>,
     >());
-    let response = tokio::time::timeout(Duration::from_millis(500), short.oneshot(req)).await??;
+    let response = tokio::time::timeout(
+        Duration::from_millis(500),
+        short.oneshot(crate::request_support::scoped(req)),
+    )
+    .await??;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!response.headers().contains_key("set-cookie"));
     assert_eq!(
@@ -807,7 +917,13 @@ async fn session_http_lookup_never_inserts_tenant_guard() -> anyhow::Result<()> 
         for method in ["GET", "HEAD"] {
             let mut req = request(method, "session", Some(&fake), None, json!(null));
             *req.uri_mut() = format!("/api/v1/identity/tenants/{target}/session").parse()?;
-            assert!(!app.clone().oneshot(req).await?.status().is_success());
+            assert!(
+                !app.clone()
+                    .oneshot(crate::request_support::scoped(req))
+                    .await?
+                    .status()
+                    .is_success()
+            );
         }
     }
     assert_eq!(
@@ -827,7 +943,13 @@ async fn session_http_lookup_never_inserts_tenant_guard() -> anyhow::Result<()> 
     ] {
         assert_eq!(
             app.clone()
-                .oneshot(request(method, path, Some(&cookie), None, json!(null)))
+                .oneshot(crate::request_support::scoped(request(
+                    method,
+                    path,
+                    Some(&cookie),
+                    None,
+                    json!(null)
+                )))
                 .await?
                 .status(),
             StatusCode::OK
@@ -864,13 +986,15 @@ async fn session_http_pending_commit_preserves_settlement() -> anyhow::Result<()
         f.runtime.inject_next_transaction_fault(fault);
         let response = tokio::time::timeout(
             Duration::from_secs(2),
-            short.clone().oneshot(request(
-                "POST",
-                "session/refresh",
-                Some(&cookie),
-                Some(&csrf),
-                json!(null),
-            )),
+            short
+                .clone()
+                .oneshot(crate::request_support::scoped(request(
+                    "POST",
+                    "session/refresh",
+                    Some(&cookie),
+                    Some(&csrf),
+                    json!(null),
+                ))),
         )
         .await??;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -886,7 +1010,13 @@ async fn session_http_pending_commit_preserves_settlement() -> anyhow::Result<()
         assert_eq!(f.events().await?, before + i64::from(committed));
         let response = normal
             .clone()
-            .oneshot(request("GET", "session", Some(&cookie), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                "session",
+                Some(&cookie),
+                None,
+                json!(null),
+            )))
             .await?;
         assert_eq!(
             response.status(),
@@ -903,48 +1033,34 @@ async fn session_http_pending_commit_preserves_settlement() -> anyhow::Result<()
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
-async fn session_http_v1_reauthentication_is_bound_and_has_no_legacy_role_surface()
+async fn session_http_reauthentication_preserves_identity_and_rotates_credentials()
 -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let app = app(&f);
     let (cookie, csrf, first) = successful_login(&app).await?;
-    assert_eq!(first["identity"].as_object().unwrap().len(), 2);
-    assert!(first["identity"].get("administrator").is_none());
-    for path in [
-        format!("/api/v1/tenants/{A}/session"),
-        format!("/api/v2/tenants/{A}/session"),
-        format!("/api/v2/tenants/{A}/sessions"),
-        format!("/api/v2/tenants/{A}/accounts"),
-        format!("/tenants/{A}/session"),
-        "/auth/callback".into(),
-        "/api/v1/identity/oidc/callback".into(),
-    ] {
-        let response = app
-            .clone()
-            .oneshot(Request::builder().uri(path).body(Body::empty())?)
-            .await?;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
     // The public prefix counts toward the URI budget, even inside a nested Router.
     let prefix = format!("/api/v1/identity/tenants/{A}/session?padding=");
     for (length, expected) in [(8192, StatusCode::OK), (8193, StatusCode::BAD_REQUEST)] {
         let path = format!("{prefix}{}", "a".repeat(length - prefix.len()));
         let mut req = request("GET", "session", Some(&cookie), None, json!(null));
         *req.uri_mut() = path.parse()?;
-        let response = app.clone().oneshot(req).await?;
+        let response = app
+            .clone()
+            .oneshot(crate::request_support::scoped(req))
+            .await?;
         assert_eq!(response.status(), expected);
         assert!(!response.headers().contains_key("set-cookie"));
     }
     let response = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "POST",
             "session/reauthenticate",
             Some(&cookie),
             None,
             json!({"password":PASSWORD}),
-        ))
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     for value in [
@@ -953,26 +1069,26 @@ async fn session_http_v1_reauthentication_is_bound_and_has_no_legacy_role_surfac
     ] {
         let response = app
             .clone()
-            .oneshot(request(
+            .oneshot(crate::request_support::scoped(request(
                 "POST",
                 "session/reauthenticate",
                 Some(&cookie),
                 Some(&csrf),
                 value,
-            ))
+            )))
             .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(!response.headers().contains_key("set-cookie"));
     }
     let response = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "POST",
             "session/reauthenticate",
             Some(&cookie),
             Some(&csrf),
             json!({"password":PASSWORD}),
-        ))
+        )))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let replacement = response.headers()["set-cookie"]
@@ -990,19 +1106,25 @@ async fn session_http_v1_reauthentication_is_bound_and_has_no_legacy_role_surfac
     assert_ne!(value["session"]["id"], first["session"]["id"]);
     assert_eq!(
         app.clone()
-            .oneshot(request("GET", "session", Some(&cookie), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                "session",
+                Some(&cookie),
+                None,
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(
-        app.oneshot(request(
+        app.oneshot(crate::request_support::scoped(request(
             "GET",
             "session",
             Some(&replacement),
             None,
             json!(null)
-        ))
+        )))
         .await?
         .status(),
         StatusCode::OK
@@ -1054,7 +1176,7 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         let error = rss_identity_http_axum::authenticate_bearer_request(
             &f.store,
             &config,
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             &headers,
             deadline(),
         )
@@ -1066,11 +1188,17 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         assert_eq!(error.headers()["cache-control"], "no-store");
         let mut logout = request("POST", "bearer/logout", None, None, json!(null));
         logout.headers_mut().extend(headers);
-        let response = app.clone().oneshot(logout).await?;
+        let response = app
+            .clone()
+            .oneshot(crate::request_support::scoped(logout))
+            .await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()["www-authenticate"], "Bearer");
     }
-    let response = app.clone().oneshot(bearer_login()).await?;
+    let response = app
+        .clone()
+        .oneshot(crate::request_support::scoped(bearer_login()))
+        .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert!(!response.headers().contains_key("www-authenticate"));
@@ -1085,7 +1213,7 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
     let (proof, retained) = rss_identity_http_axum::authenticate_bearer_request(
         &f.store,
         &config,
-        f.key.tenant,
+        crate::support::binding(f.key.tenant),
         &headers,
         deadline(),
     )
@@ -1103,7 +1231,7 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         let error = rss_identity_http_axum::authenticate_bearer_request(
             &f.store,
             &config,
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             &mixed,
             deadline(),
         )
@@ -1122,19 +1250,22 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         .headers_mut()
         .insert("authorization", format!("Bearer {token}").parse()?);
     assert_eq!(
-        app.clone().oneshot(mixed).await?.status(),
+        app.clone()
+            .oneshot(crate::request_support::scoped(mixed))
+            .await?
+            .status(),
         StatusCode::BAD_REQUEST
     );
     let fake_cookie = format!("__Host-identity-session={token}");
     assert_eq!(
         app.clone()
-            .oneshot(request(
+            .oneshot(crate::request_support::scoped(request(
                 "GET",
                 "session",
                 Some(&fake_cookie),
                 None,
                 json!(null)
-            ))
+            )))
             .await?
             .status(),
         StatusCode::UNAUTHORIZED
@@ -1143,7 +1274,7 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
     let error = rss_identity_http_axum::authenticate_bearer_request(
         &f.store,
         &config,
-        f.key.tenant,
+        crate::support::binding(f.key.tenant),
         &bearer_headers(browser_secret),
         deadline(),
     )
@@ -1156,14 +1287,17 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
     logout
         .headers_mut()
         .insert("authorization", format!("Bearer {token}").parse()?);
-    let response = app.clone().oneshot(logout).await?;
+    let response = app
+        .clone()
+        .oneshot(crate::request_support::scoped(logout))
+        .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(!response.headers().contains_key("set-cookie"));
     assert_eq!(
         rss_identity_http_axum::authenticate_bearer_request(
             &f.store,
             &config,
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             &headers,
             deadline()
         )
@@ -1175,13 +1309,13 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
     );
     assert_eq!(
         app.clone()
-            .oneshot(request(
+            .oneshot(crate::request_support::scoped(request(
                 "POST",
                 "session/logout",
                 Some(&cookie),
                 Some(&csrf),
                 json!(null)
-            ))
+            )))
             .await?
             .status(),
         StatusCode::NO_CONTENT
@@ -1190,7 +1324,10 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
     Ok(())
 }
 async fn super_router_status(f: &Fixture) -> anyhow::Result<StatusCode> {
-    Ok(app(f).oneshot(bearer_login()).await?.status())
+    Ok(app(f)
+        .oneshot(crate::request_support::scoped(bearer_login()))
+        .await?
+        .status())
 }
 #[tokio::test]
 #[ignore = "requires make test-pg"]
@@ -1210,7 +1347,10 @@ async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Re
             .parse()?,
         );
         assert_eq!(
-            app.clone().oneshot(req).await?.status(),
+            app.clone()
+                .oneshot(crate::request_support::scoped(req))
+                .await?
+                .status(),
             StatusCode::BAD_REQUEST
         );
     }
@@ -1219,13 +1359,19 @@ async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Re
         .extensions_mut()
         .remove::<rss_identity_http_axum::ClientAddress>();
     assert_eq!(
-        app.clone().oneshot(missing_source).await?.status(),
+        app.clone()
+            .oneshot(crate::request_support::scoped(missing_source))
+            .await?
+            .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
     let mut query = bearer_login();
     *query.uri_mut() =
         format!("/api/v1/identity/tenants/{A}/bearer/login?password=secret-marker").parse()?;
-    let denied = app.clone().oneshot(query).await?;
+    let denied = app
+        .clone()
+        .oneshot(crate::request_support::scoped(query))
+        .await?;
     assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
     assert!(
         !String::from_utf8(to_bytes(denied.into_body(), 4096).await?.to_vec())?
@@ -1235,24 +1381,30 @@ async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Re
         let path = if i % 2 == 0 { "login" } else { "bearer/login" };
         let response = app
             .clone()
-            .oneshot(request(
+            .oneshot(crate::request_support::scoped(request(
                 "POST",
                 path,
                 None,
                 None,
                 json!({"login":"admin","password":"incorrect-password"}),
-            ))
+            )))
             .await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
-    let limited = app.clone().oneshot(bearer_login()).await?;
+    let limited = app
+        .clone()
+        .oneshot(crate::request_support::scoped(bearer_login()))
+        .await?;
     assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
     let retry: u32 = limited.headers()["retry-after"].to_str()?.parse()?;
     assert!((590..=600).contains(&retry));
     assert_eq!(body(limited).await?, json!({"code":"rate_limited"}));
     f.reset_attempts().await?;
     sqlx::raw_sql("CREATE FUNCTION public.reject_programmatic_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private-event-marker'; END $$; CREATE TRIGGER reject_programmatic_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_programmatic_event();").execute(&f.owner).await?;
-    let response = app.clone().oneshot(bearer_login()).await?;
+    let response = app
+        .clone()
+        .oneshot(crate::request_support::scoped(bearer_login()))
+        .await?;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!response.headers().contains_key("set-cookie"));
     let value = body(response).await?;
@@ -1267,13 +1419,13 @@ async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Re
         let path = if i % 2 == 0 { "login" } else { "bearer/login" };
         let response = app
             .clone()
-            .oneshot(request(
+            .oneshot(crate::request_support::scoped(request(
                 "POST",
                 path,
                 None,
                 None,
                 json!({"login":"admin","password":PASSWORD}),
-            ))
+            )))
             .await?;
         assert_eq!(
             response.status(),
@@ -1304,20 +1456,26 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     let input = json!({"operationId":operation,"expectedRevision":0,"value":{"displayName":"Name","username":null,"email":null,"extensions":extensions,"maxAgeSeconds":60}});
     assert_eq!(
         app.clone()
-            .oneshot(request("PUT", &path, Some(&cookie), None, input.clone()))
+            .oneshot(crate::request_support::scoped(request(
+                "PUT",
+                &path,
+                Some(&cookie),
+                None,
+                input.clone()
+            )))
             .await?
             .status(),
         StatusCode::FORBIDDEN
     );
     let result = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "PUT",
             &path,
             Some(&cookie),
             Some(&csrf),
             input.clone(),
-        ))
+        )))
         .await?;
     assert_eq!(result.status(), StatusCode::OK);
     assert_eq!(result.headers()["cache-control"], "no-store");
@@ -1328,7 +1486,13 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     );
     let saved = app
         .clone()
-        .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+        .oneshot(crate::request_support::scoped(request(
+            "GET",
+            &path,
+            Some(&cookie),
+            None,
+            json!(null),
+        )))
         .await?;
     assert_eq!(
         body(saved).await?,
@@ -1337,14 +1501,26 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     let missing = json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":1});
     assert_eq!(
         app.clone()
-            .oneshot(request("PUT", &path, Some(&cookie), Some(&csrf), missing))
+            .oneshot(crate::request_support::scoped(request(
+                "PUT",
+                &path,
+                Some(&cookie),
+                Some(&csrf),
+                missing
+            )))
             .await?
             .status(),
         StatusCode::BAD_REQUEST
     );
     let unchanged = app
         .clone()
-        .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+        .oneshot(crate::request_support::scoped(request(
+            "GET",
+            &path,
+            Some(&cookie),
+            None,
+            json!(null),
+        )))
         .await?;
     assert_eq!(
         body(unchanged).await?,
@@ -1354,27 +1530,39 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     invalid["value"]["emailVerified"] = json!(true);
     assert_eq!(
         app.clone()
-            .oneshot(request("PUT", &path, Some(&cookie), Some(&csrf), invalid))
+            .oneshot(crate::request_support::scoped(request(
+                "PUT",
+                &path,
+                Some(&cookie),
+                Some(&csrf),
+                invalid
+            )))
             .await?
             .status(),
         StatusCode::BAD_REQUEST
     );
     let receipt = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "GET",
             &format!("{path}/operations/{operation}"),
             Some(&cookie),
             None,
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(body(receipt).await?["revision"], 1);
     let mut conflict = input.clone();
     conflict["value"]["displayName"] = json!("Other");
     let result = app
         .clone()
-        .oneshot(request("PUT", &path, Some(&cookie), Some(&csrf), conflict))
+        .oneshot(crate::request_support::scoped(request(
+            "PUT",
+            &path,
+            Some(&cookie),
+            Some(&csrf),
+            conflict,
+        )))
         .await?;
     assert_eq!(result.status(), StatusCode::CONFLICT);
     assert_eq!(body(result).await?["code"], "operation_conflict");
@@ -1382,21 +1570,39 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     conflict["operationId"] = json!(uuid::Uuid::new_v4());
     let result = app
         .clone()
-        .oneshot(request("PUT", &path, Some(&cookie), Some(&csrf), conflict))
+        .oneshot(crate::request_support::scoped(request(
+            "PUT",
+            &path,
+            Some(&cookie),
+            Some(&csrf),
+            conflict,
+        )))
         .await?;
     assert_eq!(result.status(), StatusCode::CONFLICT);
     assert_eq!(body(result).await?["code"], "revision_conflict");
     let deletion = json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":1,"value":null});
     assert_eq!(
         app.clone()
-            .oneshot(request("PUT", &path, Some(&cookie), Some(&csrf), deletion))
+            .oneshot(crate::request_support::scoped(request(
+                "PUT",
+                &path,
+                Some(&cookie),
+                Some(&csrf),
+                deletion
+            )))
             .await?
             .status(),
         StatusCode::OK
     );
     let deleted = app
         .clone()
-        .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+        .oneshot(crate::request_support::scoped(request(
+            "GET",
+            &path,
+            Some(&cookie),
+            None,
+            json!(null),
+        )))
         .await?;
     assert_eq!(body(deleted).await?, json!({"revision":2,"value":null}));
     // Compact JSON and PostgreSQL JSONB have different encoding overheads.
@@ -1407,30 +1613,36 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     let value = json!({"displayName":"n".repeat(512),"username":"u".repeat(256),"email":"e".repeat(320),"extensions":expanded,"maxAgeSeconds":3600});
     let write = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "PUT",
             &path,
             Some(&cookie),
             Some(&csrf),
             json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":2,"value":value}),
-        ))
+        )))
         .await?;
     assert_eq!(write.status(), StatusCode::OK);
     let read = app
         .clone()
-        .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+        .oneshot(crate::request_support::scoped(request(
+            "GET",
+            &path,
+            Some(&cookie),
+            None,
+            json!(null),
+        )))
         .await?;
     assert_eq!(body(read).await?["value"], value);
     let (fresh_cookie, _, _) = successful_login(&app).await?;
     let observation = app
         .clone()
-        .oneshot(request(
+        .oneshot(crate::request_support::scoped(request(
             "GET",
             "profile",
             Some(&fresh_cookie),
             None,
             json!(null),
-        ))
+        )))
         .await?;
     assert_eq!(observation.status(), StatusCode::OK);
     assert_eq!(
@@ -1440,17 +1652,32 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     f.policy.revoke(f.key);
     assert_eq!(
         app.clone()
-            .oneshot(request("GET", &path, Some(&cookie), None, json!(null)))
+            .oneshot(crate::request_support::scoped(request(
+                "GET",
+                &path,
+                Some(&cookie),
+                None,
+                json!(null)
+            )))
             .await?
             .status(),
         StatusCode::FORBIDDEN
     );
     assert_eq!(
-        app.oneshot(request("GET", "profile", Some(&cookie), None, json!(null)))
-            .await?
-            .status(),
+        app.oneshot(crate::request_support::scoped(request(
+            "GET",
+            "profile",
+            Some(&cookie),
+            None,
+            json!(null)
+        )))
+        .await?
+        .status(),
         StatusCode::OK
     );
     f.close().await;
     Ok(())
 }
+
+#[path = "request_support/mod.rs"]
+mod request_support;

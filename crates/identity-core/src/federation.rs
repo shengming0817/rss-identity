@@ -6,7 +6,6 @@ pub const MAX_PROVIDERS: u16 = 1024;
 // ref: RustCrypto/MACs hmac/src/lib.rs @ hmac-v0.12.1.
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 
-
 use rand_core::{OsRng, RngCore};
 
 use rss_request_context::TenantId;

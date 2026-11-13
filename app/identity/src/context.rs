@@ -17,6 +17,7 @@ use std::{sync::Arc, time::Duration};
 #[derive(Clone)]
 struct Context {
     authority: Authority,
+    storage: crate::config::StorageConfig,
     policy: Arc<BootstrapPolicy>,
     timeout: Duration,
     http: HttpConfig,
@@ -33,6 +34,7 @@ pub fn router(
         )
         .with_state(Context {
             authority,
+            storage: config.storage.clone(),
             policy: Arc::new(BootstrapPolicy(
                 config.bootstrap_keys()?,
                 std::time::Duration::from_secs(u64::from(
@@ -50,7 +52,9 @@ async fn context(
 ) -> Response {
     let response = match TenantId::parse(&raw) {
         Err(_) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"code":"malformed_request"}))).into_response(),
-        Ok(tenant) => match authenticate_request(&state.authority, &state.http, tenant, &headers, SessionActivity::Passive, OperationDeadline::from_remaining(state.timeout)).await {
+        Ok(tenant) => match state.storage.binding(tenant) {
+          Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+          Ok(binding) => match authenticate_request(&state.authority, &state.http, binding, &headers, SessionActivity::Passive, OperationDeadline::from_remaining(state.timeout)).await {
             Err(response) => response,
             Ok((session, _credential)) => Json(serde_json::json!({
                 "tenantId":session.account().tenant.to_string(),
@@ -58,7 +62,7 @@ async fn context(
                 "sessionId":session.view().id.to_string(),
                 "navigation":{"manageAccounts":state.policy.is_manager(session.account()),"manageProviders":state.policy.is_manager(session.account())}
             })).into_response(),
-        }
+        }}
     };
     private_response(response)
 }

@@ -28,7 +28,11 @@ async fn own_password_change_requires_current_host_policy() -> anyhow::Result<()
     let before = f.events().await?;
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&issued), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&issued),
+            deadline(),
+        )
         .await?;
     assert_eq!(
         f.store
@@ -49,7 +53,11 @@ async fn own_password_change_requires_current_host_policy() -> anyhow::Result<()
         ReauthenticationRequirement::RecentMfa(Duration::from_secs(300));
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&issued), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&issued),
+            deadline(),
+        )
         .await?;
     assert_eq!(
         f.store
@@ -62,7 +70,11 @@ async fn own_password_change_requires_current_host_policy() -> anyhow::Result<()
     *f.policy.recent.write().unwrap() = ReauthenticationRequirement::None;
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&issued), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&issued),
+            deadline(),
+        )
         .await?;
     f.store
         .change_own_password(actor, password(), password(), source(), deadline())
@@ -70,7 +82,11 @@ async fn own_password_change_requires_current_host_policy() -> anyhow::Result<()
     assert_eq!(f.events().await?, before + 1);
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&issued), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&issued),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -86,7 +102,11 @@ async fn local_facade_reauthenticates_and_host_policy_is_current() -> anyhow::Re
     let first = f.login().await?;
     let actor = f
         .store
-        .authenticate_session(f.key.tenant, secret(&first), deadline())
+        .authenticate_session(
+            crate::support::binding(f.key.tenant),
+            secret(&first),
+            deadline(),
+        )
         .await?;
     assert_eq!(actor.instance(), f.instance);
     assert!(matches!(
@@ -125,7 +145,11 @@ async fn local_facade_reauthenticates_and_host_policy_is_current() -> anyhow::Re
         .store
         .reauthenticate_local(
             f.store
-                .inspect_session(f.key.tenant, secret(&first), deadline())
+                .inspect_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&first),
+                    deadline(),
+                )
                 .await?,
             password(),
             source(),
@@ -135,7 +159,11 @@ async fn local_facade_reauthenticates_and_host_policy_is_current() -> anyhow::Re
     assert_ne!(first.view().id, renewed.view().id);
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&first), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&first),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -175,7 +203,11 @@ async fn instances_tenants_and_borrowed_pool_are_separate() -> anyhow::Result<()
     let issued = f.login().await?;
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&issued), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&issued),
+            deadline(),
+        )
         .await?;
     assert!(
         other
@@ -199,6 +231,7 @@ async fn instances_tenants_and_borrowed_pool_are_separate() -> anyhow::Result<()
             .unwrap(),
         ),
         config(InstanceId::generate()),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -213,7 +246,7 @@ async fn instances_tenants_and_borrowed_pool_are_separate() -> anyhow::Result<()
     assert_eq!(
         f.store
             .login_local(
-                tenant,
+                crate::support::binding(tenant),
                 login("admin"),
                 password(),
                 source(),
@@ -222,7 +255,7 @@ async fn instances_tenants_and_borrowed_pool_are_separate() -> anyhow::Result<()
             )
             .await
             .unwrap_err(),
-        AuthorityError::Rejected
+        AuthorityError::Fenced
     );
     assert!(
         f.store
@@ -248,6 +281,7 @@ async fn instances_tenants_and_borrowed_pool_are_separate() -> anyhow::Result<()
             .unwrap(),
         ),
         f.config(),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -255,7 +289,11 @@ async fn instances_tenants_and_borrowed_pool_are_separate() -> anyhow::Result<()
     drop(clone);
     assert!(
         f.store
-            .inspect_session(f.key.tenant, secret(&issued), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&issued),
+                deadline()
+            )
             .await
             .is_ok()
     );
@@ -277,7 +315,6 @@ async fn host_role_names_and_session_policy_survive_composition() -> anyhow::Res
     let old = f.login().await?;
     let config = AuthorityConfig::new(
         f.instance,
-        f.store.active_tenants()?.into_iter().map(binding).collect(),
         SessionPolicy::new(60, 600)?,
         rss_audit_postgres::Integrity::Plain,
     )?;
@@ -291,12 +328,17 @@ async fn host_role_names_and_session_policy_survive_composition() -> anyhow::Res
             .unwrap(),
         ),
         config,
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
     .await?;
     let refreshed = changed
-        .refresh_session(f.key.tenant, secret(&old), deadline())
+        .refresh_session(
+            crate::support::binding(f.key.tenant),
+            secret(&old),
+            deadline(),
+        )
         .await?;
     assert_eq!(
         refreshed.view().absolute_expires_at,
@@ -305,7 +347,7 @@ async fn host_role_names_and_session_policy_survive_composition() -> anyhow::Res
     assert_eq!(refreshed.view().issued_at, old.view().issued_at);
     let new = changed
         .login_local(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             login("admin"),
             password(),
             source(),
@@ -349,7 +391,11 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     );
     let actor = f
         .store
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     let VerifiedGroups::Available(groups) = actor.groups()? else {
         panic!("fresh groups unavailable")
@@ -398,13 +444,18 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
             .unwrap(),
         ),
         f.config(),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         Arc::new(StaffPolicy),
         deadline(),
     )
     .await?
     .with_fact_time(clock.clone());
     let fresh = managed
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     managed
         .list_accounts(
@@ -426,7 +477,11 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     // A separate Authority remains on PG time, even over the same runtime/session.
     assert!(matches!(
         f.store
-            .inspect_session(f.key.tenant, secret(&session), deadline())
+            .inspect_session(
+                crate::support::binding(f.key.tenant),
+                secret(&session),
+                deadline()
+            )
             .await?
             .groups()?,
         VerifiedGroups::Available(_)
@@ -434,7 +489,11 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     assert!(actor.assurance().is_ok());
     let before = f.events().await?;
     let expired = managed
-        .inspect_session(f.key.tenant, secret(&session), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     assert_eq!(
         managed
@@ -452,10 +511,18 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
     drop(managed);
 
     let refreshed = controlled
-        .refresh_session(f.key.tenant, secret(&session), deadline())
+        .refresh_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     let current = controlled
-        .inspect_session(f.key.tenant, secret(&refreshed), deadline())
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            secret(&refreshed),
+            deadline(),
+        )
         .await?;
     assert!(matches!(current.groups()?, VerifiedGroups::Expired));
     assert_eq!(current.view().issued_at, session.view().issued_at);
@@ -473,47 +540,108 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
-async fn construction_verifies_every_declared_tenant_fence() -> anyhow::Result<()> {
+async fn dynamic_tenant_scope_reuses_authority_and_fences_proofs() -> anyhow::Result<()> {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding};
     let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let tenant = rss_request_context::TenantId::parse("33333333-3333-4333-8333-333333333333")?;
+    let scope = binding(tenant);
+    let key = rss_identity_core::account::AccountKey {
+        tenant,
+        principal: f.key.principal,
+    };
+    assert!(matches!(
+        f.maintenance
+            .initialize(scope, key, login("admin"), password(), deadline())
+            .await,
+        Err(AuthorityError::Fenced)
+    ));
+    let guards: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.guard WHERE tenant_id=$1::uuid",
+    )
+    .bind(tenant.to_string())
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(guards, 0);
+    sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,1)")
+        .bind(tenant.to_string())
+        .execute(&f.owner)
+        .await?;
+    f.maintenance
+        .initialize(scope, key, login("admin"), password(), deadline())
+        .await?;
+    let session = f
+        .store
+        .login_local(
+            scope,
+            login("admin"),
+            password(),
+            source(),
+            None,
+            deadline(),
+        )
+        .await?;
+    let proof = f
+        .store
+        .inspect_session(scope, secret(&session), deadline())
+        .await?;
+    assert_eq!(proof.account(), key);
+    assert!(
+        f.store
+            .inspect_session(binding(f.key.tenant), secret(&session), deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        f.maintenance
+            .recover_local_password(binding(f.key.tenant), key, password(), deadline())
+            .await
+            .is_err()
+    );
     sqlx::query(
         "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid",
     )
-    .bind(B)
+    .bind(tenant.to_string())
     .execute(&f.owner)
     .await?;
+    let next = ExecutionBinding::new(scope.storage(), tenant, Epoch::new(2)?);
+    let proof = std::sync::Arc::new(proof);
+    let previous = proof.clone();
+    let rejected = f
+        .runtime
+        .local_tx(next, deadline(), move |tx| {
+            Box::pin(async move {
+                tx.with_connection(move |c| {
+                    Box::pin(
+                        async move { Ok(recheck_authenticated_session_on(c, &previous).await) },
+                    )
+                })
+                .await?
+            })
+        })
+        .await
+        .fold(
+            |_| false,
+            |_| false,
+            |e| e.kind() == rss_transactional_messaging::error::MessagingErrorKind::Conflict,
+            |_| false,
+            |_| false,
+            |_| false,
+        );
+    assert!(rejected);
     assert!(matches!(
-        Authority::connect_runtime(
-            f.runtime.clone(),
-            Arc::new(
-                PasswordKdf::new(
-                    std::num::NonZeroUsize::new(4).unwrap(),
-                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()
-                )
-                .unwrap()
-            ),
-            f.config(),
-            f.policy.clone(),
-            deadline()
-        )
-        .await,
+        f.store
+            .with_personnel_read(&proof, deadline(), |_| Box::pin(async { Ok(()) }))
+            .await,
         Err(AuthorityError::Fenced)
     ));
-    assert!(matches!(
-        Authority::connect_maintenance(
-            f.maintenance_runtime.clone(),
-            Arc::new(
-                PasswordKdf::new(
-                    std::num::NonZeroUsize::new(4).unwrap(),
-                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()
-                )
-                .unwrap()
-            ),
-            f.config(),
-            deadline()
-        )
-        .await,
-        Err(AuthorityError::Fenced)
-    ));
+    assert!(
+        f.store
+            .inspect_session(next, secret(&session), deadline())
+            .await
+            .is_ok()
+    );
+    assert!(f.login().await.is_ok());
     f.close().await;
     Ok(())
 }
@@ -549,7 +677,11 @@ async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
         .execute(&f.owner).await?;
     let actor = f
         .store
-        .authenticate_session(f.key.tenant, secret(&session), deadline())
+        .authenticate_session(
+            crate::support::binding(f.key.tenant),
+            secret(&session),
+            deadline(),
+        )
         .await?;
     let database_now: i64 =
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
@@ -590,7 +722,11 @@ async fn refresh_rejects_expiry_during_writes_without_rotating_or_emitting() -> 
             .execute(&f.owner).await?;
         let result = f
             .store
-            .refresh_session(f.key.tenant, secret(&session), deadline())
+            .refresh_session(
+                crate::support::binding(f.key.tenant),
+                secret(&session),
+                deadline(),
+            )
             .await;
         sqlx::raw_sql("DROP TRIGGER delay_refresh ON identity_authority.sessions; DROP FUNCTION identity_authority.delay_refresh();")
             .execute(&f.owner).await?;

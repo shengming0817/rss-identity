@@ -1,4 +1,3 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 //! Native Entra personnel proofs. Never issues a browser session or device permission.
 use crate::{
     Authority, AuthorityError, Budget,
@@ -13,6 +12,7 @@ use rss_identity_core::{
     federation::{FederationError, ProviderId, ProviderView},
 };
 use rss_request_context::TenantId;
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::policy::OperationDeadline;
 use sqlx::Row;
 use std::{
@@ -112,7 +112,9 @@ impl EntraAuthority {
         token: Zeroizing<String>,
         deadline: OperationDeadline,
     ) -> Result<VerifiedExternalSubject, AuthorityError> {
-        if binding.tenant() != self.tenant { return Err(AuthorityError::Rejected); }
+        if binding.tenant() != self.tenant {
+            return Err(AuthorityError::Rejected);
+        }
         let budget = Budget::new(deadline)?;
         let tenant = self.tenant;
         let provider = self.provider;

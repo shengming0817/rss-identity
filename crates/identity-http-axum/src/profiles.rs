@@ -1,4 +1,3 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 //! Profile management shares the cookie/CSRF and transaction policy owners.
 use crate::{AppState, boundary::*, management::Error};
 use axum::{
@@ -11,6 +10,7 @@ use axum::{
 };
 use rss_identity_core::{PrincipalId, account::AccountKey};
 use rss_identity_postgres::{Authority, AuthorityError};
+use rss_transactional_messaging::fence::ExecutionBinding;
 use uuid::Uuid;
 mod dto;
 
@@ -63,7 +63,6 @@ fn target(t: &str, p: &str) -> Result<AccountKey, Error> {
 }
 async fn current(
     State(s): State<AppState>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,

@@ -1,4 +1,3 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 //! Durable host-owned session references, distinct from authentication credentials.
 use crate::{
     AccountKey, AuthenticatedSession, Authority, AuthorityError, SessionIdentity, SessionView,
@@ -10,6 +9,7 @@ use crate::{
 };
 use rss_identity_core::{InstanceId, PrincipalId, SessionId};
 use rss_request_context::TenantId;
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::policy::OperationDeadline;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;

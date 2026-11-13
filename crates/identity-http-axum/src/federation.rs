@@ -1,5 +1,5 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 use crate::{boundary::*, *};
+use rss_transactional_messaging::fence::ExecutionBinding;
 
 use axum::{
     Extension, Json,
@@ -71,7 +71,6 @@ pub fn federated_router(
 
 async fn security(
     State(state): State<FederationState>,
-    Path(raw): Path<String>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
@@ -200,13 +199,11 @@ fn redirect_response(
 
 async fn begin(
     State(state): State<FederationState>,
-    Path((raw, provider)): Path<(String, ProviderId)>,
+    Path((_raw, provider)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response, HttpError> {
-    let tenant = tenant(&raw)?;
-
     let actor = actor(&state, binding, request.headers(), budget, false).await?;
 
     let (browser, created) = browser(request.headers(), true)?;
@@ -241,13 +238,11 @@ async fn begin(
 
 async fn step_up(
     State(state): State<FederationState>,
-    Path((raw, provider)): Path<(String, ProviderId)>,
+    Path((_raw, provider)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response, HttpError> {
-    let tenant = tenant(&raw)?;
-
     let actor = actor(&state, binding, request.headers(), budget, true).await?;
 
     let (browser, created) = browser(request.headers(), true)?;
@@ -289,13 +284,11 @@ async fn step_up(
 
 async fn link(
     State(state): State<FederationState>,
-    Path((raw, provider)): Path<(String, ProviderId)>,
+    Path((_raw, provider)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response, HttpError> {
-    let tenant = tenant(&raw)?;
-
     let actor = actor(&state, binding, request.headers(), budget, true)
         .await?
         .ok_or(UNAUTH)?;

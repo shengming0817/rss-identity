@@ -1,4 +1,3 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 //! Same-origin self-service ceremonies. Host operation contexts enter through typed extensions.
 use crate::{boundary::*, *};
 use axum::{
@@ -8,7 +7,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rss_identity_core::step_up::StepUpContext;
-use rss_identity_postgres::{RpGeneration, AuthenticatedSession, RegistrationAuthorization, WebauthnAuthority};
+use rss_identity_postgres::{
+    AuthenticatedSession, RegistrationAuthorization, RpGeneration, WebauthnAuthority,
+};
+use rss_transactional_messaging::fence::ExecutionBinding;
 use serde::Deserialize;
 use uuid::Uuid;
 const GRANT_COOKIE: &str = "__Host-identity-operation";
@@ -148,7 +150,6 @@ fn clear(mut response: Response) -> Response {
 }
 async fn list(
     State(s): State<StateData>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
     Extension(b): Extension<RequestBudget>,
@@ -165,7 +166,6 @@ struct Register {
 }
 async fn register_begin(
     State(s): State<StateData>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
     Extension(b): Extension<RequestBudget>,
@@ -181,7 +181,8 @@ async fn register_begin(
         Json(
             s.webauthn
                 .begin_registration(
-                    actor, generation,
+                    actor,
+                    generation,
                     input.label,
                     input.recover,
                     authorization,
@@ -200,7 +201,6 @@ struct Finish {
 }
 async fn register_finish(
     State(s): State<StateData>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
     Extension(b): Extension<RequestBudget>,
@@ -211,7 +211,8 @@ async fn register_finish(
     Ok(Json(
         s.webauthn
             .finish_registration(
-                actor, generation,
+                actor,
+                generation,
                 input.id,
                 serde_json::from_value(input.response).map_err(|_| BAD)?,
                 b.remaining(),
@@ -227,7 +228,6 @@ struct Begin {
 }
 async fn auth_begin(
     State(s): State<StateData>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
     Extension(b): Extension<RequestBudget>,
@@ -246,7 +246,6 @@ async fn auth_begin(
 }
 async fn auth_finish(
     State(s): State<StateData>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
     Extension(b): Extension<RequestBudget>,
@@ -257,7 +256,8 @@ async fn auth_finish(
     let grant = s
         .webauthn
         .finish_authentication(
-            actor, generation,
+            actor,
+            generation,
             input.id,
             serde_json::from_value(input.response).map_err(|_| BAD)?,
             b.remaining(),
@@ -272,7 +272,7 @@ async fn auth_finish(
 }
 async fn remove(
     State(s): State<StateData>,
-    Path((t, id)): Path<(String, Uuid)>,
+    Path((_t, id)): Path<(String, Uuid)>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
     Extension(b): Extension<RequestBudget>,
@@ -280,27 +280,30 @@ async fn remove(
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, &headers, b, true).await?;
     let token = grant(&headers)?.ok_or(UNAUTH)?;
-    s.webauthn.remove(actor, generation, id, token, b.remaining()).await?;
+    s.webauthn
+        .remove(actor, generation, id, token, b.remaining())
+        .await?;
     Ok(clear(
         Json(serde_json::json!({"removed":true})).into_response(),
     ))
 }
 async fn cancel(
     State(s): State<StateData>,
-    Path((t, id)): Path<(String, Uuid)>,
+    Path((_t, id)): Path<(String, Uuid)>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
     Extension(b): Extension<RequestBudget>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, &headers, b, true).await?;
-    s.webauthn.cancel(actor, generation, id, b.remaining()).await?;
+    s.webauthn
+        .cancel(actor, generation, id, b.remaining())
+        .await?;
     Ok(Json(serde_json::json!({"cancelled":true})).into_response())
 }
 
 async fn cancel_operation(
     State(s): State<StateData>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     headers: HeaderMap,
@@ -320,8 +323,15 @@ async fn cancel_operation(
 struct ExpectedRp(RpGeneration);
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ExpectedRp {
     type Rejection = HttpError;
-    async fn from_request_parts(parts: &mut axum::http::request::Parts, _: &S) -> Result<Self, Self::Rejection> {
-        parts.extensions.get::<RpGeneration>().copied().map(Self)
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<RpGeneration>()
+            .copied()
+            .map(Self)
             .ok_or_else(|| HttpError::from(AuthorityError::Unavailable))
     }
 }

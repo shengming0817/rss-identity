@@ -7,15 +7,7 @@ use std::time::Duration;
 
 // Compile the real public composition surface without relying on internal modules or test-support.
 async fn compose(authority: Authority) -> Result<axum::Router, Box<dyn std::error::Error>> {
-    let w = WebauthnAuthority::connect(
-        authority,
-        "identity.example.test".into(),
-        url::Url::parse("https://identity.example.test")?,
-        rss_transactional_messaging::policy::OperationDeadline::from_remaining(
-            Duration::from_secs(10),
-        ),
-    )
-    .await?;
+    let w = WebauthnAuthority::new(authority, "identity.example.test".into(), url::Url::parse("https://identity.example.test")?)?;
     Ok(rss_identity_http_axum::webauthn_router(
         w,
         HttpConfig::new("https://identity.example.test", Duration::from_secs(10))?,

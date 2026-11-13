@@ -16,7 +16,7 @@ async fn main() {
     }
     if args == ["--help"] {
         println!(
-            "identity-migrate --config FILE [--verify]\nidentity-migrate --check-config FILE\nidentity-migrate --config FILE --rekey KEYRING_FILE\nidentity-migrate --config FILE --verify-keys KEYRING_FILE"
+            "identity-migrate --config FILE [--verify]\nidentity-migrate --check-config FILE\nidentity-migrate --config FILE --rekey KEYRING_FILE TARGETS_FILE\nidentity-migrate --config FILE --verify-keys KEYRING_FILE TARGETS_FILE"
         );
         return;
     }
@@ -32,10 +32,12 @@ async fn main() {
         match &args[2..] {
             [] => rss_identity_app::migration::install(config).await,
             [command] if command == "--verify" => rss_identity_app::migration::verify(config).await,
-            [command, keys] if command == "--rekey" || command == "--verify-keys" => {
+            [command, keys, targets] if command == "--rekey" || command == "--verify-keys" => {
                 let keys: rss_identity_app::config::CredentialKeyringConfig =
                     rss_identity_app::config::load(std::path::Path::new(keys))?;
-                rss_identity_app::rekey::run(config, keys, command == "--verify-keys").await
+                let targets = rss_identity_app::config::load(std::path::Path::new(targets))?;
+                rss_identity_app::rekey::run(config, keys, targets, command == "--verify-keys")
+                    .await
             }
             _ => Err(rss_identity_app::AppError::Arguments),
         }

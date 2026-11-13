@@ -380,7 +380,9 @@ pub(crate) async fn check_binding(
         .bind(binding.storage().lineage().as_slice())
         .bind(binding.epoch().get())
         .fetch_one(c).await?;
-    if matches != Some(true) { return Err(reject()); }
+    if matches != Some(true) {
+        return Err(reject());
+    }
     Ok(())
 }
 

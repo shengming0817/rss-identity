@@ -113,7 +113,7 @@ async fn login(State(rp): State<Arc<Rp>>, Json(input): Json<Value>) -> axum::res
         let session = rp
             .authority
             .complete_platform_login(
-                rp.tenant,
+                crate::support::binding(rp.tenant),
                 serde_json::from_value(input["id"].clone()).map_err(|_| ())?,
                 input["nonce"].as_str().ok_or(())?.into(),
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
@@ -144,7 +144,7 @@ async fn login(State(rp): State<Arc<Rp>>, Json(input): Json<Value>) -> axum::res
         let proof = rp
             .authority
             .inspect_session(
-                rp.tenant,
+                crate::support::binding(rp.tenant),
                 rss_identity_core::session::SessionSecret::parse(
                     session.session.secret().expose().into(),
                 )
@@ -188,7 +188,7 @@ async fn resource(State(rp): State<Arc<Rp>>, headers: HeaderMap) -> StatusCode {
     };
     match rp
         .authority
-        .recheck_session_reference(rp.tenant, &reference, deadline())
+        .recheck_session_reference(crate::support::binding(rp.tenant), &reference, deadline())
         .await
     {
         Ok(_) => StatusCode::OK,
@@ -331,6 +331,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
             .unwrap(),
         ),
         config,
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -379,7 +380,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
         }));
         let c = authority
             .begin_platform_login(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 device.binding.binding_id,
                 PlatformPurpose::EnterpriseRp(target.id),
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
@@ -501,6 +502,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
                         .map_err(anyhow::Error::msg)?,
                 ),
             )?),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
@@ -588,7 +590,7 @@ async fn assertion(
 ) -> anyhow::Result<PlatformLogin> {
     let challenge = authority
         .begin_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             device.binding.binding_id,
             PlatformPurpose::EnterpriseRp(target.id.clone()),
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
@@ -603,7 +605,7 @@ async fn assertion(
         .to_vec();
     Ok(authority
         .complete_platform_login(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             challenge.id,
             challenge.nonce,
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),

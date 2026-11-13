@@ -1,4 +1,3 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 //! Provider credential storage. ref: ring 0.17.14 src/aead/less_safe_key.rs.
 use crate::{
     AuthorityError,
@@ -12,6 +11,7 @@ use ring::{
 use rss_identity_core::federation::MAX_PROVIDERS;
 use rss_identity_core::federation::{FederationError, ProviderCredentials, ProviderId};
 use rss_request_context::TenantId;
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::policy::OperationDeadline;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -255,7 +255,7 @@ impl crate::Federation {
         let keys = self.credential_keys.clone();
         let budget = crate::Budget::new(deadline)?;
         let tenant = binding.tenant();
-            self.authority.read_sql(binding,budget.remaining(),move|c|Box::pin(async move {
+        self.authority.read_sql(binding,budget.remaining(),move|c|Box::pin(async move {
                 let authority=authority_id(c).await?;
                 let rows:Vec<(Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid LIMIT $2").bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(c).await?;
                 if rows.len() > usize::from(MAX_PROVIDERS) {return Err(corrupt().into());}

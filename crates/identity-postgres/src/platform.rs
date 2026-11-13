@@ -1,7 +1,7 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 //! Trusted host platform adapter and Identity-owned one-use browser challenges.
 //! The host verifies devices and platform cryptography; Identity alone issues sessions.
 //! ref: webauthn-rs 0.5.3 src/lib.rs (server-owned, one-use ceremony state).
+use rss_transactional_messaging::fence::ExecutionBinding;
 mod admission;
 mod enterprise;
 pub use admission::{

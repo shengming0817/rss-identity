@@ -25,7 +25,7 @@ async fn transaction<'a>(
 async fn actor(f: &Fixture, issued: &IssuedSession) -> anyhow::Result<AuthenticatedSession> {
     Ok(f.store
         .inspect_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             SessionSecret::parse(issued.secret().expose().into())?,
             deadline(),
         )
@@ -74,7 +74,7 @@ async fn host_admission_is_passive_and_transaction_scoped() -> anyhow::Result<()
     let bearer = f
         .store
         .login_local_bearer(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             login("admin"),
             password(),
             source(),
@@ -84,7 +84,7 @@ async fn host_admission_is_passive_and_transaction_scoped() -> anyhow::Result<()
     let bearer_actor = f
         .store
         .inspect_bearer(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             BearerSecret::parse(bearer.secret().expose().into())?,
             deadline(),
         )
@@ -260,7 +260,7 @@ async fn host_admission_rejects_stale_credentials_and_subjects() -> anyhow::Resu
     let rotated = f
         .store
         .refresh_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             SessionSecret::parse(issued.secret().expose().into())?,
             deadline(),
         )
@@ -300,7 +300,12 @@ async fn host_admission_rejects_stale_credentials_and_subjects() -> anyhow::Resu
         tx.rollback().await?;
     }
     f.maintenance
-        .recover_local_password(f.key, password(), deadline())
+        .recover_local_password(
+            crate::support::binding((f.key).tenant),
+            f.key,
+            password(),
+            deadline(),
+        )
         .await?;
     assert!(!accepted(&f, &proof).await?);
     f.close().await;
@@ -418,7 +423,7 @@ async fn host_admission_checks_expiry_after_guard_wait() -> anyhow::Result<()> {
     let proof = f
         .store
         .inspect_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             SessionSecret::parse(issued.secret().expose().into())?,
             rss_transactional_messaging::policy::OperationDeadline::from_remaining(
                 Duration::from_secs(2),

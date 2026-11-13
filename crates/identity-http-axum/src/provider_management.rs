@@ -1,4 +1,3 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 //! Optional OIDC management adapter.
 use crate::{
     AppState, HttpConfig,
@@ -16,6 +15,7 @@ use axum::{
 };
 use rss_identity_core::federation::*;
 use rss_identity_postgres::{AuthenticatedSession, AuthorityError, Federation};
+use rss_transactional_messaging::fence::ExecutionBinding;
 use serde::Deserialize;
 type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
@@ -74,7 +74,6 @@ async fn actor(
 }
 async fn options(
     State(s): State<Management>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
 ) -> Result<Response> {
@@ -91,7 +90,6 @@ async fn options(
 }
 async fn providers(
     State(s): State<Management>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,
@@ -117,7 +115,6 @@ struct CreateProvider {
 }
 async fn create_provider(
     State(s): State<Management>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
@@ -147,7 +144,7 @@ struct UpdateProvider {
 }
 async fn update_provider(
     State(s): State<Management>,
-    Path((t, p)): Path<(String, ProviderId)>,
+    Path((_t, p)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
@@ -179,7 +176,7 @@ struct ProviderToggle {
 }
 async fn provider_enabled(
     State(s): State<Management>,
-    Path((t, p)): Path<(String, ProviderId)>,
+    Path((_t, p)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
@@ -195,7 +192,7 @@ async fn provider_enabled(
 }
 async fn test_provider(
     State(s): State<Management>,
-    Path((t, p)): Path<(String, ProviderId)>,
+    Path((_t, p)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,

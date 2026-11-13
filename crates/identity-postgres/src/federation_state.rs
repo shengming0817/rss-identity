@@ -10,8 +10,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Purpose {
     Login,
     Reauthenticate,
@@ -50,7 +49,9 @@ pub(crate) struct StateLocator {
 }
 
 impl StateLocator {
-    pub(crate) fn binding(&self) -> ExecutionBinding { self.binding }
+    pub(crate) fn binding(&self) -> ExecutionBinding {
+        self.binding
+    }
     pub fn tenant(&self) -> TenantId {
         self.binding.tenant()
     }
@@ -92,10 +93,16 @@ impl StateSigner {
         mac
     }
 
-    pub(crate) fn issue(&self, instance: InstanceId, binding: ExecutionBinding, purpose: Purpose) -> Result<String, FederationError> {
+    pub(crate) fn issue(
+        &self,
+        instance: InstanceId,
+        binding: ExecutionBinding,
+        purpose: Purpose,
+    ) -> Result<String, FederationError> {
         let mut payload = vec![2, purpose.code()];
 
-        let tenant = Uuid::parse_str(&binding.tenant().to_string()).map_err(|_| FederationError::Rejected)?;
+        let tenant = Uuid::parse_str(&binding.tenant().to_string())
+            .map_err(|_| FederationError::Rejected)?;
 
         payload.extend_from_slice(tenant.as_bytes());
         payload.extend_from_slice(&binding.storage().target());
@@ -117,7 +124,11 @@ impl StateSigner {
         Ok(B64.encode(payload))
     }
 
-    pub(crate) fn verify(&self, instance: InstanceId, state: &str) -> Result<StateLocator, FederationError> {
+    pub(crate) fn verify(
+        &self,
+        instance: InstanceId,
+        state: &str,
+    ) -> Result<StateLocator, FederationError> {
         if state.len() != 163 {
             return Err(FederationError::Rejected);
         }
@@ -142,11 +153,20 @@ impl StateSigner {
         .map_err(|_| FederationError::Rejected)?;
 
         let storage = StorageIdentity::new(
-            bytes[18..34].try_into().map_err(|_| FederationError::Rejected)?,
-            bytes[34..50].try_into().map_err(|_| FederationError::Rejected)?,
-        ).map_err(|_| FederationError::Rejected)?;
-        let epoch = Epoch::new(i64::from_be_bytes(bytes[50..58].try_into().map_err(|_| FederationError::Rejected)?))
-            .map_err(|_| FederationError::Rejected)?;
+            bytes[18..34]
+                .try_into()
+                .map_err(|_| FederationError::Rejected)?,
+            bytes[34..50]
+                .try_into()
+                .map_err(|_| FederationError::Rejected)?,
+        )
+        .map_err(|_| FederationError::Rejected)?;
+        let epoch = Epoch::new(i64::from_be_bytes(
+            bytes[50..58]
+                .try_into()
+                .map_err(|_| FederationError::Rejected)?,
+        ))
+        .map_err(|_| FederationError::Rejected)?;
         Ok(StateLocator {
             binding: ExecutionBinding::new(storage, tenant, epoch),
             id: bytes[58..90]
@@ -157,44 +177,46 @@ impl StateSigner {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-#[test]
-fn state_authentication_precedes_tenant_use_and_separates_purpose() {
-    use super::*;
-    let tenant =
-        rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap();
-    let signer = StateSigner::new([7; 32], "https://identity.example.test").unwrap();
-    let instance = InstanceId::generate();
-    let binding = ExecutionBinding::new(StorageIdentity::new([1;16],[2;16]).unwrap(),tenant,Epoch::new(7).unwrap());
-    let state = signer.issue(instance, binding, Purpose::Login).unwrap();
-    let decoded = signer.verify(instance, &state).unwrap();
-    assert_eq!(decoded.tenant(), tenant);
-    assert_eq!(decoded.binding(), binding);
-    assert!(signer.verify(InstanceId::generate(), &state).is_err());
-    assert_eq!(decoded.purpose(), Purpose::Login);
-    assert!(
-        StateSigner::new([8; 32], "https://identity.example.test")
-            .unwrap()
-            .verify(instance, &state)
-            .is_err()
-    );
-    assert!(
-        StateSigner::new([7; 32], "https://other.example.test")
-            .unwrap()
-            .verify(instance, &state)
-            .is_err()
-    );
-    for i in 0..state.len() {
-        let mut tampered = state.clone().into_bytes();
-        tampered[i] = if tampered[i] == b'A' { b'B' } else { b'A' };
+    #[test]
+    fn state_authentication_precedes_tenant_use_and_separates_purpose() {
+        use super::*;
+        let tenant =
+            rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap();
+        let signer = StateSigner::new([7; 32], "https://identity.example.test").unwrap();
+        let instance = InstanceId::generate();
+        let binding = ExecutionBinding::new(
+            StorageIdentity::new([1; 16], [2; 16]).unwrap(),
+            tenant,
+            Epoch::new(7).unwrap(),
+        );
+        let state = signer.issue(instance, binding, Purpose::Login).unwrap();
+        let decoded = signer.verify(instance, &state).unwrap();
+        assert_eq!(decoded.tenant(), tenant);
+        assert_eq!(decoded.binding(), binding);
+        assert!(signer.verify(InstanceId::generate(), &state).is_err());
+        assert_eq!(decoded.purpose(), Purpose::Login);
         assert!(
-            signer
-                .verify(instance, std::str::from_utf8(&tampered).unwrap())
+            StateSigner::new([8; 32], "https://identity.example.test")
+                .unwrap()
+                .verify(instance, &state)
                 .is_err()
         );
+        assert!(
+            StateSigner::new([7; 32], "https://other.example.test")
+                .unwrap()
+                .verify(instance, &state)
+                .is_err()
+        );
+        for i in 0..state.len() {
+            let mut tampered = state.clone().into_bytes();
+            tampered[i] = if tampered[i] == b'A' { b'B' } else { b'A' };
+            assert!(
+                signer
+                    .verify(instance, std::str::from_utf8(&tampered).unwrap())
+                    .is_err()
+            );
+        }
     }
-}
-
 }

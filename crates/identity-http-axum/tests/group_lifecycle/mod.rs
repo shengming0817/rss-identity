@@ -1,8 +1,8 @@
-use rss_identity_postgres::StateSigner;
 //! Embedded reconstruction of #2433's real directory lifecycle; no central/client APIs.
 use super::*;
 use futures::FutureExt;
 use rss_identity_core::{facts::FactUnavailableReason, groups::GroupFactsMaxAge};
+use rss_identity_postgres::StateSigner;
 use std::{future::Future, panic::AssertUnwindSafe};
 
 async fn without_staff<T>(body: impl Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
@@ -49,7 +49,11 @@ fn available(actor: &AuthenticatedSession, provider: ProviderId) -> uuid::Uuid {
 }
 async fn inspect(f: &Fixture, cookie: &str) -> anyhow::Result<AuthenticatedSession> {
     Ok(f.store
-        .inspect_session(tenant(), secret(cookie), deadline())
+        .inspect_session(
+            crate::support::binding(tenant()),
+            secret(cookie),
+            deadline(),
+        )
         .await?)
 }
 // Each independent browser gets its own binding and the normal per-browser attempt budget.
@@ -207,13 +211,13 @@ async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
         available(&inspect(&f, &fresh).await?, p.id);
         let response = app
             .clone()
-            .oneshot(request(
+            .oneshot(crate::request_support::scoped(request(
                 "POST",
                 &format!("/api/v1/identity/tenants/{A}/oidc/{}/login", p.id),
                 BROWSER,
                 None,
                 json!({"returnTarget":"home"}),
-            ))
+            )))
             .await?;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         paused.restore()?;

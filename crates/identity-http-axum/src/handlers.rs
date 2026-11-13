@@ -1,8 +1,7 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 use crate::{AppState, boundary::*};
 use axum::{
     Extension, Json,
-    extract::{FromRequest, Path, Query, Request, State},
+    extract::{FromRequest, Query, Request, State},
     http::{HeaderMap, header},
     response::{IntoResponse, Response},
 };
@@ -12,6 +11,7 @@ use rss_identity_core::{
     session::SessionSecret,
 };
 use rss_identity_postgres::{AttemptSource, AuthenticatedSession, AuthorityError, IssuedSession};
+use rss_transactional_messaging::fence::ExecutionBinding;
 use serde::Deserialize;
 
 type Result<T> = std::result::Result<T, HttpError>;
@@ -62,12 +62,10 @@ fn project_session(
 }
 pub(crate) async fn login(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response> {
-    let tenant = tenant(&raw)?;
     if unique(request.headers(), "x-identity-request")? != Some("1") {
         return Err(FORBIDDEN);
     }
@@ -121,7 +119,6 @@ pub(crate) async fn login(
 }
 pub(crate) async fn current(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
@@ -136,7 +133,6 @@ pub(crate) async fn current(
 }
 pub(crate) async fn refresh(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
@@ -165,7 +161,6 @@ async fn actor(
 }
 pub(crate) async fn logout(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
@@ -179,7 +174,6 @@ pub(crate) async fn logout(
 }
 pub(crate) async fn logout_all(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
@@ -199,7 +193,6 @@ pub(crate) struct Pagination {
 }
 pub(crate) async fn list(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     query: std::result::Result<Query<Pagination>, axum::extract::rejection::QueryRejection>,
@@ -232,7 +225,6 @@ struct Reauthentication {
 }
 pub(crate) async fn reauthenticate(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,

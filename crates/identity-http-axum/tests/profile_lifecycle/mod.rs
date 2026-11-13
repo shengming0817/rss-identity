@@ -19,12 +19,12 @@ async fn login_profile(app: &Router, p: &ProviderView, binding: char) -> anyhow:
 async fn profile_http(app: &Router, cookie: &str) -> anyhow::Result<Value> {
     let response = app
         .clone()
-        .oneshot(
+        .oneshot(crate::request_support::scoped(
             Request::builder()
                 .uri(format!("/api/v1/identity/tenants/{A}/profile"))
                 .header("cookie", cookie)
                 .body(Body::empty())?,
-        )
+        ))
         .await?;
     anyhow::ensure!(response.status() == StatusCode::OK, "profile read failed");
     Ok(serde_json::from_slice(

@@ -1,8 +1,8 @@
-use rss_identity_postgres::StateSigner;
 //! Minimal reference host: owns policy, runtime fencing, URLs and optional upstream configuration.
 use crate::{AppError, config::RuntimeConfig, read_secret};
 use rss_identity_core::{account::AccountKey, session::SessionPolicy};
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
+use rss_identity_postgres::StateSigner;
 use rss_identity_postgres::{
     Authority, AuthorityConfig, Federation, FederationConfig, ManagementContext, ManagementDenied,
     ManagementOperation, ManagementPolicy, ReauthenticationRequirement,
@@ -92,7 +92,6 @@ pub fn authority_config(config: &RuntimeConfig) -> Result<AuthorityConfig, AppEr
     config.authority.apply(
         AuthorityConfig::new(
             config.instance()?,
-            config.storage.bindings()?,
             session_policy()?,
             rss_audit_postgres::Integrity::Plain,
         )?,
@@ -109,6 +108,7 @@ pub async fn authority(
         runtime,
         kdf,
         authority_config(config)?,
+        config.storage.binding(config.bootstrap_keys()?[0].tenant)?,
         Arc::new(BootstrapPolicy(
             config.bootstrap_keys()?,
             std::time::Duration::from_secs(u64::from(
@@ -164,13 +164,9 @@ fn federation_inputs(config: &RuntimeConfig) -> Result<Option<FederationInputs>,
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
-    let oidc = HttpOidc::new(
-        profiles,
-        c.private_access(&config.storage.tenants()?)?,
-        c.transport()?,
-    )
-    .map_err(|_| AppError::Provider)?
-    .with_future_skew(config.authority.future_skew_seconds);
+    let oidc = HttpOidc::new(profiles, c.private_access()?, c.transport()?)
+        .map_err(|_| AppError::Provider)?
+        .with_future_skew(config.authority.future_skew_seconds);
     let raw = read_secret(Path::new(&c.state_key_file))?;
     let mut key = zeroize::Zeroizing::new([0; 32]);
     hex::decode_to_slice(raw.as_str(), key.as_mut()).map_err(|_| AppError::Configuration)?;

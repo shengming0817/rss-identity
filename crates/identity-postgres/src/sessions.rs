@@ -7,7 +7,6 @@ use crate::{
 };
 use rss_identity_core::SessionId;
 use rss_identity_core::session::{CredentialKind, SessionLifetime, SessionPolicy, SessionSecret};
-use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
 use serde::Serialize;
 use std::time::{Duration, Instant};
@@ -314,7 +313,10 @@ impl Authority {
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.shortened_to(candidate.expires);
         if let Some(old) = &replacement {
-            if old.key != candidate.state.key() || old.binding != candidate.binding || old.view.credential_kind != kind {
+            if old.key != candidate.state.key()
+                || old.binding != candidate.binding
+                || old.view.credential_kind != kind
+            {
                 return Err(AuthorityError::Rejected);
             }
             budget.0 = budget.0.shortened_to(old.expires);

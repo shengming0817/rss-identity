@@ -57,7 +57,6 @@ async fn run() -> Result<(), AppError> {
         AuthorityConfig::new(
             rss_identity_core::InstanceId::parse(&config.instance_id)
                 .map_err(|_| AppError::Configuration)?,
-            config.storage.bindings()?,
             rss_identity_core::session::SessionPolicy::new(900, 14400)
                 .map_err(|_| AppError::Budget)?,
             rss_audit_postgres::Integrity::Plain,
@@ -84,6 +83,7 @@ async fn run() -> Result<(), AppError> {
         runtime.clone(),
         kdf.clone(),
         authority_config,
+        config.storage.binding(command.tenant()?)?,
         assembly::deadline(cutoff),
     )
     .await;
@@ -116,6 +116,9 @@ async fn execute(
     let result = match command {
         Command::Initialize(tenant, name, pw) => {
             a.initialize(
+                config
+                    .storage
+                    .binding(TenantId::parse(tenant).map_err(|_| AppError::Tenant)?)?,
                 config.bootstrap_key(TenantId::parse(tenant).map_err(|_| AppError::Tenant)?)?,
                 login(name)?,
                 password(pw)?,
@@ -125,6 +128,9 @@ async fn execute(
         }
         Command::Recover(target, principal, pw) => {
             a.recover_local_password(
+                config
+                    .storage
+                    .binding(TenantId::parse(target).map_err(|_| AppError::Tenant)?)?,
                 key(target, principal)?,
                 password(pw)?,
                 assembly::deadline(cutoff),
@@ -144,6 +150,12 @@ async fn execute(
 enum Command<'a> {
     Initialize(&'a str, &'a str, &'a str),
     Recover(&'a str, &'a str, &'a str),
+}
+impl Command<'_> {
+    fn tenant(&self) -> Result<TenantId, AppError> {
+        let (Self::Initialize(tenant, ..) | Self::Recover(tenant, ..)) = self;
+        TenantId::parse(tenant).map_err(|_| AppError::Tenant)
+    }
 }
 fn usage() -> &'static str {
     "Usage: identity-admin --check-config FILE\nidentity-admin CONFIG COMMAND\n  initialize <tenant> <login> <password-file>\n  recover <tenant> <principal> <password-file>"

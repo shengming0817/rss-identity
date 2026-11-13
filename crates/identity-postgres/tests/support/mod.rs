@@ -190,6 +190,9 @@ impl Fixture {
                 .unwrap(),
             ),
             config(instance),
+            crate::support::binding(
+                rss_request_context::TenantId::parse(crate::support::A).unwrap(),
+            ),
             policy.clone(),
             deadline(),
         )
@@ -204,6 +207,9 @@ impl Fixture {
                 .unwrap(),
             ),
             config(instance),
+            crate::support::binding(
+                rss_request_context::TenantId::parse(crate::support::A).unwrap(),
+            ),
             deadline(),
         )
         .await?;
@@ -247,26 +253,49 @@ impl Fixture {
                     self.runtime.clone(),
                     kdf,
                     self.config(),
+                    crate::support::binding(
+                        rss_request_context::TenantId::parse(crate::support::A).unwrap(),
+                    ),
                     self.policy.clone(),
                     deadline(),
                 )
                 .await
             }
             AuthorityProfile::Maintenance => {
-                Authority::connect_maintenance(self.runtime.clone(), kdf, self.config(), deadline())
-                    .await
+                Authority::connect_maintenance(
+                    self.runtime.clone(),
+                    kdf,
+                    self.config(),
+                    crate::support::binding(
+                        rss_request_context::TenantId::parse(crate::support::A).unwrap(),
+                    ),
+                    deadline(),
+                )
+                .await
             }
         }
     }
     pub async fn bootstrap(&self) -> anyhow::Result<()> {
         self.maintenance
-            .initialize(self.system_key, login("platform"), password(), deadline())
+            .initialize(
+                crate::support::binding((self.system_key).tenant),
+                self.system_key,
+                login("platform"),
+                password(),
+                deadline(),
+            )
             .await?;
         self.provision_a().await
     }
     pub async fn provision_a(&self) -> anyhow::Result<()> {
         self.maintenance
-            .initialize(self.key, login("admin"), password(), deadline())
+            .initialize(
+                crate::support::binding((self.key).tenant),
+                self.key,
+                login("admin"),
+                password(),
+                deadline(),
+            )
             .await?;
         Ok(())
     }
@@ -274,7 +303,7 @@ impl Fixture {
         Ok(self
             .store
             .login_local(
-                self.key.tenant,
+                crate::support::binding(self.key.tenant),
                 login("admin"),
                 password(),
                 source(),
@@ -289,7 +318,7 @@ impl Fixture {
             match self
                 .store
                 .inspect_session(
-                    self.key.tenant,
+                    crate::support::binding(self.key.tenant),
                     SessionSecret::parse(value.clone())?,
                     deadline(),
                 )
@@ -305,7 +334,7 @@ impl Fixture {
         Ok(self
             .store
             .inspect_session(
-                self.key.tenant,
+                crate::support::binding(self.key.tenant),
                 SessionSecret::parse(issued.secret().expose().into())?,
                 deadline(),
             )
@@ -366,10 +395,6 @@ pub fn binding(tenant: TenantId) -> ExecutionBinding {
 pub fn config(instance: InstanceId) -> AuthorityConfig {
     AuthorityConfig::new(
         instance,
-        [SYSTEM, A, B]
-            .into_iter()
-            .map(|t| binding(TenantId::parse(t).unwrap()))
-            .collect(),
         SessionPolicy::new(900, 14400).unwrap(),
         rss_audit_postgres::Integrity::Plain,
     )

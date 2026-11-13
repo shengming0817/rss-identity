@@ -183,16 +183,6 @@ pub async fn serve(
                     let authority =
                         assembly::authority(&config, pool.clone(), kdf.clone(), cutoff).await?;
                     let federation = assembly::federation(&config, authority.clone())?;
-                    if let Some(federation) = &federation {
-                        federation
-                            .check_credential_keys(assembly::deadline(cutoff))
-                            .await?;
-                        for tenant in authority.active_tenants()? {
-                            federation
-                                .reconcile_assurance_profiles(tenant, assembly::deadline(cutoff))
-                                .await?;
-                        }
-                    }
                     let http = HttpConfig::new(&config.public_origin, config.budgets.request())
                         .map_err(|_| AppError::Configuration)?;
                     let gate = Arc::new(OnceLock::new());
@@ -200,13 +190,11 @@ pub async fn serve(
                     let origin = url::Url::parse(&config.public_origin)
                         .map_err(|_| AppError::Configuration)?;
                     let rp = origin.host_str().ok_or(AppError::Configuration)?.to_owned();
-                    let webauthn = rss_identity_postgres::WebauthnAuthority::connect(
+                    let webauthn = rss_identity_postgres::WebauthnAuthority::new(
                         authority.clone(),
                         rp,
                         origin,
-                        crate::assembly::deadline(cutoff),
-                    )
-                    .await?;
+                    )?;
                     let mut app = router(authority, http.clone())?
                         .merge(context)
                         .merge(rss_identity_http_axum::webauthn_router(
@@ -228,10 +216,18 @@ pub async fn serve(
                                 )
                             }),
                         );
+                    let execution = crate::execution::ExecutionState {
+                        config: config.clone(),
+                        federation: federation.clone(),
+                    };
                     if let Some(federation) = federation {
                         app = app.merge(federated_router(federation, http)?);
                     }
                     let app = app
+                        .layer(middleware::from_fn_with_state(
+                            execution,
+                            crate::execution::scope,
+                        ))
                         .layer(middleware::from_fn(diagnose))
                         .layer(middleware::from_fn_with_state(gate.clone(), admit))
                         .layer(middleware::from_fn_with_state(

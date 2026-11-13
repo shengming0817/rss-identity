@@ -90,7 +90,6 @@ pub async fn run() -> anyhow::Result<()> {
     sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
         .execute(&owner)
         .await?;
-    let tenant = TenantId::parse(TENANT)?;
     let instance = InstanceId::generate();
     let mut c = owner.acquire().await?;
     install(&mut c, instance).await?;
@@ -118,56 +117,26 @@ pub async fn run() -> anyhow::Result<()> {
     sqlx::raw_sql("CREATE TABLE public.host_binding(id integer PRIMARY KEY); GRANT INSERT,SELECT ON public.host_binding TO identity_runtime").execute(&owner).await?;
     let runtime = runtime(port, "identity_runtime").await?;
     let maintenance_runtime = self::runtime(port, "identity_maintenance").await?;
-    let config = AuthorityConfig::new(
-        instance,
-        vec![binding(tenant)],
-        SessionPolicy::new(900, 14400)?,
-        rss_audit_postgres::Integrity::Plain,
-    )?;
-    let maintenance = Authority::connect_maintenance(
-        maintenance_runtime.clone(),
-        Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
-        config.clone(),
-        deadline(),
-    )
+    let config = AuthorityConfig::new(instance, SessionPolicy::new(900, 14400)?, rss_audit_postgres::Integrity::Plain)?;
+    let maintenance = Authority::connect_maintenance(maintenance_runtime.clone(), Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()), config.clone(), binding(rss_request_context::TenantId::parse(TENANT).unwrap()), deadline())
     .await?;
-    let authority = Authority::connect_runtime(
-        runtime.clone(),
-        Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
-        config,
-        Arc::new(DenyManagement),
-        deadline(),
-    )
+    let authority = Authority::connect_runtime(runtime.clone(), Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()), config, binding(rss_request_context::TenantId::parse(TENANT).unwrap()), Arc::new(DenyManagement), deadline())
     .await?;
+    let tenant = TenantId::parse("33333333-3333-4333-8333-333333333333")?;
+    sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,1)").bind(tenant.to_string()).execute(&owner).await?;
     let key = AccountKey {
         tenant,
         principal: PrincipalId::generate(),
     };
     maintenance
-        .initialize(
-            key,
-            LoginKey::parse("host-user")?,
-            Password::new("correct horse battery staple".into())?,
-            deadline(),
-        )
+        .initialize(binding((key).tenant), key, LoginKey::parse("host-user")?, Password::new("correct horse battery staple".into())?, deadline())
         .await?;
     let issued = authority
-        .login_local(
-            tenant,
-            LoginKey::parse("host-user")?,
-            Password::new("correct horse battery staple".into())?,
-            AttemptSource::parse("consumer")?,
-            None,
-            deadline(),
-        )
+        .login_local(binding(tenant), LoginKey::parse("host-user")?, Password::new("correct horse battery staple".into())?, AttemptSource::parse("consumer")?, None, deadline())
         .await?;
     let actor = Arc::new(
         authority
-            .inspect_session(
-                tenant,
-                SessionSecret::parse(issued.secret().expose().into())?,
-                deadline(),
-            )
+            .inspect_session(binding(tenant), SessionSecret::parse(issued.secret().expose().into())?, deadline())
             .await?,
     );
     for commit in [true, false] {
@@ -209,11 +178,7 @@ pub async fn run() -> anyhow::Result<()> {
         anyhow::ensure!(state == if commit { "committed" } else { "rolled-back" });
     }
     let revoker = authority
-        .inspect_session(
-            tenant,
-            SessionSecret::parse(issued.secret().expose().into())?,
-            deadline(),
-        )
+        .inspect_session(binding(tenant), SessionSecret::parse(issued.secret().expose().into())?, deadline())
         .await?;
     authority
         .revoke_current_session(revoker, deadline())

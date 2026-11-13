@@ -4,7 +4,6 @@ use rss_identity_core::{
     PrincipalId,
     account::{LoginKey, Password},
 };
-use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
 
 impl Authority {
@@ -240,7 +239,6 @@ impl Authority {
     ) -> Result<IssuedSession, AuthorityError> {
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.shortened_to(actor.expires);
-        let key = actor.key;
         let (actor, login) = self.local_login_key(actor, budget.remaining()).await?;
         Box::pin(self.login_local(
             actor.binding,

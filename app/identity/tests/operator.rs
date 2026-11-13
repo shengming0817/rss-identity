@@ -28,11 +28,22 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
             }
             let result = if initialize {
                 f.maintenance
-                    .initialize(f.system_key, login("platform"), input()?, deadline())
+                    .initialize(
+                        crate::support::binding((f.system_key).tenant),
+                        f.system_key,
+                        login("platform"),
+                        input()?,
+                        deadline(),
+                    )
                     .await
             } else {
                 f.maintenance
-                    .recover_local_password(f.system_key, input()?, deadline())
+                    .recover_local_password(
+                        crate::support::binding((f.system_key).tenant),
+                        f.system_key,
+                        input()?,
+                        deadline(),
+                    )
                     .await
             };
             if fault.is_some() {
@@ -62,11 +73,22 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
             .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
         let result = if initialize {
             f.maintenance
-                .initialize(f.system_key, login("platform"), input()?, deadline())
+                .initialize(
+                    crate::support::binding((f.system_key).tenant),
+                    f.system_key,
+                    login("platform"),
+                    input()?,
+                    deadline(),
+                )
                 .await
         } else {
             f.maintenance
-                .recover_local_password(f.system_key, input()?, deadline())
+                .recover_local_password(
+                    crate::support::binding((f.system_key).tenant),
+                    f.system_key,
+                    input()?,
+                    deadline(),
+                )
                 .await
         };
         assert!(matches!(result, Err(AuthorityError::CommitUnknown(_))));
@@ -82,7 +104,7 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
     assert!(
         f.store
             .login_local(
-                f.system_key.tenant,
+                crate::support::binding(f.system_key.tenant),
                 login("platform"),
                 password(),
                 source(),

@@ -51,8 +51,8 @@ impl Federation {
         } = request;
         let tenant = binding.tenant();
         if replacement.as_ref().is_some_and(|p| {
-            p.binding != binding ||
-            p.view().credential_kind != rss_identity_core::session::CredentialKind::Cookie
+            p.binding != binding
+                || p.view().credential_kind != rss_identity_core::session::CredentialKind::Cookie
         }) {
             return Err(AuthorityError::Rejected);
         }
@@ -85,7 +85,12 @@ impl Federation {
         };
         self.check_assurance_profile(tenant, &view)?;
         let credentials = self
-            .provider_credentials(binding, view.id, view.credential_version, budget.remaining())
+            .provider_credentials(
+                binding,
+                view.id,
+                view.credential_version,
+                budget.remaining(),
+            )
             .await?;
         if !view.enabled {
             return Err(FederationError::Rejected.into());
@@ -98,7 +103,9 @@ impl Federation {
                 budget.remaining(),
             )
             .await?;
-        let state = self.signer.issue(self.authority.instance(), binding, Purpose::Login)?;
+        let state = self
+            .signer
+            .issue(self.authority.instance(), binding, Purpose::Login)?;
         let locator = self.signer.verify(self.authority.instance(), &state)?;
         let material = ProtocolMaterial::new(state)?;
         let url = self

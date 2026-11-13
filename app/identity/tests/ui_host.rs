@@ -55,6 +55,11 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
             http.clone(),
         )?)
         .merge(rss_identity_app::context::router(authority, &config, http)?)
+        .layer(axum::middleware::from_fn(
+            |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                next.run(crate::request_support::scoped(request)).await
+            },
+        ))
         .layer(axum::middleware::from_fn_with_state(
             rss_identity_app::transport::Ingress {
                 public: config.public_gateway,
@@ -126,3 +131,6 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     anyhow::ensure!(result?.success(), "consumer transport verification failed");
     Ok(())
 }
+
+#[path = "../../../crates/identity-http-axum/tests/request_support/mod.rs"]
+mod request_support;

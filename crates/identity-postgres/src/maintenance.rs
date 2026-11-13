@@ -19,7 +19,9 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<AccountState, AuthorityError> {
         self.require_maintenance()?;
-        if binding.tenant() != key.tenant { return Err(AuthorityError::Rejected); }
+        if binding.tenant() != key.tenant {
+            return Err(AuthorityError::Rejected);
+        }
         let budget = Budget::new(deadline)?;
         let hash = budget.password(self.kdf.hash(password)).await?;
         self.mutate(binding, budget.remaining(), move |tx| {
@@ -50,7 +52,9 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<AccountState, AuthorityError> {
         self.require_maintenance()?;
-        if binding.tenant() != key.tenant { return Err(AuthorityError::Rejected); }
+        if binding.tenant() != key.tenant {
+            return Err(AuthorityError::Rejected);
+        }
         let budget = Budget::new(deadline)?;
         let hash = budget.password(self.kdf.hash(password)).await?;
         self.mutate(binding, budget.remaining(), move |tx| {

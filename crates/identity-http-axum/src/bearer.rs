@@ -1,9 +1,8 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 //! Explicit programmatic routes; hosts own TLS, trusted ClientAddress and IP admission.
 use crate::{AppState, HttpConfig, boundary::*};
 use axum::{
     Extension, Json, Router,
-    extract::{FromRequest, Path, Request, State},
+    extract::{FromRequest, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -14,6 +13,7 @@ use rss_identity_core::{
     session::BearerSecret,
 };
 use rss_identity_postgres::{AttemptSource, AuthenticatedSession, Authority, AuthorityError};
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::policy::OperationDeadline;
 use serde::Deserialize;
 
@@ -50,7 +50,7 @@ fn secure(mut response: Response) -> Response {
     response
 }
 async fn boundary(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let budget = match RequestBudget::new(state.config.timeout) {
+    let budget = match RequestBudget::for_request(&request, state.config.timeout) {
         Ok(budget) => budget,
         Err(error) => return secure(error.into_response()),
     };
@@ -105,7 +105,6 @@ struct Login {
 }
 async fn login(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
@@ -113,7 +112,6 @@ async fn login(
     if request.headers().contains_key(header::AUTHORIZATION) {
         return Err(BAD);
     }
-    let tenant = tenant(&raw)?;
     let address = request
         .extensions()
         .get::<crate::ClientAddress>()
@@ -147,7 +145,6 @@ async fn login(
 }
 async fn logout(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
     Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,

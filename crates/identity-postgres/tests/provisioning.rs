@@ -71,6 +71,9 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
             runtime.clone(),
             kdf.clone(),
             f.config(),
+            crate::support::binding(
+                rss_request_context::TenantId::parse(crate::support::A).unwrap(),
+            ),
             f.key.tenant,
             policy.clone(),
             deadline(),
@@ -82,6 +85,9 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
             f.runtime.clone(),
             kdf.clone(),
             f.config(),
+            crate::support::binding(
+                rss_request_context::TenantId::parse(crate::support::A).unwrap()
+            ),
             f.key.tenant,
             policy.clone(),
             deadline()
@@ -154,7 +160,7 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
     let issued = f
         .store
         .login_local(
-            target,
+            crate::support::binding(target),
             login("new-admin"),
             password(),
             source(),
@@ -165,7 +171,7 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
     let proof = f
         .store
         .inspect_session(
-            target,
+            crate::support::binding(target),
             SessionSecret::parse(issued.secret().expose().into())?,
             deadline(),
         )

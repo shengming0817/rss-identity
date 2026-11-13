@@ -66,39 +66,21 @@ impl DatabaseConfig {
 pub struct StorageConfig {
     pub target: [u8; 16],
     pub lineage: [u8; 16],
-    pub tenants: Vec<String>,
     pub generation: i64,
 }
 impl StorageConfig {
-    pub fn tenants(&self) -> Result<Vec<TenantId>, AppError> {
-        if self.tenants.is_empty() || self.tenants.len() > 1024 {
-            return Err(AppError::Tenant);
-        }
-        let tenants = self
-            .tenants
-            .iter()
-            .map(|t| TenantId::parse(t).map_err(|_| AppError::Tenant))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut seen = std::collections::BTreeSet::new();
-        if tenants.iter().any(|t| !seen.insert(t.to_string())) {
-            return Err(AppError::Tenant);
-        }
-        Ok(tenants)
-    }
     pub fn identity(&self) -> Result<StorageIdentity, AppError> {
         StorageIdentity::new(self.target, self.lineage).map_err(|_| AppError::StorageIdentity)
     }
     pub fn epoch(&self) -> Result<Epoch, AppError> {
         Epoch::new(self.generation).map_err(|_| AppError::StorageEpoch)
     }
-    pub fn bindings(&self) -> Result<Vec<ExecutionBinding>, AppError> {
-        let storage = self.identity()?;
-        let epoch = self.epoch()?;
-        Ok(self
-            .tenants()?
-            .into_iter()
-            .map(|tenant| ExecutionBinding::new(storage, tenant, epoch))
-            .collect())
+    pub fn binding(&self, tenant: TenantId) -> Result<ExecutionBinding, AppError> {
+        Ok(ExecutionBinding::new(
+            self.identity()?,
+            tenant,
+            self.epoch()?,
+        ))
     }
 }
 #[derive(Deserialize)]
@@ -171,15 +153,11 @@ impl OidcConfig {
 
     pub fn private_access(
         &self,
-        tenants: &[TenantId],
     ) -> Result<Vec<rss_identity_oidc::PrivateProviderAccess>, AppError> {
         self.private_providers
             .iter()
             .map(|value| {
                 let tenant = TenantId::parse(&value.tenant_id).map_err(|_| AppError::Tenant)?;
-                if !tenants.contains(&tenant) {
-                    return Err(AppError::Tenant);
-                }
                 Ok(rss_identity_oidc::PrivateProviderAccess {
                     tenant,
                     issuer: value.issuer.clone(),
@@ -354,6 +332,7 @@ impl HttpServerConfig {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeConfig {
+    pub webauthn_generation: i64,
     pub authority: AuthoritySettings,
     pub password_work: PasswordWorkConfig,
     pub http: HttpServerConfig,
@@ -383,8 +362,10 @@ impl RuntimeConfig {
             return Err(AppError::Configuration);
         }
         self.budgets.validate()?;
-        self.storage.bindings()?;
+        self.storage.identity()?;
+        self.storage.epoch()?;
         self.instance()?;
+        rss_identity_postgres::RpGeneration::new(self.webauthn_generation)?;
         self.bootstrap_keys()?;
         self.password_work.build()?;
         crate::assembly::authority_config(self)?;
@@ -404,8 +385,39 @@ impl RuntimeConfig {
         InstanceId::parse(&self.instance_id).map_err(|_| AppError::Configuration)
     }
     pub fn bootstrap_keys(&self) -> Result<Vec<AccountKey>, AppError> {
-        bootstrap_keys(&self.bootstrap_accounts, &self.storage)
+        bootstrap_keys(&self.bootstrap_accounts)
     }
+}
+/// Explicit targets of one installation or maintenance page, never runtime admission.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TenantTarget {
+    pub tenant_id: String,
+    pub generation: i64,
+}
+pub fn target_bindings(
+    storage: &StorageConfig,
+    targets: &[TenantTarget],
+) -> Result<Vec<ExecutionBinding>, AppError> {
+    let storage = storage.identity()?;
+    let mut seen = std::collections::BTreeSet::new();
+    if targets.is_empty() {
+        return Err(AppError::Tenant);
+    }
+    targets
+        .iter()
+        .map(|target| {
+            let tenant = TenantId::parse(&target.tenant_id).map_err(|_| AppError::Tenant)?;
+            if !seen.insert(tenant.to_string()) {
+                return Err(AppError::Tenant);
+            }
+            Ok(ExecutionBinding::new(
+                storage,
+                tenant,
+                Epoch::new(target.generation).map_err(|_| AppError::StorageEpoch)?,
+            ))
+        })
+        .collect()
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -440,14 +452,14 @@ impl MaintenanceConfig {
             return Err(AppError::Configuration);
         }
         InstanceId::parse(&self.instance_id).map_err(|_| AppError::Configuration)?;
-        self.storage.bindings()?;
-        bootstrap_keys(&self.bootstrap_accounts, &self.storage)?;
+        self.storage.identity()?;
+        self.storage.epoch()?;
+        bootstrap_keys(&self.bootstrap_accounts)?;
         self.budgets.validate()?;
         self.password_work.build()?;
         self.authority.apply(
             rss_identity_postgres::AuthorityConfig::new(
                 InstanceId::parse(&self.instance_id).map_err(|_| AppError::Configuration)?,
-                self.storage.bindings()?,
                 crate::assembly::session_policy()?,
                 rss_audit_postgres::Integrity::Plain,
             )?,
@@ -457,25 +469,22 @@ impl MaintenanceConfig {
     }
     pub fn bootstrap_key(&self, tenant: TenantId) -> Result<AccountKey, AppError> {
         self.validate()?;
-        bootstrap_keys(&self.bootstrap_accounts, &self.storage)?
+        bootstrap_keys(&self.bootstrap_accounts)?
             .into_iter()
             .find(|k| k.tenant == tenant)
             .ok_or(AppError::Tenant)
     }
 }
-fn bootstrap_keys(
-    accounts: &[Bootstrap],
-    storage: &StorageConfig,
-) -> Result<Vec<AccountKey>, AppError> {
-    let tenants = storage.tenants()?;
+fn bootstrap_keys(accounts: &[Bootstrap]) -> Result<Vec<AccountKey>, AppError> {
     let keys = accounts
         .iter()
         .map(Bootstrap::key)
         .collect::<Result<Vec<_>, _>>()?;
-    if keys.len() != tenants.len()
-        || tenants
+    let mut tenants = std::collections::BTreeSet::new();
+    if keys.is_empty()
+        || keys
             .iter()
-            .any(|t| keys.iter().filter(|k| k.tenant == *t).count() != 1)
+            .any(|key| !tenants.insert(key.tenant.to_string()))
     {
         return Err(AppError::Tenant);
     }
@@ -484,6 +493,7 @@ fn bootstrap_keys(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MigrationConfig {
+    pub targets: Vec<TenantTarget>,
     pub budgets: Budgets,
     pub audit: AuditInstallation,
     pub format_version: u32,

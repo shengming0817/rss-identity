@@ -83,7 +83,6 @@ def oidc_settings(issuer, address, state, key):
 def runtime_template():
     value = json.loads((ROOT / "deployment/deploy.example.json").read_text())["runtime"]
     value["publicGateway"] = "10.243.254.2"
-    value["storage"]["tenants"] = TENANTS
     value["bootstrapAccounts"] = [
         {"tenantId": t, "principalId": p} for t, p in zip(TENANTS, PRINCIPALS)
     ]
@@ -340,7 +339,7 @@ def verify_observations(name, facts, subject):
             require(type(value) is int and value > 0, "observation-count")
     if name == "install":
         require(
-            facts["tenants"] == len(subject["runtimeProfile"]["storage"]["tenants"])
+            facts["tenants"] == len(subject["runtimeProfile"]["bootstrapAccounts"])
             and facts["configurationSha256"]
             == digest(json.dumps(subject["runtimeProfile"], sort_keys=True).encode()),
             "observation-configuration",
@@ -1014,7 +1013,6 @@ class Run:
         runtime["instanceId"] = str(__import__("uuid").uuid4())
         runtime["storage"]["target"] = list(secrets.token_bytes(16))
         runtime["storage"]["lineage"] = list(secrets.token_bytes(16))
-        runtime["storage"]["tenants"] = TENANTS
         runtime["bootstrapAccounts"] = [
             {"tenantId": t, "principalId": p} for t, p in zip(TENANTS, PRINCIPALS)
         ]

@@ -3,6 +3,7 @@ pub mod assembly;
 pub mod audit;
 pub mod config;
 pub mod context;
+mod execution;
 pub mod lifecycle;
 pub mod migration;
 pub mod rekey;

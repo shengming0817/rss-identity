@@ -18,7 +18,11 @@ async fn inspect(
     let cb = authorize(&url, "alice").await?;
     let response = callback(app, &cb, &browser).await?;
     Ok(f.store
-        .inspect_session(tenant(), secret(&cookie(&response)), deadline())
+        .inspect_session(
+            crate::support::binding(tenant()),
+            secret(&cookie(&response)),
+            deadline(),
+        )
         .await?)
 }
 

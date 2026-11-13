@@ -15,12 +15,16 @@ async fn session_rotation_and_revocation() -> anyhow::Result<()> {
         .await?;
     let old = issued.secret().expose().to_owned();
     let candidate = f.candidate().await?;
-    let a = f
-        .store
-        .refresh_session(f.key.tenant, SessionSecret::parse(old.clone())?, deadline());
-    let b = f
-        .store
-        .refresh_session(f.key.tenant, SessionSecret::parse(old.clone())?, deadline());
+    let a = f.store.refresh_session(
+        crate::support::binding(f.key.tenant),
+        SessionSecret::parse(old.clone())?,
+        deadline(),
+    );
+    let b = f.store.refresh_session(
+        crate::support::binding(f.key.tenant),
+        SessionSecret::parse(old.clone())?,
+        deadline(),
+    );
     let (a, b) = tokio::join!(a, b);
     assert_ne!(a.is_ok(), b.is_ok());
     let next = a.or(b)?;
@@ -31,14 +35,18 @@ async fn session_rotation_and_revocation() -> anyhow::Result<()> {
     );
     assert!(
         f.store
-            .authenticate_session(f.key.tenant, SessionSecret::parse(old)?, deadline())
+            .authenticate_session(
+                crate::support::binding(f.key.tenant),
+                SessionSecret::parse(old)?,
+                deadline()
+            )
             .await
             .is_err()
     );
     let auth = f
         .store
         .authenticate_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             SessionSecret::parse(next.secret().expose().into())?,
             deadline(),
         )
@@ -53,7 +61,7 @@ async fn session_rotation_and_revocation() -> anyhow::Result<()> {
     assert!(
         f.store
             .authenticate_session(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 SessionSecret::parse(next.secret().expose().into())?,
                 deadline()
             )
@@ -81,7 +89,7 @@ async fn issue(f: &Fixture) -> anyhow::Result<IssuedSession> {
 }
 async fn proof(f: &Fixture, s: &IssuedSession) -> anyhow::Result<AuthenticatedSession> {
     Ok(f.store
-        .inspect_session(f.key.tenant, secret(s), deadline())
+        .inspect_session(crate::support::binding(f.key.tenant), secret(s), deadline())
         .await?)
 }
 
@@ -104,7 +112,7 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
     let candidate = f
         .store
         .verify_password(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             login("member"),
             password(),
             source(),
@@ -122,7 +130,11 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
     );
     assert!(
         f.store
-            .authenticate_session(TenantId::parse(B)?, secret(&first), deadline())
+            .authenticate_session(
+                crate::support::binding(TenantId::parse(B)?),
+                secret(&first),
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -176,19 +188,28 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
             .unwrap(),
         ),
         f.config(),
+        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
         f.policy.clone(),
         deadline(),
     )
     .await?;
     assert!(
         restarted
-            .authenticate_session(f.key.tenant, secret(&replacement), deadline())
+            .authenticate_session(
+                crate::support::binding(f.key.tenant),
+                secret(&replacement),
+                deadline()
+            )
             .await
             .is_err()
     );
     assert!(
         restarted
-            .authenticate_session(f.key.tenant, secret(&second), deadline())
+            .authenticate_session(
+                crate::support::binding(f.key.tenant),
+                secret(&second),
+                deadline()
+            )
             .await
             .is_ok()
     );
@@ -197,13 +218,21 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
         .await?;
     assert!(
         restarted
-            .authenticate_session(f.key.tenant, secret(&second), deadline())
+            .authenticate_session(
+                crate::support::binding(f.key.tenant),
+                secret(&second),
+                deadline()
+            )
             .await
             .is_err()
     );
     assert_eq!(
         f.store
-            .authenticate_session(f.key.tenant, secret(&member_session), deadline())
+            .authenticate_session(
+                crate::support::binding(f.key.tenant),
+                secret(&member_session),
+                deadline()
+            )
             .await?
             .account(),
         member.key()
@@ -231,7 +260,7 @@ async fn session_account_changes_fence_racing_credentials() -> anyhow::Result<()
         let c = f
             .store
             .verify_password(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 login("member"),
                 password(),
                 source(),
@@ -243,7 +272,7 @@ async fn session_account_changes_fence_racing_credentials() -> anyhow::Result<()
         let pending = f
             .store
             .verify_password(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 login("member"),
                 password(),
                 source(),
@@ -252,27 +281,42 @@ async fn session_account_changes_fence_racing_credentials() -> anyhow::Result<()
             .await?;
         let actor = f.actor().await?;
         let (rotation, change) = tokio::join!(
-            f.store
-                .refresh_session(f.key.tenant, secret(&issued), deadline()),
+            f.store.refresh_session(
+                crate::support::binding(f.key.tenant),
+                secret(&issued),
+                deadline()
+            ),
             support::apply_change(&f.store, actor, member.key(), change, deadline())
         );
         change?;
         assert!(
             f.store
-                .recheck_session_reference(f.key.tenant, &reference, deadline())
+                .recheck_session_reference(
+                    crate::support::binding(f.key.tenant),
+                    &reference,
+                    deadline()
+                )
                 .await
                 .is_err()
         );
         assert!(
             f.store
-                .authenticate_session(f.key.tenant, secret(&issued), deadline())
+                .authenticate_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&issued),
+                    deadline()
+                )
                 .await
                 .is_err()
         );
         if let Ok(rotated) = rotation {
             assert!(
                 f.store
-                    .authenticate_session(f.key.tenant, secret(&rotated), deadline())
+                    .authenticate_session(
+                        crate::support::binding(f.key.tenant),
+                        secret(&rotated),
+                        deadline()
+                    )
                     .await
                     .is_err()
             );
@@ -301,14 +345,23 @@ async fn session_account_changes_fence_racing_credentials() -> anyhow::Result<()
         .await?;
         assert!(
             f.store
-                .authenticate_session(f.key.tenant, secret(&issued), deadline())
+                .authenticate_session(
+                    crate::support::binding(f.key.tenant),
+                    secret(&issued),
+                    deadline()
+                )
                 .await
                 .is_err()
         );
     }
     let recovery = issue(&f).await?;
     f.maintenance
-        .recover_local_password(f.key, password(), deadline())
+        .recover_local_password(
+            crate::support::binding((f.key).tenant),
+            f.key,
+            password(),
+            deadline(),
+        )
         .await?;
     assert!(proof(&f, &recovery).await.is_err());
     f.close().await;
@@ -341,7 +394,11 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     assert!(matches!(
         f.store
-            .refresh_session(f.key.tenant, secret(&live), deadline())
+            .refresh_session(
+                crate::support::binding(f.key.tenant),
+                secret(&live),
+                deadline()
+            )
             .await,
         Err(AuthorityError::CommitUnknown(_))
     ));
@@ -356,7 +413,11 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
     ));
     let failure = f
         .store
-        .refresh_session(f.key.tenant, secret(&live), deadline())
+        .refresh_session(
+            crate::support::binding(f.key.tenant),
+            secret(&live),
+            deadline(),
+        )
         .await;
     assert!(matches!(failure, Err(AuthorityError::RolledBack(_))));
     assert!(!format!("{failure:?}").contains("session secret marker"));
@@ -377,7 +438,11 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
         .inject_next_transaction_fault(PgTransactionFault::RollbackFailedAfterAck);
     assert!(matches!(
         f.store
-            .refresh_session(f.key.tenant, secret(&live), deadline())
+            .refresh_session(
+                crate::support::binding(f.key.tenant),
+                secret(&live),
+                deadline()
+            )
             .await,
         Err(AuthorityError::RollbackFailed(_))
     ));
@@ -423,14 +488,18 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
     let live = issue(&f).await?;
     assert!(
         f.maintenance
-            .authenticate_session(f.key.tenant, secret(&live), deadline())
+            .authenticate_session(
+                crate::support::binding(f.key.tenant),
+                secret(&live),
+                deadline()
+            )
             .await
             .is_err()
     );
     let short = f
         .store
         .inspect_session(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             secret(&live),
             OperationDeadline::from_remaining(Duration::from_millis(100)),
         )
@@ -453,7 +522,7 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
     assert!(
         f.store
             .authenticate_session(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 secret(&live),
                 OperationDeadline::from_remaining(Duration::from_millis(50))
             )
@@ -503,6 +572,9 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
                         .unwrap()
                     ),
                     f.config(),
+                    crate::support::binding(
+                        rss_request_context::TenantId::parse(crate::support::A).unwrap()
+                    ),
                     deadline()
                 )
                 .await
@@ -536,8 +608,11 @@ async fn session_logout_rotation_races_and_invalid_storage() -> anyhow::Result<(
             }
         };
         let (rotation, revoke) = tokio::join!(
-            f.store
-                .refresh_session(f.key.tenant, secret(&live), deadline()),
+            f.store.refresh_session(
+                crate::support::binding(f.key.tenant),
+                secret(&live),
+                deadline()
+            ),
             revoke
         );
         assert!(rotation.is_ok() || revoke.is_ok());
@@ -627,7 +702,11 @@ async fn session_events_match_committed_operations() -> anyhow::Result<()> {
     expect_session_event(&f, "created", first.view().id, None, 1).await?;
     let rotated = f
         .store
-        .refresh_session(f.key.tenant, secret(&first), deadline())
+        .refresh_session(
+            crate::support::binding(f.key.tenant),
+            secret(&first),
+            deadline(),
+        )
         .await?;
     expect_session_event(&f, "refreshed", rotated.view().id, None, 1).await?;
     let replacement = f
@@ -674,7 +753,7 @@ async fn durable_reference_is_passive_exact_and_revocable() -> anyhow::Result<()
     let restored = serde_json::from_str::<SessionReference>(&document)?;
     let checked = f
         .store
-        .recheck_session_reference(f.key.tenant, &restored, deadline())
+        .recheck_session_reference(crate::support::binding(f.key.tenant), &restored, deadline())
         .await?;
     assert_eq!(checked.instance(), f.instance);
     assert_eq!(checked.account(), f.key);
@@ -686,7 +765,11 @@ async fn durable_reference_is_passive_exact_and_revocable() -> anyhow::Result<()
     checked.check_live()?;
     assert!(
         f.store
-            .recheck_session_reference(TenantId::parse(B)?, &restored, deadline())
+            .recheck_session_reference(
+                crate::support::binding(TenantId::parse(B)?),
+                &restored,
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -696,18 +779,26 @@ async fn durable_reference_is_passive_exact_and_revocable() -> anyhow::Result<()
         let altered: SessionReference = serde_json::from_value(altered)?;
         assert!(
             f.store
-                .recheck_session_reference(f.key.tenant, &altered, deadline())
+                .recheck_session_reference(
+                    crate::support::binding(f.key.tenant),
+                    &altered,
+                    deadline()
+                )
                 .await
                 .is_err()
         );
     }
     let refreshed = f
         .store
-        .refresh_session(f.key.tenant, secret(&issued), deadline())
+        .refresh_session(
+            crate::support::binding(f.key.tenant),
+            secret(&issued),
+            deadline(),
+        )
         .await?;
     assert_eq!(
         f.store
-            .recheck_session_reference(f.key.tenant, &restored, deadline())
+            .recheck_session_reference(crate::support::binding(f.key.tenant), &restored, deadline())
             .await?
             .view()
             .id,
@@ -718,7 +809,7 @@ async fn durable_reference_is_passive_exact_and_revocable() -> anyhow::Result<()
         .await?;
     assert!(
         f.store
-            .recheck_session_reference(f.key.tenant, &restored, deadline())
+            .recheck_session_reference(crate::support::binding(f.key.tenant), &restored, deadline())
             .await
             .is_err()
     );
@@ -728,7 +819,7 @@ async fn durable_reference_is_passive_exact_and_revocable() -> anyhow::Result<()
         .bind(next.view().id.to_string()).execute(&f.owner).await?;
     assert!(
         f.store
-            .recheck_session_reference(f.key.tenant, &next_ref, deadline())
+            .recheck_session_reference(crate::support::binding(f.key.tenant), &next_ref, deadline())
             .await
             .is_err()
     );
@@ -741,7 +832,7 @@ async fn bearer(f: &Fixture) -> anyhow::Result<IssuedBearer> {
     f.reset_attempts().await?;
     Ok(f.store
         .login_local_bearer(
-            f.key.tenant,
+            crate::support::binding(f.key.tenant),
             login("admin"),
             password(),
             source(),
@@ -763,7 +854,7 @@ async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
     assert!(
         f.store
             .inspect_bearer(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 BearerSecret::parse(browser.secret().expose().into())?,
                 deadline()
             )
@@ -774,11 +865,11 @@ async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
         let secret = SessionSecret::parse(token.secret().expose().into())?;
         let result = if active {
             f.store
-                .authenticate_session(f.key.tenant, secret, deadline())
+                .authenticate_session(crate::support::binding(f.key.tenant), secret, deadline())
                 .await
         } else {
             f.store
-                .inspect_session(f.key.tenant, secret, deadline())
+                .inspect_session(crate::support::binding(f.key.tenant), secret, deadline())
                 .await
         };
         assert!(matches!(result, Err(AuthorityError::Rejected)));
@@ -786,7 +877,7 @@ async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
     assert!(
         f.store
             .refresh_session(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 SessionSecret::parse(token.secret().expose().into())?,
                 deadline()
             )
@@ -795,7 +886,11 @@ async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
     );
     let p = f
         .store
-        .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+        .inspect_bearer(
+            crate::support::binding(f.key.tenant),
+            bearer_secret(&token),
+            deadline(),
+        )
         .await?;
     let reference = p.reference()?;
     assert!(
@@ -807,14 +902,22 @@ async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
     assert!(proof(&f, &browser).await.is_ok());
     assert!(
         f.store
-            .inspect_bearer(TenantId::parse(B)?, bearer_secret(&token), deadline())
+            .inspect_bearer(
+                crate::support::binding(TenantId::parse(B)?),
+                bearer_secret(&token),
+                deadline()
+            )
             .await
             .is_err()
     );
     // Real restart of the component; the persisted discriminator remains authoritative.
     let restarted = f.probe(AuthorityProfile::Runtime).await?;
     let p = restarted
-        .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+        .inspect_bearer(
+            crate::support::binding(f.key.tenant),
+            bearer_secret(&token),
+            deadline(),
+        )
         .await?;
     assert_eq!(p.reference()?, reference);
     assert_eq!(
@@ -825,7 +928,11 @@ async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
     altered["credentialKind"] = serde_json::json!("cookie");
     assert!(
         restarted
-            .recheck_session_reference(f.key.tenant, &serde_json::from_value(altered)?, deadline())
+            .recheck_session_reference(
+                crate::support::binding(f.key.tenant),
+                &serde_json::from_value(altered)?,
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -833,16 +940,28 @@ async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
     sqlx::query("UPDATE identity_authority.sessions SET issued_at=issued_at-100,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN issued_at-100 ELSE local_authenticated_at END,idle_expires_at=idle_expires_at-100,absolute_expires_at=absolute_expires_at-100 WHERE session_id=$1")
         .bind(token.view().id.as_uuid()).execute(&f.owner).await?;
     let passive = restarted
-        .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+        .inspect_bearer(
+            crate::support::binding(f.key.tenant),
+            bearer_secret(&token),
+            deadline(),
+        )
         .await?;
     let before = passive.view().idle_expires_at;
     let absolute = passive.view().absolute_expires_at;
     let rechecked = restarted
-        .recheck_session_reference(f.key.tenant, &reference, deadline())
+        .recheck_session_reference(
+            crate::support::binding(f.key.tenant),
+            &reference,
+            deadline(),
+        )
         .await?;
     assert_eq!(rechecked.view().idle_expires_at, before);
     let active = restarted
-        .authenticate_bearer(f.key.tenant, bearer_secret(&token), deadline())
+        .authenticate_bearer(
+            crate::support::binding(f.key.tenant),
+            bearer_secret(&token),
+            deadline(),
+        )
         .await?;
     assert!(active.view().idle_expires_at > before);
     assert_eq!(active.view().absolute_expires_at, absolute);
@@ -850,13 +969,21 @@ async fn bearer_session_presentation_and_lifetime() -> anyhow::Result<()> {
         .bind(token.view().id.as_uuid()).execute(&f.owner).await?;
     assert!(
         restarted
-            .authenticate_bearer(f.key.tenant, bearer_secret(&token), deadline())
+            .authenticate_bearer(
+                crate::support::binding(f.key.tenant),
+                bearer_secret(&token),
+                deadline()
+            )
             .await
             .is_err()
     );
     assert!(
         restarted
-            .recheck_session_reference(f.key.tenant, &reference, deadline())
+            .recheck_session_reference(
+                crate::support::binding(f.key.tenant),
+                &reference,
+                deadline()
+            )
             .await
             .is_err()
     );
@@ -883,7 +1010,7 @@ async fn bearer_account_changes_and_logout_are_current() -> anyhow::Result<()> {
         let token = f
             .store
             .login_local_bearer(
-                f.key.tenant,
+                crate::support::binding(f.key.tenant),
                 login("member"),
                 password(),
                 source(),
@@ -892,7 +1019,11 @@ async fn bearer_account_changes_and_logout_are_current() -> anyhow::Result<()> {
             .await?;
         let p = f
             .store
-            .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+            .inspect_bearer(
+                crate::support::binding(f.key.tenant),
+                bearer_secret(&token),
+                deadline(),
+            )
             .await?;
         let reference = p.reference()?;
         match change {
@@ -924,13 +1055,21 @@ async fn bearer_account_changes_and_logout_are_current() -> anyhow::Result<()> {
         }
         assert!(
             f.store
-                .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+                .inspect_bearer(
+                    crate::support::binding(f.key.tenant),
+                    bearer_secret(&token),
+                    deadline()
+                )
                 .await
                 .is_err()
         );
         assert!(
             f.store
-                .recheck_session_reference(f.key.tenant, &reference, deadline())
+                .recheck_session_reference(
+                    crate::support::binding(f.key.tenant),
+                    &reference,
+                    deadline()
+                )
                 .await
                 .is_err()
         );
@@ -938,7 +1077,7 @@ async fn bearer_account_changes_and_logout_are_current() -> anyhow::Result<()> {
             assert!(
                 f.store
                     .login_local_bearer(
-                        f.key.tenant,
+                        crate::support::binding(f.key.tenant),
                         login("member"),
                         password(),
                         source(),
@@ -968,7 +1107,11 @@ async fn bearer_account_changes_and_logout_are_current() -> anyhow::Result<()> {
         }
         assert!(
             f.store
-                .inspect_bearer(f.key.tenant, bearer_secret(&token), deadline())
+                .inspect_bearer(
+                    crate::support::binding(f.key.tenant),
+                    bearer_secret(&token),
+                    deadline()
+                )
                 .await
                 .is_err()
         );
@@ -977,18 +1120,30 @@ async fn bearer_account_changes_and_logout_are_current() -> anyhow::Result<()> {
     let two = bearer(&f).await?;
     let p = f
         .store
-        .inspect_bearer(f.key.tenant, bearer_secret(&one), deadline())
+        .inspect_bearer(
+            crate::support::binding(f.key.tenant),
+            bearer_secret(&one),
+            deadline(),
+        )
         .await?;
     f.store.revoke_current_session(p, deadline()).await?;
     assert!(
         f.store
-            .inspect_bearer(f.key.tenant, bearer_secret(&one), deadline())
+            .inspect_bearer(
+                crate::support::binding(f.key.tenant),
+                bearer_secret(&one),
+                deadline()
+            )
             .await
             .is_err()
     );
     assert!(
         f.store
-            .inspect_bearer(f.key.tenant, bearer_secret(&two), deadline())
+            .inspect_bearer(
+                crate::support::binding(f.key.tenant),
+                bearer_secret(&two),
+                deadline()
+            )
             .await
             .is_ok()
     );
@@ -997,7 +1152,11 @@ async fn bearer_account_changes_and_logout_are_current() -> anyhow::Result<()> {
         .await?;
     assert!(
         f.store
-            .inspect_bearer(f.key.tenant, bearer_secret(&two), deadline())
+            .inspect_bearer(
+                crate::support::binding(f.key.tenant),
+                bearer_secret(&two),
+                deadline()
+            )
             .await
             .is_err()
     );

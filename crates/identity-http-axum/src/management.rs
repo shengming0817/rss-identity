@@ -1,4 +1,3 @@
-use rss_transactional_messaging::fence::ExecutionBinding;
 //! Instance-local management. Domain authorization is rechecked in the mutation transaction.
 use crate::{AppState, HttpConfig, boundary::*};
 use axum::{
@@ -17,6 +16,7 @@ use rss_identity_core::{
 use rss_identity_postgres::{
     AccountView, AttemptSource, AuthenticatedSession, Authority, AuthorityError,
 };
+use rss_transactional_messaging::fence::ExecutionBinding;
 use serde::{Deserialize, de::DeserializeOwned};
 
 #[derive(Clone)]
@@ -166,7 +166,6 @@ struct AccountParameters {
 }
 async fn accounts(
     State(s): State<Management>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     h: HeaderMap,
@@ -212,7 +211,6 @@ struct CreateAccount {
 }
 async fn create_account(
     State(s): State<Management>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,
@@ -297,7 +295,6 @@ struct ChangePassword {
 }
 async fn own_password(
     State(s): State<Management>,
-    Path(t): Path<String>,
     Execution(binding): Execution,
     Extension(b): Extension<RequestBudget>,
     r: Request,

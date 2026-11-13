@@ -10,9 +10,11 @@ use sqlx::{Connection, PgConnection};
 pub async fn run(
     config: MigrationConfig,
     keyring: CredentialKeyringConfig,
+    targets: Vec<crate::config::TenantTarget>,
     verify_only: bool,
 ) -> Result<(), AppError> {
     let instance = migration::validate(&config)?;
+    let targets = crate::config::target_bindings(&config.storage, &targets)?;
     if verify_only && keyring.keys.len() != 1 {
         return Err(AppError::Configuration);
     }
@@ -34,9 +36,10 @@ pub async fn run(
         if signature.as_deref() != Some(rss_identity_postgres::SCHEMA_SIGNATURE.trim()) { return Err(AppError::Migration); }
         let versions: Vec<i32> = sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *tx).await.map_err(|_| AppError::Migration)?;
         if versions != [rss_identity_postgres::SCHEMA_VERSION] { return Err(AppError::Migration); }
-        for tenant in config.storage.tenants()? {
+        for target in targets {
+            let tenant = target.tenant();
             sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target',$2,true),set_config('rss.storage_lineage',$3,true),set_config('rss.execution_epoch',$4,true)")
-                .bind(tenant.to_string()).bind(hex::encode(config.storage.target)).bind(hex::encode(config.storage.lineage)).bind(config.storage.generation.to_string()).execute(&mut *tx).await.map_err(|_| AppError::Migration)?;
+                .bind(tenant.to_string()).bind(hex::encode(config.storage.target)).bind(hex::encode(config.storage.lineage)).bind(target.epoch().get().to_string()).execute(&mut *tx).await.map_err(|_| AppError::Migration)?;
             sqlx::query("SELECT rss_transactional_messaging.check_execution()").execute(&mut *tx).await.map_err(|_| AppError::Migration)?;
             keys.reencrypt_tenant(&mut tx, instance, tenant).await?;
         }
