@@ -87,8 +87,14 @@ pub struct AuthorityConfig {
     future_skew_seconds: u32,
     operation_proof_seconds: std::num::NonZeroU32,
     max_auth_facts_bytes: std::num::NonZeroU32,
+    provider_capacity: std::num::NonZeroU16,
 }
 impl AuthorityConfig {
+    pub fn with_provider_capacity(mut self, capacity: std::num::NonZeroU16) -> Result<Self,AuthorityError> {
+        if capacity.get()>rss_identity_core::federation::MAX_PROVIDERS {return Err(AuthorityError::Configuration);}
+        self.provider_capacity=capacity; Ok(self)
+    }
+
     pub fn with_future_skew(mut self, seconds: u32) -> Self { self.future_skew_seconds=seconds; self }
     pub fn with_operation_proof_lifetime(mut self, seconds: std::num::NonZeroU32) -> Self { self.operation_proof_seconds=seconds; self }
     pub fn with_auth_facts_budget(mut self, bytes: std::num::NonZeroU32) -> Self { self.max_auth_facts_bytes=bytes; self }
@@ -144,6 +150,7 @@ impl AuthorityConfig {
             future_skew_seconds: 30,
             operation_proof_seconds: std::num::NonZeroU32::new(300).expect("positive default"),
             max_auth_facts_bytes: std::num::NonZeroU32::new(32768).expect("positive default"),
+            provider_capacity: std::num::NonZeroU16::new(rss_identity_core::federation::MAX_PROVIDERS).expect("positive capacity"),
         })
     }
 }
@@ -163,6 +170,7 @@ pub struct Authority {
     future_skew_seconds: u32,
     operation_proof_seconds: std::num::NonZeroU32,
     max_auth_facts_bytes: std::num::NonZeroU32,
+    provider_capacity: std::num::NonZeroU16,
 }
 impl Authority {
     pub async fn connect_runtime(
@@ -232,6 +240,7 @@ impl Authority {
             future_skew_seconds: config.future_skew_seconds,
             operation_proof_seconds: config.operation_proof_seconds,
             max_auth_facts_bytes: config.max_auth_facts_bytes,
+            provider_capacity: config.provider_capacity,
         };
         let integrity = authority.runtime.audit.clone();
         let valid = Self::read_bundle(

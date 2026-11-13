@@ -6,7 +6,6 @@ use crate::{
     migration,
 };
 use sqlx::{Connection, PgConnection};
-use std::time::Duration;
 
 pub async fn run(
     config: MigrationConfig,
@@ -19,16 +18,17 @@ pub async fn run(
     }
     let keys = keyring.load()?;
     let options = config.database.sqlx()?;
-    let mut c = tokio::time::timeout(
-        Duration::from_secs(10),
+    let cutoff=crate::config::cutoff(config.budgets.migration_seconds)?;
+    let mut c = tokio::time::timeout_at(
+        cutoff.instant().into(),
         PgConnection::connect_with(&options),
     )
     .await
     .map_err(|_| AppError::Connection)?
     .map_err(|_| AppError::Connection)?;
-    let result = tokio::time::timeout(Duration::from_secs(60), async {
+    let result = tokio::time::timeout_at(cutoff.instant().into(), async {
         let mut tx = c.begin().await.map_err(|_| AppError::Migration)?;
-        sqlx::raw_sql("SET LOCAL lock_timeout='10s'; SET LOCAL statement_timeout='30s'").execute(&mut *tx).await.map_err(|_| AppError::Migration)?;
+        migration::watchdog(&mut tx,cutoff).await.map_err(|_|AppError::Migration)?;
         migration::verify_storage(&mut tx, &config.storage).await.map_err(|_| AppError::Migration)?;
         let signature: Option<String> = sqlx::query_scalar(rss_identity_postgres::SCHEMA_SIGNATURE_SQL).fetch_one(&mut *tx).await.map_err(|_| AppError::Migration)?;
         if signature.as_deref() != Some(rss_identity_postgres::SCHEMA_SIGNATURE.trim()) { return Err(AppError::Migration); }
@@ -44,7 +44,7 @@ pub async fn run(
     }).await.map_err(|_| AppError::Migration).and_then(|v| v);
     // Owned connection is discarded after uncertain settlement; never returned to a runtime pool.
     if !matches!(
-        tokio::time::timeout(Duration::from_secs(5), c.close()).await,
+        tokio::time::timeout(config.budgets.resource(), c.close()).await,
         Ok(Ok(()))
     ) {
         eprintln!("component=credential-rekey cleanup=unconfirmed");

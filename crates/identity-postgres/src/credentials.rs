@@ -259,9 +259,10 @@ impl crate::Federation {
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
         let keys = self.credential_keys.clone();
+        let budget = crate::Budget::new(deadline)?;
         for tenant in self.authority.active_tenants()? {
             let keys = keys.clone();
-            self.authority.read_sql(tenant,deadline,move|c|Box::pin(async move {
+            self.authority.read_sql(tenant,budget.remaining(),move|c|Box::pin(async move {
                 let authority=authority_id(c).await?;
                 let rows:Vec<(Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid LIMIT $2").bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(c).await?;
                 if rows.len() > usize::from(MAX_PROVIDERS) {return Err(corrupt().into());}

@@ -19,10 +19,10 @@ def compose_literals(value):
     if isinstance(value,list): return [compose_literals(v) for v in value]
     if isinstance(value,dict): return {k:compose_literals(v) for k,v in value.items()}
     return value
-def read(path,secret=False):
+def read(path,secret=False,limit=1048576):
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     with os.fdopen(fd,'rb') as f:
-        info=os.fstat(f.fileno()); limit=4096 if secret else 1048576
+        info=os.fstat(f.fileno()); limit=4096 if secret else limit
         require(stat.S_ISREG(info.st_mode) and info.st_size<=limit,'unsafe input file')
         require(not secret or not info.st_mode&0o077,'unsafe secret permissions')
         value=f.read(limit+1);require(0<len(value)<=limit,'invalid input length');return value
@@ -53,7 +53,7 @@ def stage(data,out,images,final):
     fields(images,{'identity','web','postgres','runtime'},'images')
     require(all(re.fullmatch(r'sha256:[a-f0-9]{64}',v) for v in images.values()),'immutable image IDs required')
     c=copy.deepcopy(data['runtime'])
-    fields(c,{'formatVersion','instanceId','publicOrigin','bootstrapAccounts','database','storage','listen','publicGateway','budgets','oidc'},'runtime')
+    fields(c,{'formatVersion','instanceId','publicOrigin','bootstrapAccounts','database','storage','listen','publicGateway','budgets','oidc','authority','passwordWork','http'},'runtime')
     require(c['formatVersion']==5,'unsupported runtime config')
     origin=c['publicOrigin'];u=urlsplit(origin)
     require(u.scheme=='https' and u.hostname and not u.username and not u.password and not u.path and not u.query and not u.fragment and u.port is None and re.fullmatch(r'[a-z0-9.-]+',u.hostname),'canonical HTTPS origin required')
@@ -62,7 +62,7 @@ def stage(data,out,images,final):
     require(c['listen']=='0.0.0.0:8080' and c['publicGateway']==gateway,'ingress mismatch')
     require(c['database']['host']=='postgres' and c['database']['database']=='identity' and c['database']['user']=='identity_runtime' and c['database']['port']==5432,'database identity mismatch')
     tenants=c['storage']['tenants'];accounts=c['bootstrapAccounts']
-    require(len(tenants)==len(set(tenants)) and 1<=len(tenants)<=128 and len(accounts)==len(tenants) and all(sum(a['tenantId']==t for a in accounts)==1 for t in tenants),'one bootstrap account per tenant required')
+    require(len(tenants)==len(set(tenants)) and 1<=len(tenants)<=1024 and len(accounts)==len(tenants) and all(sum(a['tenantId']==t for a in accounts)==1 for t in tenants),'one bootstrap account per tenant required')
     os.chown(out,UID,UID)
     inputs=out/'input';inputs.mkdir(mode=0o700);os.chown(inputs,UID,UID)
     mounts={}
@@ -78,7 +78,7 @@ def stage(data,out,images,final):
     audit_install={'ownerRole':'identity_audit_owner'}
     if c['oidc'] is not None:
         oidc=c['oidc'];oidc['stateKeyFile']=mount(oidc['stateKeyFile'],'state-key',True);runtime_files.append('state-key')
-        require(oidc['returnTargets']=={'resume':origin+'/auth/resume'},'return target mismatch')
+        require(oidc['returnTargets'].get('resume')==origin+'/auth/resume','return target mismatch')
         for n,k in enumerate(oidc['credentialKeyring']['keys']):
             name='credential-key-'+str(n);k['path']=mount(k['path'],name,True);key_files.append(name)
         runtime_files+=key_files
@@ -86,8 +86,8 @@ def stage(data,out,images,final):
     write('runtime.json',json.dumps(c))
     maintenance_db={**c['database'],'user':'identity_maintenance','passwordFile':mount(data['maintenancePasswordFile'],'maintenance-password',True)}
     owner_db={**c['database'],'user':'postgres','passwordFile':mount(data['ownerPasswordFile'],'owner-password',True)}
-    common={k:c[k] for k in ['formatVersion','instanceId','storage']}
-    write('maintenance.json',json.dumps({**common,'bootstrapAccounts':c['bootstrapAccounts'],'database':maintenance_db}))
+    common={k:c[k] for k in ['formatVersion','instanceId','storage','budgets']}
+    write('maintenance.json',json.dumps({**common,'bootstrapAccounts':c['bootstrapAccounts'],'database':maintenance_db,'authority':c['authority'],'passwordWork':c['passwordWork']}))
     write('migration.json',json.dumps({**common,'database':owner_db,'runtimeRole':'identity_runtime','maintenanceRole':'identity_maintenance','audit':audit_install}))
     write('ui.json',json.dumps({'canonicalOrigin':origin,'oidcEnabled':c['oidc'] is not None}))
     def literal(value):return "'"+value.replace("'","''")+"'"
@@ -110,7 +110,7 @@ http {{
  access_log off; include /etc/nginx/mime.types;
  upstream identity_backend {{ server {identity}:8080; keepalive 32; }}
  client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi;
- proxy_next_upstream off; proxy_read_timeout 70s; proxy_send_timeout 70s; client_max_body_size 32k;
+ proxy_next_upstream off; proxy_read_timeout {c['budgets']['requestSeconds']+c['budgets']['resourceSeconds']}s; proxy_send_timeout {c['budgets']['requestSeconds']}s; client_body_timeout {c['budgets']['requestSeconds']}s; send_timeout {c['budgets']['requestSeconds']}s; client_max_body_size 96k;
  server {{
   listen 8443 ssl; server_name {u.hostname};
   ssl_certificate {cert}; ssl_certificate_key {key}; ssl_protocols TLSv1.2 TLSv1.3;
@@ -189,6 +189,6 @@ def render(data,out,images):
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--input',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--identity-image',required=True);p.add_argument('--web-image',required=True);a=p.parse_args()
-    try:render(json.loads(read(a.input)),a.output.resolve(),resolve_images(a.identity_image,a.web_image))
+    try:render(json.loads(read(a.input,limit=16*1024*1024)),a.output.resolve(),resolve_images(a.identity_image,a.web_image))
     except (ValueError,KeyError,TypeError,OSError,subprocess.SubprocessError):raise SystemExit('deployment configuration rejected; no services started')
 if __name__=='__main__':main()

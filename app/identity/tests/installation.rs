@@ -37,7 +37,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .unwrap()
         .push(json!("33333333-3333-4333-8333-333333333333"));
     value["bootstrapAccounts"].as_array_mut().unwrap().push(json!({"tenantId":"33333333-3333-4333-8333-333333333333","principalId":"44444444-4444-4444-8444-444444444444"}));
-    let install_value = json!({"formatVersion":5,"audit":{"ownerRole":"host_audit_owner"},"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
+    let install_value = json!({"formatVersion":5,"audit":{"ownerRole":"host_audit_owner"},"budgets":value["budgets"],"instanceId":value["instanceId"],"database":value["database"],"storage":value["storage"],"runtimeRole":"host_runtime","maintenanceRole":"host_maintenance"});
     let install_config =
         || serde_json::from_value::<MigrationConfig>(install_value.clone()).unwrap();
     for (corrupt, restore) in [
@@ -140,7 +140,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         maintenance_runtime.clone(),
         kdf.clone(),
         assembly::authority_config(&config)?,
-        assembly::deadline(),
+        deadline(),
     )
     .await?;
     let keys = config.bootstrap_keys()?;
@@ -150,13 +150,13 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 *key,
                 LoginKey::parse("operator")?,
                 password(),
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
     }
     value["database"]["user"] = json!("host_runtime");
     value["database"]["passwordFile"] = json!(root.join("runtime"));
-    value["budgets"] = json!({"requestSeconds":1,"drainSeconds":60,"resourceSeconds":30});
+    value["budgets"]["requestSeconds"] = json!(1);
     value["publicGateway"] = json!("127.0.0.1");
     let runtime_config = || serde_json::from_value::<RuntimeConfig>(value.clone()).unwrap();
     let config = runtime_config();
@@ -193,7 +193,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 password(),
                 AttemptSource::parse("fixture")?,
                 None,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         let http = rss_identity_http_axum::HttpConfig::new(
@@ -241,7 +241,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 .unwrap()
         };
         let manager = authority
-            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .inspect_session(key.tenant, actor(), deadline())
             .await?;
         let provider = federation
             .create_provider(
@@ -251,11 +251,11 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                     "private-rotation-test".into(),
                     None,
                 )?,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         let manager = authority
-            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .inspect_session(key.tenant, actor(), deadline())
             .await?;
         federation
             .enable_provider(
@@ -263,28 +263,28 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 provider.id,
                 provider.version,
                 true,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
 
         let manager = authority
-            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .inspect_session(key.tenant, actor(), deadline())
             .await?;
         let member = authority
             .create_local_account(
                 manager,
                 LoginKey::parse("member")?,
                 password(),
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         assert_eq!(member.key().tenant, key.tenant);
         let manager = authority
-            .inspect_session(key.tenant, actor(), assembly::deadline())
+            .inspect_session(key.tenant, actor(), deadline())
             .await?;
         assert!(matches!(
             authority
-                .set_account_enabled(manager, *key, false, assembly::deadline())
+                .set_account_enabled(manager, *key, false, deadline())
                 .await,
             Err(AuthorityError::RuleRejected(_))
         ));
@@ -295,7 +295,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 password(),
                 AttemptSource::parse("fixture")?,
                 None,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         let member_actor = authority
@@ -304,7 +304,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 rss_identity_core::session::SessionSecret::parse(
                     member_session.secret().expose().into(),
                 )?,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         assert!(
@@ -313,7 +313,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                     member_actor,
                     rss_identity_core::directory::AccountQuery::parse(None, None, None, None, 10)?,
                     None,
-                    assembly::deadline()
+                    deadline()
                 )
                 .await
                 .is_err()
@@ -324,7 +324,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 rss_identity_core::session::SessionSecret::parse(
                     member_session.secret().expose().into(),
                 )?,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
         authority
@@ -333,7 +333,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 password(),
                 password(),
                 AttemptSource::parse("fixture")?,
-                assembly::deadline(),
+                deadline(),
             )
             .await?;
     }
@@ -594,4 +594,8 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     migration::verify(restored).await?;
     owner.close().await?;
     Ok(())
+}
+
+fn deadline() -> rss_transactional_messaging::policy::OperationDeadline {
+    rss_transactional_messaging::policy::OperationDeadline::from_remaining(std::time::Duration::from_secs(10))
 }

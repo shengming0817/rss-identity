@@ -65,7 +65,7 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
     runtime["database"]["passwordFile"] = json!(root.join("password"));
     runtime["database"]["caFile"] = json!(cert);
     runtime["database"]["port"] = json!(1);
-    runtime["oidc"] = json!({"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[{"tenantId":runtime["storage"]["tenants"][0],"issuer":"https://idp.example.test","clientId":"fixture","keycloakTotp":false}],"stateKeyFile":root.join("state"),"credentialKeyring":{"activeKeyId":"active","keys":[{"keyId":"active","path":root.join("key")}]},"returnTargets":{"resume":"https://identity.example.test/auth/resume"}});
+    runtime["oidc"] = json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[{"tenantId":runtime["storage"]["tenants"][0],"issuer":"https://idp.example.test","clientId":"fixture","keycloakTotp":false}],"stateKeyFile":root.join("state"),"credentialKeyring":{"activeKeyId":"active","keys":[{"keyId":"active","path":root.join("key")}]},"returnTargets":{"resume":"https://identity.example.test/auth/resume"}});
     let path = root.join("config.json");
     let server = env!("CARGO_BIN_EXE_identity-server");
     check(server, &path, &runtime, true);
@@ -108,9 +108,11 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
         bad["oidc"]["privateProviders"][0][field] = value;
         check(server, &path, &bad, false);
     }
-    let common = json!({"formatVersion":runtime["formatVersion"],"instanceId":runtime["instanceId"],"storage":runtime["storage"],"database":runtime["database"]});
+    let common = json!({"formatVersion":runtime["formatVersion"],"instanceId":runtime["instanceId"],"storage":runtime["storage"],"database":runtime["database"],"budgets":runtime["budgets"]});
     let mut maintenance = common.clone();
     maintenance["bootstrapAccounts"] = runtime["bootstrapAccounts"].clone();
+    maintenance["authority"] = runtime["authority"].clone();
+    maintenance["passwordWork"] = runtime["passwordWork"].clone();
     check(
         env!("CARGO_BIN_EXE_identity-admin"),
         &path,

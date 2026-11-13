@@ -171,6 +171,7 @@ impl Federation {
     ) -> Result<ProviderView, AuthorityError> {
         self.authority.require_runtime()?;
         let keys = self.credential_keys.clone();
+        let capacity = self.authority.provider_capacity;
         let operation = ManagementOperation::CreateProvider;
         let policy = self.authority.policy.clone();
         let instance = self.authority.instance;
@@ -178,7 +179,7 @@ impl Federation {
         self.authority.write_sql(tenant,deadline,move|c|Box::pin(async move {
             let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
-            if count>=i64::from(MAX_PROVIDERS){return Err(FederationError::ProviderLimitReached.into());}
+            if count>=i64::from(capacity.get()){return Err(FederationError::ProviderLimitReached.into());}
             let view=ProviderView{id:ProviderId::generate(),version:1,enabled:false,revocation_epoch:1,settings,assurance_profile:profile,credential_version:1};
             sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) VALUES($1::uuid,$2::uuid,1,1,false,$3,$4,1)").bind(tenant.to_string()).bind(view.id.to_string()).bind(serde_json::to_value(&view.settings).map_err(|_|transaction::corrupt())?).bind(profile.as_slice()).execute(&mut *c).await?;
             crate::credentials::write_credentials(c,&keys,tenant,view.id,1,&credentials).await?;

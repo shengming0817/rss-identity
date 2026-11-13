@@ -10,7 +10,7 @@ use rss_identity_core::{
 };
 use rss_identity_postgres::*;
 use rss_request_context::TenantId;
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc};
 fn password(path: &str) -> Result<Password, AppError> {
     Password::new(read_secret(Path::new(path))?.to_string()).map_err(|_| AppError::Password)
 }
@@ -23,10 +23,6 @@ fn key(tenant: &str, principal: &str) -> Result<AccountKey, AppError> {
         principal: PrincipalId::parse(principal).map_err(|_| AppError::Principal)?,
     })
 }
-fn budget() -> rss_transactional_messaging::policy::OperationDeadline {
-    rss_transactional_messaging::policy::OperationDeadline::from_remaining(Duration::from_secs(30))
-}
-
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -56,41 +52,42 @@ async fn run() -> Result<(), AppError> {
     let command = parse_command(&args[1..])?;
     let config: MaintenanceConfig = load(Path::new(&args[0]))?;
     config.validate()?;
-    let authority_config = AuthorityConfig::new(
+    let cutoff = rss_identity_app::config::cutoff(config.budgets.maintenance_seconds)?;
+    let authority_config = config.authority.apply(AuthorityConfig::new(
         rss_identity_core::InstanceId::parse(&config.instance_id)
             .map_err(|_| AppError::Configuration)?,
         config.storage.bindings()?,
         rss_identity_core::session::SessionPolicy::new(900, 14400).map_err(|_| AppError::Budget)?,
         rss_audit_postgres::Integrity::Plain,
-    )?;
+    )?,rss_identity_app::config::finite_seconds(config.budgets.maintenance_seconds)?)?;
     let database = config.database.pg()?;
     let binding = config.storage.identity()?;
     let runtime = Arc::new(
-        rss_transactional_messaging_postgres::PgRuntime::connect_producer(
+        tokio::time::timeout_at(cutoff.instant().into(),rss_transactional_messaging_postgres::PgRuntime::connect_producer(
             database,
             assembly::Timer,
             binding,
-        )
-        .await
+        ))
+        .await.map_err(|_|AppError::Connection)?
         .map_err(|_| AppError::Connection)?,
     );
-    let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
+    let kdf = Arc::new(config.password_work.build()?);
     let authority =
-        Authority::connect_maintenance(runtime.clone(), kdf.clone(), authority_config, budget())
+        Authority::connect_maintenance(runtime.clone(), kdf.clone(), authority_config, assembly::deadline(cutoff))
             .await;
     let result = match authority {
-        Ok(authority) => execute(&authority, &config, command).await,
+        Ok(authority) => execute(&authority, &config, command,cutoff).await,
         Err(error) => Err(error.into()),
     };
     kdf.close();
-    if tokio::time::timeout(Duration::from_secs(5), kdf.wait_closed())
+    if tokio::time::timeout(config.budgets.resource(), kdf.wait_closed())
         .await
         .is_err()
     {
         eprintln!("password task shutdown incomplete");
         std::process::exit(1);
     }
-    if tokio::time::timeout(Duration::from_secs(5), runtime.close())
+    if tokio::time::timeout(config.budgets.resource(), runtime.close())
         .await
         .is_err()
     {
@@ -102,6 +99,7 @@ async fn execute(
     a: &Authority,
     config: &MaintenanceConfig,
     command: Command<'_>,
+    cutoff: rss_request_context::Deadline,
 ) -> Result<(), AppError> {
     let result = match command {
         Command::Initialize(tenant, name, pw) => {
@@ -109,12 +107,12 @@ async fn execute(
                 config.bootstrap_key(TenantId::parse(tenant).map_err(|_| AppError::Tenant)?)?,
                 login(name)?,
                 password(pw)?,
-                budget(),
+                assembly::deadline(cutoff),
             )
             .await
         }
         Command::Recover(target, principal, pw) => {
-            a.recover_local_password(key(target, principal)?, password(pw)?, budget())
+            a.recover_local_password(key(target, principal)?, password(pw)?, assembly::deadline(cutoff))
                 .await
         }
     }?;

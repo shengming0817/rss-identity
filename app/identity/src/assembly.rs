@@ -25,12 +25,12 @@ impl ExecutionTimer for Timer {
         tokio::time::sleep(d.remaining(self.now()).unwrap_or_default()).await;
     }
 }
-pub fn deadline() -> OperationDeadline {
-    OperationDeadline::from_remaining(Duration::from_secs(10))
+pub fn deadline(cutoff: Deadline) -> OperationDeadline {
+    OperationDeadline::from_cutoff(cutoff, &Timer)
 }
 
 /// Product policy, deliberately outside the authentication component.
-pub struct BootstrapPolicy(pub Vec<AccountKey>);
+pub struct BootstrapPolicy(pub Vec<AccountKey>, pub Duration);
 impl BootstrapPolicy {
     pub fn is_manager(&self, account: AccountKey) -> bool {
         self.0.contains(&account)
@@ -65,9 +65,7 @@ impl ManagementPolicy for BootstrapPolicy {
             if context.operation() == ManagementOperation::ChangeOwnPassword
                 && context.target() == Some(context.actor())
             {
-                return Ok(ReauthenticationRequirement::Recent(Duration::from_secs(
-                    300,
-                )));
+                return Ok(ReauthenticationRequirement::Recent(self.1));
             }
             if !self.is_manager(context.actor())
                 || (context
@@ -81,9 +79,7 @@ impl ManagementPolicy for BootstrapPolicy {
             {
                 return Err(ManagementDenied);
             }
-            Ok(ReauthenticationRequirement::Recent(Duration::from_secs(
-                300,
-            )))
+            Ok(ReauthenticationRequirement::Recent(self.1))
         })
     }
 }
@@ -92,24 +88,25 @@ pub fn session_policy() -> Result<SessionPolicy, AppError> {
     SessionPolicy::new(900, 14400).map_err(|_| AppError::Configuration)
 }
 pub fn authority_config(config: &RuntimeConfig) -> Result<AuthorityConfig, AppError> {
-    Ok(AuthorityConfig::new(
+    config.authority.apply(AuthorityConfig::new(
         config.instance()?,
         config.storage.bindings()?,
         session_policy()?,
         rss_audit_postgres::Integrity::Plain,
-    )?)
+    )?, config.budgets.request())
 }
 pub async fn authority(
     config: &RuntimeConfig,
     runtime: Arc<PgRuntime>,
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
+    cutoff: Deadline,
 ) -> Result<Authority, AppError> {
     Ok(Authority::connect_runtime(
         runtime,
         kdf,
         authority_config(config)?,
-        Arc::new(BootstrapPolicy(config.bootstrap_keys()?)),
-        deadline(),
+        Arc::new(BootstrapPolicy(config.bootstrap_keys()?, std::time::Duration::from_secs(u64::from(config.authority.operation_proof_seconds.get())))),
+        deadline(cutoff),
     )
     .await?)
 }
@@ -123,7 +120,6 @@ struct FederationInputs {
 pub fn preflight(config: &RuntimeConfig) -> Result<(), AppError> {
     config.validate()?;
     config.database.pg()?;
-    authority_config(config)?;
     federation_inputs(config)?;
     Ok(())
 }
@@ -160,7 +156,7 @@ fn federation_inputs(config: &RuntimeConfig) -> Result<Option<FederationInputs>,
         })
         .collect::<Result<Vec<_>, AppError>>()?;
     let oidc = HttpOidc::new(profiles, c.private_access(&config.storage.tenants()?)?, c.transport()?)
-        .map_err(|_| AppError::Provider)?;
+        .map_err(|_| AppError::Provider)?.with_future_skew(config.authority.future_skew_seconds);
     let raw = read_secret(Path::new(&c.state_key_file))?;
     let mut key = zeroize::Zeroizing::new([0; 32]);
     hex::decode_to_slice(raw.as_str(), key.as_mut()).map_err(|_| AppError::Configuration)?;

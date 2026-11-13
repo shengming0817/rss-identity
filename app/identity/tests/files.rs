@@ -136,7 +136,7 @@ fn group_facts_policy_is_required_only_when_oidc_is_configured() {
     use rss_identity_core::groups::GroupFactsMaxAge;
     let mut example: serde_json::Value =
         serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
-    example["oidc"] = serde_json::json!({"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[],"stateKeyFile":"/host/state.key","credentialKeyring":{"activeKeyId":"host","keys":[{"keyId":"host","path":"/host/credential.key"}]},"returnTargets":{"home":"https://identity.example.test/"}});
+    example["oidc"] = serde_json::json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[],"stateKeyFile":"/host/state.key","credentialKeyring":{"activeKeyId":"host","keys":[{"keyId":"host","path":"/host/credential.key"}]},"returnTargets":{"home":"https://identity.example.test/"}});
     for value in [
         0, 1, 3600, i64::MAX,
     ] {
@@ -170,4 +170,29 @@ fn migration_descriptor_includes_all_installed_schema_owners() {
         value["audit_sql_sha256"],
         hex::encode(Sha256::digest(rss_audit_postgres::MIGRATION_SQL))
     );
+}
+
+#[test]
+fn configured_directories_load_at_the_supported_capacity() {
+    use rss_identity_app::config::{RuntimeConfig,CONFIG_MAX_BYTES};
+    use serde_json::json;
+    let mut value: serde_json::Value=serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
+    let tenants: Vec<_>=(0..1024).map(|_|uuid::Uuid::new_v4().to_string()).collect();
+    let issuer=format!("https://idp.example.test/{}","a".repeat(2000));
+    value["storage"]["tenants"]=json!(tenants);
+    value["bootstrapAccounts"]=json!(tenants.iter().map(|tenant|json!({"tenantId":tenant,"principalId":uuid::Uuid::new_v4()})).collect::<Vec<_>>());
+    value["oidc"]=json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,
+        "groupFactsMaxAgeSeconds":300,"stateKeyFile":"/host/state","credentialKeyring":{"activeKeyId":"key","keys":[{"keyId":"key","path":"/host/key"}]},"returnTargets":{"resume":"https://identity.example.test/auth/resume"},
+        "assuranceProfiles":tenants.iter().map(|tenant|json!({"tenantId":tenant,"issuer":issuer,"clientId":"c".repeat(256),"keycloakTotp":false})).collect::<Vec<_>>(),
+        "privateProviders":tenants.iter().map(|tenant|json!({"tenantId":tenant,"issuer":issuer,"clientId":"c".repeat(256),"cidrs":["10.42.0.0/16"]})).collect::<Vec<_>>()});
+    let bytes=serde_json::to_vec(&value).unwrap();
+    assert!(bytes.len()<CONFIG_MAX_BYTES);
+    let path=std::env::temp_dir().join(format!("identity-directories-{}",uuid::Uuid::new_v4()));
+    std::fs::write(&path,bytes).unwrap();
+    let config=RuntimeConfig::load(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(config.storage.tenants().unwrap().len(),1024);
+    let oidc=config.oidc.as_ref().unwrap();
+    let profiles=oidc.assurance_profiles.iter().map(|p|rss_identity_oidc::TrustedAssuranceProfile {tenant:rss_request_context::TenantId::parse(&p.tenant_id).unwrap(),issuer:p.issuer.clone(),client_id:p.client_id.clone(),keycloak_totp:p.keycloak_totp}).collect();
+    assert!(rss_identity_oidc::HttpOidc::new(profiles,oidc.private_access(&config.storage.tenants().unwrap()).unwrap(),oidc.transport().unwrap()).is_ok());
 }

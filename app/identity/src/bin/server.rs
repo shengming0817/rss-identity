@@ -14,12 +14,18 @@ fn main() {
     }
     if args == ["--help"] {
         println!(
-            "identity-server --config FILE\nidentity-server --check-config FILE\nidentity-server --version\nidentity-server --acceptance-profile\nidentity-server --probe LOOPBACK:PORT"
+            "identity-server --config FILE\nidentity-server --check-config FILE\nidentity-server --version\nidentity-server --acceptance-profile < runtime.json\nidentity-server --probe LOOPBACK:PORT"
         );
         return;
     }
     let result = (|| {
         if args == ["--acceptance-profile"] {
+            use std::io::Read;
+            let mut bytes=Vec::new();
+            std::io::stdin().take(rss_identity_app::config::CONFIG_MAX_BYTES as u64+1).read_to_end(&mut bytes).map_err(|_|AppError::Configuration)?;
+            if bytes.len()>rss_identity_app::config::CONFIG_MAX_BYTES {return Err(AppError::Configuration);}
+            let config: RuntimeConfig=serde_json::from_slice(&bytes).map_err(|_|AppError::Json)?;
+            config.validate()?;
             let policy = rss_identity_app::assembly::session_policy()?;
             println!(
                 "{}",
@@ -28,15 +34,15 @@ fn main() {
                     "schemaVersion": rss_identity_postgres::SCHEMA_VERSION,
                     "session": {"idleSeconds": policy.idle_seconds(), "absoluteSeconds": policy.absolute_seconds()},
                     "attempts": {
-                        "sourceLimit": rss_identity_postgres::ATTEMPT_SOURCE_LIMIT,
-                        "sourceSeconds": rss_identity_postgres::ATTEMPT_SOURCE_SECONDS,
-                        "scopeLimit": rss_identity_postgres::ATTEMPT_SCOPE_LIMIT,
-                        "scopeSeconds": rss_identity_postgres::ATTEMPT_SCOPE_SECONDS,
-                        "passwordFailureLimit": rss_identity_postgres::PASSWORD_FAILURE_LIMIT,
-                        "passwordFailureSeconds": rss_identity_postgres::PASSWORD_FAILURE_SECONDS
+                        "sourceLimit": config.authority.source_limit,
+                        "sourceSeconds": config.authority.source_seconds,
+                        "scopeLimit": config.authority.scope_limit,
+                        "scopeSeconds": config.authority.scope_seconds,
+                        "passwordFailureLimit": config.authority.password_failure_limit,
+                        "passwordFailureSeconds": config.authority.password_failure_seconds
                     },
-                    "kdfConcurrency": rss_identity_core::account::PasswordKdf::MAX_CONCURRENCY,
-                    "operationProofSeconds": rss_identity_core::step_up::OPERATION_PROOF_SECONDS
+                    "kdfConcurrency": config.password_work.concurrency.get(),
+                    "operationProofSeconds": config.authority.operation_proof_seconds.get()
                 })
             );
             return Ok(());

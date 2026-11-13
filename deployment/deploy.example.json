@@ -7,7 +7,10 @@
       "database": "identity",
       "user": "identity_runtime",
       "passwordFile": "/srv/rss-identity/input/runtime-password",
-      "caFile": "/srv/rss-identity/input/database-ca.pem"
+      "caFile": "/srv/rss-identity/input/database-ca.pem",
+      "minConnections": 0,
+      "maxConnections": 10,
+      "acquireSeconds": 5
     },
     "storage": {
       "target": [
@@ -56,7 +59,10 @@
     "budgets": {
       "requestSeconds": 30,
       "drainSeconds": 60,
-      "resourceSeconds": 30
+      "resourceSeconds": 30,
+      "startupSeconds": 10,
+      "maintenanceSeconds": 30,
+      "migrationSeconds": 60
     },
     "oidc": null,
     "instanceId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -66,7 +72,36 @@
         "tenantId": "11111111-1111-4111-8111-111111111111",
         "principalId": "22222222-2222-4222-8222-222222222222"
       }
-    ]
+    ],
+    "authority": {
+      "sourceLimit": 30,
+      "sourceSeconds": 300,
+      "scopeLimit": 5,
+      "scopeSeconds": 900,
+      "passwordFailureLimit": 5,
+      "passwordFailureSeconds": 600,
+      "attemptRecords": 10000,
+      "cleanupBatch": 128,
+      "providerCapacity": 1024,
+      "profileReceipts": 4096,
+      "profileBytes": 65536,
+      "profileMembers": 1024,
+      "profileDepth": 8,
+      "profileArray": 1024,
+      "profileMaxAgeSeconds": 86400,
+      "maxAuthFactsBytes": 32768,
+      "futureSkewSeconds": 30,
+      "operationProofSeconds": 300
+    },
+    "passwordWork": {
+      "concurrency": 4,
+      "reservedMemoryBytes": 134217728
+    },
+    "http": {
+      "connections": 256,
+      "headers": 64,
+      "bufferBytes": 32768
+    }
   },
   "ownerPasswordFile": "/srv/rss-identity/input/owner-password",
   "maintenancePasswordFile": "/srv/rss-identity/input/maintenance-password",
