@@ -1329,7 +1329,7 @@ async fn latest_source_discovery_is_target_bound_and_policy_checked() -> anyhow:
     let target = proof(&f.store, &f, &federated).await?.account();
     let page = f
         .store
-        .latest_profile_sources(&manager, target, None, deadline())
+        .latest_profile_sources(&manager, target, None, 50, deadline())
         .await?;
     assert_eq!(
         page.sources,
@@ -1340,14 +1340,14 @@ async fn latest_source_discovery_is_target_bound_and_policy_checked() -> anyhow:
     assert!(page.next_cursor.is_none());
     assert!(
         f.store
-            .latest_profile_sources(&manager, target, page.sources.last().copied(), deadline())
+            .latest_profile_sources(&manager, target, page.sources.last().copied(), 50, deadline())
             .await?
             .sources
             .is_empty()
     );
     assert_eq!(
         f.store
-            .latest_profile_sources(&manager, f.key, None, deadline())
+            .latest_profile_sources(&manager, f.key, None, 50, deadline())
             .await?
             .sources,
         vec![ProfileSource::IdentityLocal]
@@ -1358,14 +1358,14 @@ async fn latest_source_discovery_is_target_bound_and_policy_checked() -> anyhow:
     };
     assert!(
         f.store
-            .latest_profile_sources(&manager, peer, None, deadline())
+            .latest_profile_sources(&manager, peer, None, 50, deadline())
             .await
             .is_err()
     );
     f.policy.revoke(f.key);
     assert!(
         f.store
-            .latest_profile_sources(&manager, target, None, deadline())
+            .latest_profile_sources(&manager, target, None, 50, deadline())
             .await
             .is_err()
     );

@@ -23,7 +23,7 @@ impl TryFrom<Input> for StepUpContext {
 impl StepUpContext {
     pub fn new(purpose: String, digest: [u8; 32]) -> Result<Self, &'static str> {
         if purpose.is_empty()
-            || purpose.len() > 128
+            || purpose.len() > 255
             || !purpose
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"-_.:/".contains(&b))

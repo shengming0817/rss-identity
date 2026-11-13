@@ -5,6 +5,7 @@ use crate::facts::{
 };
 use serde::{Deserialize, Serialize};
 pub const VERSION: u32 = 1;
+pub const MAX_VALUES: usize = 1024;
 /// Only available contains values. Unknown states/fields fail deserialization;
 /// consumers must also validate the explicit version and metadata.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,7 +65,7 @@ impl Groups {
     }
 }
 pub fn bounded_values(values: &[String]) -> bool {
-    values.len() <= 100
+    values.len() <= MAX_VALUES
         && values
             .iter()
             .all(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control))

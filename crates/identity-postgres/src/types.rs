@@ -26,7 +26,7 @@ pub struct AttemptSource(String);
 impl AttemptSource {
     pub fn parse(value: &str) -> Result<Self, AuthorityError> {
         if value.is_empty()
-            || value.len() > 128
+            || value.len() > 255
             || !value.is_ascii()
             || value.chars().any(char::is_control)
         {

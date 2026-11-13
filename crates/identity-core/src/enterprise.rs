@@ -16,7 +16,7 @@ pub struct EnterpriseTarget {
 impl EnterpriseTarget {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.id.is_empty()
-            || self.id.len() > 128
+            || self.id.len() > 255
             || !self
                 .id
                 .bytes()

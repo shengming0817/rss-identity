@@ -1,4 +1,5 @@
 //! Federation application service. One injected upstream port and the existing PG settlement owner.
+use rss_identity_core::federation::MAX_PROVIDERS;
 use crate::{
     federation_storage as db,
     storage::*,
@@ -177,7 +178,7 @@ impl Federation {
         self.authority.write_sql(tenant,deadline,move|c|Box::pin(async move {
             let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
-            if count>=100{return Err(FederationError::ProviderLimitReached.into());}
+            if count>=i64::from(MAX_PROVIDERS){return Err(FederationError::ProviderLimitReached.into());}
             let view=ProviderView{id:ProviderId::generate(),version:1,enabled:false,revocation_epoch:1,settings,assurance_profile:profile,credential_version:1};
             sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) VALUES($1::uuid,$2::uuid,1,1,false,$3,$4,1)").bind(tenant.to_string()).bind(view.id.to_string()).bind(serde_json::to_value(&view.settings).map_err(|_|transaction::corrupt())?).bind(profile.as_slice()).execute(&mut *c).await?;
             crate::credentials::write_credentials(c,&keys,tenant,view.id,1,&credentials).await?;
@@ -255,12 +256,12 @@ impl Federation {
                     crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListProviders,None, c).await?;
                     let ids: Vec<Uuid> = sqlx::query_scalar(concat!(
                         "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid OR",
-                        "DER BY provider_id LIMIT 101"
+                        "DER BY provider_id LIMIT $2"
                     ))
-                    .bind(tenant.to_string())
+                    .bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1)
                     .fetch_all(&mut *c)
                     .await?;
-                    if ids.len() > 100 {
+                    if ids.len() > usize::from(MAX_PROVIDERS) {
                         return Err(FederationError::ProviderLimitReached.into());
                     }
                     let mut result = vec![];
@@ -462,8 +463,8 @@ impl Federation {
         deadline: OperationDeadline,
     ) -> Result<Vec<LoginOption>, AuthorityError> {
         self.authority.read_sql(tenant,deadline,move |c|Box::pin(async move {
-            let rows:Vec<(Uuid,serde_json::Value)>=sqlx::query_as("SELECT provider_id,settings FROM identity_authority.providers WHERE tenant_id=$1::uuid AND enabled ORDER BY provider_id LIMIT 101").bind(tenant.to_string()).fetch_all(c).await?;
-            if rows.len()>100 {return Err(reject().into());}
+            let rows:Vec<(Uuid,serde_json::Value)>=sqlx::query_as("SELECT provider_id,settings FROM identity_authority.providers WHERE tenant_id=$1::uuid AND enabled ORDER BY provider_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(c).await?;
+            if rows.len() > usize::from(MAX_PROVIDERS) {return Err(reject().into());}
             rows.into_iter().map(|(id,value)|{
                 let settings:ProviderSettings=serde_json::from_value(value).map_err(|_|crate::transaction::corrupt())?;
                 let issuer=url::Url::parse(settings.issuer().as_str()).map_err(|_|crate::transaction::corrupt())?;
@@ -497,9 +498,9 @@ impl Federation {
                 }
             }
             let ids: Vec<Uuid> = sqlx::query_scalar(
-                "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT 101"
-            ).bind(actor.key.tenant.to_string()).fetch_all(&mut *c).await?;
-            if ids.len() > 100 { return Err(reject().into()); }
+                "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $2"
+            ).bind(actor.key.tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(&mut *c).await?;
+            if ids.len() > usize::from(MAX_PROVIDERS) { return Err(reject().into()); }
             let mut providers = Vec::new();
             for id in ids {
                 let view = db::provider(c, actor.key.tenant, ProviderId::parse(&id.to_string())?).await?;
@@ -549,9 +550,9 @@ impl Federation {
         loop {
             let oidc = self.oidc.clone();
             let more = self.authority.conditional_write_sql(tenant, budget.remaining(), move |c| Box::pin(async move {
-            let ids:Vec<Uuid> = sqlx::query_scalar("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT 101")
-                .bind(tenant.to_string()).fetch_all(&mut *c).await?;
-            if ids.len()>100 { return Err(reject().into()); }
+            let ids:Vec<Uuid> = sqlx::query_scalar("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $2")
+                .bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(&mut *c).await?;
+            if ids.len() > usize::from(MAX_PROVIDERS) { return Err(reject().into()); }
             // Before the tenant is initialized there is no guard or provider to synchronize.
             if ids.is_empty() { return Ok((false,Vec::new())); }
             lock_guard(c, tenant).await?;
@@ -619,13 +620,13 @@ pub struct SessionSecurity {
 impl FederationConfig {
     /// Validate callback and return-target contracts without connecting to storage or a provider.
     pub fn validate(&self) -> Result<(), AuthorityError> {
-        if self.targets.len() > 128 {
+        if self.targets.len() > 1024 {
             return Err(FederationError::Configuration.into());
         }
         for (id, target) in &self.targets {
             let url = url::Url::parse(target).map_err(|_| FederationError::Configuration)?;
             if id.is_empty()
-                || id.len() > 128
+                || id.len() > 255
                 || target.len() > 2048
                 || url.scheme() != "https"
                 || url.host_str().is_none()

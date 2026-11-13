@@ -98,7 +98,7 @@ impl DepartmentSnapshotClaim {
             "updated_at",
         ];
         if claim.is_empty()
-            || claim.len() > 64
+            || claim.len() > 255
             || !claim
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_')
@@ -236,8 +236,8 @@ impl DepartmentSnapshot {
             memberships,
         };
         if input.nodes.is_empty()
-            || input.nodes.len() > 256
-            || input.memberships.len() > 16
+            || input.nodes.len() > 1024
+            || input.memberships.len() > 1024
             || DepartmentId::new(input.source_revision.clone()).is_err()
         {
             return Err(FederationError::Claims);

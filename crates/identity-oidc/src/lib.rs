@@ -82,7 +82,7 @@ impl HttpOidc {
         private_access: Vec<PrivateProviderAccess>,
         loopback: bool,
     ) -> Result<Self, FederationError> {
-        if profiles.len() > 128 || private_access.len() > 128 {
+        if profiles.len() > 1024 || private_access.len() > 1024 {
             return Err(FederationError::Configuration);
         }
         let mut grants = std::collections::BTreeSet::new();

@@ -5,6 +5,8 @@ async fn passwords_and_login_keys_are_bounded() {
     assert!(LoginKey::parse("Ａlice").is_err());
     assert_eq!(LoginKey::parse("ALICE").unwrap().as_str(), "alice");
     assert!(Password::new("short".into()).is_err());
+    assert!(LoginKey::parse(&"x".repeat(255)).is_ok());
+    assert!(LoginKey::parse(&"x".repeat(256)).is_err());
     let kdf = PasswordKdf::new();
     let hash = kdf
         .hash(Password::new("correct horse battery staple".into()).unwrap())

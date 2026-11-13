@@ -14,7 +14,7 @@ impl Es256EnterpriseSigner {
     /// Load a dedicated ES256 signing key and public key identifier.
     pub fn new(kid: String, pem: &[u8]) -> Result<Self, &'static str> {
         if kid.is_empty()
-            || kid.len() > 128
+            || kid.len() > 255
             || !kid
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))

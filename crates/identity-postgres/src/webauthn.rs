@@ -184,7 +184,7 @@ impl WebauthnAuthority {
         authorization: RegistrationAuthorization,
         deadline: OperationDeadline,
     ) -> Result<WebauthnChallenge<CreationChallengeResponse>, AuthorityError> {
-        if label.is_empty() || label.len() > 128 || label.chars().any(char::is_control) {
+        if label.is_empty() || label.len() > 255 || label.chars().any(char::is_control) {
             return Err(AuthorityError::InvalidInput);
         }
         let this = self.clone();

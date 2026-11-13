@@ -1,4 +1,5 @@
 //! Provider credential storage. ref: ring 0.17.14 src/aead/less_safe_key.rs.
+use rss_identity_core::federation::MAX_PROVIDERS;
 use crate::{
     AuthorityError,
     storage::authority_id,
@@ -134,9 +135,9 @@ impl CredentialKeys {
         .fetch_optional(&mut **tx)
         .await
         .map_err(|_| AuthorityError::Unavailable)?;
-        let rows: Vec<(Uuid, i64, serde_json::Value)> = sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT 101 FOR UPDATE")
-            .bind(tenant.to_string()).fetch_all(&mut **tx).await.map_err(|_| AuthorityError::Unavailable)?;
-        if rows.len() > 100 {
+        let rows: Vec<(Uuid, i64, serde_json::Value)> = sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $2 FOR UPDATE")
+            .bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(&mut **tx).await.map_err(|_| AuthorityError::Unavailable)?;
+        if rows.len() > usize::from(MAX_PROVIDERS) {
             return Err(AuthorityError::Configuration);
         }
         let count = rows.len();
@@ -248,7 +249,7 @@ impl crate::Federation {
     /// Uses this federation's configured keyring and authority/tenant/provider/version AAD.
     /// No credential, key version, epoch or audit state is changed. Each tenant is read in
     /// its own transaction; this is not a cross-tenant snapshot or proof against later writes.
-    /// At most 100 credentials per tenant are accepted (101 rows detect overflow).
+    /// The provider directory capacity applies to credentials; an extra row detects overflow.
     /// Missing keys, malformed/authentication-failed ciphertext and overflow fail closed.
     /// The caller's absolute deadline is shared by every tenant read; timeout or storage
     /// failure returns an error without asserting that all tenants were checked.
@@ -262,8 +263,8 @@ impl crate::Federation {
             let keys = keys.clone();
             self.authority.read_sql(tenant,deadline,move|c|Box::pin(async move {
                 let authority=authority_id(c).await?;
-                let rows:Vec<(Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid LIMIT 101").bind(tenant.to_string()).fetch_all(c).await?;
-                if rows.len()>100 {return Err(corrupt().into());}
+                let rows:Vec<(Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid LIMIT $2").bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(c).await?;
+                if rows.len() > usize::from(MAX_PROVIDERS) {return Err(corrupt().into());}
                 for (provider,version,value) in rows {
                     let provider=ProviderId::parse(&provider.to_string()).map_err(|_|corrupt())?;
                     let sealed:Sealed=serde_json::from_value(value).map_err(|_|corrupt())?;

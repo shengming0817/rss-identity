@@ -48,13 +48,13 @@ fn group_values_are_exact_bounded_sets_and_missing_is_not_empty() {
         vec!["".into()],
         vec!["\n".into()],
         vec!["x".repeat(257)],
-        vec!["x".into(); 101],
+        vec!["x".into(); 1025],
     ] {
         assert!(UpstreamGroups::present(values).is_err());
     }
     assert!(
         UpstreamGroups::present(
-            (0..100)
+            (0..1024)
                 .map(|i| format!("{i:03}{}", "x".repeat(253)))
                 .collect()
         )

@@ -81,7 +81,7 @@ impl PersonnelRead<'_> {
         max_rows: usize,
     ) -> Result<Vec<PgRow>, AuthorityError> {
         self.live()?;
-        if !(1..=1001).contains(&max_rows) {
+        if !(1..=usize::from(rss_identity_core::directory::MAX_PAGE_SIZE) + 1).contains(&max_rows) {
             return Err(AuthorityError::Configuration);
         }
         let sql = format!(

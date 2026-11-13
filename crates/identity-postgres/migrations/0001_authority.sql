@@ -23,7 +23,7 @@ CREATE TABLE identity_authority.accounts (
 -- Keep composite bounds flat: pg_dump/reparse must preserve structural attestation.
 CREATE TABLE identity_authority.local_credentials (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL,
- login_key text NOT NULL CHECK(octet_length(login_key)>=1 AND octet_length(login_key)<=128 AND login_key=lower(login_key COLLATE "C") AND login_key !~ '[^\x20-\x7e]' AND login_key=btrim(login_key)),
+ login_key text NOT NULL CHECK(octet_length(login_key)>=1 AND octet_length(login_key)<=255 AND login_key=lower(login_key COLLATE "C") AND login_key !~ '[^\x20-\x7e]' AND login_key=btrim(login_key)),
  password_hash text NOT NULL CHECK(octet_length(password_hash)>=80 AND octet_length(password_hash)<=256 AND password_hash ~ '^\$argon2id\$v=19\$m=19456,t=2,p=1\$[A-Za-z0-9+/]{21}[AQgw]\$[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$'),
  PRIMARY KEY(tenant_id,principal_id), UNIQUE(tenant_id,login_key),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts
@@ -177,7 +177,7 @@ CREATE TABLE identity_authority.profile_observations (
  provider_id uuid, config_version bigint, source_epoch bigint, source_revision bigint,
  snapshot_id uuid NOT NULL, sequence bigint NOT NULL CHECK(sequence>0),
  observed_at bigint NOT NULL CHECK(observed_at>0), collected_at bigint NOT NULL CHECK(collected_at>0),
- expires_at bigint NOT NULL CHECK(expires_at>observed_at AND expires_at-observed_at<=86400),
+ expires_at bigint NOT NULL CHECK(expires_at>observed_at),
  value jsonb NOT NULL CHECK(jsonb_typeof(value)='object' AND octet_length(value::text)<=98304),
  CHECK (((source='local' AND provider_id IS NULL AND config_version IS NULL AND source_epoch IS NULL)
  OR (provider_id IS NOT NULL AND source=provider_id::text AND config_version>0 AND source_epoch>0 AND source_revision IS NULL)) IS TRUE),
@@ -207,7 +207,7 @@ CREATE TABLE identity_authority.webauthn_credentials (
  rp text NOT NULL CHECK(octet_length(rp)<=253), rp_config bytea NOT NULL CHECK(octet_length(rp_config)=32),
  credential_hash bytea NOT NULL CHECK(octet_length(credential_hash)=32),
  value jsonb NOT NULL CHECK(jsonb_typeof(value)='object' AND octet_length(value::text)<=16384),
- label text NOT NULL CHECK(octet_length(label) BETWEEN 1 AND 128),
+ label text NOT NULL CHECK(octet_length(label) BETWEEN 1 AND 255),
  epoch bigint NOT NULL DEFAULT 1 CHECK(epoch>0), version bigint NOT NULL DEFAULT 1 CHECK(version>0), revoked boolean NOT NULL DEFAULT false,
  PRIMARY KEY(tenant_id,id), UNIQUE(rp,credential_hash),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE

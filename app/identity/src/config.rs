@@ -63,7 +63,7 @@ pub struct StorageConfig {
 }
 impl StorageConfig {
     pub fn tenants(&self) -> Result<Vec<TenantId>, AppError> {
-        if self.tenants.is_empty() || self.tenants.len() > 128 {
+        if self.tenants.is_empty() || self.tenants.len() > 1024 {
             return Err(AppError::Tenant);
         }
         let tenants = self
@@ -237,7 +237,7 @@ impl RuntimeConfig {
             .map_err(|_| AppError::Configuration)?;
         if let Some(oidc) = &self.oidc {
             oidc.group_policy()?;
-            if oidc.assurance_profiles.len() > 128 {
+            if oidc.assurance_profiles.len() > 1024 {
                 return Err(AppError::Configuration);
             }
         }

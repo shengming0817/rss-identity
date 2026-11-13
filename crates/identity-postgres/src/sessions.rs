@@ -507,7 +507,7 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<SessionPage, AuthorityError> {
         self.require_runtime()?;
-        if !(1..=100).contains(&limit) {
+        if !(1..=rss_identity_core::directory::MAX_PAGE_SIZE).contains(&limit) {
             return Err(AuthorityError::InvalidInput);
         }
         let mut budget = Budget::new(deadline)?;

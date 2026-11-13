@@ -25,7 +25,7 @@ impl EnterpriseConfig {
         targets: Vec<EnterpriseTarget>,
         signer: Arc<dyn EnterpriseSigner>,
     ) -> Result<Self, AuthorityError> {
-        if targets.is_empty() || targets.len() > 128 {
+        if targets.is_empty() || targets.len() > 1024 {
             return Err(AuthorityError::Configuration);
         }
         let mut map = BTreeMap::new();

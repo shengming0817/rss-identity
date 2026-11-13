@@ -2,6 +2,9 @@
 //! ref: tokio-rs/axum axum-v0.8.9 src/extract/query.rs.
 use serde::{Deserialize, Serialize};
 
+/// Largest explicitly selected account/session page.
+pub const MAX_PAGE_SIZE: u16 = 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Field {
@@ -130,7 +133,7 @@ impl AccountQuery {
         source: Option<&str>,
         limit: u16,
     ) -> Result<Self, InvalidQuery> {
-        if !(1..=100).contains(&limit) {
+        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
             return Err(InvalidQuery);
         }
         let source = source
