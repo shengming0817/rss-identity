@@ -1,6 +1,7 @@
+use rss_identity_postgres::StateSigner;
 //! Minimal reference host: owns policy, runtime fencing, URLs and optional upstream configuration.
 use crate::{AppError, config::RuntimeConfig, read_secret};
-use rss_identity_core::{account::AccountKey, federation::StateSigner, session::SessionPolicy};
+use rss_identity_core::{account::AccountKey, session::SessionPolicy};
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
 use rss_identity_postgres::{
     Authority, AuthorityConfig, Federation, FederationConfig, ManagementContext, ManagementDenied,

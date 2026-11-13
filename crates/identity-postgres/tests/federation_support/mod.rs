@@ -1,3 +1,4 @@
+use rss_identity_postgres::StateSigner;
 #![allow(dead_code)]
 use crate::support::*;
 use rss_identity_core::federation::*;

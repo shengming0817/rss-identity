@@ -1,3 +1,4 @@
+use rss_transactional_messaging::fence::ExecutionBinding;
 use crate::{AppState, boundary::*};
 use axum::{
     Extension, Json,
@@ -62,6 +63,7 @@ fn project_session(
 pub(crate) async fn login(
     State(state): State<AppState>,
     Path(raw): Path<String>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response> {
@@ -80,7 +82,7 @@ pub(crate) async fn login(
             let token = SessionSecret::parse(secret.expose().into()).map_err(|_| UNAUTH)?;
             match state
                 .authority
-                .inspect_session(tenant, token, budget.remaining())
+                .inspect_session(binding, token, budget.remaining())
                 .await
             {
                 Ok(proof) => {
@@ -107,7 +109,7 @@ pub(crate) async fn login(
         state
             .authority
             .login_local(
-                tenant,
+                binding,
                 login,
                 password,
                 source,
@@ -120,6 +122,7 @@ pub(crate) async fn login(
 pub(crate) async fn current(
     State(state): State<AppState>,
     Path(raw): Path<String>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
 ) -> Result<Response> {
@@ -127,13 +130,14 @@ pub(crate) async fn current(
     let csrf = secret.csrf();
     let proof = state
         .authority
-        .inspect_session(tenant(&raw)?, secret, budget.remaining())
+        .inspect_session(binding, secret, budget.remaining())
         .await?;
     Ok(Json(project_session(proof.identity(), proof.view(), csrf)).into_response())
 }
 pub(crate) async fn refresh(
     State(state): State<AppState>,
     Path(raw): Path<String>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
 ) -> Result<Response> {
@@ -142,13 +146,13 @@ pub(crate) async fn refresh(
     issued(
         state
             .authority
-            .refresh_session(tenant(&raw)?, secret, budget.remaining())
+            .refresh_session(binding, secret, budget.remaining())
             .await?,
     )
 }
 async fn actor(
     state: &AppState,
-    raw: &str,
+    binding: ExecutionBinding,
     headers: &HeaderMap,
     budget: RequestBudget,
 ) -> Result<AuthenticatedSession> {
@@ -156,16 +160,17 @@ async fn actor(
     csrf(headers, &secret)?;
     Ok(state
         .authority
-        .inspect_session(tenant(raw)?, secret, budget.remaining())
+        .inspect_session(binding, secret, budget.remaining())
         .await?)
 }
 pub(crate) async fn logout(
     State(state): State<AppState>,
     Path(raw): Path<String>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
 ) -> Result<Response> {
-    let proof = actor(&state, &raw, &headers, budget).await?;
+    let proof = actor(&state, binding, &headers, budget).await?;
     state
         .authority
         .revoke_current_session(proof, budget.remaining())
@@ -175,10 +180,11 @@ pub(crate) async fn logout(
 pub(crate) async fn logout_all(
     State(state): State<AppState>,
     Path(raw): Path<String>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
 ) -> Result<Response> {
-    let proof = actor(&state, &raw, &headers, budget).await?;
+    let proof = actor(&state, binding, &headers, budget).await?;
     state
         .authority
         .revoke_all_sessions(proof, budget.remaining())
@@ -194,6 +200,7 @@ pub(crate) struct Pagination {
 pub(crate) async fn list(
     State(state): State<AppState>,
     Path(raw): Path<String>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     query: std::result::Result<Query<Pagination>, axum::extract::rejection::QueryRejection>,
     headers: HeaderMap,
@@ -202,7 +209,7 @@ pub(crate) async fn list(
     let secret = cookie(&headers)?.ok_or(UNAUTH)?;
     let proof = state
         .authority
-        .inspect_session(tenant(&raw)?, secret, budget.remaining())
+        .inspect_session(binding, secret, budget.remaining())
         .await?;
     Ok(Json(crate::dto::SessionPage::from(
         state
@@ -226,13 +233,14 @@ struct Reauthentication {
 pub(crate) async fn reauthenticate(
     State(state): State<AppState>,
     Path(raw): Path<String>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response> {
     if unique(request.headers(), "x-identity-request")? != Some("1") {
         return Err(FORBIDDEN);
     }
-    let proof = actor(&state, &raw, request.headers(), budget).await?;
+    let proof = actor(&state, binding, request.headers(), budget).await?;
     let peer = request
         .extensions()
         .get::<crate::ClientAddress>()

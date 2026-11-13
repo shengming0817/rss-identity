@@ -12,6 +12,9 @@ mod session_checks;
 pub use session_checks::ControlledFactTime;
 mod account_directory;
 mod federation;
+mod federation_state;
+pub use federation_state::StateSigner;
+pub(crate) use federation_state::{Purpose, StateLocator};
 mod federation_link;
 mod federation_login;
 mod federation_storage;
@@ -413,6 +416,6 @@ mod step_up;
 pub use step_up::{ConsumedStepUp, StepUpGrant, consume_step_up_on};
 mod webauthn;
 pub use webauthn::{
-    RegistrationAuthorization, WebauthnAuthority, WebauthnChallenge, WebauthnCredentialView,
+    RegistrationAuthorization, RpGeneration, WebauthnAuthority, WebauthnChallenge, WebauthnCredentialView,
     activate_webauthn_rp_on, webauthn_management_context,
 };

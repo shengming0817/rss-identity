@@ -20,9 +20,18 @@ pub struct WebauthnAuthority {
     verifier: Arc<Webauthn>,
     rp: String,
     config: [u8; 32],
-    generations: Arc<std::collections::BTreeMap<String, i64>>,
     workers: Arc<tokio::sync::Semaphore>,
 }
+/// Deployment-trusted RP generation for one operation. Never deserialize browser input into it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RpGeneration(i64);
+impl RpGeneration {
+    pub fn new(value: i64) -> Result<Self, AuthorityError> {
+        if value <= 0 { return Err(AuthorityError::Configuration); }
+        Ok(Self(value))
+    }
+}
+
 /// Host-only authorization choice; never deserialize this from a browser.
 pub enum RegistrationAuthorization {
     First,
@@ -92,31 +101,17 @@ pub fn webauthn_management_context(
         .map_err(|_| AuthorityError::InvalidInput)
 }
 impl WebauthnAuthority {
-    pub async fn connect(
+    pub fn new(
         authority: Authority,
         rp: String,
         origin: url::Url,
-        deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
         authority.require_runtime()?;
-        let (verifier, config) =
-            rp_configuration(&rp, &origin).map_err(|_| AuthorityError::Configuration)?;
-        let budget = Budget::new(deadline)?;
-        let mut generations = std::collections::BTreeMap::new();
-        for tenant in authority.active_tenants()? {
-            let rp = rp.clone();
-            let generation=authority.read_sql(tenant,budget.remaining(),move|c|Box::pin(async move{
-                sqlx::query("SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE").bind(tenant.to_string()).fetch_optional(&mut *c).await?;
-                sqlx::query("INSERT INTO identity_authority.webauthn_rp(tenant_id,rp,fingerprint,generation) VALUES($1::uuid,$2,$3,1) ON CONFLICT DO NOTHING").bind(tenant.to_string()).bind(&rp).bind(config.as_slice()).execute(&mut *c).await?;
-                let (current,generation):(Vec<u8>,i64)=sqlx::query_as("SELECT fingerprint,generation FROM identity_authority.webauthn_rp WHERE tenant_id=$1::uuid AND rp=$2").bind(tenant.to_string()).bind(rp).fetch_one(c).await?;
-                if current!=config{return Err(reject().into());}Ok(generation)
-            })).await?;
-            generations.insert(tenant.to_string(), generation);
-        }
+        let (verifier, config) = rp_configuration(&rp, &origin)
+            .map_err(|_| AuthorityError::Configuration)?;
         Ok(Self {
             authority,
             verifier: Arc::new(verifier),
-            generations: Arc::new(generations),
             rp,
             config,
             workers: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -126,16 +121,19 @@ impl WebauthnAuthority {
         &self,
         c: &mut PgConnection,
         tenant: TenantId,
+        expected: RpGeneration,
     ) -> Result<i64, MutationError> {
-        let expected = *self
-            .generations
-            .get(&tenant.to_string())
-            .ok_or_else(reject)?;
-        let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.webauthn_rp WHERE tenant_id=$1::uuid AND rp=$2 AND fingerprint=$3 AND generation=$4)").bind(tenant.to_string()).bind(&self.rp).bind(self.config.as_slice()).bind(expected).fetch_one(c).await?;
-        if !valid {
-            return Err(reject().into());
-        }
-        Ok(expected)
+        // Serialize first use with deployment-owner activation. An unknown tenant cannot
+        // create a guard or RP as a side effect of an unauthenticated request.
+        storage::lock_guard(c, tenant).await?;
+        sqlx::query("INSERT INTO identity_authority.webauthn_rp(tenant_id,rp,fingerprint,generation) VALUES($1::uuid,$2,$3,$4) ON CONFLICT DO NOTHING")
+            .bind(tenant.to_string()).bind(&self.rp).bind(self.config.as_slice()).bind(expected.0)
+            .execute(&mut *c).await?;
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.webauthn_rp WHERE tenant_id=$1::uuid AND rp=$2 AND fingerprint=$3 AND generation=$4)")
+            .bind(tenant.to_string()).bind(&self.rp).bind(self.config.as_slice()).bind(expected.0)
+            .fetch_one(c).await?;
+        if !valid { return Err(reject().into()); }
+        Ok(expected.0)
     }
     pub fn authority(&self) -> Authority {
         self.authority.clone()
@@ -163,6 +161,7 @@ impl WebauthnAuthority {
     pub async fn list(
         &self,
         actor: AuthenticatedSession,
+        generation: RpGeneration,
         deadline: OperationDeadline,
     ) -> Result<Vec<WebauthnCredentialView>, AuthorityError> {
         let this = self.clone();
@@ -170,7 +169,7 @@ impl WebauthnAuthority {
         let config = self.config;
         self.authority.read_sql(actor.binding,deadline,move|c|Box::pin(async move{
             session_storage::recheck(c,&actor).await?;
-            this.check_configuration(c,actor.key.tenant).await?;
+            this.check_configuration(c,actor.key.tenant,generation).await?;
             let rows=sqlx::query("SELECT id,label FROM identity_authority.webauthn_credentials WHERE tenant_id=$1::uuid AND principal_id=$2 AND rp=$3 AND rp_config=$4 AND NOT revoked ORDER BY id LIMIT 32").bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(rp).bind(config.as_slice()).fetch_all(c).await?;
             rows.into_iter().map(|r|Ok(WebauthnCredentialView{id:r.try_get("id")?,label:r.try_get("label")?})).collect()
         })).await
@@ -178,6 +177,7 @@ impl WebauthnAuthority {
     pub async fn begin_registration(
         &self,
         actor: AuthenticatedSession,
+        generation: RpGeneration,
         label: String,
         recover: bool,
         authorization: RegistrationAuthorization,
@@ -196,7 +196,7 @@ impl WebauthnAuthority {
             .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
-                    this.check_configuration(c, actor.key.tenant).await?;
+                    this.check_configuration(c, actor.key.tenant, generation).await?;
                     let (handle, enrolled, epoch) = account(c, actor.key).await?;
                     let host_recovery =
                         matches!(authorization, RegistrationAuthorization::HostRecovery);
@@ -288,12 +288,13 @@ impl WebauthnAuthority {
     pub async fn finish_registration(
         &self,
         actor: AuthenticatedSession,
+        generation: RpGeneration,
         id: Uuid,
         response: RegisterPublicKeyCredential,
         deadline: OperationDeadline,
     ) -> Result<WebauthnCredentialView, AuthorityError> {
         let budget = Budget::new(deadline)?;
-        let snapshot = self.snapshot(&actor, id, budget.remaining()).await?;
+        let snapshot = self.snapshot(&actor, generation, id, budget.remaining()).await?;
         let Ceremony::Register {
             state,
             label,
@@ -320,7 +321,7 @@ impl WebauthnAuthority {
         let this = self.clone();
         self.authority.write_sql(actor.binding,budget.remaining(),move|c|Box::pin(async move{
             let loaded=session_storage::recheck(c,&actor).await?;
-            this.check_configuration(c,actor.key.tenant).await?;
+            this.check_configuration(c,actor.key.tenant,generation).await?;
             let current=read(c,&actor,id,this.config).await?;
             if current.epoch!=snapshot.epoch || !matches!(current.ceremony,Ceremony::Register{..}) {return Err(reject().into());}
             management::authorize(this.authority.policy.as_ref(),this.authority.instance,&loaded,if host_recovery{ManagementOperation::AuthorizeWebauthnRecovery}else if recover{ManagementOperation::RecoverWebauthn}else{ManagementOperation::RegisterWebauthn},Some(actor.key),c).await?;
@@ -339,6 +340,7 @@ impl WebauthnAuthority {
     pub async fn begin_authentication(
         &self,
         actor: AuthenticatedSession,
+        generation: RpGeneration,
         context: StepUpContext,
         deadline: OperationDeadline,
     ) -> Result<WebauthnChallenge<RequestChallengeResponse>, AuthorityError> {
@@ -347,7 +349,7 @@ impl WebauthnAuthority {
             .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
-                    this.check_configuration(c, actor.key.tenant).await?;
+                    this.check_configuration(c, actor.key.tenant, generation).await?;
                     let (_, _, epoch) = account(c, actor.key).await?;
                     let keys = credentials(c, actor.key, &this.rp, &this.config).await?;
                     if keys.is_empty() {
@@ -383,12 +385,13 @@ impl WebauthnAuthority {
     pub async fn finish_authentication(
         &self,
         actor: AuthenticatedSession,
+        generation: RpGeneration,
         id: Uuid,
         response: PublicKeyCredential,
         deadline: OperationDeadline,
     ) -> Result<StepUpGrant, AuthorityError> {
         let budget = Budget::new(deadline)?;
-        let snapshot = self.snapshot(&actor, id, budget.remaining()).await?;
+        let snapshot = self.snapshot(&actor, generation, id, budget.remaining()).await?;
         let Ceremony::Authenticate {
             state,
             context,
@@ -425,14 +428,14 @@ impl WebauthnAuthority {
         let this = self.clone();
         self.authority.write_sql(actor.binding,budget.remaining(),move|c|Box::pin(async move{
             let loaded=session_storage::recheck(c,&actor).await?;
-            this.check_configuration(c,actor.key.tenant).await?;
+            this.check_configuration(c,actor.key.tenant,generation).await?;
             let current=read(c,&actor,id,this.config).await?;
             if current.epoch!=snapshot.epoch || !matches!(current.ceremony,Ceremony::Authenticate{..}) {return Err(reject().into());}
             let updated=sqlx::query("UPDATE identity_authority.webauthn_credentials SET value=$6,version=version+1 WHERE tenant_id=$1::uuid AND principal_id=$2 AND id=$3 AND version=$4 AND epoch=$5 AND NOT revoked")
                 .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(selected.id).bind(selected.version).bind(selected.epoch).bind(serde_json::to_value(selected.passkey).map_err(|_|corrupt())?).execute(&mut *c).await?.rows_affected();
             if updated!=1 {return Err(reject().into());}
             let now=snapshot.observed_at;
-            let grant=crate::step_up::issue(c,&loaded,&context,GrantSource::Webauthn{credential:selected.id,epoch:selected.epoch,configuration:*this.generations.get(&actor.key.tenant.to_string()).ok_or_else(reject)?,rp:this.rp},now, this.authority.operation_proof_seconds).await?;
+            let grant=crate::step_up::issue(c,&loaded,&context,GrantSource::Webauthn{credential:selected.id,epoch:selected.epoch,configuration:generation.0,rp:this.rp},now, this.authority.operation_proof_seconds).await?;
             if session_storage::now(c).await?>=current.expires_at{return Err(reject().into());}
             consume(c,actor.key,id).await?;
             Ok((grant,vec![crate::step_up::event(actor.key,AuthenticationAction::Verified)]))
@@ -441,6 +444,7 @@ impl WebauthnAuthority {
     pub async fn remove(
         &self,
         actor: AuthenticatedSession,
+        generation: RpGeneration,
         id: Uuid,
         grant: String,
         deadline: OperationDeadline,
@@ -449,7 +453,7 @@ impl WebauthnAuthority {
         let context = webauthn_management_context(actor.key, "remove", Some(id))?;
         self.authority.write_sql(actor.binding,deadline,move|c|Box::pin(async move{
             let loaded=session_storage::recheck(c,&actor).await?;
-            this.check_configuration(c,actor.key.tenant).await?;
+            this.check_configuration(c,actor.key.tenant,generation).await?;
             management::authorize(this.authority.policy.as_ref(),this.authority.instance,&loaded,ManagementOperation::RemoveWebauthn,Some(actor.key),c).await?;
             crate::consume_step_up_on(c,&actor,&context,&grant).await?;
             let changed=sqlx::query("UPDATE identity_authority.webauthn_credentials SET revoked=true,epoch=epoch+1 WHERE tenant_id=$1::uuid AND principal_id=$2 AND id=$3 AND NOT revoked").bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(id).execute(&mut *c).await?.rows_affected();
@@ -461,6 +465,7 @@ impl WebauthnAuthority {
     pub async fn cancel(
         &self,
         actor: AuthenticatedSession,
+        generation: RpGeneration,
         id: Uuid,
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
@@ -470,7 +475,7 @@ impl WebauthnAuthority {
             .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
                     read(c, &actor, id, config).await?;
-                    this.check_configuration(c, actor.key.tenant).await?;
+                    this.check_configuration(c, actor.key.tenant, generation).await?;
                     consume(c, actor.key, id).await?;
                     Ok(())
                 })
@@ -480,6 +485,7 @@ impl WebauthnAuthority {
     async fn snapshot(
         &self,
         actor: &AuthenticatedSession,
+        generation: RpGeneration,
         id: Uuid,
         deadline: OperationDeadline,
     ) -> Result<Snapshot, AuthorityError> {
@@ -492,7 +498,7 @@ impl WebauthnAuthority {
         let config = self.config;
         let this = self.clone();
         self.authority
-            .read_sql(key.tenant, deadline, move |c| {
+            .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
                     if storage::authority_id(c).await? != authority {
                         return Err(reject().into());
@@ -508,7 +514,7 @@ impl WebauthnAuthority {
                     if loaded.view.id != session || loaded.state.key() != key {
                         return Err(reject().into());
                     }
-                    this.check_configuration(c, key.tenant).await?;
+                    this.check_configuration(c, key.tenant, generation).await?;
                     read_loaded(c, &loaded, id, config).await
                 })
             })

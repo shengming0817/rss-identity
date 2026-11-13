@@ -1,3 +1,4 @@
+use rss_transactional_messaging::fence::ExecutionBinding;
 //! Explicit programmatic routes; hosts own TLS, trusted ClientAddress and IP admission.
 use crate::{AppState, HttpConfig, boundary::*};
 use axum::{
@@ -13,7 +14,6 @@ use rss_identity_core::{
     session::BearerSecret,
 };
 use rss_identity_postgres::{AttemptSource, AuthenticatedSession, Authority, AuthorityError};
-use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
 use serde::Deserialize;
 
@@ -80,7 +80,7 @@ fn credential(headers: &HeaderMap) -> Result<BearerSecret, HttpError> {
 pub async fn authenticate_bearer_request(
     authority: &Authority,
     config: &HttpConfig,
-    tenant: TenantId,
+    binding: ExecutionBinding,
     headers: &HeaderMap,
     deadline: OperationDeadline,
 ) -> Result<(AuthenticatedSession, BearerSecret), Response> {
@@ -90,7 +90,7 @@ pub async fn authenticate_bearer_request(
         let retained = credential(headers)?;
         let secret = BearerSecret::parse(retained.expose().into()).map_err(|_| UNAUTH)?;
         let proof = authority
-            .authenticate_bearer(tenant, secret, budget.remaining())
+            .authenticate_bearer(binding, secret, budget.remaining())
             .await?;
         Ok((proof, retained))
     }
@@ -106,6 +106,7 @@ struct Login {
 async fn login(
     State(state): State<AppState>,
     Path(raw): Path<String>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response, HttpError> {
@@ -129,7 +130,7 @@ async fn login(
     let issued = state
         .authority
         .login_local_bearer(
-            tenant,
+            binding,
             LoginKey::parse(&input.login).map_err(|_| UNAUTH)?,
             Password::new(input.password).map_err(|_| UNAUTH)?,
             source,
@@ -147,12 +148,13 @@ async fn login(
 async fn logout(
     State(state): State<AppState>,
     Path(raw): Path<String>,
+    Execution(binding): Execution,
     Extension(budget): Extension<RequestBudget>,
     headers: HeaderMap,
 ) -> Result<StatusCode, HttpError> {
     let proof = state
         .authority
-        .inspect_bearer(tenant(&raw)?, credential(&headers)?, budget.remaining())
+        .inspect_bearer(binding, credential(&headers)?, budget.remaining())
         .await?;
     state
         .authority

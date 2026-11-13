@@ -1,3 +1,4 @@
+use rss_identity_postgres::StateSigner;
 //! Real PG + HTTPS Keycloak adapter with explicit loopback fixture transport + in-process Axum. No product binary/T3 claim.
 mod department_lifecycle;
 #[path = "../../identity-postgres/tests/federation_support/mod.rs"]

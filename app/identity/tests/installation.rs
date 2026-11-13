@@ -182,7 +182,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
         authority.clone(),
         upstream.clone(),
-        rss_identity_core::federation::StateSigner::new([7; 32], &config.public_origin)?,
+        rss_identity_postgres::StateSigner::new([7; 32], &config.public_origin)?,
         FederationConfig {
             callback: format!("{}/api/v1/identity/oidc/callback", config.public_origin),
             credential_keys: support::credential_keys(),

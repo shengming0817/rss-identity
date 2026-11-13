@@ -54,12 +54,13 @@ pub(crate) fn exact(view: &ProviderView, version: i64) -> Result<(), FederationE
 }
 pub(crate) async fn read_provider(
     authority: &Authority,
-    tenant: TenantId,
+    binding: ExecutionBinding,
     id: ProviderId,
     d: rss_transactional_messaging::policy::OperationDeadline,
 ) -> Result<ProviderView, AuthorityError> {
+    let tenant = binding.tenant();
     authority
-        .read_sql(tenant, d, move |c| {
+        .read_sql(binding, d, move |c| {
             Box::pin(async move {
                 lock_guard(c, tenant).await?;
                 Ok(provider(c, tenant, id).await?)

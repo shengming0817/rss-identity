@@ -324,7 +324,7 @@ async fn host_role_names_and_session_policy_survive_composition() -> anyhow::Res
 #[ignore = "requires make test-pg"]
 async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyhow::Result<()> {
     use federation_support::{RETURN, ScriptedOidc, begin, enabled, finish, issued};
-    use rss_identity_core::federation::StateSigner;
+    use rss_identity_postgres::StateSigner;
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let federation = Federation::new(
@@ -522,7 +522,7 @@ async fn construction_verifies_every_declared_tenant_fence() -> anyhow::Result<(
 #[ignore = "requires make test-pg"]
 async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
     use federation_support::{RETURN, ScriptedOidc, begin, enabled_department, finish, issued};
-    use rss_identity_core::federation::StateSigner;
+    use rss_identity_postgres::StateSigner;
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let federation = Federation::new(

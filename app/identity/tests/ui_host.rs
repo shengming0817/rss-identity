@@ -38,7 +38,7 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
         authority.clone(),
         federation_support::ScriptedOidc::new(),
-        rss_identity_core::federation::StateSigner::new([7; 32], &origin)?,
+        rss_identity_postgres::StateSigner::new([7; 32], &origin)?,
         FederationConfig {
             callback: format!("{origin}/api/v1/identity/oidc/callback"),
             credential_keys: credential_keys(),

@@ -1,3 +1,4 @@
+use rss_identity_postgres::StateSigner;
 //! Embedded reconstruction of #2433's real directory lifecycle; no central/client APIs.
 use super::*;
 use futures::FutureExt;

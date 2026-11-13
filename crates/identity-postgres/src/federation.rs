@@ -24,7 +24,7 @@ pub struct Federation {
 }
 /// Browser input plus transport attribution; the optional replacement is an authority-issued proof.
 pub struct LoginRequest {
-    pub tenant: TenantId,
+    pub binding: ExecutionBinding,
     pub provider: ProviderId,
     pub browser: String,
     pub target: String,
@@ -175,8 +175,9 @@ impl Federation {
         let operation = ManagementOperation::CreateProvider;
         let policy = self.authority.policy.clone();
         let instance = self.authority.instance;
-        let tenant = actor.key.tenant;
-        self.authority.write_sql(tenant,deadline,move|c|Box::pin(async move {
+        let binding = actor.binding;
+        let tenant = binding.tenant();
+        self.authority.write_sql(binding,deadline,move|c|Box::pin(async move {
             let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
             if count>=i64::from(capacity.get()){return Err(FederationError::ProviderLimitReached.into());}
@@ -218,8 +219,9 @@ impl Federation {
         };
         let policy = self.authority.policy.clone();
         let instance = self.authority.instance;
-        let tenant = actor.key.tenant;
-        self.authority.write_sql(tenant,deadline,move|c|Box::pin(async move {
+        let binding = actor.binding;
+        let tenant = binding.tenant();
+        self.authority.write_sql(binding,deadline,move|c|Box::pin(async move {
             let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let mut view=db::provider(c,tenant,id).await?;
             if view.version!=expected{return Err(FederationError::StaleConfiguration.into());}
@@ -248,10 +250,11 @@ impl Federation {
         self.authority.require_runtime()?;
         let policy = self.authority.policy.clone();
         let instance = self.authority.instance;
-        let tenant = actor.key.tenant;
+        let binding = actor.binding;
+        let tenant = binding.tenant();
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.shortened_to(actor.expires);
-        self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
+        self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let loaded = crate::session_storage::recheck(c, &actor).await?;
                     crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListProviders,None, c).await?;
@@ -297,13 +300,14 @@ impl Federation {
         self.authority.require_runtime()?;
         let policy = self.authority.policy.clone();
         let instance = self.authority.instance;
-        let tenant = actor.key.tenant;
+        let binding = actor.binding;
+        let tenant = binding.tenant();
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.shortened_to(actor.expires);
         let read_policy = policy.clone();
         let (actor, view) = self
             .authority
-            .read_sql(tenant, budget.remaining(), move |c| {
+            .read_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let loaded = crate::session_storage::recheck(c, &actor).await?;
@@ -323,7 +327,7 @@ impl Federation {
         // Cancel upstream work before the shared deadline: permission/version checks and
         // the security event must settle before any report is released.
         let credentials = self
-            .provider_credentials(tenant, id, view.credential_version, budget.remaining())
+            .provider_credentials(binding, id, view.credential_version, budget.remaining())
             .await?;
         let remaining = budget.remaining().timeout();
         let reserve = (remaining / 4).min(std::time::Duration::from_secs(1));
@@ -342,7 +346,7 @@ impl Federation {
         let diagnostic = result.as_ref().err().map(|e| e.diagnostic());
         let passed = result.is_ok();
         self.authority
-            .write_sql(tenant, budget.remaining(), move |c| {
+            .write_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let loaded = crate::session_storage::recheck(c, &actor).await?;
@@ -466,10 +470,11 @@ impl Federation {
     }
     pub async fn login_options(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
     ) -> Result<Vec<LoginOption>, AuthorityError> {
-        self.authority.read_sql(tenant,deadline,move |c|Box::pin(async move {
+        let tenant = binding.tenant();
+        self.authority.read_sql(binding,deadline,move |c|Box::pin(async move {
             let rows:Vec<(Uuid,serde_json::Value)>=sqlx::query_as("SELECT provider_id,settings FROM identity_authority.providers WHERE tenant_id=$1::uuid AND enabled ORDER BY provider_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(c).await?;
             if rows.len() > usize::from(MAX_PROVIDERS) {return Err(reject().into());}
             rows.into_iter().map(|(id,value)|{
@@ -550,13 +555,14 @@ impl Federation {
     /// ref: PostgreSQL 17 explicit-locking; reuse the same tenant/provider lock order as administration.
     pub async fn reconcile_assurance_profiles(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
     ) -> Result<(), AuthorityError> {
+        let tenant = binding.tenant();
         let budget = Budget::new(deadline)?;
         loop {
             let oidc = self.oidc.clone();
-            let more = self.authority.conditional_write_sql(tenant, budget.remaining(), move |c| Box::pin(async move {
+            let more = self.authority.conditional_write_sql(binding, budget.remaining(), move |c| Box::pin(async move {
             let ids:Vec<Uuid> = sqlx::query_scalar("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $2")
                 .bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(&mut *c).await?;
             if ids.len() > usize::from(MAX_PROVIDERS) { return Err(reject().into()); }
