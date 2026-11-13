@@ -116,7 +116,7 @@ async fn department_expiry_refresh_and_management() -> anyhow::Result<()> {
         let controlled = f.store.clone().with_fact_time(clock.clone());
         let managed = Authority::connect_runtime(
             f.runtime.clone(),
-            Arc::new(PasswordKdf::new()),
+            Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
             f.config(),
             Arc::new(DepartmentPolicy {
                 expected: expected.map(str::to_owned),

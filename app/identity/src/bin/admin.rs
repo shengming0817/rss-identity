@@ -74,7 +74,7 @@ async fn run() -> Result<(), AppError> {
         .await
         .map_err(|_| AppError::Connection)?,
     );
-    let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new());
+    let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
     let authority =
         Authority::connect_maintenance(runtime.clone(), kdf.clone(), authority_config, budget())
             .await;

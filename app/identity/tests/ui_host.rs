@@ -20,7 +20,7 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     config.public_origin = origin.clone();
     config.public_gateway = "127.0.0.1".parse()?;
     config.bootstrap_accounts[0].principal_id = f.key.principal.as_uuid().to_string();
-    let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new());
+    let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
     let authority = assembly::authority(&config, f.runtime.clone(), kdf.clone()).await?;
     let federation = Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,

@@ -58,7 +58,7 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
     grant_profile(&mut conn, &role, AuthorityProfile::Provisioning).await?;
     drop(conn);
     let runtime = f.runtime_as(&role).await?;
-    let kdf = Arc::new(PasswordKdf::new());
+    let kdf = Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
     let policy = Arc::new(SqlPolicy(f.policy.clone()));
     let service = Arc::new(
         AccountProvisioner::connect(

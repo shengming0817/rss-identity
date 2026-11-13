@@ -116,7 +116,7 @@ fn transport_policy() -> rss_identity_oidc::TransportPolicy {
 }
 
 #[test]
-fn transport_policy_has_no_old_timeout_ceiling() {
+fn transport_policy_validates_finite_resource_selections() {
     use rss_identity_oidc::TransportPolicy;
     use std::time::Duration;
     assert!(TransportPolicy::new(Duration::from_secs(120),Duration::from_secs(30),2*1024*1024,1024).is_ok());

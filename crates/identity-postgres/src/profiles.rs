@@ -499,6 +499,7 @@ impl Authority {
             return Err(AuthorityError::InvalidInput);
         }
         let policy = self.policy.clone();
+        let receipt_capacity = i64::from(self.profile_receipt_capacity.get());
         let instance = self.instance;
         let digest = rss_identity_core::federation::digest(
             &serde_json::to_string(&change).map_err(|_| AuthorityError::InvalidInput)?,
@@ -513,9 +514,9 @@ impl Authority {
                 return Ok((ProfileReceipt{operation_id:change.operation_id,revision:row.try_get("revision")?},vec![]));
             }
             // The tenant guard serializes admission with insertion; replay above remains available.
-            let operations:i64=sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND principal_id=$2 LIMIT 4096) AS bounded")
-                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).fetch_one(&mut *c).await?;
-            if operations>=4096{return Err(reject().into());}
+            let operations:i64=sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND principal_id=$2 LIMIT $3) AS bounded")
+                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(receipt_capacity).fetch_one(&mut *c).await?;
+            if operations>=receipt_capacity{return Err(transaction::MutationError::ProfileReceiptCapacityReached);}
             let old=local_view(c,target).await?;
             if old.revision!=change.expected_revision{return Err(transaction::MutationError::RevisionConflict);}
             let revision=old.revision.checked_add(1).ok_or_else(corrupt)?;

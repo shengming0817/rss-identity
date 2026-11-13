@@ -7,7 +7,7 @@ async fn passwords_and_login_keys_are_bounded() {
     assert!(Password::new("short".into()).is_err());
     assert!(LoginKey::parse(&"x".repeat(255)).is_ok());
     assert!(LoginKey::parse(&"x".repeat(256)).is_err());
-    let kdf = PasswordKdf::new();
+    let kdf = PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap();
     let hash = kdf
         .hash(Password::new("correct horse battery staple".into()).unwrap())
         .await
@@ -28,5 +28,19 @@ async fn passwords_and_login_keys_are_bounded() {
         .await
         .unwrap()
     );
-    assert!(kdf.verify(Password::new("correct horse battery staple".into()).unwrap(), PasswordEncoding::from_storage("$argon2id$v=19$m=999999999,t=2,p=1$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()).unwrap()).await.is_err());
+    assert!(PasswordEncoding::from_storage("$argon2id$v=19$m=999999999,t=2,p=1$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()).is_err());
+
+}
+
+#[test]
+fn password_work_reservation_is_checked_without_allocating_it() {
+    use std::num::{NonZeroUsize,NonZeroU64};
+    use rss_identity_core::account::PasswordPolicy;
+    for count in [1,8] {
+        let concurrency=NonZeroUsize::new(count).unwrap();
+        let nominal=PasswordPolicy::MEMORY_BYTES*count as u64;
+        assert!(PasswordKdf::new(concurrency,NonZeroU64::new(nominal).unwrap()).is_err());
+        assert!(PasswordKdf::new(concurrency,NonZeroU64::new(nominal+1024*1024).unwrap()).is_ok());
+    }
+    assert!(PasswordKdf::new(NonZeroUsize::new(usize::MAX).unwrap(),NonZeroU64::new(u64::MAX).unwrap()).is_err());
 }

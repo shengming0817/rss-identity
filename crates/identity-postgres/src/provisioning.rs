@@ -34,7 +34,8 @@ impl From<sqlx::Error> for ProvisioningError {
 impl From<MutationError> for ProvisioningError {
     fn from(error: MutationError) -> Self {
         match error {
-            MutationError::InvalidInput
+            MutationError::ProfileReceiptCapacityReached
+            | MutationError::InvalidInput
             | MutationError::CursorInvalidated
             | MutationError::RevisionConflict => Self::Rejected,
             MutationError::OperationConflict => Self::Rejected,

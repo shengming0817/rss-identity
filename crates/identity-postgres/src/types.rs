@@ -49,6 +49,8 @@ pub enum AuthorityError {
     Cancelled,
     #[error("invalid authority configuration")]
     Configuration,
+    #[error("profile receipt capacity reached")]
+    ProfileReceiptCapacityReached,
     #[error("profile revision conflict")]
     RevisionConflict,
     #[error("operation identifier reused with different input")]

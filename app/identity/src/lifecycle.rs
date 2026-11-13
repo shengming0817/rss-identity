@@ -165,7 +165,7 @@ pub async fn serve(
                         pool: pool.clone(),
                         timeout: per,
                     }));
-                    let kdf = Arc::new(PasswordKdf::new());
+                    let kdf = Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
                     startup.stage_resource(DynManagedResource::new_box(KdfResource {
                         kdf: kdf.clone(),
                         timeout: per,

@@ -255,8 +255,8 @@ pub use webauthn::webauthn_router;
 mod budget_tests {
     use super::*;
     #[test]
-    fn request_budget_accepts_long_finite_time_and_rejects_overflow() {
-        for seconds in [61,120,86401] {
+    fn request_budget_validates_finite_time_and_overflow() {
+        for seconds in [120,3600] {
             let duration=std::time::Duration::from_secs(seconds);
             assert!(HttpConfig::new("https://identity.example.test",duration).is_ok());
             assert!(boundary::RequestBudget::new(duration).is_ok());

@@ -368,7 +368,7 @@ async fn account_directory_filters_before_stable_pagination_and_invalidates_chan
     ));
     let second_authority = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
         f.config(),
         f.policy.clone(),
         deadline(),
@@ -448,7 +448,7 @@ async fn account_directory_profiles_are_source_selected_and_authorized_for_predi
     }
     let restricted = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
         f.config(),
         Arc::new(NoProfiles),
         deadline(),

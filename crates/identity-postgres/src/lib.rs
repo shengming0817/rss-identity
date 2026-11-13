@@ -1,7 +1,6 @@
 //! Embeddable account/session services over a host-owned PostgreSQL runtime.
 mod attempts;
 mod password_attempts;
-pub use password_attempts::{PASSWORD_FAILURE_LIMIT, PASSWORD_FAILURE_SECONDS};
 mod audit;
 mod auth_facts;
 mod credentials;
@@ -37,9 +36,7 @@ mod sessions;
 mod storage;
 mod transaction;
 mod types;
-pub use attempts::{
-    ATTEMPT_SCOPE_LIMIT, ATTEMPT_SCOPE_SECONDS, ATTEMPT_SOURCE_LIMIT, ATTEMPT_SOURCE_SECONDS,
-};
+pub use attempts::{AttemptWindow, AuthenticationPolicy};
 pub use credentials::CredentialKeys;
 pub use department::{
     DepartmentAccessError, TrustedDepartmentSnapshot, VerifiedDepartmentSnapshot,
@@ -85,8 +82,18 @@ pub struct AuthorityConfig {
     platform: Option<Arc<dyn platform::PlatformVerifier>>,
     enterprise: Option<platform::EnterpriseConfig>,
     profile_limits: rss_identity_core::profile::ProfileLimits,
+    authentication: AuthenticationPolicy,
+    profile_receipt_capacity: std::num::NonZeroU32,
 }
 impl AuthorityConfig {
+    pub fn with_authentication_policy(mut self, policy: AuthenticationPolicy) -> Self {
+        self.authentication = policy;
+        self
+    }
+    pub fn with_profile_receipt_capacity(mut self, capacity: std::num::NonZeroU32) -> Self {
+        self.profile_receipt_capacity = capacity;
+        self
+    }
     pub fn with_enterprise(mut self, config: platform::EnterpriseConfig) -> Self {
         self.enterprise = Some(config);
         self
@@ -125,6 +132,8 @@ impl AuthorityConfig {
             platform: None,
             enterprise: None,
             profile_limits: Default::default(),
+            authentication: AuthenticationPolicy::standard(std::time::Duration::from_secs(60))?,
+            profile_receipt_capacity: std::num::NonZeroU32::new(4096).expect("positive default"),
         })
     }
 }
@@ -139,6 +148,8 @@ pub struct Authority {
     session_policy: SessionPolicy,
     policy: Arc<dyn ManagementPolicy>,
     profile_limits: rss_identity_core::profile::ProfileLimits,
+    authentication: AuthenticationPolicy,
+    profile_receipt_capacity: std::num::NonZeroU32,
 }
 impl Authority {
     pub async fn connect_runtime(
@@ -203,6 +214,8 @@ impl Authority {
             session_policy: config.sessions,
             policy,
             profile_limits: config.profile_limits,
+            authentication: config.authentication,
+            profile_receipt_capacity: config.profile_receipt_capacity,
         };
         let integrity = authority.runtime.audit.clone();
         let valid = Self::read_bundle(

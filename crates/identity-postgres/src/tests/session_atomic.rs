@@ -168,7 +168,7 @@ async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
     let restarted_runtime = f.additional_runtime().await?;
     let restarted = Authority::connect_runtime(
         restarted_runtime.clone(),
-        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
         f.config(),
         f.policy.clone(),
         deadline(),
@@ -489,7 +489,7 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
             assert!(
                 Authority::connect_maintenance(
                     f.maintenance_runtime.clone(),
-                    std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new()),
+                    std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
                     f.config(),
                     deadline()
                 )

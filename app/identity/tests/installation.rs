@@ -135,7 +135,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         )
         .await?,
     );
-    let kdf = Arc::new(PasswordKdf::new());
+    let kdf = Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
     let maintenance = Authority::connect_maintenance(
         maintenance_runtime.clone(),
         kdf.clone(),

@@ -43,7 +43,7 @@ CREATE INDEX attempts_expiry ON identity_authority.attempts(tenant_id,expires_at
 CREATE TABLE identity_authority.password_attempts (
  tenant_id uuid NOT NULL,
  login_digest bytea NOT NULL CHECK(octet_length(login_digest)=32),
- failures integer NOT NULL DEFAULT 0 CHECK(failures BETWEEN 0 AND 5),
+ failures integer NOT NULL DEFAULT 0 CHECK(failures>=0),
  window_until timestamptz,
  claim_token uuid CHECK(claim_token <> '00000000-0000-0000-0000-000000000000'),
  claim_until timestamptz,

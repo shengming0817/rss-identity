@@ -35,7 +35,7 @@ pub struct Password(Zeroizing<String>);
 impl Password {
     pub fn new(value: String) -> Result<Self, PasswordError> {
         let value = Zeroizing::new(value);
-        if value.len() > 1024 || value.chars().count() < 15 {
+        if value.len() > PasswordPolicy::MAX_PASSWORD_BYTES || value.chars().count() < PasswordPolicy::MIN_CHARACTERS {
             return Err(PasswordError::Invalid);
         }
         Ok(Self(value))
@@ -53,9 +53,7 @@ pub struct PasswordEncoding(Zeroizing<String>);
 impl PasswordEncoding {
     pub fn from_storage(value: String) -> Result<Self, PasswordError> {
         let value = Zeroizing::new(value);
-        if value.len() > 256 {
-            return Err(PasswordError::Unavailable);
-        }
+        PasswordPolicy::validate_encoding(&value)?;
         Ok(Self(value))
     }
     pub fn as_str(&self) -> &str {
@@ -78,6 +76,41 @@ pub enum PasswordError {
     Unavailable,
 }
 
+/// The single supported password security contract; resource capacity never lowers it.
+pub struct PasswordPolicy;
+impl PasswordPolicy {
+    pub const MIN_CHARACTERS: usize = 15;
+    pub const MAX_PASSWORD_BYTES: usize = 1024;
+    pub const MEMORY_KIB: u32 = 19456;
+    pub const MEMORY_BYTES: u64 = Self::MEMORY_KIB as u64 * 1024;
+    pub const ITERATIONS: u32 = 2;
+    pub const PARALLELISM: u32 = 1;
+    pub const SALT_BYTES: usize = 16;
+    pub const HASH_BYTES: usize = 32;
+    fn argon2() -> Argon2<'static> {
+        Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13,
+            argon2::Params::new(Self::MEMORY_KIB, Self::ITERATIONS, Self::PARALLELISM, Some(Self::HASH_BYTES))
+                .expect("fixed Argon2 policy"))
+    }
+    fn validate_encoding(value: &str) -> Result<(), PasswordError> {
+        use base64::Engine;
+        if value.len() > 256 { return Err(PasswordError::Unavailable); }
+        let hash=PasswordHash::new(value).map_err(|_|PasswordError::Unavailable)?;
+        let salt=hash.salt.ok_or(PasswordError::Unavailable)?;
+        let output=hash.hash.ok_or(PasswordError::Unavailable)?;
+        let decoded=base64::engine::general_purpose::STANDARD_NO_PAD.decode(salt.as_str()).map_err(|_|PasswordError::Unavailable)?;
+        if hash.algorithm.as_str() != "argon2id" || hash.version != Some(19)
+            || hash.params.to_string() != format!("m={},t={},p={}",Self::MEMORY_KIB,Self::ITERATIONS,Self::PARALLELISM)
+            || decoded.len() != Self::SALT_BYTES || output.len() != Self::HASH_BYTES
+            || base64::engine::general_purpose::STANDARD_NO_PAD.encode(&decoded) != salt.as_str()
+            || value != format!("$argon2id$v=19$m={},t={},p={}${}${}",Self::MEMORY_KIB,Self::ITERATIONS,Self::PARALLELISM,
+                salt,base64::engine::general_purpose::STANDARD_NO_PAD.encode(output.as_bytes())) {
+            return Err(PasswordError::Unavailable);
+        }
+        Ok(())
+    }
+}
+
 const DUMMY: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 #[derive(Clone)]
@@ -86,20 +119,21 @@ pub struct PasswordKdf {
     admission: Arc<Mutex<bool>>,
     tasks: tokio_util::task::TaskTracker,
 }
-impl Default for PasswordKdf {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 impl PasswordKdf {
-    /// Maximum concurrent password computations, shared by all clones.
-    pub const MAX_CONCURRENCY: usize = 4;
-    pub fn new() -> Self {
-        Self {
-            gate: Arc::new(Semaphore::new(Self::MAX_CONCURRENCY)),
+    /// Reserve a finite number of equal-cost jobs in this process. All clones share the gate.
+    /// Memory above the nominal Argon2 working sets is a host reservation for overhead,
+    /// not an allocator limit or a process RSS guarantee.
+    pub fn new(max_concurrency: std::num::NonZeroUsize, reserved_memory_bytes: std::num::NonZeroU64) -> Result<Self, PasswordError> {
+        let count = max_concurrency.get();
+        let nominal = u64::try_from(count).ok().and_then(|n| n.checked_mul(PasswordPolicy::MEMORY_BYTES));
+        if count > Semaphore::MAX_PERMITS || nominal.is_none_or(|bytes| bytes >= reserved_memory_bytes.get()) {
+            return Err(PasswordError::Invalid);
+        }
+        Ok(Self {
+            gate: Arc::new(Semaphore::new(count)),
             admission: Arc::new(Mutex::new(true)),
             tasks: tokio_util::task::TaskTracker::new(),
-        }
+        })
     }
     /// Permanently close work admission. Existing blocking closures retain their tokens.
     pub fn close(&self) {
@@ -141,7 +175,7 @@ impl PasswordKdf {
     pub async fn hash(&self, secret: Password) -> Result<PasswordEncoding, PasswordError> {
         self.compute(move || {
             let salt = SaltString::generate(&mut OsRng);
-            Argon2::default()
+            PasswordPolicy::argon2()
                 .hash_password(secret.0.as_bytes(), &salt)
                 .map(|h| PasswordEncoding(Zeroizing::new(h.to_string())))
                 .map_err(|_| PasswordError::Unavailable)
@@ -156,16 +190,7 @@ impl PasswordKdf {
         self.compute(move || {
             let hash =
                 PasswordHash::new(encoded.as_str()).map_err(|_| PasswordError::Unavailable)?;
-            if encoded.as_str().len() > 256
-                || hash.algorithm.as_str() != "argon2id"
-                || hash.version != Some(19)
-                || hash.params.to_string() != "m=19456,t=2,p=1"
-                || hash.hash.as_ref().map(|h| h.len()) != Some(32)
-                || hash.salt.as_ref().map(|s| s.as_str().len()) != Some(22)
-            {
-                return Err(PasswordError::Unavailable);
-            }
-            Ok(Argon2::default()
+            Ok(PasswordPolicy::argon2()
                 .verify_password(secret.0.as_bytes(), &hash)
                 .is_ok())
         })
@@ -183,7 +208,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn closing_kdf_waits_for_actual_work_and_rejects_new_work() {
-        let kdf = Arc::new(PasswordKdf::new());
+        let kdf = Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
         let (started, seen) = tokio::sync::oneshot::channel();
         let (release, wait) = std::sync::mpsc::channel();
         let worker = kdf.clone();
@@ -218,7 +243,7 @@ mod tests {
     async fn cancelled_waiter_does_not_release_running_work() {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (end_tx, end_rx) = std::sync::mpsc::channel();
-        let kdf = Arc::new(PasswordKdf::new());
+        let kdf = Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap());
         let worker = kdf.clone();
         let task = tokio::spawn(async move {
             worker

@@ -128,6 +128,8 @@ pub(crate) enum MutationError {
     Storage(#[from] PgError),
     #[error(transparent)]
     Rule(#[from] AccountRuleError),
+    #[error("profile receipt capacity reached")]
+    ProfileReceiptCapacityReached,
     #[error("profile revision conflict")]
     RevisionConflict,
     #[error("profile operation conflict")]
@@ -391,6 +393,10 @@ fn sql_failure(error: MutationError, reason: &std::sync::OnceLock<AuthorityError
         }
         MutationError::CursorInvalidated => {
             let _ = reason.set(AuthorityError::CursorInvalidated);
+            reject()
+        }
+        MutationError::ProfileReceiptCapacityReached => {
+            let _ = reason.set(AuthorityError::ProfileReceiptCapacityReached);
             reject()
         }
         MutationError::RevisionConflict => {

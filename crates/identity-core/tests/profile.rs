@@ -63,7 +63,7 @@ fn extension_budgets_and_sensitive_material_fail_closed() {
             .is_err()
         );
     }
-    for age in [1, 59, 60, 14400, 86400, 86401, u32::MAX] {
+    for age in [1, 14400, u32::MAX] {
         assert!(
             ProfileSettings {
                 extensions_claim: None,

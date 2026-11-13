@@ -126,14 +126,14 @@ pub async fn run() -> anyhow::Result<()> {
     )?;
     let maintenance = Authority::connect_maintenance(
         maintenance_runtime.clone(),
-        Arc::new(PasswordKdf::new()),
+        Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
         config.clone(),
         deadline(),
     )
     .await?;
     let authority = Authority::connect_runtime(
         runtime.clone(),
-        Arc::new(PasswordKdf::new()),
+        Arc::new(PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
         config,
         Arc::new(DenyManagement),
         deadline(),

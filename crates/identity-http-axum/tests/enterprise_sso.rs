@@ -320,7 +320,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
         .with_enterprise(EnterpriseConfig::new(targets.clone(), signer)?);
     let authority = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
         config,
         f.policy.clone(),
         deadline(),
@@ -473,7 +473,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
     );
     let rotated = Authority::connect_runtime(
         f.runtime.clone(),
-        Arc::new(rss_identity_core::account::PasswordKdf::new()),
+        Arc::new(rss_identity_core::account::PasswordKdf::new(std::num::NonZeroUsize::new(4).unwrap(), std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap()).unwrap()),
         support::config(f.instance)
             .with_platform(device.clone())
             .with_enterprise(EnterpriseConfig::new(
