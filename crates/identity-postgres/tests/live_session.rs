@@ -323,7 +323,7 @@ async fn host_admission_preserves_unknown_and_failed_settlement() -> anyhow::Res
         let proof = proof.clone();
         let outcome = f
             .runtime
-            .local_tx(f.key.tenant, deadline(), move |tx| {
+            .local_tx(binding(f.key.tenant), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.with_connection(move |c| {
                         Box::pin(

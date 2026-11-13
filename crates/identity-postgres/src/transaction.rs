@@ -184,9 +184,7 @@ impl Authority {
             + Send
             + 'static,
     {
-        if !bundle.tenants.contains(&tenant) {
-            return Err(AuthorityError::Rejected);
-        }
+        let binding = bundle.binding(tenant).ok_or(AuthorityError::Rejected)?;
         let instance = bundle.instance;
         if deadline.timeout().is_zero() {
             return Err(AuthorityError::NotStarted(
@@ -195,7 +193,7 @@ impl Authority {
         }
         bundle
             .runtime
-            .local_tx(tenant, deadline, move |tx| {
+            .local_tx(binding, deadline, move |tx| {
                 Box::pin(async move {
                     if verify_instance {
                         let actual =

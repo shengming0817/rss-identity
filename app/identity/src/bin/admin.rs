@@ -59,12 +59,12 @@ async fn run() -> Result<(), AppError> {
     let authority_config = AuthorityConfig::new(
         rss_identity_core::InstanceId::parse(&config.instance_id)
             .map_err(|_| AppError::Configuration)?,
-        config.storage.tenants()?,
+        config.storage.bindings()?,
         rss_identity_core::session::SessionPolicy::new(900, 14400).map_err(|_| AppError::Budget)?,
         rss_audit_postgres::Integrity::Plain,
     )?;
     let database = config.database.pg()?;
-    let binding = config.storage.binding()?;
+    let binding = config.storage.identity()?;
     let runtime = Arc::new(
         rss_transactional_messaging_postgres::PgRuntime::connect_producer(
             database,

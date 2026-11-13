@@ -91,7 +91,7 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
     let svc = service.clone();
     let who = actor.clone();
     let outcome = runtime
-        .local_tx(target, deadline(), move |tx| {
+        .local_tx(binding(target), deadline(), move |tx| {
             Box::pin(async move {
                 host_authorization(tx).await?;
                 let account = svc
@@ -172,7 +172,7 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
     let svc = service.clone();
     let who = actor.clone();
     let outcome = runtime
-        .local_tx(target, deadline(), move |tx| {
+        .local_tx(binding(target), deadline(), move |tx| {
             Box::pin(async move {
                 host_authorization(tx).await?;
                 svc.create_local_account_in(tx, who, prepared)
@@ -206,7 +206,7 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
     let svc = service.clone();
     let who = actor.clone();
     let stale = runtime
-        .local_tx(target, deadline(), move |tx| {
+        .local_tx(binding(target), deadline(), move |tx| {
             Box::pin(async move {
                 host_authorization(tx).await?;
                 match svc.authorize_in(tx, who).await {
@@ -227,7 +227,7 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
     let svc = service.clone();
     let who = actor.clone();
     let outcome = runtime
-        .local_tx(target, deadline(), move |tx| {
+        .local_tx(binding(target), deadline(), move |tx| {
             Box::pin(async move {
                 host_authorization(tx).await?;
                 svc.authorize_in(tx, who.clone())
@@ -271,7 +271,7 @@ async fn provisioned_account_and_event_share_host_commit_and_revalidate_source()
     let svc = service.clone();
     let who = actor.clone();
     let outcome = runtime
-        .local_tx(target, deadline(), move |tx| {
+        .local_tx(binding(target), deadline(), move |tx| {
             Box::pin(async move {
                 host_authorization(tx).await?;
                 assert!(svc.authorize_in(tx, who).await.is_err());

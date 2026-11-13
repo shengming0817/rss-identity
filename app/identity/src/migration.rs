@@ -15,7 +15,7 @@ pub(crate) fn validate(config: &MigrationConfig) -> Result<InstanceId, AppError>
         return Err(AppError::Configuration);
     }
     crate::audit::validate_installation(config)?;
-    config.storage.binding()?;
+    config.storage.bindings()?;
     InstanceId::parse(&config.instance_id).map_err(|_| AppError::Configuration)
 }
 

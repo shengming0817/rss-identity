@@ -94,7 +94,7 @@ pub fn session_policy() -> Result<SessionPolicy, AppError> {
 pub fn authority_config(config: &RuntimeConfig) -> Result<AuthorityConfig, AppError> {
     Ok(AuthorityConfig::new(
         config.instance()?,
-        config.storage.tenants()?,
+        config.storage.bindings()?,
         session_policy()?,
         rss_audit_postgres::Integrity::Plain,
     )?)

@@ -63,7 +63,7 @@ impl AccountProvisioner {
         policy: Arc<dyn ManagementPolicy>,
         deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
-        if !config.tenants.contains(&source) {
+        if !config.bindings.iter().any(|binding| binding.tenant() == source) {
             return Err(AuthorityError::Configuration);
         }
         Ok(Self {
@@ -107,11 +107,13 @@ impl AccountProvisioner {
         if actor.key.tenant != self.source
             || target == self.source
             || actor.authority != self.authority.instance.as_uuid()
-            || !bundle.tenants.contains(&target)
+            || bundle.binding(target).is_none()
         {
             return Err(ProvisioningError::Rejected);
         }
-        let source = self.source;
+        let target_binding = bundle.binding(target).ok_or(ProvisioningError::Rejected)?;
+        tx.with_tenant_connection(target_binding, |_| Box::pin(async { Ok(()) })).await?;
+        let source = bundle.binding(self.source).ok_or(ProvisioningError::Rejected)?;
         let instance = self.authority.instance;
         let policy = self.authority.policy.clone();
         tx.with_tenant_connection(source, move |c| {

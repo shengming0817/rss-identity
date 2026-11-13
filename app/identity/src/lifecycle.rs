@@ -156,7 +156,7 @@ pub async fn serve(
                         PgRuntime::connect_producer(
                             config.database.pg()?,
                             assembly::Timer,
-                            config.storage.binding()?,
+                            config.storage.identity()?,
                         )
                         .await
                         .map_err(|_| AppError::Connection)?,

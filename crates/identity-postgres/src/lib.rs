@@ -60,7 +60,7 @@ use rss_identity_core::{
     session::SessionPolicy,
 };
 use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::OperationDeadline;
+use rss_transactional_messaging::{fence::ExecutionBinding, policy::OperationDeadline};
 use rss_transactional_messaging_postgres::PgRuntime;
 pub use schema::{
     MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_SIGNATURE_SQL, SCHEMA_VERSION,
@@ -79,7 +79,7 @@ pub use types::*;
 #[derive(Clone)]
 pub struct AuthorityConfig {
     instance: InstanceId,
-    tenants: Vec<TenantId>,
+    bindings: Vec<ExecutionBinding>,
     sessions: SessionPolicy,
     audit: rss_audit_postgres::Integrity,
     platform: Option<Arc<dyn platform::PlatformVerifier>>,
@@ -105,20 +105,21 @@ impl AuthorityConfig {
     }
     pub fn new(
         instance: InstanceId,
-        mut tenants: Vec<TenantId>,
+        mut bindings: Vec<ExecutionBinding>,
         sessions: SessionPolicy,
         audit: rss_audit_postgres::Integrity,
     ) -> Result<Self, AuthorityError> {
-        tenants.sort_by_key(|tenant| tenant.to_string());
-        if tenants.is_empty()
-            || tenants.len() > 128
-            || tenants.windows(2).any(|pair| pair[0] == pair[1])
+        bindings.sort_by_key(|binding| binding.tenant().to_string());
+        if bindings.is_empty()
+            || bindings.len() > 1024
+            || bindings.windows(2).any(|pair| pair[0].tenant() == pair[1].tenant()
+                || pair[0].storage() != pair[1].storage())
         {
             return Err(AuthorityError::Configuration);
         }
         Ok(Self {
             instance,
-            tenants,
+            bindings,
             sessions,
             audit,
             platform: None,
@@ -182,7 +183,7 @@ impl Authority {
         deadline: OperationDeadline,
     ) -> Result<Self, AuthorityError> {
         let budget = Budget::new(deadline)?;
-        let tenant = config.tenants[0];
+        let tenant = config.bindings[0].tenant();
         let instance = config.instance;
         let authority = Self {
             enterprise: config.enterprise,
@@ -194,7 +195,7 @@ impl Authority {
             runtime: Arc::new(runtime::RuntimeBundle {
                 runtime,
                 audit: config.audit,
-                tenants: config.tenants,
+                bindings: config.bindings,
                 instance,
             }),
             profile,
@@ -225,8 +226,8 @@ impl Authority {
         check_probe(valid)?;
         let bundle = authority.runtime.clone();
         // Schema/profile are global, but every declared tenant has its own runtime fence.
-        for tenant in bundle.tenants.iter().skip(1) {
-            Self::read_bundle(bundle.clone(), *tenant, budget.remaining(), true, |_| {
+        for binding in bundle.bindings.iter().skip(1) {
+            Self::read_bundle(bundle.clone(), binding.tenant(), budget.remaining(), true, |_| {
                 Box::pin(async { Ok(()) })
             })
             .await?;
@@ -237,10 +238,10 @@ impl Authority {
         self.instance
     }
     pub fn active_tenants(&self) -> Result<Vec<TenantId>, AuthorityError> {
-        Ok(self.runtime.clone().tenants.clone())
+        Ok(self.runtime.bindings.iter().map(|binding| binding.tenant()).collect())
     }
     pub fn tenant_active(&self, tenant: TenantId) -> bool {
-        self.runtime.tenants.contains(&tenant)
+        self.runtime.binding(tenant).is_some()
     }
     fn require_maintenance(&self) -> Result<(), AuthorityError> {
         if self.profile != AuthorityProfile::Maintenance {

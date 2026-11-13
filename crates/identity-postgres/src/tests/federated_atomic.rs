@@ -1246,7 +1246,7 @@ async fn federation_concurrent_jit_rls_and_schema_drift() -> anyhow::Result<()> 
     );
     let count = f
         .runtime
-        .local_tx(rss_request_context::TenantId::parse(B)?, deadline(), |tx| {
+        .local_tx(binding(rss_request_context::TenantId::parse(B)?), deadline(), |tx| {
             Box::pin(async move {
                 tx.with_connection(|c| {
                     Box::pin(async move {

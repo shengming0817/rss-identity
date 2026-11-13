@@ -411,7 +411,7 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
     .fetch_one(&f.owner)
     .await?;
     assert_eq!(before, 1);
-    let result=f.runtime.local_tx(f.key.tenant,deadline(),|tx|Box::pin(async move {tx.with_connection(|c|Box::pin(async move {sqlx::query("UPDATE identity_authority.accounts SET auth_epoch=99 WHERE tenant_id='22222222-2222-4222-8222-222222222222'").execute(c).await.map(|r|r.rows_affected())})).await})).await.fold(Ok,Err,Err,Err,Err,Err)?;
+    let result=f.runtime.local_tx(binding(f.key.tenant),deadline(),|tx|Box::pin(async move {tx.with_connection(|c|Box::pin(async move {sqlx::query("UPDATE identity_authority.accounts SET auth_epoch=99 WHERE tenant_id='22222222-2222-4222-8222-222222222222'").execute(c).await.map(|r|r.rows_affected())})).await})).await.fold(Ok,Err,Err,Err,Err,Err)?;
     assert_eq!(result, 0);
     f.maintenance
         .recover_local_password(f.key, password(), deadline())
@@ -1331,7 +1331,7 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
     ] {
         let result = f
             .maintenance_runtime
-            .local_tx(f.key.tenant, deadline(), move |tx| {
+            .local_tx(binding(f.key.tenant), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.with_connection(move |c| {
                         Box::pin(async move { sqlx::query(query).execute(c).await.map(|_| ()) })
@@ -1345,7 +1345,7 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
     }
     let result = f
         .runtime
-        .local_tx(f.key.tenant, deadline(), |tx| {
+        .local_tx(binding(f.key.tenant), deadline(), |tx| {
             Box::pin(async move {
                 tx.with_connection(|c| {
                     Box::pin(async move {
@@ -1514,7 +1514,7 @@ async fn maintenance_runbook_respects_forced_rls() -> anyhow::Result<()> {
         .await?;
     let rows = f
         .maintenance_runtime
-        .local_tx(f.key.tenant, deadline(), |tx| {
+        .local_tx(binding(f.key.tenant), deadline(), |tx| {
             Box::pin(async move {
                 tx.with_connection(|c| {
                     Box::pin(async move {

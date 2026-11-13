@@ -131,7 +131,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         PgRuntime::connect_producer(
             maintenance_db.pg()?,
             assembly::Timer,
-            config.storage.binding()?,
+            config.storage.identity()?,
         )
         .await?,
     );
@@ -165,7 +165,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         PgRuntime::connect_producer(
             config.database.pg()?,
             assembly::Timer,
-            config.storage.binding()?,
+            config.storage.identity()?,
         )
         .await?,
     );

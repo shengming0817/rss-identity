@@ -83,15 +83,10 @@ impl StorageConfig {
     pub fn epoch(&self) -> Result<Epoch, AppError> {
         Epoch::new(self.generation).map_err(|_| AppError::StorageEpoch)
     }
-    pub fn binding(&self) -> Result<ExecutionBinding, AppError> {
-        ExecutionBinding::new(
-            self.identity()?,
-            self.tenants()?
-                .into_iter()
-                .map(|t| Ok((t, self.epoch()?)))
-                .collect::<Result<Vec<_>, AppError>>()?,
-        )
-        .map_err(|_| AppError::StorageIdentity)
+    pub fn bindings(&self) -> Result<Vec<ExecutionBinding>, AppError> {
+        let storage = self.identity()?;
+        let epoch = self.epoch()?;
+        Ok(self.tenants()?.into_iter().map(|tenant| ExecutionBinding::new(storage, tenant, epoch)).collect())
     }
 }
 #[derive(Deserialize)]
@@ -235,7 +230,7 @@ impl RuntimeConfig {
             return Err(AppError::Configuration);
         }
         self.budgets.validate()?;
-        self.storage.binding()?;
+        self.storage.bindings()?;
         self.instance()?;
         self.bootstrap_keys()?;
         rss_identity_http_axum::HttpConfig::new(&self.public_origin, self.budgets.request())
@@ -285,7 +280,7 @@ impl MaintenanceConfig {
             return Err(AppError::Configuration);
         }
         InstanceId::parse(&self.instance_id).map_err(|_| AppError::Configuration)?;
-        self.storage.binding()?;
+        self.storage.bindings()?;
         bootstrap_keys(&self.bootstrap_accounts, &self.storage)?;
         Ok(())
     }

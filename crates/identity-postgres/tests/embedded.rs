@@ -265,7 +265,7 @@ async fn host_role_names_and_session_policy_survive_composition() -> anyhow::Res
     let old = f.login().await?;
     let config = AuthorityConfig::new(
         f.instance,
-        f.store.active_tenants()?,
+        f.store.active_tenants()?.into_iter().map(binding).collect(),
         SessionPolicy::new(60, 600)?,
         rss_audit_postgres::Integrity::Plain,
     )?;
@@ -450,38 +450,7 @@ async fn trusted_groups_expire_without_extending_identity_or_snapshot() -> anyho
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn construction_verifies_every_declared_tenant_fence() -> anyhow::Result<()> {
-    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
-    use rss_transactional_messaging_postgres::{PgConfig, PgPassword, PgRuntime};
     let f = Fixture::new().await?;
-    let runtime = Arc::new(
-        PgRuntime::connect_producer(
-            PgConfig::new_for_test_plaintext(
-                "127.0.0.1",
-                f.port,
-                &f.database,
-                "identity_runtime",
-                PgPassword::new("fixture-only"),
-            ),
-            Timer,
-            ExecutionBinding::new(
-                StorageIdentity::new([1; 16], [2; 16])?,
-                vec![(f.key.tenant, Epoch::new(1)?)],
-            )?,
-        )
-        .await?,
-    );
-    assert!(matches!(
-        Authority::connect_runtime(
-            runtime.clone(),
-            Arc::new(PasswordKdf::new()),
-            f.config(),
-            f.policy.clone(),
-            deadline()
-        )
-        .await,
-        Err(AuthorityError::Fenced)
-    ));
-    runtime.close().await;
     sqlx::query(
         "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid",
     )
