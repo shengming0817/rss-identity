@@ -50,9 +50,11 @@ fn secure(mut response: Response) -> Response {
     response
 }
 async fn boundary(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    request
-        .extensions_mut()
-        .insert(RequestBudget::new(state.config.timeout));
+    let budget = match RequestBudget::new(state.config.timeout) {
+        Ok(budget) => budget,
+        Err(error) => return secure(error.into_response()),
+    };
+    request.extensions_mut().insert(budget);
     let admitted = if request.uri().to_string().len() > 8192 || request.uri().query().is_some() {
         Err(BAD)
     } else {
@@ -82,7 +84,7 @@ pub async fn authenticate_bearer_request(
     headers: &HeaderMap,
     deadline: OperationDeadline,
 ) -> Result<(AuthenticatedSession, BearerSecret), Response> {
-    let budget = RequestBudget::new(deadline.timeout().min(config.timeout));
+    let budget = RequestBudget::new(deadline.timeout().min(config.timeout)).map_err(|e| secure(e.into_response()))?;
     let result = async {
         let retained = credential(headers)?;
         let secret = BearerSecret::parse(retained.expose().into()).map_err(|_| UNAUTH)?;

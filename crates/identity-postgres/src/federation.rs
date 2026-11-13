@@ -153,7 +153,7 @@ impl Federation {
         budget: &Budget,
         future: UpstreamFuture<'_, T>,
     ) -> Result<T, AuthorityError> {
-        tokio::time::timeout_at(budget.0.into(), future)
+        tokio::time::timeout_at(budget.0.instant().into(), future)
             .await
             .map_err(|_| AuthorityError::Federation(FederationError::Unavailable))?
             .map_err(Into::into)
@@ -249,7 +249,7 @@ impl Federation {
         let instance = self.authority.instance;
         let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let loaded = crate::session_storage::recheck(c, &actor).await?;
@@ -290,6 +290,7 @@ impl Federation {
             TenantId,
             ProviderSettings,
             ProviderCredentials,
+            rss_request_context::Deadline,
         ) -> UpstreamFuture<'static, ConnectionReport>,
     {
         self.authority.require_runtime()?;
@@ -297,7 +298,7 @@ impl Federation {
         let instance = self.authority.instance;
         let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         let read_policy = policy.clone();
         let (actor, view) = self
             .authority
@@ -325,10 +326,10 @@ impl Federation {
             .await?;
         let remaining = budget.remaining().timeout();
         let reserve = (remaining / 4).min(std::time::Duration::from_secs(1));
-        let upstream_deadline = budget.0 - reserve;
+        let upstream_deadline = budget.0.instant() - reserve;
         let result = tokio::time::timeout_at(
             upstream_deadline.into(),
-            test(tenant, view.settings.clone(), credentials),
+            test(tenant, view.settings.clone(), credentials, rss_request_context::Deadline::at(upstream_deadline)),
         )
         .await
         .unwrap_or(Err(FederationError::Unavailable));
@@ -450,8 +451,8 @@ impl Federation {
         self.persist_test_provider(
             actor,
             id,
-            move |tenant, settings, credentials| {
-                Box::pin(async move { oidc.test(tenant, &settings, &credentials).await })
+            move |tenant, settings, credentials, cutoff| {
+                Box::pin(async move { oidc.test(tenant, &settings, &credentials, cutoff).await })
             },
             deadline,
         )

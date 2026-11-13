@@ -117,7 +117,7 @@ impl From<PasswordError> for AuthorityError {
     }
 }
 
-pub(crate) struct Budget(pub Instant);
+pub(crate) struct Budget(pub rss_request_context::Deadline);
 impl Budget {
     pub fn new(deadline: OperationDeadline) -> Result<Self, AuthorityError> {
         if deadline.timeout().is_zero() {
@@ -125,17 +125,17 @@ impl Budget {
         }
         Instant::now()
             .checked_add(deadline.timeout())
-            .map(Self)
+            .map(|at| Self(rss_request_context::Deadline::at(at)))
             .ok_or(AuthorityError::InvalidInput)
     }
     pub fn remaining(&self) -> OperationDeadline {
-        OperationDeadline::from_remaining(self.0.saturating_duration_since(Instant::now()))
+        OperationDeadline::from_remaining(self.0.remaining(Instant::now()).unwrap_or_default())
     }
     pub async fn password<T>(
         &self,
         future: impl std::future::Future<Output = Result<T, PasswordError>>,
     ) -> Result<T, AuthorityError> {
-        tokio::time::timeout_at(self.0.into(), future)
+        tokio::time::timeout_at(self.0.instant().into(), future)
             .await
             .map_err(|_| AuthorityError::DeadlineElapsed)?
             .map_err(Into::into)

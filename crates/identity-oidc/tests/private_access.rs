@@ -33,7 +33,7 @@ fn settings(issuer: &str, client: &str) -> ProviderSettings {
 #[test]
 fn private_grants_are_exact_and_do_not_grant_mfa() {
     let issuer = "https://10.42.0.9:8443/realms/reference";
-    let adapter = HttpOidc::new(vec![], vec![grant(issuer, &["10.42.0.9/32"])]).unwrap();
+    let adapter = HttpOidc::new(vec![], vec![grant(issuer, &["10.42.0.9/32"])], transport_policy()).unwrap();
     let credentials = ProviderCredentials::new("private-test-secret".into(), None).unwrap();
     let provider = settings(issuer, "client");
     assert!(adapter.validate(tenant(), &provider, &credentials).is_ok());
@@ -78,8 +78,7 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
         assert!(
             HttpOidc::new(
                 vec![],
-                vec![grant("https://idp.example.test/realm", &cidrs)]
-            )
+                vec![grant("https://idp.example.test/realm", &cidrs)], transport_policy())
             .is_err(),
             "{cidrs:?}"
         );
@@ -88,27 +87,28 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
         assert!(
             HttpOidc::new(
                 vec![],
-                vec![grant("https://idp.example.test/realm", &[cidr])]
-            )
+                vec![grant("https://idp.example.test/realm", &[cidr])], transport_policy())
             .is_ok()
         );
     }
     let duplicate = || grant("https://idp.example.test/realm", &["10.0.0.0/8"]);
-    assert!(HttpOidc::new(vec![], vec![duplicate(), duplicate()]).is_err());
+    assert!(HttpOidc::new(vec![], vec![duplicate(), duplicate()], transport_policy()).is_err());
     assert!(
         HttpOidc::new(
             vec![],
             (0..129)
                 .map(|i| grant(&format!("https://idp{i}.example.test"), &["10.0.0.0/8"]))
-                .collect()
-        )
+                .collect(), transport_policy())
         .is_err()
     );
     assert!(
         HttpOidc::new(
             vec![],
-            vec![grant("http://idp.example.test", &["10.0.0.0/8"])]
-        )
+            vec![grant("http://idp.example.test", &["10.0.0.0/8"])], transport_policy())
         .is_err()
     );
+}
+
+fn transport_policy() -> rss_identity_oidc::TransportPolicy {
+    rss_identity_oidc::TransportPolicy::new(std::time::Duration::from_secs(5),std::time::Duration::from_secs(3),1024*1024,128).unwrap()
 }

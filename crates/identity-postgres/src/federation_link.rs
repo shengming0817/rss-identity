@@ -92,7 +92,7 @@ impl Federation {
         check_browser(&browser)?;
         let tenant = actor.key.tenant;
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         let return_url = self.target(&target)?;
         let (actor,account,origin,login)=self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
@@ -180,8 +180,7 @@ impl Federation {
                         AuthenticationMode::Reauthenticate
                     } else {
                         AuthenticationMode::Login
-                    },
-                ),
+                    }, budget.0),
             )
             .await?;
         self.authority.read_sql(tenant,budget.remaining(),move |c| { Box::pin(async move {
@@ -294,8 +293,7 @@ impl Federation {
                     &target.settings,
                     &credentials,
                     &material,
-                    AuthenticationMode::Login,
-                ),
+                    AuthenticationMode::Login, budget.0),
             )
             .await?;
         let group_policy = self.group_policy;

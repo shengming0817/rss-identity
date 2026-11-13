@@ -402,7 +402,7 @@ impl Authority {
         }
         self.read_sql(reader.key.tenant,budget.remaining(),move|c|Box::pin(async move {
             let loaded=reader.recheck(c).await?;
-            let mut expires=crate::sessions::checked_expiry(&loaded,budget.0.min(reader.expires)).map_err(transaction::MutationError::from)?;
+            let mut expires=crate::sessions::checked_expiry(&loaded,budget.0.instant().min(reader.expires)).map_err(transaction::MutationError::from)?;
             let (target,source,bound)=match latest {
                 Some((target,source))=>{
                     crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadLatestProfile,Some(target),c).await?;

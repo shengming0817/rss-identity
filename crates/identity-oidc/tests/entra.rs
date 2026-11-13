@@ -68,9 +68,9 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
     let user = Uuid::new_v4();
     let device = Uuid::new_v4();
     let claims = json!({"iss":p.issuer(),"aud":p.app_id,"ver":"2.0","idtyp":"user","tid":p.tenant,"oid":user,"azp":p.authorized_clients[0],"iat":now-1,"nbf":now-1,"exp":now+300,"scp":"mdm.enroll other","deviceid":device});
-    let verifier = Arc::new(HttpEntra::for_loopback_test(endpoint.clone())?);
+    let verifier = Arc::new(HttpEntra::for_loopback_test(endpoint.clone(), transport_policy(), 32768)?);
     let result = verifier
-        .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-a"), key_a)))
+        .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-a"), key_a)), upstream_deadline())
         .await?;
     assert_eq!(result.user, user);
     assert_eq!(result.device, Some(device));
@@ -78,7 +78,7 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
     tou.as_object_mut().unwrap().remove("deviceid");
     assert!(
         verifier
-            .verify(&p, Zeroizing::new(jwt(&tou, Some("entra-a"), key_a)))
+            .verify(&p, Zeroizing::new(jwt(&tou, Some("entra-a"), key_a)), upstream_deadline())
             .await?
             .device
             .is_none()
@@ -105,7 +105,7 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
         invalid[field] = value;
         assert!(
             verifier
-                .verify(&p, Zeroizing::new(jwt(&invalid, Some("entra-a"), key_a)))
+                .verify(&p, Zeroizing::new(jwt(&invalid, Some("entra-a"), key_a)), upstream_deadline())
                 .await
                 .is_err(),
             "field {field}"
@@ -118,7 +118,7 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
         invalid.as_object_mut().unwrap().remove(field);
         assert!(
             verifier
-                .verify(&p, Zeroizing::new(jwt(&invalid, Some("entra-a"), key_a)))
+                .verify(&p, Zeroizing::new(jwt(&invalid, Some("entra-a"), key_a)), upstream_deadline())
                 .await
                 .is_err(),
             "missing {field}"
@@ -131,7 +131,7 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
     ] {
         assert!(
             verifier
-                .verify(&p, Zeroizing::new(jwt(&claims, kid, key)))
+                .verify(&p, Zeroizing::new(jwt(&claims, kid, key)), upstream_deadline())
                 .await
                 .is_err()
         );
@@ -149,15 +149,14 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
             verifier
                 .verify(
                     &other,
-                    Zeroizing::new(jwt(&other_claims, Some("entra-a"), key_a)),
-                )
+                    Zeroizing::new(jwt(&other_claims, Some("entra-a"), key_a)), upstream_deadline())
                 .await
         })
     };
     tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
     let hot = tokio::time::timeout(
         Duration::from_millis(500),
-        verifier.verify(&p, Zeroizing::new(jwt(&claims, Some("entra-a"), key_a))),
+        verifier.verify(&p, Zeroizing::new(jwt(&claims, Some("entra-a"), key_a)), upstream_deadline()),
     )
     .await;
     blocked.store(false, Ordering::SeqCst);
@@ -167,28 +166,36 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
     // A new cache sees rotated public keys, rejects removed keys and duplicate key ids.
     *document.write().unwrap() =
         json!({"keys":[serde_json::from_str::<Value>(include_str!("fixtures/entra-b.json"))?]});
-    let rotated = HttpEntra::for_loopback_test(endpoint.clone())?;
+    let rotated = HttpEntra::for_loopback_test(endpoint.clone(), transport_policy(), 32768)?;
     assert!(
         rotated
-            .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-b"), key_b)))
+            .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-b"), key_b)), upstream_deadline())
             .await
             .is_ok()
     );
     assert!(
         rotated
-            .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-a"), key_a)))
+            .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-a"), key_a)), upstream_deadline())
             .await
             .is_err()
     );
     let a: Value = serde_json::from_str(include_str!("fixtures/entra-a.json"))?;
     *document.write().unwrap() = json!({"keys":[a,a]});
     assert!(
-        HttpEntra::for_loopback_test(endpoint)?
-            .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-a"), key_a)))
+        HttpEntra::for_loopback_test(endpoint, transport_policy(), 32768)?
+            .verify(&p, Zeroizing::new(jwt(&claims, Some("entra-a"), key_a)), upstream_deadline())
             .await
             .is_err()
     );
     let _ = stop.send(());
     server.await?;
     Ok(())
+}
+
+fn transport_policy() -> rss_identity_oidc::TransportPolicy {
+    rss_identity_oidc::TransportPolicy::new(std::time::Duration::from_secs(5),std::time::Duration::from_secs(3),1024*1024,128).unwrap()
+}
+
+fn upstream_deadline() -> rss_request_context::Deadline {
+    rss_request_context::Deadline::at(std::time::Instant::now().checked_add(std::time::Duration::from_secs(30)).unwrap())
 }

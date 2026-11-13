@@ -34,7 +34,7 @@ pub(super) fn verify(
     client: &str,
     client_secret: &str,
 ) -> Result<Claims, FederationError> {
-    if raw.is_empty() || raw.len() > 262_144 {
+    if raw.is_empty() {
         return Err(FederationError::Claims);
     }
     let header = decode_header(raw).map_err(|_| FederationError::Claims)?;
@@ -66,9 +66,6 @@ pub(super) fn verify(
             .get("keys")
             .and_then(|v| v.as_array())
             .ok_or(FederationError::Claims)?;
-        if keys.len() > 128 {
-            return Err(FederationError::Claims);
-        }
         let key_type = match header.alg {
             Algorithm::RS256
             | Algorithm::RS384

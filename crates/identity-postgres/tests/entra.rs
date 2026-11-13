@@ -16,6 +16,7 @@ impl EntraTokenVerifier for Verifier {
         &'a self,
         p: &'a EntraTokenProfile,
         token: Zeroizing<String>,
+        _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, EntraTokenClaims> {
         Box::pin(async move {
             let user = Uuid::parse_str(&token).map_err(|_| FederationError::Claims)?;

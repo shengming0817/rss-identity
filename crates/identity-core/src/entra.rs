@@ -129,5 +129,6 @@ pub trait EntraTokenVerifier: Send + Sync {
         &'a self,
         profile: &'a EntraTokenProfile,
         token: Zeroizing<String>,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, EntraTokenClaims>;
 }

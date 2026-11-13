@@ -103,7 +103,7 @@ impl Federation {
             .upstream(
                 &budget,
                 self.oidc
-                    .prepare(tenant, &view.settings, &credentials, &material, mode),
+                    .prepare(tenant, &view.settings, &credentials, &material, mode, budget.0),
             )
             .await?;
         let oidc = self.oidc.clone();
@@ -244,7 +244,7 @@ impl Federation {
             .upstream(
                 &budget,
                 self.oidc
-                    .exchange(tenant, &view.settings, &credentials, material, code),
+                    .exchange(tenant, &view.settings, &credentials, material, code, budget.0),
             )
             .await?;
         claims.validate()?;

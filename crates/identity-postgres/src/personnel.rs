@@ -140,7 +140,7 @@ impl Authority {
                 Box::pin(async move {
                     let loaded = reader.recheck(c).await?;
                     let expires =
-                        crate::sessions::checked_expiry(&loaded, budget.0.min(reader.expires))?;
+                        crate::sessions::checked_expiry(&loaded, budget.0.instant().min(reader.expires))?;
                     let login = permission(
                         crate::management::authorize(
                             policy.as_ref(),

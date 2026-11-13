@@ -156,7 +156,7 @@ impl WebauthnAuthority {
             let _permit = permit;
             work(verifier)
         });
-        tokio::time::timeout_at(budget.0.into(), task)
+        tokio::time::timeout_at(budget.0.instant().into(), task)
             .await
             .map_err(|_| AuthorityError::DeadlineElapsed)?
             .map_err(|_| AuthorityError::Unavailable)?

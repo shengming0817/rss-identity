@@ -181,7 +181,7 @@ pub async fn authenticate_request(
     axum::response::Response,
 > {
     use axum::response::IntoResponse;
-    let budget = boundary::RequestBudget::new(deadline.timeout().min(config.timeout));
+    let budget = boundary::RequestBudget::new(deadline.timeout().min(config.timeout)).map_err(IntoResponse::into_response)?;
     let result = async {
         authority.require_runtime()?;
         boundary::cookie_presentation(headers)?;
@@ -250,3 +250,20 @@ pub fn issued_session_response(
 
 mod webauthn;
 pub use webauthn::webauthn_router;
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn request_budget_accepts_long_finite_time_and_rejects_overflow() {
+        for seconds in [61,120,86401] {
+            let duration=std::time::Duration::from_secs(seconds);
+            assert!(HttpConfig::new("https://identity.example.test",duration).is_ok());
+            assert!(boundary::RequestBudget::new(duration).is_ok());
+        }
+        for duration in [std::time::Duration::ZERO,std::time::Duration::MAX] {
+            assert!(HttpConfig::new("https://identity.example.test",duration).is_err());
+            assert!(boundary::RequestBudget::new(duration).is_err());
+        }
+    }
+}

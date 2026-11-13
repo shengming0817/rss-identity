@@ -454,6 +454,7 @@ pub trait UpstreamOidc: Send + Sync {
         credentials: &'a ProviderCredentials,
         material: &'a ProtocolMaterial,
         mode: crate::assurance::AuthenticationMode,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String>;
     fn exchange<'a>(
         &'a self,
@@ -462,12 +463,14 @@ pub trait UpstreamOidc: Send + Sync {
         credentials: &'a ProviderCredentials,
         material: ProtocolMaterial,
         code: Zeroizing<String>,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims>;
     fn test<'a>(
         &'a self,
         tenant: TenantId,
         config: &'a ProviderSettings,
         credentials: &'a ProviderCredentials,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport>;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

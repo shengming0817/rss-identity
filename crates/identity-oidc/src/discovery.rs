@@ -71,5 +71,8 @@ pub(super) async fn discover(
         ));
     }
     metadata.jwks = get(transport, metadata.jwks_uri.as_str(), true).await?;
+    if metadata.jwks.keys.len() > transport.policy.max_jwks_keys {
+        return Err(failure(ProviderStage::Jwks, ProviderReason::InvalidResponse));
+    }
     Ok(metadata)
 }

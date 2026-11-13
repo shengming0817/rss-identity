@@ -134,7 +134,7 @@ impl Authority {
                         if loaded.view.credential_kind != reference.credential_kind {
                             return Err(reject());
                         }
-                        let expires = checked_expiry(&loaded, budget.0)?;
+                        let expires = checked_expiry(&loaded, budget.0.instant())?;
                         Ok(RevalidatedSession {
                             reference,
                             identity: SessionIdentity::from_state(loaded.state),
@@ -188,7 +188,7 @@ impl Authority {
                 Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let window =
-                        crate::personnel::read_window(c, tenant, None, None, budget.0, None)
+                        crate::personnel::read_window(c, tenant, None, None, budget.0.instant(), None)
                             .await?;
                     let expires = window.expires;
                     let relation = crate::personnel::session_relation(

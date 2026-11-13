@@ -310,12 +310,12 @@ impl Authority {
     ) -> Result<IssuedSession, AuthorityError> {
         self.require_runtime()?;
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(candidate.expires);
+        budget.0 = budget.0.shortened_to(candidate.expires);
         if let Some(old) = &replacement {
             if old.key != candidate.state.key() || old.view.credential_kind != kind {
                 return Err(AuthorityError::Rejected);
             }
-            budget.0 = budget.0.min(old.expires);
+            budget.0 = budget.0.shortened_to(old.expires);
         }
         let policy = self.session_policy;
         let limits = self.profile_limits;
@@ -420,7 +420,7 @@ impl Authority {
                             db::touch(c, &mut loaded).await?;
                         }
                         let authority = authority_id(c).await?;
-                        let expires = checked_expiry(&loaded, budget.0)?;
+                        let expires = checked_expiry(&loaded, budget.0.instant())?;
                         Ok(AuthenticatedSession {
                             session_checks,
                             identity: SessionIdentity::from_state(loaded.state),
@@ -457,7 +457,7 @@ impl Authority {
                 db::touch(c,&mut loaded).await?;
                 sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
                     .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;
-                checked_expiry(&loaded, budget.0)?;
+                checked_expiry(&loaded, budget.0.instant())?;
                 let fact = event(SessionAction::Refreshed,loaded.state,loaded.view.id,None,loaded.source);
                 Ok((IssuedSession::new(secret,loaded.view,loaded.now,loaded.state),fact))
             })).await
@@ -485,7 +485,7 @@ impl Authority {
     ) -> Result<(), AuthorityError> {
         self.require_runtime()?;
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         self.mutate(actor.key.tenant,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let loaded = db::recheck(c,&actor).await?;
@@ -511,7 +511,7 @@ impl Authority {
             return Err(AuthorityError::InvalidInput);
         }
         let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.min(actor.expires);
+        budget.0 = budget.0.shortened_to(actor.expires);
         self.read(actor.key.tenant,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let loaded = db::recheck(c,&actor).await?;

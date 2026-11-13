@@ -135,7 +135,7 @@ async fn login(State(rp): State<Arc<Rp>>, Json(input): Json<Value>) -> axum::res
                 assertion: assertion.expose(),
                 assertion_expires_at: assertion.expires_at,
                 expected_subject: &rp.subject,
-            })
+            }, upstream_deadline())
             .await
             .map_err(|_| ())?;
         let proof = rp
@@ -351,7 +351,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
                 "fixture-enterprise-secret".into(),
                 Some(ca.clone()),
             )?,
-            oidc: HttpOidc::for_loopback_test(vec![])?,
+            oidc: HttpOidc::for_loopback_test(vec![], transport_policy())?,
             subject: user.clone(),
             tenant: f.key.tenant,
             sessions: Default::default(),
@@ -455,7 +455,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
     .await?;
     let credentials =
         ProviderCredentials::new("fixture-enterprise-secret".into(), Some(ca.clone()))?;
-    let transport = HttpOidc::for_loopback_test(vec![])?;
+    let transport = HttpOidc::for_loopback_test(vec![], transport_policy())?;
     let provider = rp_settings(&target, &issuer)?;
     assert!(
         transport
@@ -467,7 +467,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
                 assertion: stale.assertion.as_ref().unwrap().expose(),
                 assertion_expires_at: stale.assertion.as_ref().unwrap().expires_at,
                 expected_subject: &user
-            })
+            }, upstream_deadline())
             .await
             .is_err()
     );
@@ -500,7 +500,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
                 assertion: signed,
                 assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
                 expected_subject: &user
-            })
+            }, upstream_deadline())
             .await
             .is_err()
     );
@@ -515,7 +515,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
             assertion: signed,
             assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
             expected_subject: &user,
-        })
+        }, upstream_deadline())
         .await?;
     assert!(
         transport
@@ -527,7 +527,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
                 assertion: signed,
                 assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
                 expected_subject: &user
-            })
+            }, upstream_deadline())
             .await
             .is_err()
     );
@@ -600,4 +600,12 @@ fn rp_settings(target: &EnterpriseTarget, issuer: &str) -> anyhow::Result<Provid
         jit: false,
     }
     .try_into()?)
+}
+
+fn transport_policy() -> rss_identity_oidc::TransportPolicy {
+    rss_identity_oidc::TransportPolicy::new(std::time::Duration::from_secs(5),std::time::Duration::from_secs(3),1024*1024,128).unwrap()
+}
+
+fn upstream_deadline() -> rss_request_context::Deadline {
+    rss_request_context::Deadline::at(std::time::Instant::now().checked_add(std::time::Duration::from_secs(30)).unwrap())
 }

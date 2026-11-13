@@ -76,6 +76,7 @@ impl UpstreamOidc for ScriptedOidc {
         _: &'a ProviderCredentials,
         m: &'a ProtocolMaterial,
         _: rss_identity_core::assurance::AuthenticationMode,
+        _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
             Ok(format!(
@@ -91,6 +92,7 @@ impl UpstreamOidc for ScriptedOidc {
         _: &'a ProviderCredentials,
         _: ProtocolMaterial,
         code: Zeroizing<String>,
+        _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -161,6 +163,7 @@ impl UpstreamOidc for ScriptedOidc {
         _tenant: TenantId,
         _: &'a ProviderSettings,
         _: &'a ProviderCredentials,
+        _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
             let hook = self.hook.lock().unwrap().take();

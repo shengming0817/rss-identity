@@ -181,8 +181,9 @@ pub struct Budgets {
 }
 impl Budgets {
     pub fn validate(self) -> Result<Self, AppError> {
-        if !(1..=60).contains(&self.request_seconds)
-            || !(1..=300).contains(&self.drain_seconds)
+        if self.request_seconds == 0
+            || self.drain_seconds == 0
+            || std::time::Instant::now().checked_add(self.drain()).is_none()
             || self.resource_seconds == 0
             || self.resource_seconds > self.drain_seconds
             || self.request_seconds > self.drain_seconds

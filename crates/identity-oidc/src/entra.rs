@@ -21,6 +21,8 @@ struct Cached {
 }
 /// Vetted Microsoft transport and a bounded, short-lived public-key cache.
 pub struct HttpEntra {
+    policy: crate::TransportPolicy,
+    max_token_bytes: usize,
     http: reqwest::Client,
     keys: tokio::sync::Mutex<BTreeMap<Uuid, TenantKeys>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -28,11 +30,14 @@ pub struct HttpEntra {
 }
 impl HttpEntra {
     /// Construct the production Microsoft-only verifier; no private-network bypass.
-    pub fn new() -> Result<Self, FederationError> {
-        Self::build(false)
+    pub fn new(policy: crate::TransportPolicy, max_token_bytes: usize) -> Result<Self, FederationError> {
+        Self::build(false, policy, max_token_bytes)
     }
-    fn build(loopback: bool) -> Result<Self, FederationError> {
+    fn build(loopback: bool, policy: crate::TransportPolicy, max_token_bytes: usize) -> Result<Self, FederationError> {
+        if max_token_bytes == 0 { return Err(FederationError::Configuration); }
         Ok(Self {
+            policy,
+            max_token_bytes,
             http: reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
@@ -40,8 +45,8 @@ impl HttpEntra {
                     loopback,
                     vec![],
                 )))
-                .timeout(Duration::from_secs(5))
-                .connect_timeout(Duration::from_secs(3))
+                .timeout(policy.request_timeout)
+                .connect_timeout(policy.connect_timeout)
                 .build()
                 .map_err(|_| FederationError::Unavailable)?,
             keys: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -51,7 +56,7 @@ impl HttpEntra {
     }
     /// Explicit loopback JWKS fixture. Production configuration cannot select this transport.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_loopback_test(jwks: String) -> Result<Self, FederationError> {
+    pub fn for_loopback_test(jwks: String, policy: crate::TransportPolicy, max_token_bytes: usize) -> Result<Self, FederationError> {
         let url = reqwest::Url::parse(&jwks).map_err(|_| FederationError::Configuration)?;
         if url.scheme() != "http"
             || !url.host_str().is_some_and(|h| {
@@ -65,11 +70,11 @@ impl HttpEntra {
         {
             return Err(FederationError::Configuration);
         }
-        let mut verifier = Self::build(true)?;
+        let mut verifier = Self::build(true, policy, max_token_bytes)?;
         verifier.fixture = Some(jwks);
         Ok(verifier)
     }
-    async fn key(&self, p: &EntraTokenProfile, kid: &str) -> Result<DecodingKey, FederationError> {
+    async fn key(&self, p: &EntraTokenProfile, kid: &str, deadline: rss_request_context::Deadline) -> Result<DecodingKey, FederationError> {
         let entry = {
             let mut entries = self.keys.lock().await;
             entries.retain(|_, entry| {
@@ -98,6 +103,7 @@ impl HttpEntra {
             let mut response = self
                 .http
                 .get(endpoint)
+                .timeout(crate::remaining(deadline)?.min(self.policy.request_timeout))
                 .send()
                 .await
                 .map_err(|_| FederationError::Unavailable)?;
@@ -110,7 +116,7 @@ impl HttpEntra {
                 .await
                 .map_err(|_| FederationError::Unavailable)?
             {
-                if bytes.len().saturating_add(part.len()) > 1024 * 1024 {
+                if bytes.len().saturating_add(part.len()) > self.policy.max_response_bytes {
                     return Err(FederationError::Claims);
                 }
                 bytes.extend_from_slice(&part);
@@ -121,7 +127,7 @@ impl HttpEntra {
                 .get("keys")
                 .and_then(serde_json::Value::as_array)
                 .ok_or(FederationError::Claims)?;
-            if keys.is_empty() || keys.len() > 128 {
+            if keys.is_empty() || keys.len() > self.policy.max_jwks_keys {
                 return Err(FederationError::Claims);
             }
             *cached = Some(Cached {
@@ -179,10 +185,13 @@ impl EntraTokenVerifier for HttpEntra {
         &'a self,
         p: &'a EntraTokenProfile,
         token: Zeroizing<String>,
+        deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, EntraTokenClaims> {
         Box::pin(async move {
+            crate::remaining(deadline)?;
+            tokio::time::timeout_at(deadline.instant().into(), async move {
             p.validate()?;
-            if token.is_empty() || token.len() > 32768 {
+            if token.is_empty() || token.len() > self.max_token_bytes {
                 return Err(FederationError::Claims);
             }
             let header = decode_header(&token).map_err(|_| FederationError::Claims)?;
@@ -193,7 +202,7 @@ impl EntraTokenVerifier for HttpEntra {
                 .kid
                 .filter(|s| !s.is_empty() && s.len() <= 256)
                 .ok_or(FederationError::Claims)?;
-            let key = self.key(p, &kid).await?;
+            let key = self.key(p, &kid, deadline).await?;
             let mut validation = Validation::new(Algorithm::RS256);
             validation.set_required_spec_claims(&["exp", "nbf", "iss", "aud"]);
             validation.set_audience(&[p.app_id.to_string()]);
@@ -246,7 +255,9 @@ impl EntraTokenVerifier for HttpEntra {
                 expires_at: c.exp,
             };
             result.validate(p)?;
+            crate::remaining(deadline)?;
             Ok(result)
+            }).await.map_err(|_| FederationError::Unavailable)?
         })
     }
 }
