@@ -2,6 +2,7 @@
 //! ref: oauth2-rs src/code.rs @ 5.0.0 (code flow, state and PKCE).
 #![deny(missing_docs)]
 mod assurance;
+mod code;
 mod discovery;
 use discovery::Metadata;
 mod egress;
@@ -10,10 +11,7 @@ mod private_provider_tests;
 mod profile_token;
 pub use ipnet::IpNet;
 pub mod entra;
-use oauth2::{
-    AsyncHttpClient, AuthorizationCode, ClientId, ClientSecret, CsrfToken, HttpRequest,
-    HttpResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
-};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Url;
 use rss_identity_core::{assurance::AuthenticationMode, federation::*};
 use rss_request_context::TenantId;
@@ -248,14 +246,12 @@ impl HttpOidc {
         let metadata = discovery::discover(&transport, c.issuer().as_str()).await?;
         if metadata
             .authorization_endpoint
-            .url()
             .origin()
             .ascii_serialization()
             != transport.origin
-            || metadata
-                .token_endpoint
-                .as_ref()
-                .is_none_or(|u| u.url().origin().ascii_serialization() != transport.origin)
+            || metadata.token_endpoint.as_ref().is_none_or(|endpoint| {
+                endpoint.url.origin().ascii_serialization() != transport.origin
+            })
         {
             return Err(failure(
                 ProviderStage::Discovery,
@@ -352,58 +348,54 @@ impl Transport {
             },
         )
     }
-}
-impl<'a> AsyncHttpClient<'a> for Transport {
-    type Error = FederationError;
-    type Future = UpstreamFuture<'a, HttpResponse>;
-    fn call(&'a self, request: HttpRequest) -> Self::Future {
-        Box::pin(async move {
-            let previous = self.requests.fetch_add(1, Ordering::Relaxed);
-            self.phase.store(
-                if request.method() == oauth2::http::Method::POST {
-                    2
-                } else if previous == 0 {
-                    0
-                } else {
-                    1
-                },
-                Ordering::Relaxed,
-            );
-            let u = Url::parse(&request.uri().to_string())
-                .map_err(|_| failure(self.stage(), ProviderReason::InvalidResponse))?;
-            if u.origin().ascii_serialization() != self.origin
-                || !u.username().is_empty()
-                || u.password().is_some()
-            {
-                return Err(failure(self.stage(), ProviderReason::EgressDenied));
+    async fn call(
+        &self,
+        request: http::Request<Vec<u8>>,
+    ) -> Result<http::Response<Vec<u8>>, FederationError> {
+        let previous = self.requests.fetch_add(1, Ordering::Relaxed);
+        self.phase.store(
+            if request.method() == http::Method::POST {
+                2
+            } else if previous == 0 {
+                0
+            } else {
+                1
+            },
+            Ordering::Relaxed,
+        );
+        let u = Url::parse(&request.uri().to_string())
+            .map_err(|_| failure(self.stage(), ProviderReason::InvalidResponse))?;
+        if u.origin().ascii_serialization() != self.origin
+            || !u.username().is_empty()
+            || u.password().is_some()
+        {
+            return Err(failure(self.stage(), ProviderReason::EgressDenied));
+        }
+        let mut request: reqwest::Request = request
+            .try_into()
+            .map_err(|_| failure(self.stage(), ProviderReason::InvalidResponse))?;
+        *request.timeout_mut() = Some(remaining(self.deadline)?.min(self.policy.request_timeout));
+        let mut response = self
+            .http
+            .execute(request)
+            .await
+            .map_err(|e| self.request_error(e))?;
+        let status = response.status();
+        if status.is_server_error() || status.as_u16() == 429 {
+            return Err(failure(self.stage(), ProviderReason::Unavailable));
+        }
+        let headers = response.headers().clone();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|e| self.request_error(e))? {
+            if bytes.len().saturating_add(chunk.len()) > self.policy.max_response_bytes {
+                return Err(failure(self.stage(), ProviderReason::InvalidResponse));
             }
-            let mut request: reqwest::Request = request
-                .try_into()
-                .map_err(|_| failure(self.stage(), ProviderReason::InvalidResponse))?;
-            *request.timeout_mut() =
-                Some(remaining(self.deadline)?.min(self.policy.request_timeout));
-            let mut response = self
-                .http
-                .execute(request)
-                .await
-                .map_err(|e| self.request_error(e))?;
-            let status = response.status();
-            if status.is_server_error() || status.as_u16() == 429 {
-                return Err(failure(self.stage(), ProviderReason::Unavailable));
-            }
-            let headers = response.headers().clone();
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(|e| self.request_error(e))? {
-                if bytes.len().saturating_add(chunk.len()) > self.policy.max_response_bytes {
-                    return Err(failure(self.stage(), ProviderReason::InvalidResponse));
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            let mut result = HttpResponse::new(bytes);
-            *result.status_mut() = status;
-            *result.headers_mut() = headers;
-            Ok(result)
-        })
+            bytes.extend_from_slice(&chunk);
+        }
+        let mut result = http::Response::new(bytes);
+        *result.status_mut() = status;
+        *result.headers_mut() = headers;
+        Ok(result)
     }
 }
 impl UpstreamOidc for HttpOidc {
@@ -455,42 +447,38 @@ impl UpstreamOidc for HttpOidc {
             }
             let (metadata, _) = self.discover(tenant, c, credentials, deadline).await?;
 
-            let client =
-                oauth2::basic::BasicClient::new(ClientId::new(c.client_id().as_str().to_owned()))
-                    .set_auth_uri(metadata.authorization_endpoint)
-                    .set_redirect_uri(
-                        RedirectUrl::new(c.redirect_uri().to_owned())
-                            .map_err(|_| FederationError::Configuration)?,
-                    );
-
-            let state = m.state.to_string();
-
-            let nonce = m.nonce.to_string();
-
-            let mut request = client
-                .authorize_url(move || CsrfToken::new(state))
-                .add_scope(Scope::new("openid".into()))
-                .add_extra_param("nonce", nonce)
-                .set_pkce_challenge(PkceCodeChallenge::from_code_verifier_sha256(
-                    &PkceCodeVerifier::new(m.verifier.to_string()),
-                ));
-
-            for scope in c.scopes() {
-                if scope != "openid" {
-                    request = request.add_scope(Scope::new(scope.clone()));
+            let scope = std::iter::once("openid")
+                .chain(
+                    c.scopes()
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|s| *s != "openid"),
+                )
+                .collect::<Vec<_>>()
+                .join(" ");
+            let challenge = URL_SAFE_NO_PAD.encode(digest(m.verifier.as_str()));
+            let mut url = metadata.authorization_endpoint;
+            {
+                let mut query = url.query_pairs_mut();
+                query
+                    .append_pair("response_type", "code")
+                    .append_pair("client_id", c.client_id().as_str())
+                    .append_pair("state", m.state.as_str())
+                    .append_pair("redirect_uri", c.redirect_uri())
+                    .append_pair("scope", &scope)
+                    .append_pair("nonce", m.nonce.as_str())
+                    .append_pair("code_challenge", &challenge)
+                    .append_pair("code_challenge_method", "S256");
+                if mode != AuthenticationMode::Login {
+                    query
+                        .append_pair("prompt", "login")
+                        .append_pair("max_age", "0");
+                }
+                if mode == AuthenticationMode::StepUp {
+                    query.append_pair("acr_values", assurance::KEYCLOAK_TOTP_ACR);
                 }
             }
-
-            if mode != AuthenticationMode::Login {
-                request = request
-                    .add_extra_param("prompt", "login")
-                    .add_extra_param("max_age", "0");
-            }
-            if mode == AuthenticationMode::StepUp {
-                request = request.add_extra_param("acr_values", assurance::KEYCLOAK_TOTP_ACR);
-            }
-
-            let url = request.url().0.to_string();
+            let url = url.into();
             remaining(deadline)?;
             Ok(url)
         })
@@ -512,40 +500,17 @@ impl UpstreamOidc for HttpOidc {
 
             let (metadata, transport) = self.discover(tenant, c, credentials, deadline).await?;
 
-            let client_id = ClientId::new(c.client_id().as_str().to_owned());
-
-            let client = profile_token::TokenClient::new(client_id.clone())
-                .set_client_secret(ClientSecret::new(credentials.client_secret().to_string()))
-                .set_token_uri(
-                    metadata
-                        .token_endpoint
-                        .as_ref()
-                        .ok_or(FederationError::Configuration)?
-                        .clone(),
-                )
-                .set_redirect_uri(
-                    RedirectUrl::new(c.redirect_uri().to_owned())
-                        .map_err(|_| FederationError::Configuration)?,
-                );
-
-            let token = client
-                .exchange_code(AuthorizationCode::new(code.to_string()))
-                .set_pkce_verifier(PkceCodeVerifier::new(m.verifier.to_string()))
-                .request_async(&transport)
-                .await
-                .map_err(|e| match e {
-                    oauth2::RequestTokenError::Request(error) => error,
-                    oauth2::RequestTokenError::ServerResponse(_) => {
-                        failure(ProviderStage::Exchange, ProviderReason::CodeRejected)
-                    }
-                    _ => failure(ProviderStage::Exchange, ProviderReason::InvalidResponse),
-                })?;
-
+            let endpoint = metadata
+                .token_endpoint
+                .as_ref()
+                .ok_or(FederationError::Configuration)?;
+            let id_token =
+                code::exchange(&transport, &endpoint.url, c, credentials, &m, &code).await?;
             let claims = profile_token::verify(
-                &token.extra_fields().id_token,
+                id_token.as_str(),
                 &metadata,
                 m.nonce.as_str(),
-                client_id.as_str(),
+                c.client_id().as_str(),
                 credentials.client_secret(),
                 self.future_skew_seconds,
             )?;

@@ -1,7 +1,6 @@
 //! Fixed ES256 assertion signing for Keycloak's supported JWT authorization grant.
 //! ref: keycloak 26.7.3 JWTAuthorizationGrantType.java and AbstractBaseJWTValidator.java.
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
-use oauth2::AsyncHttpClient;
 use rss_identity_core::enterprise::{EnterpriseClaims, EnterpriseSigner};
 use zeroize::Zeroizing;
 
@@ -120,7 +119,7 @@ impl crate::HttpOidc {
         if metadata
             .token_endpoint
             .as_ref()
-            .is_none_or(|u| u.as_str() != target.token_endpoint)
+            .is_none_or(|endpoint| endpoint.advertised != target.token_endpoint)
         {
             return Err(FederationError::Configuration);
         }
@@ -134,7 +133,7 @@ impl crate::HttpOidc {
             )
             .append_pair("assertion", assertion)
             .finish();
-        let request = oauth2::http::Request::builder()
+        let request = http::Request::builder()
             .method("POST")
             .uri(&target.token_endpoint)
             .header("content-type", "application/x-www-form-urlencoded")

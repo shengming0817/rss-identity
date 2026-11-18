@@ -140,14 +140,9 @@ fn transport(origin: &str) -> Transport {
         )
         .unwrap()
 }
-async fn get(t: &Transport, url: &str) -> Result<HttpResponse, FederationError> {
-    t.call(
-        oauth2::http::Request::builder()
-            .uri(url)
-            .body(vec![])
-            .unwrap(),
-    )
-    .await
+async fn get(t: &Transport, url: &str) -> Result<http::Response<Vec<u8>>, FederationError> {
+    t.call(http::Request::builder().uri(url).body(vec![]).unwrap())
+        .await
 }
 #[tokio::test]
 async fn outbound_origin_redirect_and_size_are_enforced() {
@@ -608,6 +603,14 @@ async fn discovery_preserves_required_metadata_and_transport_boundaries() {
     }
 }
 
+#[test]
+fn token_endpoint_retains_exact_enterprise_binding() {
+    let advertised = "https://issuer.test:443/token";
+    let endpoint: discovery::TokenEndpoint = serde_json::from_value(json!(advertised)).unwrap();
+    assert_eq!(endpoint.advertised, advertised);
+    assert_eq!(endpoint.url.as_str(), "https://issuer.test/token");
+}
+
 #[tokio::test]
 async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
     let (issuer, task) = discovery_server("valid").await;
@@ -621,7 +624,8 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
         transport_policy(),
     )
     .unwrap();
-    let material = ProtocolMaterial::new(random_secret().unwrap().to_string()).unwrap();
+    let mut material = ProtocolMaterial::new(random_secret().unwrap().to_string()).unwrap();
+    material.verifier = Zeroizing::new("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into());
     for mode in [
         AuthenticationMode::Login,
         AuthenticationMode::Reauthenticate,
@@ -654,10 +658,10 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
         assert_eq!(query("nonce"), Some(material.nonce.as_str()));
         assert_eq!(query("state"), Some(material.state.as_str()));
         assert_eq!(query("code_challenge_method"), Some("S256"));
-        let expected = PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(
-            material.verifier.to_string(),
-        ));
-        assert_eq!(query("code_challenge"), Some(expected.as_str()));
+        assert_eq!(
+            query("code_challenge"),
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+        );
         assert_eq!(
             query("prompt"),
             if mode == AuthenticationMode::Login {
