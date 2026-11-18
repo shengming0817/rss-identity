@@ -116,13 +116,7 @@ impl crate::HttpOidc {
         let (metadata, transport) = self
             .discover(tenant, provider, credentials, deadline)
             .await?;
-        if metadata
-            .token_endpoint
-            .as_ref()
-            .is_none_or(|endpoint| endpoint.advertised != target.token_endpoint)
-        {
-            return Err(FederationError::Configuration);
-        }
+        let endpoint = metadata.bound_token_endpoint(&target.token_endpoint)?;
         let form = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
             .append_pair("client_id", &target.client_id)
@@ -135,7 +129,7 @@ impl crate::HttpOidc {
             .finish();
         let request = http::Request::builder()
             .method("POST")
-            .uri(&target.token_endpoint)
+            .uri(endpoint)
             .header("content-type", "application/x-www-form-urlencoded")
             .body(form.into_bytes())
             .map_err(|_| FederationError::Configuration)?;

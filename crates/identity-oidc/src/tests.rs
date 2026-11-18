@@ -531,6 +531,10 @@ async fn discovery_server(case: &str) -> (String, tokio::task::JoinHandle<()>) {
         }
         "jwks-origin" => document["jwks_uri"] = json!("https://unapproved.test/keys"),
         "auth-origin" => document["authorization_endpoint"] = json!("https://unapproved.test/auth"),
+        "noncanonical-token" => {
+            document["token_endpoint"] =
+                json!(format!("{origin}/token").replacen("http:", "HTTP:", 1));
+        }
         "no-token" => {
             document.as_object_mut().unwrap().remove("token_endpoint");
         }
@@ -603,12 +607,35 @@ async fn discovery_preserves_required_metadata_and_transport_boundaries() {
     }
 }
 
-#[test]
-fn token_endpoint_retains_exact_enterprise_binding() {
-    let advertised = "https://issuer.test:443/token";
-    let endpoint: discovery::TokenEndpoint = serde_json::from_value(json!(advertised)).unwrap();
-    assert_eq!(endpoint.advertised, advertised);
-    assert_eq!(endpoint.url.as_str(), "https://issuer.test/token");
+#[tokio::test]
+async fn advertised_token_endpoint_must_match_the_exact_enterprise_binding() {
+    let (issuer, task) = discovery_server("noncanonical-token").await;
+    let credentials = ProviderCredentials::new("fixture-secret".into(), None).unwrap();
+    let (metadata, _) = adapter(&issuer)
+        .discover(
+            tenant(),
+            &config(&issuer),
+            &credentials,
+            upstream_deadline(),
+        )
+        .await
+        .unwrap();
+    let canonical = format!("{}/token", issuer.trim_end_matches("/realms/host"));
+    let advertised = canonical.replacen("http:", "HTTP:", 1);
+    assert_eq!(
+        metadata.token_endpoint.as_ref().unwrap().url.as_str(),
+        canonical
+    );
+    assert_eq!(
+        metadata.bound_token_endpoint(&advertised).unwrap(),
+        advertised
+    );
+    assert!(matches!(
+        metadata.bound_token_endpoint(&canonical),
+        Err(FederationError::Configuration)
+    ));
+    task.abort();
+    let _ = task.await;
 }
 
 #[tokio::test]

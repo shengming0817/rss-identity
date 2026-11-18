@@ -26,12 +26,22 @@ pub(super) struct Metadata {
     pub jwks: Jwks,
 }
 
+impl Metadata {
+    pub(super) fn bound_token_endpoint(&self, registered: &str) -> Result<&str, FederationError> {
+        self.token_endpoint
+            .as_ref()
+            .filter(|endpoint| endpoint.advertised == registered)
+            .map(|endpoint| endpoint.advertised.as_str())
+            .ok_or(FederationError::Configuration)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(try_from = "String")]
 pub(super) struct TokenEndpoint {
     pub url: Url,
     // The enterprise exchange compares the advertised endpoint against the exact host binding.
-    pub advertised: String,
+    advertised: String,
 }
 
 impl TryFrom<String> for TokenEndpoint {
