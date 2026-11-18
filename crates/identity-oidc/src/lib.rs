@@ -440,6 +440,9 @@ impl UpstreamOidc for HttpOidc {
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
+            if !code::valid_verifier(m.verifier.as_str()) {
+                return Err(FederationError::Rejected);
+            }
             if mode == AuthenticationMode::StepUp
                 && !self.assurance_profile(tenant, c).supports_step_up
             {
@@ -494,7 +497,7 @@ impl UpstreamOidc for HttpOidc {
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
-            if code.is_empty() || code.len() > 4096 {
+            if code.is_empty() || code.len() > 4096 || !code::valid_verifier(m.verifier.as_str()) {
                 return Err(FederationError::Rejected);
             }
 

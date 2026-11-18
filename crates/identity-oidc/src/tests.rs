@@ -690,6 +690,36 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
             assert_eq!(pairs.iter().filter(|(k, _)| k == key).count(), 1);
         }
     }
+    material.verifier = Zeroizing::new("short".into());
+    let settings = config(&issuer);
+    let credentials = ProviderCredentials::new("fixture-secret".into(), None).unwrap();
+    assert!(matches!(
+        adapter
+            .prepare(
+                tenant(),
+                &settings,
+                &credentials,
+                &material,
+                AuthenticationMode::Login,
+                upstream_deadline(),
+            )
+            .await,
+        Err(FederationError::Rejected)
+    ));
+    material.verifier = Zeroizing::new("!".repeat(43));
+    assert!(matches!(
+        adapter
+            .exchange(
+                tenant(),
+                &settings,
+                &credentials,
+                material,
+                Zeroizing::new("fixture-code".into()),
+                upstream_deadline(),
+            )
+            .await,
+        Err(FederationError::Rejected)
+    ));
     task.abort();
     let _ = task.await;
 }
