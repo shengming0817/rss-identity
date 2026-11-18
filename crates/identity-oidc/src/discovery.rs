@@ -1,9 +1,9 @@
 //! Bounded discovery using the existing vetted transport; JWT verification has one owner.
 //! ref: openidconnect-rs src/discovery/mod.rs @ b639b5d39eac6903238867aeb2b29326502e6b26.
 use super::{Transport, failure};
-use oauth2::{AsyncHttpClient, AuthUrl, TokenUrl, http};
 use rss_identity_core::federation::{FederationError, ProviderReason, ProviderStage};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use url::Url;
 
 #[derive(Default, Deserialize, Serialize)]
 pub(super) struct Jwks {
@@ -12,9 +12,9 @@ pub(super) struct Jwks {
 #[derive(Deserialize)]
 pub(super) struct Metadata {
     pub issuer: String,
-    pub authorization_endpoint: AuthUrl,
-    pub token_endpoint: Option<TokenUrl>,
-    jwks_uri: url::Url,
+    pub authorization_endpoint: Url,
+    pub token_endpoint: Option<TokenEndpoint>,
+    jwks_uri: Url,
     #[serde(rename = "response_types_supported")]
     _response_types_supported: Vec<String>,
     #[serde(rename = "subject_types_supported")]
@@ -24,6 +24,33 @@ pub(super) struct Metadata {
     pub authorization_response_iss_parameter_supported: bool,
     #[serde(skip)]
     pub jwks: Jwks,
+}
+
+impl Metadata {
+    pub(super) fn bound_token_endpoint(&self, registered: &str) -> Result<&str, FederationError> {
+        self.token_endpoint
+            .as_ref()
+            .filter(|endpoint| endpoint.advertised == registered)
+            .map(|endpoint| endpoint.advertised.as_str())
+            .ok_or(FederationError::Configuration)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(try_from = "String")]
+pub(super) struct TokenEndpoint {
+    pub url: Url,
+    // The enterprise exchange compares the advertised endpoint against the exact host binding.
+    advertised: String,
+}
+
+impl TryFrom<String> for TokenEndpoint {
+    type Error = url::ParseError;
+
+    fn try_from(advertised: String) -> Result<Self, Self::Error> {
+        let url = Url::parse(&advertised)?;
+        Ok(Self { url, advertised })
+    }
 }
 
 async fn get<T: DeserializeOwned>(

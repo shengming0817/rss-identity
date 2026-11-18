@@ -133,21 +133,3 @@ pub(super) fn verify(
     }
     Ok(claims)
 }
-
-#[derive(Clone, Deserialize, Serialize)]
-pub(super) struct RawTokenFields {
-    pub id_token: String,
-}
-impl std::fmt::Debug for RawTokenFields {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("RawTokenFields(<redacted>)")
-    }
-}
-impl oauth2::ExtraTokenFields for RawTokenFields {}
-pub(super) type TokenClient = oauth2::Client<
-    oauth2::basic::BasicErrorResponse,
-    oauth2::StandardTokenResponse<RawTokenFields, oauth2::basic::BasicTokenType>,
-    oauth2::basic::BasicTokenIntrospectionResponse,
-    oauth2::StandardRevocableToken,
-    oauth2::basic::BasicRevocationErrorResponse,
->;

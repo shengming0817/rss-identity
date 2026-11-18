@@ -1,7 +1,6 @@
 //! Fixed ES256 assertion signing for Keycloak's supported JWT authorization grant.
 //! ref: keycloak 26.7.3 JWTAuthorizationGrantType.java and AbstractBaseJWTValidator.java.
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
-use oauth2::AsyncHttpClient;
 use rss_identity_core::enterprise::{EnterpriseClaims, EnterpriseSigner};
 use zeroize::Zeroizing;
 
@@ -117,13 +116,7 @@ impl crate::HttpOidc {
         let (metadata, transport) = self
             .discover(tenant, provider, credentials, deadline)
             .await?;
-        if metadata
-            .token_endpoint
-            .as_ref()
-            .is_none_or(|u| u.as_str() != target.token_endpoint)
-        {
-            return Err(FederationError::Configuration);
-        }
+        let endpoint = metadata.bound_token_endpoint(&target.token_endpoint)?;
         let form = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
             .append_pair("client_id", &target.client_id)
@@ -134,9 +127,9 @@ impl crate::HttpOidc {
             )
             .append_pair("assertion", assertion)
             .finish();
-        let request = oauth2::http::Request::builder()
+        let request = http::Request::builder()
             .method("POST")
-            .uri(&target.token_endpoint)
+            .uri(endpoint)
             .header("content-type", "application/x-www-form-urlencoded")
             .body(form.into_bytes())
             .map_err(|_| FederationError::Configuration)?;

@@ -140,14 +140,9 @@ fn transport(origin: &str) -> Transport {
         )
         .unwrap()
 }
-async fn get(t: &Transport, url: &str) -> Result<HttpResponse, FederationError> {
-    t.call(
-        oauth2::http::Request::builder()
-            .uri(url)
-            .body(vec![])
-            .unwrap(),
-    )
-    .await
+async fn get(t: &Transport, url: &str) -> Result<http::Response<Vec<u8>>, FederationError> {
+    t.call(http::Request::builder().uri(url).body(vec![]).unwrap())
+        .await
 }
 #[tokio::test]
 async fn outbound_origin_redirect_and_size_are_enforced() {
@@ -536,6 +531,10 @@ async fn discovery_server(case: &str) -> (String, tokio::task::JoinHandle<()>) {
         }
         "jwks-origin" => document["jwks_uri"] = json!("https://unapproved.test/keys"),
         "auth-origin" => document["authorization_endpoint"] = json!("https://unapproved.test/auth"),
+        "noncanonical-token" => {
+            document["token_endpoint"] =
+                json!(format!("{origin}/token").replacen("http:", "HTTP:", 1));
+        }
         "no-token" => {
             document.as_object_mut().unwrap().remove("token_endpoint");
         }
@@ -609,6 +608,102 @@ async fn discovery_preserves_required_metadata_and_transport_boundaries() {
 }
 
 #[tokio::test]
+async fn advertised_token_endpoint_must_match_the_exact_enterprise_binding() {
+    let (issuer, task) = discovery_server("noncanonical-token").await;
+    let credentials = ProviderCredentials::new("fixture-secret".into(), None).unwrap();
+    let (metadata, _) = adapter(&issuer)
+        .discover(
+            tenant(),
+            &config(&issuer),
+            &credentials,
+            upstream_deadline(),
+        )
+        .await
+        .unwrap();
+    let canonical = format!("{}/token", issuer.trim_end_matches("/realms/host"));
+    let advertised = canonical.replacen("http:", "HTTP:", 1);
+    assert_eq!(
+        metadata.token_endpoint.as_ref().unwrap().url.as_str(),
+        canonical
+    );
+    assert_eq!(
+        metadata.bound_token_endpoint(&advertised).unwrap(),
+        advertised
+    );
+    assert!(matches!(
+        metadata.bound_token_endpoint(&canonical),
+        Err(FederationError::Configuration)
+    ));
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn code_exchange_encodes_client_credentials_and_form_on_the_wire() {
+    use axum::{Json, Router, routing::post};
+    use base64::engine::general_purpose::STANDARD;
+    use std::collections::BTreeMap;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/token",
+        post(|headers: http::HeaderMap, body: String| async move {
+            let credential = headers[http::header::AUTHORIZATION]
+                .to_str()
+                .unwrap()
+                .strip_prefix("Basic ")
+                .unwrap();
+            assert_eq!(
+                STANDARD.decode(credential).unwrap(),
+                b"client%3A%2B%25:secret+with%2F%3A%25"
+            );
+            assert_eq!(
+                headers[http::header::CONTENT_TYPE],
+                "application/x-www-form-urlencoded"
+            );
+            let pairs: Vec<_> = url::form_urlencoded::parse(body.as_bytes()).collect();
+            assert_eq!(pairs.len(), 4);
+            let fields: BTreeMap<_, _> = pairs.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
+            assert_eq!(
+                fields,
+                BTreeMap::from([
+                    ("grant_type", "authorization_code"),
+                    ("code", "fixture +/=%"),
+                    ("redirect_uri", "http://127.0.0.1/callback"),
+                    ("code_verifier", "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+                ])
+            );
+            Json(json!({"access_token":"fixture-access","id_token":"fixture-id","token_type":"Bearer"}))
+        }),
+    );
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mut input = config(&origin).input();
+    input.client_id = "client:+%".into();
+    let settings = input.try_into().unwrap();
+    let credentials = ProviderCredentials::new("secret with/:%".into(), None).unwrap();
+    let mut material = ProtocolMaterial::new("fixture-state".into()).unwrap();
+    material.verifier = Zeroizing::new("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into());
+    let endpoint = Url::parse(&format!("{origin}/token")).unwrap();
+    let token = code::exchange(
+        &transport(&origin),
+        &endpoint,
+        &settings,
+        &credentials,
+        &material,
+        "fixture +/=%",
+    )
+    .await
+    .unwrap();
+    assert_eq!(token.as_str(), "fixture-id");
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
 async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
     let (issuer, task) = discovery_server("valid").await;
     let adapter = HttpOidc::for_loopback_test(
@@ -621,7 +716,8 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
         transport_policy(),
     )
     .unwrap();
-    let material = ProtocolMaterial::new(random_secret().unwrap().to_string()).unwrap();
+    let mut material = ProtocolMaterial::new(random_secret().unwrap().to_string()).unwrap();
+    material.verifier = Zeroizing::new("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into());
     for mode in [
         AuthenticationMode::Login,
         AuthenticationMode::Reauthenticate,
@@ -654,10 +750,10 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
         assert_eq!(query("nonce"), Some(material.nonce.as_str()));
         assert_eq!(query("state"), Some(material.state.as_str()));
         assert_eq!(query("code_challenge_method"), Some("S256"));
-        let expected = PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(
-            material.verifier.to_string(),
-        ));
-        assert_eq!(query("code_challenge"), Some(expected.as_str()));
+        assert_eq!(
+            query("code_challenge"),
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+        );
         assert_eq!(
             query("prompt"),
             if mode == AuthenticationMode::Login {
@@ -686,6 +782,36 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
             assert_eq!(pairs.iter().filter(|(k, _)| k == key).count(), 1);
         }
     }
+    material.verifier = Zeroizing::new("short".into());
+    let settings = config(&issuer);
+    let credentials = ProviderCredentials::new("fixture-secret".into(), None).unwrap();
+    assert!(matches!(
+        adapter
+            .prepare(
+                tenant(),
+                &settings,
+                &credentials,
+                &material,
+                AuthenticationMode::Login,
+                upstream_deadline(),
+            )
+            .await,
+        Err(FederationError::Rejected)
+    ));
+    material.verifier = Zeroizing::new("!".repeat(43));
+    assert!(matches!(
+        adapter
+            .exchange(
+                tenant(),
+                &settings,
+                &credentials,
+                material,
+                Zeroizing::new("fixture-code".into()),
+                upstream_deadline(),
+            )
+            .await,
+        Err(FederationError::Rejected)
+    ));
     task.abort();
     let _ = task.await;
 }
