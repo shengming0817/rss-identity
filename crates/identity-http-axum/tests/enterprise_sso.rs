@@ -529,6 +529,27 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
     );
     let fresh = assertion(&rotated, &device, &f, &target).await?;
     let signed = fresh.assertion.as_ref().unwrap().expose();
+    let different_endpoint = EnterpriseTarget {
+        token_endpoint: target.token_endpoint.replacen("https:", "HTTPS:", 1),
+        ..target.clone()
+    };
+    assert!(matches!(
+        transport
+            .exchange_enterprise(
+                rss_identity_oidc::enterprise::EnterpriseExchange {
+                    tenant: f.key.tenant,
+                    provider: &provider,
+                    credentials: &credentials,
+                    target: &different_endpoint,
+                    assertion: signed,
+                    assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
+                    expected_subject: &user
+                },
+                upstream_deadline()
+            )
+            .await,
+        Err(FederationError::Configuration)
+    ));
     transport
         .exchange_enterprise(
             rss_identity_oidc::enterprise::EnterpriseExchange {

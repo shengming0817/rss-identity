@@ -612,6 +612,71 @@ fn token_endpoint_retains_exact_enterprise_binding() {
 }
 
 #[tokio::test]
+async fn code_exchange_encodes_client_credentials_and_form_on_the_wire() {
+    use axum::{Json, Router, routing::post};
+    use base64::engine::general_purpose::STANDARD;
+    use std::collections::BTreeMap;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/token",
+        post(|headers: http::HeaderMap, body: String| async move {
+            let credential = headers[http::header::AUTHORIZATION]
+                .to_str()
+                .unwrap()
+                .strip_prefix("Basic ")
+                .unwrap();
+            assert_eq!(
+                STANDARD.decode(credential).unwrap(),
+                b"client%3A%2B%25:secret+with%2F%3A%25"
+            );
+            assert_eq!(
+                headers[http::header::CONTENT_TYPE],
+                "application/x-www-form-urlencoded"
+            );
+            let pairs: Vec<_> = url::form_urlencoded::parse(body.as_bytes()).collect();
+            assert_eq!(pairs.len(), 4);
+            let fields: BTreeMap<_, _> = pairs.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
+            assert_eq!(
+                fields,
+                BTreeMap::from([
+                    ("grant_type", "authorization_code"),
+                    ("code", "fixture +/=%"),
+                    ("redirect_uri", "http://127.0.0.1/callback"),
+                    ("code_verifier", "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+                ])
+            );
+            Json(json!({"access_token":"fixture-access","id_token":"fixture-id","token_type":"Bearer"}))
+        }),
+    );
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mut input = config(&origin).input();
+    input.client_id = "client:+%".into();
+    let settings = input.try_into().unwrap();
+    let credentials = ProviderCredentials::new("secret with/:%".into(), None).unwrap();
+    let mut material = ProtocolMaterial::new("fixture-state".into()).unwrap();
+    material.verifier = Zeroizing::new("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into());
+    let endpoint = Url::parse(&format!("{origin}/token")).unwrap();
+    let token = code::exchange(
+        &transport(&origin),
+        &endpoint,
+        &settings,
+        &credentials,
+        &material,
+        "fixture +/=%",
+    )
+    .await
+    .unwrap();
+    assert_eq!(token.as_str(), "fixture-id");
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
 async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
     let (issuer, task) = discovery_server("valid").await;
     let adapter = HttpOidc::for_loopback_test(
