@@ -247,7 +247,7 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 
 没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(binding, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用宿主提供的明确 binding、实例和执行 fencing，锁定现有租户 guard 后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，期限只受会话当前性和原调用预算限制。
 
-会话关系不公开滑动 idle expiry；它只供按完整定位坐标关联当前会话。普通 touch 延长存活时间不改变关系中的可排序值；cursor 到期上界沿用签发时的保守期限，过期后必须重新查询。人员回调本身也受同一资料/会话最早过期时间限制。
+会话关系通过完整定位坐标关联当前会话。列 `session_valid_until` 是读取当时该会话空闲期限与绝对期限的较早者，续期会更新该值。宿主用它限制投影的有效期。分页按稳定定位坐标排序，cursor 沿用签发时的保守期限，到期后重新查询。人员回调也受资料和会话最早到期时间限制。
 
 ## 企业 RP 与 WebAuthn 操作证明
 

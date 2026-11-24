@@ -1810,11 +1810,37 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
     let reference = serde_json::to_value(actor.reference()?)?;
     // The host can retain a locator without possessing a management-capable actor.
     f.policy.revoke(f.key);
-    let (before, valid) = trusted_reference(&f.store, f.key.tenant, reference.clone()).await?;
-    assert!(valid);
+    sqlx::query("UPDATE identity_authority.sessions SET idle_expires_at=idle_expires_at-100 WHERE session_id=$1")
+        .bind(issued.view().id.as_uuid()).execute(&f.owner).await?;
+    let (before, expiry) = trusted_reference(&f.store, f.key.tenant, reference.clone()).await?;
+    assert_eq!(expiry, Some(issued.view().idle_expires_at - 100));
+    let renewed = f
+        .store
+        .authenticate_session(
+            crate::support::binding(f.key.tenant),
+            rss_identity_core::session::SessionSecret::parse(issued.secret().expose().into())?,
+            deadline(),
+        )
+        .await?;
+    let (_, expiry) = trusted_reference(&f.store, f.key.tenant, reference.clone()).await?;
+    assert_eq!(
+        expiry,
+        Some(
+            renewed
+                .view()
+                .idle_expires_at
+                .min(renewed.view().absolute_expires_at)
+        )
+    );
+    assert!(expiry > Some(issued.view().idle_expires_at - 100));
     let mut wrong = reference.clone();
     wrong["principal"] = json!(Uuid::new_v4());
-    assert!(!trusted_reference(&f.store, f.key.tenant, wrong).await?.1);
+    assert!(
+        trusted_reference(&f.store, f.key.tenant, wrong)
+            .await?
+            .1
+            .is_none()
+    );
     assert!(
         f.store
             .with_session_references_read(
@@ -1916,8 +1942,8 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
             .await
             .is_err()
     );
-    let (after, valid) = trusted_reference(&f.store, f.key.tenant, reference).await?;
-    assert!(!valid);
+    let (after, expiry) = trusted_reference(&f.store, f.key.tenant, reference).await?;
+    assert!(expiry.is_none());
     assert!(after.generation > before.generation);
     f.close().await;
     Ok(())
@@ -1927,7 +1953,7 @@ async fn trusted_reference(
     store: &Authority,
     tenant: rss_request_context::TenantId,
     reference: serde_json::Value,
-) -> Result<(PersonnelRevision, bool), AuthorityError> {
+) -> Result<(PersonnelRevision, Option<i64>), AuthorityError> {
     store.with_session_references_read(crate::support::binding(tenant), deadline(), move |mut read| Box::pin(async move {
             use sqlx::Arguments;
             let revision = read.revision()?;
@@ -1935,8 +1961,8 @@ async fn trusted_reference(
             assert_eq!(revision.profiles, PersonnelProfileScope::None);
             let mut args = sqlx::postgres::PgArguments::default();
             args.add(reference).map_err(|_| AuthorityError::Configuration)?;
-            let rows = read.query("SELECT EXISTS(SELECT FROM identity_session_references s WHERE s.instance_id=($1->>'instance')::uuid AND s.tenant_id=($1->>'tenant')::uuid AND s.principal_id=($1->>'principal')::uuid AND s.session_id=($1->>'session')::uuid AND s.credential_kind=$1->>'credentialKind') AS valid", args, 1).await?;
-            Ok((revision, rows[0].get("valid")))
+            let rows = read.query("SELECT s.session_valid_until FROM identity_session_references s WHERE s.instance_id=($1->>'instance')::uuid AND s.tenant_id=($1->>'tenant')::uuid AND s.principal_id=($1->>'principal')::uuid AND s.session_id=($1->>'session')::uuid AND s.credential_kind=$1->>'credentialKind'", args, 1).await?;
+            Ok((revision, rows.first().map(|row| row.get("session_valid_until"))))
     })).await
 }
 
