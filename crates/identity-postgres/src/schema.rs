@@ -3,7 +3,7 @@ use crate::{AuthorityError, AuthorityProfile};
 use rss_identity_core::InstanceId;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::PgConnection;
-pub const SCHEMA_VERSION: i32 = 18;
+pub const SCHEMA_VERSION: i32 = 19;
 pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_authority.sql");
 pub const SCHEMA_SIGNATURE_SQL: &str = include_str!("schema-signature.sql");
 pub const SCHEMA_SIGNATURE: &str = include_str!("schema-signature.sha256");
@@ -186,6 +186,8 @@ async fn verify_host_admission(
         // SET reachability includes NOINHERIT membership; effective privileges alone are insufficient.
         let reachable_safe:bool=sqlx::query_scalar("WITH reachable AS (SELECT oid,rolsuper,rolbypassrls,rolcreaterole FROM pg_roles WHERE pg_has_role(current_user,oid,'SET')) SELECT NOT EXISTS(SELECT FROM reachable r WHERE r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR has_schema_privilege(r.oid,'identity_authority','CREATE')) AND NOT EXISTS(SELECT FROM reachable r CROSS JOIN pg_attribute a JOIN pg_class cl ON cl.oid=a.attrelid JOIN pg_namespace n ON n.oid=cl.relnamespace WHERE n.nspname='identity_authority' AND cl.relkind='r' AND a.attnum>0 AND NOT a.attisdropped AND ((has_column_privilege(r.oid,a.attrelid,a.attnum,'SELECT') AND NOT ((cl.relname='schema_version' OR (cl.relname='deployment' AND a.attname IN ('singleton','authority_id'))) OR (cl.relname='guard' AND a.attname='tenant_id') OR (cl.relname='providers' AND a.attname IN ('tenant_id','provider_id','enabled','config_version','settings')) OR ($1 AND ((cl.relname='accounts' AND a.attname IN ('tenant_id','principal_id','enabled','auth_epoch')) OR (cl.relname='memberships' AND a.attname IN ('tenant_id','principal_id','active','epoch')) OR (cl.relname='external_identities' AND a.attname IN ('tenant_id','principal_id','identity_id','provider_id')) OR (cl.relname='providers' AND a.attname='revocation_epoch'))))) OR (has_column_privilege(r.oid,a.attrelid,a.attnum,'UPDATE') AND NOT (cl.relname='guard' AND a.attname='tenant_id')) OR has_column_privilege(r.oid,a.attrelid,a.attnum,'INSERT,REFERENCES') OR has_table_privilege(r.oid,a.attrelid,'DELETE,TRUNCATE,TRIGGER')))").bind(platform).fetch_one(&mut *c).await?;
         if !reachable_safe {return Ok::<_,sqlx::Error>(false);}
+        let fact_access: bool = sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND has_function_privilege(r.oid,'identity_authority.personnel_facts(uuid,uuid,uuid[],text,text,text[],bigint)','EXECUTE'))").fetch_one(&mut *c).await?;
+        if fact_access {return Ok(false);}
         let valid:bool=sqlx::query_scalar("SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT has_schema_privilege(current_user,'identity_authority','CREATE') AND has_schema_privilege(current_user,'identity_authority','USAGE') FROM pg_roles WHERE rolname=current_user").fetch_one(&mut *c).await?;
         if !valid {return Ok::<_,sqlx::Error>(false);}
         let valid:bool=sqlx::query_scalar("SELECT bool_and(has_column_privilege(current_user,a.attrelid,a.attnum,'SELECT') = ((cl.relname='schema_version' OR (cl.relname='deployment' AND a.attname IN ('singleton','authority_id'))) OR (cl.relname='guard' AND a.attname='tenant_id') OR (cl.relname='providers' AND a.attname IN ('tenant_id','provider_id','enabled','config_version','settings')) OR ($1 AND ((cl.relname='accounts' AND a.attname IN ('tenant_id','principal_id','enabled','auth_epoch')) OR (cl.relname='memberships' AND a.attname IN ('tenant_id','principal_id','active','epoch')) OR (cl.relname='external_identities' AND a.attname IN ('tenant_id','principal_id','identity_id','provider_id')) OR (cl.relname='providers' AND a.attname='revocation_epoch')))) AND has_column_privilege(current_user,a.attrelid,a.attnum,'UPDATE') = (cl.relname='guard' AND a.attname='tenant_id') AND NOT has_column_privilege(current_user,a.attrelid,a.attnum,'INSERT') AND NOT has_column_privilege(current_user,a.attrelid,a.attnum,'REFERENCES') AND NOT has_table_privilege(current_user,a.attrelid,'DELETE,TRUNCATE,TRIGGER')) FROM pg_attribute a JOIN pg_class cl ON cl.oid=a.attrelid JOIN pg_namespace n ON n.oid=cl.relnamespace WHERE n.nspname='identity_authority' AND cl.relkind='r' AND a.attnum>0 AND NOT a.attisdropped").bind(platform).fetch_one(&mut *c).await?;
@@ -200,4 +202,44 @@ async fn verify_host_admission(
     } else {
         Err(AuthorityError::Configuration)
     }
+}
+
+/// Grant only schema usage and execution of the bounded read function. The host owns the role.
+pub async fn grant_personnel_fact_read(
+    c: &mut PgConnection,
+    role: &str,
+) -> Result<(), sqlx::Error> {
+    if role.is_empty() || role.len() > 63 || role.contains('\0') {
+        return Err(sqlx::Error::Protocol("invalid role identifier".into()));
+    }
+    let role = format!("\"{}\"", role.replace('"', "\"\""));
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "GRANT USAGE ON SCHEMA identity_authority TO {role}; GRANT EXECUTE ON FUNCTION identity_authority.personnel_facts(uuid,uuid,uuid[],text,text,text[],bigint) TO {role}"
+    )))
+    .execute(c).await?;
+    Ok(())
+}
+
+/// Verify a dedicated personnel reader. Host-owned schema privileges are independent.
+pub async fn verify_personnel_fact_read(c: &mut PgConnection) -> Result<(), AuthorityError> {
+    use crate::StorageMismatch;
+    let signature: Option<String> = sqlx::query_scalar(SCHEMA_SIGNATURE_SQL)
+        .fetch_one(&mut *c)
+        .await
+        .map_err(|_| AuthorityError::Unavailable)?;
+    if signature.as_deref() != Some(SCHEMA_SIGNATURE.trim()) {
+        return Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::SchemaContract,
+        ));
+    }
+    let safe: bool = sqlx::query_scalar(include_str!("personnel-fact-privileges.sql"))
+        .fetch_one(c)
+        .await
+        .map_err(|_| AuthorityError::Unavailable)?;
+    if !safe {
+        return Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::Privileges,
+        ));
+    }
+    Ok(())
 }

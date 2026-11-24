@@ -22,7 +22,7 @@ pub enum ProfileSource {
     Idp { provider: ProviderId },
 }
 impl ProfileSource {
-    fn key(self) -> String {
+    pub(crate) fn key(self) -> String {
         match self {
             Self::IdentityLocal => "local".into(),
             Self::Idp { provider } => provider.to_string(),

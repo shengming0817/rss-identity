@@ -1,7 +1,7 @@
--- Fresh schema v18 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v19 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=18));
-INSERT INTO identity_authority.schema_version VALUES(18);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=19));
+INSERT INTO identity_authority.schema_version VALUES(19);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),
@@ -72,7 +72,7 @@ CREATE TABLE identity_authority.external_identities (
  tenant_id uuid NOT NULL, identity_id uuid NOT NULL, principal_id uuid NOT NULL, provider_id uuid NOT NULL,
  issuer text NOT NULL CHECK(octet_length(issuer) BETWEEN 1 AND 2048),
  subject text NOT NULL CHECK(octet_length(subject)>=6 AND octet_length(subject)<=260 AND (subject LIKE 'oidc:%' OR subject ~ '^entra:[0-9a-f-]{36}:[0-9a-f-]{36}$')),
- PRIMARY KEY(tenant_id,identity_id), UNIQUE(tenant_id,principal_id,identity_id), UNIQUE(tenant_id,provider_id,issuer,subject),
+ PRIMARY KEY(tenant_id,identity_id), UNIQUE(tenant_id,principal_id,provider_id,identity_id), UNIQUE(tenant_id,provider_id,issuer,subject),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts,
  FOREIGN KEY(tenant_id,provider_id) REFERENCES identity_authority.providers
 );
@@ -97,6 +97,8 @@ CREATE TABLE identity_authority.sessions (
  profile_snapshot uuid,
  CHECK ((profile_source IS NULL) = (profile_snapshot IS NULL)),
  external_identity_id uuid,
+ source_provider_id uuid,
+ CHECK ((external_identity_id IS NULL) = (source_provider_id IS NULL)),
  provider_epoch bigint,
  auth_facts jsonb,
  CONSTRAINT session_presentation CHECK(credential_kind='cookie' OR authentication_source='local_password'),
@@ -104,7 +106,7 @@ CREATE TABLE identity_authority.sessions (
  OR (authentication_source='oidc' AND local_authenticated_at IS NULL AND platform_authentication IS NULL AND external_identity_id IS NOT NULL)
  OR (authentication_source='platform' AND local_authenticated_at IS NULL AND external_identity_id IS NULL AND jsonb_typeof(platform_authentication)='object' AND octet_length(platform_authentication::text)<=4096)) IS TRUE),
  CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL AND facts_sequence IS NULL) OR (external_identity_id IS NOT NULL AND facts_sequence IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND (auth_facts->'format_version'='3'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
- FOREIGN KEY(tenant_id,principal_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,principal_id,identity_id),
+ FOREIGN KEY(tenant_id,principal_id,source_provider_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,principal_id,provider_id,identity_id),
  PRIMARY KEY(tenant_id,session_id),
  UNIQUE(tenant_id,token_hash), UNIQUE(tenant_id,principal_id,session_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts,
@@ -259,7 +261,113 @@ REVOKE ALL ON FUNCTION identity_authority.advance_personnel_revision() FROM PUBL
 CREATE INDEX personnel_observation_expiry ON identity_authority.profile_observations(tenant_id,expires_at);
 CREATE INDEX personnel_observation_time ON identity_authority.profile_observations(tenant_id,observed_at);
 
-CREATE TRIGGER personnel_revision AFTER INSERT OR DELETE OR UPDATE OF principal_id,authentication_source,local_authenticated_at,platform_authentication,credential_kind,auth_epoch,membership_epoch,absolute_expires_at,revoked_at,external_identity_id,provider_epoch,auth_facts ON identity_authority.sessions FOR EACH ROW EXECUTE FUNCTION identity_authority.advance_personnel_revision();
+CREATE TRIGGER personnel_revision AFTER INSERT OR DELETE OR UPDATE OF principal_id,authentication_source,local_authenticated_at,platform_authentication,credential_kind,auth_epoch,membership_epoch,absolute_expires_at,revoked_at,external_identity_id,source_provider_id,provider_epoch,auth_facts,facts_sequence ON identity_authority.sessions FOR EACH ROW EXECUTE FUNCTION identity_authority.advance_personnel_revision();
 
 CREATE INDEX personnel_session_idle ON identity_authority.sessions(tenant_id,idle_expires_at) WHERE revoked_at IS NULL;
 CREATE INDEX personnel_session_absolute ON identity_authority.sessions(tenant_id,absolute_expires_at) WHERE revoked_at IS NULL;
+
+-- Match serde_json/RFC 6901 array indices while preserving numeric object keys.
+CREATE FUNCTION identity_authority.profile_path_scalar(document jsonb, segments text[]) RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE STRICT SET search_path = pg_catalog, pg_temp AS $$
+DECLARE segment text;
+BEGIN
+ FOREACH segment IN ARRAY segments LOOP
+  CASE jsonb_typeof(document)
+   WHEN 'object' THEN document := document->segment;
+   WHEN 'array' THEN
+    IF segment !~ '^(0|[1-9][0-9]{0,8})$' THEN RETURN NULL; END IF;
+    document := document->(segment::integer);
+   ELSE RETURN NULL;
+  END CASE;
+ END LOOP;
+ RETURN document;
+END $$;
+REVOKE ALL ON FUNCTION identity_authority.profile_path_scalar(jsonb,text[]) FROM PUBLIC;
+CREATE INDEX personnel_source_observation ON identity_authority.sessions
+ (tenant_id,principal_id,source_provider_id,facts_sequence DESC,auth_epoch DESC,membership_epoch DESC,session_id)
+ WHERE source_provider_id IS NOT NULL;
+
+-- One observation family, source and bounded principal page per host transaction.
+-- ref: PostgreSQL REL_17_STABLE doc/src/sgml/ref/create_function.sgml
+CREATE FUNCTION identity_authority.personnel_facts(
+ instance_id uuid, tenant uuid, subjects uuid[], source_key text,
+ family text, field_path text[], max_age bigint
+) RETURNS TABLE (
+ generation bigint, sampled_at bigint, principal uuid, status text, snapshot_id uuid,
+ provider_version bigint, observation_sequence bigint, source_revision bigint, collected_at_micros bigint,
+ observed_at bigint, expires_at bigint, value jsonb
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+ WITH admitted AS MATERIALIZED (
+  SELECT g.personnel_revision, floor(extract(epoch FROM statement_timestamp()))::bigint AS now_at
+  FROM identity_authority.guard g
+  WHERE g.tenant_id=tenant AND tenant::text=current_setting('rss.tenant_id',true)
+    AND EXISTS (SELECT FROM identity_authority.deployment WHERE authority_id=instance_id)
+    AND subjects IS NOT NULL AND cardinality(subjects)<=64
+    AND NOT EXISTS (SELECT FROM unnest(subjects) s WHERE s IS NULL OR s='00000000-0000-0000-0000-000000000000')
+    AND (SELECT count(DISTINCT s) FROM unnest(subjects) s)=cardinality(subjects)
+    AND (source_key='local' OR source_key ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+    AND ((family IN ('groups','department_snapshot') AND source_key<>'local' AND cardinality(field_path)=0)
+      OR (family='profile' AND max_age BETWEEN 1 AND 4294967295 AND cardinality(field_path) BETWEEN 1 AND 9 AND octet_length(array_to_string(field_path,''))<=1024
+        AND (field_path[1]='extensions' AND cardinality(field_path)>1 OR
+        field_path[1] IN ('displayName','username','email','emailVerified') AND cardinality(field_path)=1)))
+ ), facts AS (
+  SELECT g.*, subject.id, a.enabled AND m.active AS active,
+   p.enabled AND link.linked AS linked, p.config_version, p.revocation_epoch,
+   o.value AS profile, o.snapshot_id AS profile_snapshot, o.sequence AS profile_sequence, o.source_revision, o.collected_at,
+   o.config_version AS profile_version, o.source_epoch, o.observed_at AS profile_time,
+   LEAST(o.expires_at,o.observed_at+max_age) AS profile_end,
+   s.auth_facts->family AS observation, s.facts_sequence,
+   s.fact_version AS fact_version,
+   s.auth_epoch=a.auth_epoch AND s.membership_epoch=m.epoch AND s.provider_epoch=p.revocation_epoch
+    AND s.fact_version=p.config_version AS current_origin
+  FROM admitted g LEFT JOIN LATERAL unnest(subjects) subject(id) ON true
+  LEFT JOIN identity_authority.accounts a ON a.tenant_id=tenant AND a.principal_id=subject.id
+  LEFT JOIN identity_authority.memberships m ON m.tenant_id=a.tenant_id AND m.principal_id=a.principal_id
+  LEFT JOIN identity_authority.providers p ON p.tenant_id=tenant AND p.provider_id=nullif(source_key,'local')::uuid
+  CROSS JOIN LATERAL (SELECT EXISTS (SELECT FROM identity_authority.external_identities e
+    WHERE e.tenant_id=tenant AND e.principal_id=subject.id AND e.provider_id=p.provider_id) AS linked) link
+  LEFT JOIN identity_authority.profile_observations o ON family='profile' AND o.tenant_id=tenant
+    AND o.principal_id=subject.id AND o.source=source_key
+  LEFT JOIN LATERAL (
+   SELECT ses.auth_facts,ses.facts_sequence,ses.auth_epoch,ses.membership_epoch,ses.provider_epoch,
+    CASE WHEN jsonb_typeof(ses.auth_facts->'provider_config_version')='number'
+      AND pg_input_is_valid(ses.auth_facts->>'provider_config_version','bigint')
+     THEN (ses.auth_facts->>'provider_config_version')::bigint END AS fact_version
+   FROM identity_authority.sessions ses
+   WHERE family<>'profile' AND ses.tenant_id=tenant AND ses.principal_id=subject.id AND ses.source_provider_id=p.provider_id
+   ORDER BY ses.facts_sequence DESC,ses.auth_epoch DESC,ses.membership_epoch DESC,ses.session_id LIMIT 1
+  ) s ON true
+ ), selected AS (
+  SELECT f.*,
+   CASE WHEN family='profile' THEN profile_snapshot WHEN jsonb_typeof(observation->'snapshot_id')='string' AND pg_input_is_valid(observation->>'snapshot_id','uuid') THEN (observation->>'snapshot_id')::uuid END AS snap,
+   CASE WHEN family='profile' THEN profile_time WHEN jsonb_typeof(observation->'observed_at')='number' AND pg_input_is_valid(observation->>'observed_at','bigint') THEN (observation->>'observed_at')::bigint END AS start_at,
+   CASE WHEN family='profile' THEN profile_end WHEN jsonb_typeof(observation->'expires_at')='number' AND pg_input_is_valid(observation->>'expires_at','bigint') THEN (observation->>'expires_at')::bigint END AS end_at,
+   CASE WHEN family='groups' THEN observation->'values'
+    WHEN family='department_snapshot' THEN observation->'snapshot'
+    ELSE identity_authority.profile_path_scalar(profile->field_path[1]->'value',field_path[2:]) END AS selected_value
+  FROM facts f
+ ), classified AS (
+  SELECT s.*, CASE
+   WHEN active IS NOT TRUE OR (source_key<>'local' AND linked IS NOT TRUE) THEN 'unavailable'
+   WHEN family='profile' AND profile_snapshot IS NULL OR family<>'profile' AND facts_sequence IS NULL THEN 'missing'
+   WHEN family='profile' AND source_key<>'local' AND (profile_version<>config_version OR source_epoch<>revocation_epoch)
+     OR family<>'profile' AND current_origin IS NOT TRUE THEN 'unavailable'
+   WHEN family<>'profile' AND observation->>'status'='available' AND
+     (snap IS NULL OR snap='00000000-0000-0000-0000-000000000000' OR start_at IS NULL OR end_at IS NULL
+      OR start_at<=0 OR end_at<=start_at OR (family='groups' AND jsonb_typeof(selected_value) IS DISTINCT FROM 'array')
+      OR (family='department_snapshot' AND jsonb_typeof(selected_value) IS DISTINCT FROM 'object')) THEN 'unavailable'
+   WHEN start_at>now_at THEN 'unavailable' WHEN end_at<=now_at THEN 'expired'
+   WHEN family<>'profile' AND observation->>'reason'='claim_missing' THEN 'missing'
+   WHEN family<>'profile' AND observation->>'status' IS DISTINCT FROM 'available' THEN 'unavailable'
+   WHEN family='profile' AND profile->field_path[1]->>'status' IN ('invalid','not_configured') THEN 'unavailable'
+   WHEN selected_value IS NULL OR selected_value='null'::jsonb THEN 'missing'
+   WHEN family='profile' AND jsonb_typeof(selected_value) NOT IN ('string','number','boolean') THEN 'unavailable'
+   ELSE 'available' END AS state
+  FROM selected s
+ )
+ SELECT personnel_revision,now_at,id,state,snap,CASE WHEN family='profile' THEN profile_version ELSE fact_version END,
+  CASE WHEN family='profile' THEN profile_sequence ELSE facts_sequence END,c.source_revision,collected_at,
+  start_at,end_at,CASE WHEN state='available' THEN selected_value END
+ FROM classified c ORDER BY id
+$$;
+REVOKE ALL ON FUNCTION identity_authority.personnel_facts(uuid,uuid,uuid[],text,text,text[],bigint) FROM PUBLIC;
