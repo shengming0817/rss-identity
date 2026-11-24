@@ -16,7 +16,7 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
         value: Extensions::try_from(json!({"jobs":["sales","dev"],"object":{"-1":"literal"}}))?,
     };
     *adapter.profile.lock().unwrap() = Some(profile);
-    let federation = service(&f, adapter);
+    let federation = service(&f, adapter.clone());
     let provider = enabled_department(&f, &federation, 300).await?;
     let login = issued(
         finish(
@@ -26,20 +26,101 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
         )
         .await?,
     );
-    let account = proof(&f.store, &f, &login).await?.account();
-    let mut owner = f.owner.acquire().await?;
-    let mut tx = owner.begin().await?;
-    let role = format!("personnel_reader_{}", Uuid::new_v4().simple());
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} NOLOGIN")))
-        .execute(&mut *tx)
+    let actor = proof(&f.store, &f, &login).await?;
+    let account = actor.account();
+    let other = enabled_department(&f, &federation, 300).await?;
+    let link = state(
+        federation
+            .begin_link(
+                LinkRequest {
+                    actor,
+                    target_provider: other.id,
+                    password: None,
+                    browser: BROWSER.into(),
+                    target: "home".into(),
+                    source: source(),
+                },
+                deadline(),
+            )
+            .await?,
+    );
+    let redirect = federation
+        .complete(
+            link,
+            BROWSER.into(),
+            zeroize::Zeroizing::new("employee".into()),
+            "https://idp.example.test".into(),
+            Some(secret(&login)),
+            deadline(),
+        )
         .await?;
-    grant_personnel_fact_read(&mut tx, &role).await?;
-    sqlx::query("SELECT set_config('role',$1,true),set_config('rss.tenant_id',$2,true)")
+    let FederatedOutcome::Redirect(target) = redirect else {
+        anyhow::bail!("expected target authentication");
+    };
+    issued(
+        federation
+            .complete(
+                state(target),
+                BROWSER.into(),
+                zeroize::Zeroizing::new("second-subject".into()),
+                "https://idp.example.test".into(),
+                Some(secret(&login)),
+                deadline(),
+            )
+            .await?,
+    );
+    *adapter.groups.lock().unwrap() = vec!["second-only".into()];
+    let second_login = issued(
+        finish(
+            &federation,
+            begin(&f, &federation, &other).await?,
+            "second-subject",
+        )
+        .await?,
+    );
+    assert_eq!(proof(&f.store, &f, &second_login).await?.account(), account);
+    let healthy = issued(
+        finish(
+            &federation,
+            begin(&f, &federation, &provider).await?,
+            "other-employee",
+        )
+        .await?,
+    );
+    let healthy = proof(&f.store, &f, &healthy).await?.account().principal;
+    let mut owner = f.owner.acquire().await?;
+    let role = format!("personnel_reader_{}", Uuid::new_v4().simple());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role} LOGIN PASSWORD 'fixture-only'"
+    )))
+    .execute(&mut *owner)
+    .await?;
+    grant_personnel_fact_read(&mut owner, &role).await?;
+    let mut impersonated = owner.begin().await?;
+    sqlx::query("SELECT set_config('role',$1,true)")
         .bind(&role)
+        .execute(&mut *impersonated)
+        .await?;
+    assert!(matches!(
+        verify_personnel_fact_read(&mut impersonated).await,
+        Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::Privileges
+        ))
+    ));
+    impersonated.rollback().await?;
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host("127.0.0.1")
+        .port(f.port)
+        .database(&f.database)
+        .username(&role)
+        .password("fixture-only");
+    let mut reader = sqlx::PgConnection::connect_with(&options).await?;
+    verify_personnel_fact_read(&mut reader).await?;
+    let mut tx = reader.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
         .bind(account.tenant.to_string())
         .execute(&mut *tx)
         .await?;
-    verify_personnel_fact_read(&mut tx).await?;
     let field = || PersonnelField::Groups(provider.id);
     let max_age_seconds = std::num::NonZeroU32::new(86400).unwrap();
     let groups = read_personnel_facts_on(
@@ -56,6 +137,15 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
     assert_eq!(item.provider_version, Some(provider.version));
     assert!(item.expires_at.unwrap() > groups.sampled_at);
     assert!(item.snapshot_id.is_some() && item.observation_sequence.is_some());
+    let second_source = read_personnel_facts_on(
+        &mut tx,
+        f.instance,
+        account.tenant,
+        &[account.principal],
+        PersonnelField::Groups(other.id),
+    )
+    .await?;
+    assert_eq!(second_source.items[0].value, Some(json!(["second-only"])));
     let departments = read_personnel_facts_on(
         &mut tx,
         f.instance,
@@ -126,6 +216,22 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
             .items
             .is_empty()
     );
+    let ids: Vec<_> = (0..=MAX_PERSONNEL_SUBJECTS)
+        .map(|_| rss_identity_core::PrincipalId::generate())
+        .collect();
+    assert_eq!(
+        read_personnel_facts_on(
+            &mut tx,
+            f.instance,
+            account.tenant,
+            &ids[..MAX_PERSONNEL_SUBJECTS],
+            field()
+        )
+        .await?
+        .items
+        .len(),
+        MAX_PERSONNEL_SUBJECTS
+    );
     for (instance, tenant, ids) in [
         (
             rss_identity_core::InstanceId::generate(),
@@ -138,11 +244,7 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
             vec![account.principal],
         ),
         (f.instance, account.tenant, vec![account.principal; 2]),
-        (
-            f.instance,
-            account.tenant,
-            vec![account.principal; MAX_PERSONNEL_SUBJECTS + 1],
-        ),
+        (f.instance, account.tenant, ids),
     ] {
         assert!(
             read_personnel_facts_on(&mut tx, instance, tenant, &ids, field())
@@ -150,6 +252,20 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
                 .is_err()
         );
     }
+    sqlx::query("UPDATE identity_authority.sessions SET facts_sequence=facts_sequence+1 WHERE principal_id=$1 AND facts_sequence IS NOT NULL")
+        .bind(account.principal.as_uuid()).execute(&f.owner).await?;
+    let advanced = read_personnel_facts_on(
+        &mut tx,
+        f.instance,
+        account.tenant,
+        &[account.principal],
+        field(),
+    )
+    .await?;
+    assert!(
+        advanced.generation > groups.generation
+            && advanced.items[0].observation_sequence > item.observation_sequence
+    );
     let future = groups.sampled_at + 20;
     sqlx::query("UPDATE identity_authority.sessions SET auth_facts=jsonb_set(auth_facts,'{groups,observed_at}',to_jsonb($1::bigint)) WHERE principal_id=$2 AND facts_sequence IS NOT NULL")
         .bind(future).bind(account.principal.as_uuid()).execute(&f.owner).await?;
@@ -163,7 +279,7 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
     .await?;
     assert_eq!(pending.items[0].status, ProfileStatus::Unavailable);
     assert_eq!(pending.next_transition_at(), Some(future));
-    sqlx::query("UPDATE identity_authority.sessions SET auth_facts=auth_facts #- '{groups,expires_at}' WHERE principal_id=$1 AND facts_sequence IS NOT NULL")
+    sqlx::query("UPDATE identity_authority.sessions SET auth_facts=jsonb_set(auth_facts,'{groups,expires_at}','\"invalid\"'::jsonb) WHERE principal_id=$1 AND facts_sequence IS NOT NULL")
         .bind(account.principal.as_uuid()).execute(&f.owner).await?;
     let malformed = read_personnel_facts_on(
         &mut tx,
@@ -175,6 +291,27 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
     .await?;
     assert_eq!(malformed.items[0].status, ProfileStatus::Unavailable);
     assert!(malformed.items[0].value.is_none());
+    let mixed = read_personnel_facts_on(
+        &mut tx,
+        f.instance,
+        account.tenant,
+        &[account.principal, healthy],
+        field(),
+    )
+    .await?;
+    assert_eq!(mixed.items.len(), 2);
+    assert!(
+        mixed
+            .items
+            .iter()
+            .any(|i| i.principal == healthy && i.status == ProfileStatus::Available)
+    );
+    assert!(
+        mixed
+            .items
+            .iter()
+            .any(|i| i.principal == account.principal && i.status == ProfileStatus::Unavailable)
+    );
     sqlx::query("UPDATE identity_authority.sessions SET auth_facts=jsonb_set(jsonb_set(auth_facts,'{groups,observed_at}',to_jsonb($1::bigint-10)),'{groups,expires_at}',to_jsonb($1::bigint)) WHERE principal_id=$2 AND facts_sequence IS NOT NULL")
         .bind(groups.sampled_at).bind(account.principal.as_uuid()).execute(&f.owner).await?;
     let expired = read_personnel_facts_on(
@@ -200,20 +337,21 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
     assert_eq!(invalid.items[0].status, ProfileStatus::Unavailable);
     assert!(invalid.items[0].value.is_none() && invalid.generation > expired.generation);
     assert_eq!(invalid.items[0].provider_version, item.provider_version);
-    sqlx::query("RESET ROLE").execute(&mut *tx).await?;
+    tx.rollback().await?;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("GRANT EXECUTE ON FUNCTION identity_authority.personnel_facts(uuid,uuid,uuid[],text,text,text[],bigint) TO {role} WITH GRANT OPTION")))
-        .execute(&mut *tx).await?;
-    sqlx::query("SELECT set_config('role',$1,true)")
-        .bind(&role)
-        .execute(&mut *tx)
-        .await?;
+        .execute(&mut *owner).await?;
     assert!(matches!(
-        verify_personnel_fact_read(&mut tx).await,
+        verify_personnel_fact_read(&mut reader).await,
         Err(AuthorityError::StorageIncompatible(
             StorageMismatch::Privileges
         ))
     ));
-    tx.rollback().await?;
+    reader.close().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP OWNED BY {role}; DROP ROLE {role}"
+    )))
+    .execute(&mut *owner)
+    .await?;
     drop(owner);
     f.close().await;
     Ok(())
