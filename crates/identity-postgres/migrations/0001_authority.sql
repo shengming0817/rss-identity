@@ -1,7 +1,7 @@
--- Fresh schema v18 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v19 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=18));
-INSERT INTO identity_authority.schema_version VALUES(18);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=19));
+INSERT INTO identity_authority.schema_version VALUES(19);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),
@@ -263,3 +263,82 @@ CREATE TRIGGER personnel_revision AFTER INSERT OR DELETE OR UPDATE OF principal_
 
 CREATE INDEX personnel_session_idle ON identity_authority.sessions(tenant_id,idle_expires_at) WHERE revoked_at IS NULL;
 CREATE INDEX personnel_session_absolute ON identity_authority.sessions(tenant_id,absolute_expires_at) WHERE revoked_at IS NULL;
+
+-- One observation family, source and bounded principal page per host transaction.
+-- ref: PostgreSQL REL_17_STABLE doc/src/sgml/ref/create_function.sgml
+CREATE FUNCTION identity_authority.personnel_facts(
+ instance_id uuid, tenant uuid, subjects uuid[], source_key text,
+ family text, field_path text[], max_age bigint
+) RETURNS TABLE (
+ generation bigint, sampled_at bigint, principal uuid, status text, snapshot_id uuid,
+ provider_version bigint, source_revision bigint, collected_at_micros bigint,
+ observed_at bigint, expires_at bigint, value jsonb
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+ WITH admitted AS MATERIALIZED (
+  SELECT g.personnel_revision, floor(extract(epoch FROM statement_timestamp()))::bigint AS now_at
+  FROM identity_authority.guard g
+  WHERE g.tenant_id=tenant AND tenant::text=current_setting('rss.tenant_id',true)
+    AND EXISTS (SELECT FROM identity_authority.deployment WHERE authority_id=instance_id)
+    AND subjects IS NOT NULL AND cardinality(subjects)<=64
+    AND NOT EXISTS (SELECT FROM unnest(subjects) s WHERE s IS NULL OR s='00000000-0000-0000-0000-000000000000')
+    AND (SELECT count(DISTINCT s) FROM unnest(subjects) s)=cardinality(subjects)
+    AND max_age BETWEEN 1 AND 4294967295
+    AND (source_key='local' OR source_key ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+    AND ((family IN ('groups','department_snapshot') AND source_key<>'local' AND cardinality(field_path)=0)
+      OR (family='profile' AND cardinality(field_path) BETWEEN 1 AND 9 AND octet_length(array_to_string(field_path,''))<=1024
+        AND (field_path[1]='extensions' AND cardinality(field_path)>1 OR
+        field_path[1] IN ('displayName','username','email','emailVerified') AND cardinality(field_path)=1)))
+ ), facts AS (
+  SELECT g.*, subject.id, a.enabled AND m.active AS active,
+   p.enabled AND link.linked AS linked, p.config_version, p.revocation_epoch,
+   o.value AS profile, o.snapshot_id AS profile_snapshot, o.source_revision, o.collected_at,
+   o.config_version AS profile_version, o.source_epoch, o.observed_at AS profile_time,
+   LEAST(o.expires_at,o.observed_at+max_age) AS profile_end,
+   s.auth_facts->family AS observation, s.facts_sequence,
+   s.auth_epoch=a.auth_epoch AND s.membership_epoch=m.epoch AND s.provider_epoch=p.revocation_epoch
+    AND (s.auth_facts->>'provider_config_version')::bigint=p.config_version AS current_origin
+  FROM admitted g LEFT JOIN LATERAL unnest(subjects) subject(id) ON true
+  LEFT JOIN identity_authority.accounts a ON a.tenant_id=tenant AND a.principal_id=subject.id
+  LEFT JOIN identity_authority.memberships m ON m.tenant_id=a.tenant_id AND m.principal_id=a.principal_id
+  LEFT JOIN identity_authority.providers p ON p.tenant_id=tenant AND p.provider_id::text=source_key
+  CROSS JOIN LATERAL (SELECT EXISTS (SELECT FROM identity_authority.external_identities e
+    WHERE e.tenant_id=tenant AND e.principal_id=subject.id AND e.provider_id=p.provider_id) AS linked) link
+  LEFT JOIN identity_authority.profile_observations o ON family='profile' AND o.tenant_id=tenant
+    AND o.principal_id=subject.id AND o.source=source_key
+  LEFT JOIN LATERAL (
+   SELECT ses.auth_facts,ses.facts_sequence,ses.auth_epoch,ses.membership_epoch,ses.provider_epoch
+   FROM identity_authority.sessions ses JOIN identity_authority.external_identities e
+    ON e.tenant_id=ses.tenant_id AND e.identity_id=ses.external_identity_id AND e.principal_id=ses.principal_id
+   WHERE family<>'profile' AND ses.tenant_id=tenant AND ses.principal_id=subject.id AND e.provider_id=p.provider_id
+   ORDER BY ses.facts_sequence DESC,ses.auth_epoch DESC,ses.membership_epoch DESC,ses.session_id LIMIT 1
+  ) s ON true
+ ), selected AS (
+  SELECT f.*,
+   CASE WHEN family='profile' THEN profile_snapshot ELSE (observation->>'snapshot_id')::uuid END AS snap,
+   CASE WHEN family='profile' THEN profile_time ELSE (observation->>'observed_at')::bigint END AS start_at,
+   CASE WHEN family='profile' THEN profile_end ELSE (observation->>'expires_at')::bigint END AS end_at,
+   CASE WHEN family='groups' THEN observation->'values'
+    WHEN family='department_snapshot' THEN observation->'snapshot'
+    ELSE (profile->field_path[1]->'value') #> field_path[2:] END AS selected_value
+  FROM facts f
+ ), classified AS (
+  SELECT s.*, CASE
+   WHEN active IS NOT TRUE OR (source_key<>'local' AND linked IS NOT TRUE) THEN 'unavailable'
+   WHEN family='profile' AND profile_snapshot IS NULL OR family<>'profile' AND facts_sequence IS NULL THEN 'missing'
+   WHEN family='profile' AND source_key<>'local' AND (profile_version<>config_version OR source_epoch<>revocation_epoch)
+     OR family<>'profile' AND current_origin IS NOT TRUE THEN 'unavailable'
+   WHEN start_at>now_at THEN 'unavailable' WHEN end_at<=now_at THEN 'expired'
+   WHEN family<>'profile' AND observation->>'reason'='claim_missing' THEN 'missing'
+   WHEN family<>'profile' AND observation->>'status' IS DISTINCT FROM 'available' THEN 'unavailable'
+   WHEN family='profile' AND profile->field_path[1]->>'status' IN ('invalid','not_configured') THEN 'unavailable'
+   WHEN selected_value IS NULL OR selected_value='null'::jsonb THEN 'missing'
+   WHEN family='profile' AND jsonb_typeof(selected_value) NOT IN ('string','number','boolean') THEN 'unavailable'
+   ELSE 'available' END AS state
+  FROM selected s
+ )
+ SELECT personnel_revision,now_at,id,state,snap,config_version,
+  CASE WHEN family='profile' THEN c.source_revision ELSE facts_sequence END,collected_at,
+  start_at,end_at,CASE WHEN state='available' THEN selected_value END
+ FROM classified c ORDER BY id
+$$;
+REVOKE ALL ON FUNCTION identity_authority.personnel_facts(uuid,uuid,uuid[],text,text,text[],bigint) FROM PUBLIC;

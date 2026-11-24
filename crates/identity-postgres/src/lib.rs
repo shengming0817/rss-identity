@@ -24,6 +24,7 @@ mod management;
 mod operations;
 pub use account_directory::{AccountDirectoryRow, AccountPage};
 mod personnel;
+pub mod personnel_facts;
 pub mod platform;
 mod profiles;
 pub use personnel::{PersonnelProfileScope, PersonnelRead, PersonnelRevision};
@@ -64,7 +65,8 @@ use rss_transactional_messaging::{fence::ExecutionBinding, policy::OperationDead
 use rss_transactional_messaging_postgres::PgRuntime;
 pub use schema::{
     MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_SIGNATURE_SQL, SCHEMA_VERSION,
-    grant_platform_subject_admission, grant_profile, grant_profile_source_admission, install,
+    grant_personnel_fact_read, grant_platform_subject_admission, grant_profile,
+    grant_profile_source_admission, install, verify_personnel_fact_read,
     verify_platform_subject_admission, verify_profile, verify_profile_source_admission,
 };
 pub use session_reference::{RevalidatedSession, SessionReference};

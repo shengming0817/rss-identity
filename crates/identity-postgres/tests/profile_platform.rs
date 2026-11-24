@@ -1,3 +1,4 @@
+mod personnel_facts;
 mod support;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use rss_identity_core::{assurance::Acr, profile::*, session::AuthenticationSource};
