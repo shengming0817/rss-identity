@@ -108,6 +108,19 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
         ))
     ));
     impersonated.rollback().await?;
+    let mut assumed = owner.begin().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "SET LOCAL SESSION AUTHORIZATION {role}"
+    )))
+    .execute(&mut *assumed)
+    .await?;
+    assert!(matches!(
+        verify_personnel_fact_read(&mut assumed).await,
+        Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::Privileges
+        ))
+    ));
+    assumed.rollback().await?;
     let options = sqlx::postgres::PgConnectOptions::new()
         .host("127.0.0.1")
         .port(f.port)
@@ -115,6 +128,23 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
         .username(&role)
         .password("fixture-only");
     let mut reader = sqlx::PgConnection::connect_with(&options).await?;
+    verify_personnel_fact_read(&mut reader).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "GRANT identity_runtime TO {role} WITH ADMIN TRUE, SET FALSE, INHERIT FALSE"
+    )))
+    .execute(&mut *owner)
+    .await?;
+    assert!(matches!(
+        verify_personnel_fact_read(&mut reader).await,
+        Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::Privileges
+        ))
+    ));
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "REVOKE identity_runtime FROM {role}"
+    )))
+    .execute(&mut *owner)
+    .await?;
     verify_personnel_fact_read(&mut reader).await?;
     let mut tx = reader.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
