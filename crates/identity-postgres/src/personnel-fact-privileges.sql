@@ -10,8 +10,9 @@ SELECT coalesce(has_schema_privilege(current_user,n.oid,'USAGE')
  AND NOT EXISTS (SELECT FROM pg_proc p, LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
   WHERE p.oid=reader.oid AND acl.grantee=0 AND acl.privilege_type='EXECUTE')
  AND NOT EXISTS (
-  SELECT FROM reachable r WHERE r.rolsuper OR r.rolbypassrls OR r.rolcreaterole
-    OR has_schema_privilege(r.oid,n.oid,'CREATE')
+  SELECT FROM reachable r WHERE r.rolsuper OR r.rolreplication OR r.rolcreatedb OR r.rolbypassrls OR r.rolcreaterole
+    OR has_schema_privilege(r.oid,n.oid,'CREATE,USAGE WITH GRANT OPTION')
+    OR has_function_privilege(r.oid,reader.oid,'EXECUTE WITH GRANT OPTION')
     OR EXISTS (SELECT FROM pg_class c WHERE c.relnamespace=n.oid AND c.relkind='r' AND
      (has_any_column_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')
       OR has_table_privilege(r.oid,c.oid,'DELETE,TRUNCATE,TRIGGER,MAINTAIN')))

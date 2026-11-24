@@ -10,6 +10,12 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
     f.bootstrap().await?;
     let adapter = ScriptedOidc::new();
     adapter.groups.lock().unwrap().clear();
+    let mut profile = local("emp").observation()?;
+    profile.email_verified = rss_identity_core::profile::Attribute::Available { value: true };
+    profile.extensions = rss_identity_core::profile::Attribute::Available {
+        value: Extensions::try_from(json!({"jobs":["sales","dev"],"object":{"-1":"literal"}}))?,
+    };
+    *adapter.profile.lock().unwrap() = Some(profile);
     let federation = service(&f, adapter);
     let provider = enabled_department(&f, &federation, 300).await?;
     let login = issued(
@@ -35,14 +41,13 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
         .await?;
     verify_personnel_fact_read(&mut tx).await?;
     let field = || PersonnelField::Groups(provider.id);
-    let limits = ProfileLimits::default();
+    let max_age_seconds = std::num::NonZeroU32::new(86400).unwrap();
     let groups = read_personnel_facts_on(
         &mut tx,
         f.instance,
         account.tenant,
         &[account.principal],
         field(),
-        limits,
     )
     .await?;
     let item = &groups.items[0];
@@ -50,14 +55,13 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
     assert_eq!(item.status, ProfileStatus::Available);
     assert_eq!(item.provider_version, Some(provider.version));
     assert!(item.expires_at.unwrap() > groups.sampled_at);
-    assert!(item.snapshot_id.is_some() && item.source_revision.is_some());
+    assert!(item.snapshot_id.is_some() && item.observation_sequence.is_some());
     let departments = read_personnel_facts_on(
         &mut tx,
         f.instance,
         account.tenant,
         &[account.principal],
         PersonnelField::Departments(provider.id),
-        limits,
     )
     .await?;
     assert_eq!(
@@ -76,11 +80,33 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
         PersonnelField::Profile {
             source,
             path: &path,
+            max_age_seconds,
         },
-        limits,
     )
     .await?;
     assert_eq!(email.items[0].value, Some(json!(true)));
+    assert!(email.items[0].observation_sequence.is_some());
+    for (segments, expected) in [
+        (["extensions", "jobs", "1"], Some(json!("dev"))),
+        (["extensions", "jobs", "-1"], None),
+        (["extensions", "jobs", "01"], None),
+        (["extensions", "object", "-1"], Some(json!("literal"))),
+    ] {
+        let segments = segments.map(str::to_owned);
+        let profile = read_personnel_facts_on(
+            &mut tx,
+            f.instance,
+            account.tenant,
+            &[account.principal],
+            PersonnelField::Profile {
+                source,
+                path: &segments,
+                max_age_seconds,
+            },
+        )
+        .await?;
+        assert_eq!(profile.items[0].value, expected);
+    }
     let missing = read_personnel_facts_on(
         &mut tx,
         f.instance,
@@ -89,13 +115,13 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
         PersonnelField::Profile {
             source: ProfileSource::IdentityLocal,
             path: &path,
+            max_age_seconds,
         },
-        limits,
     )
     .await?;
     assert_eq!(missing.items[0].status, ProfileStatus::Missing);
     assert!(
-        read_personnel_facts_on(&mut tx, f.instance, account.tenant, &[], field(), limits)
+        read_personnel_facts_on(&mut tx, f.instance, account.tenant, &[], field())
             .await?
             .items
             .is_empty()
@@ -119,11 +145,36 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
         ),
     ] {
         assert!(
-            read_personnel_facts_on(&mut tx, instance, tenant, &ids, field(), limits)
+            read_personnel_facts_on(&mut tx, instance, tenant, &ids, field())
                 .await
                 .is_err()
         );
     }
+    let future = groups.sampled_at + 20;
+    sqlx::query("UPDATE identity_authority.sessions SET auth_facts=jsonb_set(auth_facts,'{groups,observed_at}',to_jsonb($1::bigint)) WHERE principal_id=$2 AND facts_sequence IS NOT NULL")
+        .bind(future).bind(account.principal.as_uuid()).execute(&f.owner).await?;
+    let pending = read_personnel_facts_on(
+        &mut tx,
+        f.instance,
+        account.tenant,
+        &[account.principal],
+        field(),
+    )
+    .await?;
+    assert_eq!(pending.items[0].status, ProfileStatus::Unavailable);
+    assert_eq!(pending.next_transition_at(), Some(future));
+    sqlx::query("UPDATE identity_authority.sessions SET auth_facts=auth_facts #- '{groups,expires_at}' WHERE principal_id=$1 AND facts_sequence IS NOT NULL")
+        .bind(account.principal.as_uuid()).execute(&f.owner).await?;
+    let malformed = read_personnel_facts_on(
+        &mut tx,
+        f.instance,
+        account.tenant,
+        &[account.principal],
+        field(),
+    )
+    .await?;
+    assert_eq!(malformed.items[0].status, ProfileStatus::Unavailable);
+    assert!(malformed.items[0].value.is_none());
     sqlx::query("UPDATE identity_authority.sessions SET auth_facts=jsonb_set(jsonb_set(auth_facts,'{groups,observed_at}',to_jsonb($1::bigint-10)),'{groups,expires_at}',to_jsonb($1::bigint)) WHERE principal_id=$2 AND facts_sequence IS NOT NULL")
         .bind(groups.sampled_at).bind(account.principal.as_uuid()).execute(&f.owner).await?;
     let expired = read_personnel_facts_on(
@@ -132,7 +183,6 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
         account.tenant,
         &[account.principal],
         field(),
-        limits,
     )
     .await?;
     assert_eq!(expired.items[0].status, ProfileStatus::Expired);
@@ -145,11 +195,24 @@ async fn bounded_source_observations_under_reader_role() -> anyhow::Result<()> {
         account.tenant,
         &[account.principal],
         field(),
-        limits,
     )
     .await?;
     assert_eq!(invalid.items[0].status, ProfileStatus::Unavailable);
     assert!(invalid.items[0].value.is_none() && invalid.generation > expired.generation);
+    assert_eq!(invalid.items[0].provider_version, item.provider_version);
+    sqlx::query("RESET ROLE").execute(&mut *tx).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("GRANT EXECUTE ON FUNCTION identity_authority.personnel_facts(uuid,uuid,uuid[],text,text,text[],bigint) TO {role} WITH GRANT OPTION")))
+        .execute(&mut *tx).await?;
+    sqlx::query("SELECT set_config('role',$1,true)")
+        .bind(&role)
+        .execute(&mut *tx)
+        .await?;
+    assert!(matches!(
+        verify_personnel_fact_read(&mut tx).await,
+        Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::Privileges
+        ))
+    ));
     tx.rollback().await?;
     drop(owner);
     f.close().await;

@@ -222,17 +222,24 @@ pub async fn grant_personnel_fact_read(
 
 /// Verify a dedicated personnel reader. Host-owned schema privileges are independent.
 pub async fn verify_personnel_fact_read(c: &mut PgConnection) -> Result<(), AuthorityError> {
-    let safe: bool = sqlx::query_scalar(include_str!("personnel-fact-privileges.sql"))
+    use crate::StorageMismatch;
+    let signature: Option<String> = sqlx::query_scalar(SCHEMA_SIGNATURE_SQL)
         .fetch_one(&mut *c)
         .await
         .map_err(|_| AuthorityError::Unavailable)?;
-    let signature: Option<String> = sqlx::query_scalar(SCHEMA_SIGNATURE_SQL)
+    if signature.as_deref() != Some(SCHEMA_SIGNATURE.trim()) {
+        return Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::SchemaContract,
+        ));
+    }
+    let safe: bool = sqlx::query_scalar(include_str!("personnel-fact-privileges.sql"))
         .fetch_one(c)
         .await
         .map_err(|_| AuthorityError::Unavailable)?;
-    if safe && signature.as_deref() == Some(SCHEMA_SIGNATURE.trim()) {
-        Ok(())
-    } else {
-        Err(AuthorityError::Configuration)
+    if !safe {
+        return Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::Privileges,
+        ));
     }
+    Ok(())
 }
