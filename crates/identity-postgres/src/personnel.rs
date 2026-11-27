@@ -278,7 +278,7 @@ pub(crate) async fn read_window(
     c: &mut PgConnection,
     tenant: TenantId,
     max_age: Option<u32>,
-    department_source: Option<&str>,
+    department_source: Option<uuid::Uuid>,
     expires: Instant,
     actor_until: Option<i64>,
 ) -> Result<PersonnelWindow, MutationError> {

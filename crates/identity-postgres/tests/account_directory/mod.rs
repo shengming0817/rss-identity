@@ -419,7 +419,7 @@ async fn account_directory_profiles_are_source_selected_and_authorized_for_predi
                 operation_id: uuid::Uuid::new_v4(),
                 expected_revision: 0,
                 value: Some(LocalProfile {
-                    display_name: Some("Local Alice".into()),
+                    display_name: Some(r"Local Alice林%_\Team".into()),
                     username: None,
                     email: Some("alice@example.test".into()),
                     extensions: Extensions::try_from(serde_json::json!({}))?,
@@ -444,9 +444,23 @@ async fn account_directory_profiles_are_source_selected_and_authorized_for_predi
     assert_eq!(page.accounts.len(), 1);
     assert_eq!(
         page.accounts[0].display_name.as_deref(),
-        Some("Local Alice")
+        Some(r"Local Alice林%_\Team")
     );
     assert_eq!(page.accounts[0].profile_status, "available");
+    for (predicate, matches) in [
+        (r"displayName=icontains='林%_\\TEAM'", true),
+        ("displayName=icontains='AL_CE'", false),
+        ("displayName=icontains='%TEAm'", false),
+        ("displayName=icontains=''", true),
+    ] {
+        let query =
+            AccountQuery::parse(Some(predicate), None, Some("principalId"), Some("local"), 5)?;
+        let page = f
+            .store
+            .list_accounts(f.actor().await?, query, None, deadline())
+            .await?;
+        assert_eq!(page.accounts.len(), usize::from(matches), "{predicate}");
+    }
     struct NoProfiles;
     impl ManagementPolicy for NoProfiles {
         fn authorize<'a>(
@@ -533,6 +547,26 @@ async fn department_directory_uses_latest_accepted_fact_without_resurrecting_old
         .await?;
     assert_eq!(page.accounts.len(), 1);
     let principal = page.accounts[0].principal_id.clone();
+    for (predicate, count) in [
+        ("department==root", 0),
+        ("department==dept-01;departmentSubtree==root", 1),
+        ("departmentSubtree==dept-01;departmentSubtree==root", 1),
+        ("departmentSubtree==absent,departmentSubtree==dept-01", 1),
+        ("department==Dept-01", 0),
+    ] {
+        let query = AccountQuery::parse(
+            Some(predicate),
+            None,
+            Some("principalId"),
+            Some(&provider_id),
+            5,
+        )?;
+        let page = f
+            .store
+            .list_accounts(f.actor().await?, query, None, deadline())
+            .await?;
+        assert_eq!(page.accounts.len(), count, "{predicate}");
+    }
     // Logging out does not rewrite the accepted directory observation or extend its TTL.
     let actor = f
         .store
@@ -587,6 +621,30 @@ async fn department_directory_uses_latest_accepted_fact_without_resurrecting_old
     assert!(page.accounts[0].department_snapshot.is_none());
     let (old_seq,new_seq):(i64,i64)=sqlx::query_as("SELECT (SELECT facts_sequence FROM identity_authority.sessions WHERE session_id=$1),(SELECT facts_sequence FROM identity_authority.sessions WHERE session_id=$2)").bind(old.view().id.as_uuid()).bind(newer.view().id.as_uuid()).fetch_one(&f.owner).await?;
     assert!(new_seq > old_seq);
+    // Linked sessions can copy one acceptance sequence. Exercise the final UUID tie-break.
+    sqlx::query("UPDATE identity_authority.sessions SET facts_sequence=$1 WHERE session_id=$2")
+        .bind(new_seq)
+        .bind(old.view().id.as_uuid())
+        .execute(&f.owner)
+        .await?;
+    let expected = if old.view().id.as_uuid() < newer.view().id.as_uuid() {
+        "available"
+    } else {
+        "claim_missing"
+    };
+    let tied = f
+        .store
+        .list_accounts(f.actor().await?, all()?, None, deadline())
+        .await?;
+    assert_eq!(tied.accounts[0].department_status, expected);
+    // Higher epoch wins before session ID, even when that fact is no longer current.
+    sqlx::query("UPDATE identity_authority.sessions SET membership_epoch=membership_epoch+1 WHERE session_id=$1")
+        .bind(old.view().id.as_uuid()).execute(&f.owner).await?;
+    let stale = f
+        .store
+        .list_accounts(f.actor().await?, all()?, None, deadline())
+        .await?;
+    assert_eq!(stale.accounts[0].department_status, "unavailable");
     upstream
         .issued_at_offset
         .store(0, std::sync::atomic::Ordering::SeqCst);
@@ -617,8 +675,34 @@ async fn department_directory_uses_latest_accepted_fact_without_resurrecting_old
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
             .fetch_one(&f.owner)
             .await?;
-    sqlx::query("UPDATE identity_authority.sessions SET auth_facts=jsonb_set(jsonb_set(auth_facts,'{department_snapshot,observed_at}',to_jsonb($2::bigint)),'{department_snapshot,expires_at}',to_jsonb($3::bigint)) WHERE facts_sequence=(SELECT max(facts_sequence) FROM identity_authority.sessions WHERE principal_id=$1::uuid AND external_identity_id IS NOT NULL)")
-        .bind(&principal).bind(now-1000).bind(now-900).execute(&f.owner).await?;
+    // A future observation bounds every page's cursor, even when that page omits the account.
+    let set_latest_times = "UPDATE identity_authority.sessions SET auth_facts=jsonb_set(jsonb_set(auth_facts,'{department_snapshot,observed_at}',to_jsonb($2::bigint)),'{department_snapshot,expires_at}',to_jsonb($3::bigint)) WHERE facts_sequence=(SELECT max(facts_sequence) FROM identity_authority.sessions WHERE principal_id=$1::uuid AND external_identity_id IS NOT NULL)";
+    sqlx::query(set_latest_times)
+        .bind(&principal)
+        .bind(now + 30)
+        .bind(now + 90)
+        .execute(&f.owner)
+        .await?;
+    let future = f
+        .store
+        .list_accounts(f.actor().await?, all()?, None, deadline())
+        .await?;
+    assert_eq!(future.accounts[0].department_status, "not_yet_valid");
+    let query = AccountQuery::parse(None, None, Some("departmentStatus"), Some(&provider_id), 1)?;
+    let page = f
+        .store
+        .list_accounts(f.actor().await?, query, None, deadline())
+        .await?;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let bytes = URL_SAFE_NO_PAD.decode(page.next_cursor.unwrap())?;
+    let payload: serde_json::Value = serde_json::from_slice(&bytes[32..])?;
+    assert_eq!(payload["expires"], now + 30);
+    sqlx::query(set_latest_times)
+        .bind(&principal)
+        .bind(now - 1000)
+        .bind(now - 900)
+        .execute(&f.owner)
+        .await?;
     let page = f
         .store
         .list_accounts(f.actor().await?, all()?, None, deadline())

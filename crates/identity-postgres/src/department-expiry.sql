@@ -1,12 +1,17 @@
-WITH latest AS (
- SELECT DISTINCT ON (s.principal_id) s.auth_facts->'department_snapshot' AS fact
- FROM identity_authority.sessions s
- JOIN identity_authority.external_identities e ON e.tenant_id=s.tenant_id AND e.identity_id=s.external_identity_id
- WHERE s.tenant_id=$1::uuid AND e.provider_id::text=$2
- ORDER BY s.principal_id,s.facts_sequence DESC,s.auth_epoch DESC,s.membership_epoch DESC,s.session_id
-), boundaries AS (
- SELECT (fact->>'observed_at')::bigint AS until FROM latest WHERE fact->>'status'='available'
- UNION ALL
- SELECT (fact->>'expires_at')::bigint FROM latest WHERE fact->>'status'='available'
+-- Enumerate this source's linked subjects once. Multiple external IDs can belong to one subject.
+WITH subjects AS (
+ SELECT DISTINCT e.principal_id
+ FROM identity_authority.external_identities e
+ WHERE e.tenant_id=$1::uuid AND e.provider_id=$2
 )
-SELECT min(until) FROM boundaries WHERE until>$3
+SELECT least(min((fact->>'observed_at')::bigint) FILTER (WHERE (fact->>'observed_at')::bigint>$3),
+             min((fact->>'expires_at')::bigint) FILTER (WHERE (fact->>'expires_at')::bigint>$3))
+FROM subjects
+CROSS JOIN LATERAL (
+ SELECT s.auth_facts->'department_snapshot' AS fact
+ FROM identity_authority.sessions s
+ WHERE s.tenant_id=$1::uuid AND s.source_provider_id=$2 AND s.principal_id=subjects.principal_id
+ ORDER BY s.facts_sequence DESC,s.auth_epoch DESC,s.membership_epoch DESC,s.session_id
+ LIMIT 1
+) latest
+WHERE fact->>'status'='available'

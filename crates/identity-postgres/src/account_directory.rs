@@ -61,7 +61,9 @@ fn operand(sql: &mut QueryBuilder<Postgres>, field: Field, value: &str) {
         sql.push_bind(value.to_owned());
     }
 }
-fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) {
+const ANCESTORS: &str = include_str!("department-ancestors.sql");
+
+fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression, shared_ancestors: bool) {
     sql.push("(");
     match expression {
         Expression::And(items) | Expression::Or(items) => {
@@ -73,7 +75,7 @@ fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) {
                         " OR "
                     });
                 }
-                filter(sql, item);
+                filter(sql, item, shared_ancestors);
             }
         }
         Expression::Compare {
@@ -81,16 +83,20 @@ fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) {
             operator,
             values,
         } => {
-            if matches!(field, Field::Department | Field::DepartmentSubtree) {
-                sql.push("\"departmentStatus\"='available' AND EXISTS(WITH RECURSIVE ancestors(id) AS (SELECT jsonb_array_elements_text(\"departmentSnapshot\"->'memberships') UNION SELECT n->>'parentId' FROM ancestors x CROSS JOIN LATERAL jsonb_array_elements(\"departmentSnapshot\"->'nodes') n WHERE n->>'id'=x.id AND ");
-                sql.push(if *field == Field::DepartmentSubtree {
-                    "true"
+            if *field == Field::Department {
+                sql.push("\"departmentStatus\"='available' AND (\"departmentSnapshot\"->'memberships') ? ")
+                    .push_bind(values[0].clone());
+            } else if *field == Field::DepartmentSubtree {
+                sql.push("\"departmentStatus\"='available' AND ");
+                if shared_ancestors {
+                    sql.push_bind(values[0].clone()).push(" = ANY(tree.ids)");
                 } else {
-                    "false"
-                });
-                sql.push(" AND n->>'parentId' IS NOT NULL) SELECT FROM ancestors WHERE id=")
-                    .push_bind(values[0].clone())
-                    .push(")");
+                    sql.push("EXISTS (")
+                        .push(ANCESTORS)
+                        .push("SELECT FROM ancestors WHERE id=")
+                        .push_bind(values[0].clone())
+                        .push(")");
+                }
             } else if matches!(operator.as_str(), "=isnull=" | "=isnotnull=") {
                 sql.push(column(*field)).push(if operator == "=isnull=" {
                     " IS NULL"
@@ -236,13 +242,18 @@ impl Authority {
         self.read_sql(actor.binding, budget.remaining(), move |c| {
             Box::pin(async move {
                 let loaded = crate::session_storage::recheck(c, &actor).await?;
+                let profiles = query.needs_profiles();
+                let department_source = if query.needs_departments() {
+                    let source = query.source().ok_or_else(corrupt)?;
+                    Some(uuid::Uuid::parse_str(source).map_err(|_| corrupt())?)
+                } else {
+                    None
+                };
                 for op in [
                     Some(ManagementOperation::ListAccounts),
-                    query
-                        .needs_profiles()
-                        .then_some(ManagementOperation::ReadLatestProfile),
-                    query
-                        .needs_departments()
+                    profiles.then_some(ManagementOperation::ReadLatestProfile),
+                    department_source
+                        .is_some()
                         .then_some(ManagementOperation::ReadLatestDepartments),
                 ]
                 .into_iter()
@@ -254,8 +265,8 @@ impl Authority {
                 let window = crate::personnel::read_window(
                     c,
                     actor.key.tenant,
-                    query.needs_profiles().then_some(max_age),
-                    query.needs_departments().then(|| query.source()).flatten(),
+                    profiles.then_some(max_age),
+                    department_source,
                     budget.0.instant(),
                     Some(
                         loaded
@@ -307,7 +318,7 @@ impl Authority {
                     }
                 }
 
-                // The six prefix parameters are bound explicitly; only owner-controlled columns enter SQL.
+                // The five prefix parameters are bound explicitly; only owner-controlled columns enter SQL.
                 let mut sql = QueryBuilder::<Postgres>::with_arguments(
                     include_str!("account-directory.sql"),
                     {
@@ -315,20 +326,32 @@ impl Authority {
                         let mut args = sqlx::postgres::PgArguments::default();
                         args.add(actor.key.tenant.to_string())
                             .map_err(|_| corrupt())?;
-                        args.add(query.source().map(str::to_owned))
+                        args.add(query.source().filter(|_| profiles).map(str::to_owned))
                             .map_err(|_| corrupt())?;
                         args.add(window.now).map_err(|_| corrupt())?;
-                        args.add(query.needs_profiles()).map_err(|_| corrupt())?;
-                        args.add(query.needs_departments()).map_err(|_| corrupt())?;
+                        args.add(department_source).map_err(|_| corrupt())?;
                         args.add(i64::from(max_age)).map_err(|_| corrupt())?;
                         args
                     },
                 );
-                sql.push("SELECT to_jsonb(r) FROM account_rows r WHERE ");
+                sql.push("SELECT to_jsonb(r) FROM account_rows r");
                 if let Some(expression) = query.filter() {
-                    filter(&mut sql, expression);
+                    let mut fields = Vec::new();
+                    expression.fields(&mut fields);
+                    let shared = fields
+                        .iter()
+                        .filter(|&&field| field == Field::DepartmentSubtree)
+                        .count()
+                        > 1;
+                    if shared {
+                        sql.push(" CROSS JOIN LATERAL (")
+                            .push(ANCESTORS)
+                            .push("SELECT array_agg(id) AS ids FROM ancestors) tree");
+                    }
+                    sql.push(" WHERE ");
+                    filter(&mut sql, expression, shared);
                 } else {
-                    sql.push("true");
+                    sql.push(" WHERE true");
                 }
                 if let Some(seek) = &seek {
                     after(&mut sql, &query, &seek.position);
