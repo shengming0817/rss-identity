@@ -276,16 +276,14 @@ pub(crate) fn session_relation(
     now: i64,
     platform: Option<&str>,
 ) -> String {
-    include_str!("session_reference.sql")
-        .replace("{tenant}", &tenant.to_string())
-        .replace("{instance}", &instance.to_string())
-        .replace("{now}", &now.to_string())
-        .replace(
-            "{platform_enabled}",
-            if platform.is_some() { "true" } else { "false" },
-        )
-        .replace(
-            "{platform_audience}",
-            &platform.unwrap_or("").replace("'", "''"),
-        )
+    // The host supplies its own positional query arguments. Keep these trusted context
+    // literals inside the reference relation; the internal deadline probe uses bindings.
+    let audience = platform.map_or_else(
+        || "NULL".to_owned(),
+        |s| format!("'{}'", s.replace('\'', "''")),
+    );
+    include_str!("session_reference.sql").replace(
+        "{context}",
+        &format!("'{tenant}'::uuid,'{instance}'::uuid,{now}::bigint,{audience}::text"),
+    )
 }

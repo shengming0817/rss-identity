@@ -827,14 +827,15 @@ async fn cursor_source_clock_and_actor_boundaries() -> anyhow::Result<()> {
         )
         .await?;
     let simple = AccountQuery::parse(None, None, Some("principalId"), Some("local"), 1)?;
-    let profiled = AccountQuery::parse(None, None, Some("profileStatus"), Some("local"), 1)?;
-    let profile_start:i64=sqlx::query_scalar("UPDATE identity_authority.profile_observations SET observed_at=floor(extract(epoch FROM clock_timestamp()))::bigint+3,expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+120 WHERE principal_id=$1 RETURNING observed_at").bind(second.principal.as_uuid()).fetch_one(&f.owner).await?;
-    sqlx::query(
-        "UPDATE identity_authority.sessions SET idle_expires_at=issued_at+1 WHERE session_id=$1",
-    )
-    .bind(local.view().id.as_uuid())
-    .execute(&f.owner)
-    .await?;
+    let profiled =
+        AccountQuery::parse(None, Some("login"), Some("profileStatus"), Some("local"), 1)?;
+    let profile_start:i64=sqlx::query_scalar("UPDATE identity_authority.profile_observations SET observed_at=floor(extract(epoch FROM clock_timestamp()))::bigint+5,expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+120 WHERE principal_id=$1 RETURNING observed_at").bind(second.principal.as_uuid()).fetch_one(&f.owner).await?;
+    let reference_end = profile_start - 1;
+    sqlx::query("UPDATE identity_authority.sessions SET idle_expires_at=$2 WHERE session_id=$1")
+        .bind(local.view().id.as_uuid())
+        .bind(reference_end)
+        .execute(&f.owner)
+        .await?;
     let first = |q: AccountQuery| async {
         f.store
             .list_accounts(f.actor().await?, q, None, deadline())
@@ -851,11 +852,37 @@ async fn cursor_source_clock_and_actor_boundaries() -> anyhow::Result<()> {
     };
     assert_eq!(signed_expiry(&prof)?, profile_start);
     assert!(signed_expiry(&base)? > profile_start);
+    let mut gate = f.owner.begin().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(3337)")
+        .fetch_one(&mut *gate)
+        .await?;
+    // Only the second directory row waits. Actor authentication and cursor validation run first.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION public.wait_directory_page() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared(3337); RETURN true; END $$; CREATE POLICY wait_directory_page ON identity_authority.local_credentials AS RESTRICTIVE FOR SELECT USING (CASE WHEN principal_id='{}'::uuid THEN public.wait_directory_page() ELSE true END)",second.principal.as_uuid()))).execute(&f.owner).await?;
+    let store = f.store.clone();
+    let actor = f.actor().await?;
+    let continued = tokio::spawn(async move {
+        store
+            .list_accounts(actor, profiled, Some(prof), deadline())
+            .await
+    });
+    let blocked = wait_for_blocked_backend(&f, pid).await?;
+    let query: String = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE pid=$1")
+        .bind(blocked)
+        .fetch_one(&f.owner)
+        .await?;
+    assert!(
+        query.contains("department_facts"),
+        "expected directory page read"
+    );
+    let before: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    assert!(before < reference_end && reference_end < profile_start);
     sqlx::query("SELECT pg_sleep(greatest(0,$1::bigint-extract(epoch FROM clock_timestamp()))::double precision)").bind(profile_start).execute(&f.owner).await?;
+    gate.commit().await?;
     assert!(matches!(
-        f.store
-            .list_accounts(f.actor().await?, profiled, Some(prof), deadline())
-            .await,
+        continued.await?,
         Err(AuthorityError::CursorInvalidated)
     ));
     assert_eq!(

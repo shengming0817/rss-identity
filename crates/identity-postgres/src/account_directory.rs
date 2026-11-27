@@ -27,6 +27,8 @@ pub struct AccountDirectoryRow {
     pub department_status: String,
     pub department_snapshot: Option<rss_identity_core::department::DepartmentSnapshot>,
 }
+/// Across pages, the directory guarantees consistency for the requested projection,
+/// filter and sort. Embedded callers should use `fields` to project each row.
 pub struct AccountPage {
     pub accounts: Vec<AccountDirectoryRow>,
     pub fields: Vec<Field>,
@@ -311,11 +313,12 @@ impl Authority {
                     crate::management::authorize(policy.as_ref(), instance, &loaded, op, None, c)
                         .await?;
                 }
+                let actor_deadline = crate::sessions::checked_expiry(&loaded, budget.0.instant())?;
                 let window = deps
                     .window(
                         c,
                         actor.key.tenant,
-                        crate::sessions::checked_expiry(&loaded, budget.0.instant())?,
+                        actor_deadline,
                         Some(
                             loaded
                                 .view
@@ -439,8 +442,12 @@ impl Authority {
                     .map(serde_json::from_value)
                     .collect::<Result<_, _>>()
                     .map_err(|_| corrupt())?;
-                if std::time::Instant::now() >= window.expires {
+                let finished = std::time::Instant::now();
+                if finished >= actor_deadline {
                     return Err(reject().into());
+                }
+                if finished >= window.expires {
+                    return Err(MutationError::CursorInvalidated);
                 }
                 Ok(AccountPage {
                     accounts,

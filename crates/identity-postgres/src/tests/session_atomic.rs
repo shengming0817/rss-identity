@@ -159,7 +159,8 @@ async fn session_updates_match_activity_and_rotation() -> anyhow::Result<()> {
         );
 
         set_test_idle(&f, &session, idle).await?;
-        let (writes, _, _) = state().await?;
+        let (writes, rotation_revision, _) = state().await?;
+        assert_eq!(rotation_revision > revision, !capped);
         let events = f.events().await?;
         let rotated = f
             .store
@@ -167,7 +168,7 @@ async fn session_updates_match_activity_and_rotation() -> anyhow::Result<()> {
             .await?;
         let renewed = rotated.view().idle_expires_at;
         assert_eq!(renewed.cmp(&idle), expected_order);
-        assert_eq!(state().await?, (writes + 1, revision, renewed));
+        assert_eq!(state().await?, (writes + 1, rotation_revision, renewed));
         assert_eq!(rotated.view().absolute_expires_at, view.absolute_expires_at);
         assert_eq!(f.events().await?, events + 1);
         expect_session_event(&f, "refreshed", view.id, None, 1).await?;

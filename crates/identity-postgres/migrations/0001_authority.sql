@@ -428,7 +428,7 @@ BEGIN
  LOOP
   trg := 'revision_' || item.kind;
   SELECT string_agg('OLD.'||term,',' ORDER BY pos),string_agg('NEW.'||term,',' ORDER BY pos),
-   string_agg(DISTINCT split_part(term,'->',1),',')
+   string_agg(DISTINCT split_part(term,'->',1) COLLATE "C",',')
   INTO old_values,new_values,cols
   FROM unnest(string_to_array('tenant_id,'||item.observed,',')) WITH ORDINALITY terms(term,pos);
   pred := format('ROW(%s) IS DISTINCT FROM ROW(%s)',old_values,new_values);
@@ -441,7 +441,10 @@ BEGIN
   EXECUTE format('CREATE TRIGGER %I AFTER UPDATE OF %s ON identity_authority.%I FOR EACH ROW WHEN (%s) EXECUTE FUNCTION identity_authority.advance_directory_revision(%L,%L)',trg||'_update',cols,item.tab,pred,item.kind,item.scope);
  END LOOP;
 END $$;
-CREATE INDEX directory_profile_source ON identity_authority.profile_observations(tenant_id,source,principal_id);
+CREATE INDEX directory_profile_start ON identity_authority.profile_observations(tenant_id,source,observed_at);
+CREATE INDEX directory_profile_end ON identity_authority.profile_observations(tenant_id,source,expires_at);
+CREATE INDEX personnel_profile_start ON identity_authority.profile_observations(tenant_id,observed_at);
+CREATE INDEX personnel_profile_end ON identity_authority.profile_observations(tenant_id,expires_at);
 CREATE INDEX directory_link_source ON identity_authority.external_identities(tenant_id,provider_id,principal_id);
 
 CREATE INDEX personnel_session_idle ON identity_authority.sessions(tenant_id,idle_expires_at) WHERE revoked_at IS NULL;
