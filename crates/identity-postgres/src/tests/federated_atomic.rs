@@ -100,6 +100,12 @@ async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()>
     let s = service(&f, upstream.clone());
     let p = enabled(&f, &s).await?;
     let local = session(&f).await?;
+    // Password verification and issuance are separate phases. Give this fixture distinct
+    // timestamps even when both operations happen within one database clock second.
+    let authenticated_at: i64 = sqlx::query_scalar(
+        "UPDATE identity_authority.sessions SET local_authenticated_at=least(local_authenticated_at,issued_at-1)
+         WHERE session_id=$1 RETURNING local_authenticated_at")
+        .bind(local.view().id.as_uuid()).fetch_one(&f.owner).await?;
     let snapshot = s
         .current_session_security(
             f.store
@@ -113,10 +119,8 @@ async fn session_security_is_subject_bound_and_revocable() -> anyhow::Result<()>
         )
         .await?;
     assert_eq!(snapshot.session_id, local.view().id);
-    assert_eq!(
-        snapshot.assurance.auth_time().unwrap(),
-        local.view().issued_at
-    );
+    assert!(authenticated_at < local.view().issued_at);
+    assert_eq!(snapshot.assurance.auth_time(), Some(authenticated_at));
     assert_eq!(snapshot.assurance.acr(), Acr::Unspecified);
     assert_eq!(snapshot.assurance.amr(), [Amr::Pwd]);
     assert!(snapshot.eligible_step_up_providers.is_empty());

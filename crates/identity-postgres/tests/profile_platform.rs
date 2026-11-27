@@ -294,6 +294,7 @@ struct Verifier {
         )>,
     >,
     unavailable: std::sync::atomic::AtomicBool,
+    rechecks: std::sync::atomic::AtomicUsize,
     last_backend: std::sync::atomic::AtomicI32,
     runtime: Arc<rss_transactional_messaging_postgres::PgRuntime>,
     fault: std::sync::Mutex<Option<PgTransactionFault>>,
@@ -380,6 +381,8 @@ impl PlatformVerifier for Verifier {
         c: &'a mut sqlx::PgConnection,
     ) -> futures::future::BoxFuture<'a, Result<(), PlatformError>> {
         Box::pin(async move {
+            self.rechecks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(PlatformError::Unavailable);
             }
@@ -441,6 +444,7 @@ async fn platform_host_for(
         evidence: std::sync::Mutex::new((true, false, None)),
         idp: std::sync::Mutex::new(None),
         unavailable: std::sync::atomic::AtomicBool::new(false),
+        rechecks: Default::default(),
         last_backend: std::sync::atomic::AtomicI32::new(0),
         runtime: f.runtime.clone(),
         fault: std::sync::Mutex::new(None),
@@ -612,6 +616,128 @@ async fn platform_challenges_are_one_use_and_all_session_paths_recheck() -> anyh
         .list_sessions(proof(&store, &f, &local).await?, None, 100, deadline())
         .await?;
     assert!(!listed.sessions.iter().any(|s| s.id == issued.view().id));
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn session_page_rechecks_distinct_bindings_and_advances_over_rejections() -> anyhow::Result<()>
+{
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let local = f.login().await?;
+    let (store, verifier) = platform_host(&f, false).await?;
+    let binding = &verifier.binding;
+    let platform = json!({"binding":binding,"audience":verifier.audience(),"authenticatedAt":null,
+                          "hardwareKey":true,"userPresence":false,"userVerification":false});
+    // The first two rows share a stale source version. The third has the same binding ID
+    // and the current version and is the first page's lookahead.
+    let current_secret = rss_identity_core::session::SessionSecret::generate()?;
+    for n in 1..=3 {
+        let digest = if n == 3 {
+            current_secret.digest()
+        } else {
+            rss_identity_core::session::SessionSecret::generate()?.digest()
+        };
+        let mut stored = platform.clone();
+        if n < 3 {
+            stored["binding"]["sourceVersion"] = json!(binding.source_version + 1);
+        }
+        sqlx::query("INSERT INTO identity_authority.sessions(tenant_id,principal_id,session_id,
+            credential_kind,token_hash,authentication_source,platform_authentication,auth_epoch,membership_epoch,
+            issued_at,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at)
+            SELECT tenant_id,principal_id,$2,credential_kind,$4,'platform',$3,auth_epoch,membership_epoch,
+            issued_at,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at FROM identity_authority.sessions WHERE session_id=$1")
+            .bind(local.view().id.as_uuid()).bind(Uuid::from_u128(n)).bind(stored).bind(digest.as_slice()).execute(&f.owner).await?;
+    }
+    let page = store
+        .list_sessions(proof(&store, &f, &local).await?, None, 2, deadline())
+        .await?;
+    assert!(page.sessions.is_empty());
+    assert_eq!(page.next_cursor.unwrap().as_uuid(), Uuid::from_u128(2));
+    assert_eq!(verifier.rechecks.load(Ordering::SeqCst), 1);
+    let next = store
+        .list_sessions(
+            proof(&store, &f, &local).await?,
+            page.next_cursor,
+            2,
+            deadline(),
+        )
+        .await?;
+    assert_eq!(
+        next.sessions
+            .iter()
+            .map(|s| s.id.as_uuid())
+            .collect::<Vec<_>>(),
+        [Uuid::from_u128(3), local.view().id.as_uuid()]
+    );
+    assert!(next.next_cursor.is_none());
+    assert_eq!(verifier.rechecks.load(Ordering::SeqCst), 2);
+    let both = store
+        .list_sessions(proof(&store, &f, &local).await?, None, 3, deadline())
+        .await?;
+    assert_eq!(
+        both.sessions
+            .iter()
+            .map(|s| s.id.as_uuid())
+            .collect::<Vec<_>>(),
+        [Uuid::from_u128(3)]
+    );
+    assert_eq!(verifier.rechecks.load(Ordering::SeqCst), 4);
+
+    // Start a fresh list transaction using the current platform credential.
+    let actor = store
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            current_secret,
+            deadline(),
+        )
+        .await?;
+    let before = verifier.rechecks.load(Ordering::SeqCst);
+    let from_platform = store
+        .list_sessions(actor, page.next_cursor, 2, deadline())
+        .await?;
+    assert_eq!(
+        from_platform
+            .sessions
+            .iter()
+            .map(|s| s.id.as_uuid())
+            .collect::<Vec<_>>(),
+        [Uuid::from_u128(3), local.view().id.as_uuid()]
+    );
+    assert_eq!(verifier.rechecks.load(Ordering::SeqCst) - before, 1);
+    // A cached success may only cover the binding, never the next session's envelope.
+    sqlx::query(
+        "UPDATE identity_authority.sessions SET platform_authentication=$1 WHERE session_id=$2",
+    )
+    .bind(&platform)
+    .bind(Uuid::from_u128(1))
+    .execute(&f.owner)
+    .await?;
+    let mut inconsistent = platform.clone();
+    inconsistent["authenticatedAt"] = json!(1);
+    sqlx::query(
+        "UPDATE identity_authority.sessions SET platform_authentication=$1 WHERE session_id=$2",
+    )
+    .bind(inconsistent)
+    .bind(Uuid::from_u128(2))
+    .execute(&f.owner)
+    .await?;
+    assert!(matches!(
+        store
+            .list_sessions(proof(&store, &f, &local).await?, None, 2, deadline())
+            .await,
+        Err(AuthorityError::RolledBack(StorageFailure::Invariant))
+    ));
+    verifier.unavailable.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        store
+            .list_sessions(proof(&store, &f, &local).await?, None, 3, deadline())
+            .await,
+        Err(AuthorityError::RolledBack(StorageFailure::Transient))
+    ));
     f.close().await;
     Ok(())
 }
@@ -1208,6 +1334,8 @@ async fn source_admission_borrows_transaction_with_no_credential_privileges() ->
         .execute(&mut *tx)
         .await?;
     verify_profile_source_admission(&mut tx, f.instance).await?;
+    let can_read_session_version: bool=sqlx::query_scalar("SELECT has_column_privilege(current_user,'identity_authority.sessions','provider_config_version','SELECT')").fetch_one(&mut *tx).await?;
+    assert!(!can_read_session_version);
     let can_read_cursor_key:bool=sqlx::query_scalar("SELECT has_column_privilege(current_user,'identity_authority.deployment','account_cursor_key','SELECT')").fetch_one(&mut *tx).await?;
     assert!(
         !can_read_cursor_key,

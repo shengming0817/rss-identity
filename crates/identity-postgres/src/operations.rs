@@ -53,28 +53,30 @@ impl Authority {
     ) -> Result<AuthenticationCandidate, AuthorityError> {
         let tenant = binding.tenant();
         let budget = Budget::new(deadline)?;
-        let snapshot=self.read(binding,budget.remaining(),move|tx|Box::pin(async move {
-            crate::transaction::connection(tx,move|c|Box::pin(async move {
-                let id:Option<String>=sqlx::query_scalar(concat!("SELECT principal_id::text FROM identity_authority.local_credentials WHERE tenant","_id=$1::uuid AND login_key=$2")).bind(tenant.to_string()).bind(login.as_str()).fetch_optional(&mut *c).await?;
-                match id {
-                    Some(id)=>Ok(Some((load(c,AccountKey {tenant,principal:principal(&id)?}).await?,authority_id(c).await?,crate::session_storage::now(c).await?))),
-                    None=>Ok(None)
-                }
-            })).await
+        let authority = self.instance.as_uuid();
+        let snapshot = self.read_sql(binding, budget.remaining(), move |c| Box::pin(async move {
+            lock_guard(c, tenant).await?;
+            let credential: Option<(uuid::Uuid, String)> = sqlx::query_as(
+                "SELECT principal_id,password_hash FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND login_key=$2")
+                .bind(tenant.to_string()).bind(login.as_str()).fetch_optional(&mut *c).await?;
+            let Some((id, encoding)) = credential else { return Ok(None) };
+            let key = AccountKey {tenant, principal: principal(&id.to_string())?};
+            let hash = rss_identity_core::account::PasswordEncoding::from_storage(encoding)
+                .map_err(|_| crate::transaction::corrupt())?;
+            Ok(Some((account_state_locked(c,key).await?, hash, crate::session_storage::now(c).await?)))
         })).await?;
         let kdf = &self.kdf;
-        let Some((stored, authority, authenticated_at)) = snapshot else {
+        let Some((state, hash, authenticated_at)) = snapshot else {
             budget.password(kdf.dummy(password)).await?;
             return Err(AuthorityError::Rejected);
         };
-        let hash = stored.hash.ok_or(AuthorityError::Rejected)?;
         let valid = budget.password(kdf.verify(password, hash)).await?;
-        if !valid || !stored.state.enabled() || !stored.state.member_active() {
+        if !valid || !state.active() {
             return Err(AuthorityError::Rejected);
         }
         let candidate = AuthenticationCandidate {
             binding,
-            state: stored.state,
+            state,
             authority,
             expires: budget.0.instant(),
             authenticated_at,
@@ -124,7 +126,7 @@ impl Authority {
                 )
                 .await?;
                 insert_account(c, key, login.as_str(), hash.as_str()).await?;
-                let state = load(c, key).await?.state;
+                let state = account_state_locked(c, key).await?;
                 Ok((
                     state,
                     vec![SecurityEvent::account(
@@ -307,7 +309,7 @@ impl Authority {
                 current(c, &proof).await?;
             }
             crate::management::authorize(policy.as_ref(),instance,&loaded,operation,Some(target), c).await?;
-            let old = load(c, target).await?.state;
+            let old = account_state_locked(c, target).await?;
             let (next, action) = old.change(change)?;
             sqlx::query("UPDATE identity_authority.accounts SET enabled=$3,auth_epoch=$4 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(next.enabled()).bind(next.epoch()).execute(&mut *c).await?;

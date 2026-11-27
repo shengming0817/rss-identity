@@ -157,6 +157,10 @@ SUITES[("rss-identity-postgres", "embedded")].update({
 })
 SUITES[("rss-identity-http-axum", "management_http")].add("account_query_projection_detail_and_cursor_context")
 
+SUITES[("rss-identity-postgres","profile_platform")].add("session_page_rechecks_distinct_bindings_and_advances_over_rejections")
+
+SUITES[("rss-identity-postgres","embedded")].add("session_reads_only_require_password_presence")
+
 def cargo(package, test, env, features=()):
     expected = SUITES[(package,test)]
     internal = (package=="rss-identity-postgres" and test in {"atomic","session_atomic","federated_atomic"}) or (package=="rss-identity-oidc" and test=="private_provider_tests")

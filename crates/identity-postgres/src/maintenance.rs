@@ -32,7 +32,7 @@ impl Authority {
                             .bind(key.tenant.to_string()).execute(&mut *c).await?.rows_affected();
                         if inserted != 1 { return Err(reject().into()); }
                         insert_account(c, key, login.as_str(), hash.as_str()).await?;
-                        let state = load_for_maintenance(c, key).await?.state;
+                        let state = account_state_locked(c, key).await?;
                         Ok((state, SecurityEvent::account(SecurityAction::AccountCreated, state, None)))
                     })
                 })
@@ -62,7 +62,7 @@ impl Authority {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {
                         lock_guard(c, key.tenant).await?;
-                        let old = load_for_maintenance(c, key).await?.state;
+                        let old = account_state_locked(c, key).await?;
                         let (next, action) = old.recover()?;
                         sqlx::query(
                             "UPDATE identity_authority.accounts SET auth_epoch=$3
