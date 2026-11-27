@@ -321,7 +321,8 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
         },
         key: Ed25519KeyPair::from_seed_unchecked(&[17; 32]).unwrap(),
     });
-    let config = support::config(f.instance)
+    let config = f
+        .config()
         .with_platform(device.clone())
         .with_enterprise(EnterpriseConfig::new(targets.clone(), signer)?);
     let authority = Authority::connect_runtime(
@@ -515,7 +516,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
             )
             .unwrap(),
         ),
-        support::config(f.instance)
+        f.config()
             .with_platform(device.clone())
             .with_enterprise(EnterpriseConfig::new(
                 targets.clone(),

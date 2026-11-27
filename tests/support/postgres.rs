@@ -325,7 +325,7 @@ pub fn binding(tenant: TenantId) -> ExecutionBinding {
         Epoch::new(1).unwrap(),
     )
 }
-pub fn config(instance: InstanceId) -> AuthorityConfig {
+fn config(instance: InstanceId) -> AuthorityConfig {
     AuthorityConfig::new(
         instance,
         SessionPolicy::new(900, 14400).unwrap(),

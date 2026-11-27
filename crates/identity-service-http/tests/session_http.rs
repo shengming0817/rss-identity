@@ -191,16 +191,18 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             .err()
             .unwrap();
 
-            assert_eq!(
-                error,
-                if remaining.is_zero() {
+            if remaining.is_zero() {
+                assert_eq!(error, CredentialError::Deadline);
+            } else {
+                // The cap can expire during credential admission or before the PG operation.
+                assert!(matches!(
+                    error,
                     CredentialError::Deadline
-                } else {
-                    CredentialError::Authority(
-                        rss_identity_postgres::AuthorityError::DeadlineElapsed,
-                    )
-                }
-            );
+                        | CredentialError::Authority(
+                            rss_identity_postgres::AuthorityError::DeadlineElapsed
+                        )
+                ));
+            }
         }
     }
     // Every rejected request above leaves idle expiry unchanged.

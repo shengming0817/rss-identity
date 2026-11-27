@@ -17,6 +17,7 @@ use rss_identity_postgres::*;
 use rss_transactional_messaging_postgres::PgRuntime;
 use serde_json::json;
 use sqlx::Connection;
+use std::io::Write;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use support::deadline;
 
@@ -153,14 +154,19 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     maintenance["database"]["user"] = json!("host_maintenance");
     maintenance["database"]["passwordFile"] = json!(root.join("maintenance"));
     std::fs::write(&maintenance_file, serde_json::to_vec(&maintenance)?)?;
-    use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&password_file)?
-        .write_all(PASSWORD.as_bytes())?;
+    let initial_password = root.join("initial-password");
+    for (path, value) in [
+        (&initial_password, "initial fixture operator password"),
+        (&password_file, PASSWORD),
+    ] {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?
+            .write_all(value.as_bytes())?;
+    }
     let kdf = Arc::new(
         PasswordKdf::new(
             std::num::NonZeroUsize::new(4).unwrap(),
@@ -170,15 +176,19 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     );
     let keys = config.bootstrap_keys()?;
     for key in &keys {
-        for (command, target) in [
-            ("initialize", "operator".to_owned()),
-            ("recover", key.principal.as_uuid().to_string()),
+        for (command, target, secret) in [
+            ("initialize", "operator".to_owned(), &initial_password),
+            (
+                "recover",
+                key.principal.as_uuid().to_string(),
+                &password_file,
+            ),
         ] {
             assert!(
                 std::process::Command::new(env!("CARGO_BIN_EXE_identity-admin"))
                     .arg(&maintenance_file)
                     .args([command, &key.tenant.to_string(), &target])
-                    .arg(&password_file)
+                    .arg(secret)
                     .status()?
                     .success()
             );
@@ -749,7 +759,6 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
-    use std::io::Write;
     restore.stdin.take().unwrap().write_all(&dump.stdout)?;
     anyhow::ensure!(
         restore.wait_with_output()?.status.success(),

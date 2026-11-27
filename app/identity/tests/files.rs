@@ -171,6 +171,10 @@ fn configured_directories_load_at_the_supported_capacity() {
         .collect();
     assert!(
         rss_identity_oidc::HttpOidc::new(
+            rss_identity_oidc::ProviderClock::new(
+                rss_request_context::SharedExecutionTimer::new(rss_identity_app::assembly::Timer),
+                std::time::SystemTime::now
+            ),
             profiles,
             oidc.private_access().unwrap(),
             oidc.transport().unwrap(),
