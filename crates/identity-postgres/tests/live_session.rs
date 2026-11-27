@@ -419,7 +419,7 @@ async fn host_admission_rechecks_federated_source() -> anyhow::Result<()> {
         .await?;
     let before = f.events().await?;
     let mut blocked = f.owner.begin().await?;
-    let blocker:i32=sqlx::query_scalar("SELECT pg_backend_pid() FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='personnel_revision' FOR UPDATE").bind(A).fetch_one(&mut *blocked).await?;
+    let blocker:i32=sqlx::query_scalar("SELECT pg_backend_pid() FROM identity_authority.directory_revisions WHERE tenant_id=$1::uuid AND kind='origin' AND source=$2 FOR UPDATE").bind(A).bind(provider.id.to_string()).fetch_one(&mut *blocked).await?;
     let service = oidc.clone();
     let id = provider.id;
     let version = provider.version;

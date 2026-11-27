@@ -507,7 +507,7 @@ async fn concurrent_accounts_share_one_operation_id_namespace() -> anyhow::Resul
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
-async fn receipt_write_deadline_covers_trigger_wait() -> anyhow::Result<()> {
+async fn receipt_write_deadline_covers_receipt_insert_wait() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let session = f.login().await?;
@@ -522,8 +522,12 @@ async fn receipt_write_deadline_covers_trigger_wait() -> anyhow::Result<()> {
     let id = operation(now(&f).await?);
     let before = f.events().await?;
     let mut blocker = f.owner.begin().await?;
-    let pid:i32=sqlx::query_scalar("SELECT pg_backend_pid() FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='personnel_revision' FOR UPDATE")
-        .bind(A).fetch_one(&mut *blocker).await?;
+    sqlx::query("LOCK TABLE identity_authority.profile_operations IN SHARE MODE")
+        .execute(&mut *blocker)
+        .await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
     let key = f.key;
     let store = f.store.clone();
     let writer = tokio::spawn(async move {

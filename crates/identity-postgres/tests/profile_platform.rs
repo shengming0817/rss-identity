@@ -1741,7 +1741,7 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
     })).await?;
     let _ = other;
     // A side-effecting SELECT is rejected by PostgreSQL READ ONLY, even though host code installed it.
-    sqlx::raw_sql("CREATE FUNCTION public.personnel_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.tenant_state SET value=value+1 WHERE kind=''personnel_revision'' RETURNING value'").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.personnel_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.tenant_state SET value=value+1 WHERE kind=''profile_sequence'' RETURNING value'").execute(&f.owner).await?;
     assert!(
         f.store
             .with_personnel_read(&actor, deadline(), |mut read| Box::pin(async move {
@@ -1886,7 +1886,7 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
             .await
             .is_err()
     );
-    sqlx::raw_sql("CREATE FUNCTION public.reference_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.tenant_state SET value=value+1 WHERE kind=''personnel_revision'' RETURNING value'").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reference_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.tenant_state SET value=value+1 WHERE kind=''profile_sequence'' RETURNING value'").execute(&f.owner).await?;
     assert!(
         f.store
             .with_session_references_read(
