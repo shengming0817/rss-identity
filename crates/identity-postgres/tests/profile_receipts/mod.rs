@@ -123,7 +123,59 @@ async fn admission_after_quota_changes_and_concurrent_reclamation() -> anyhow::R
     advance(&f, future).await?;
     // The physical wall clock stays behind the durable floor across Authority reconstruction.
     let small = capacity(&f, 1).await?;
-    for i in 0..3 {
+    let retry = change(operation(future), 8193);
+    sqlx::raw_sql("CREATE FUNCTION public.reject_reclamation_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture rollback'; END $$;
+                   CREATE TRIGGER fail_audit BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_reclamation_event()")
+        .execute(&f.owner).await?;
+    assert!(matches!(
+        small
+            .update_local_profile(f.actor().await?, f.key, retry.clone(), deadline())
+            .await,
+        Err(AuthorityError::RolledBack(_))
+    ));
+    sqlx::raw_sql("DROP TRIGGER fail_audit ON rss_audit.records")
+        .execute(&f.owner)
+        .await?;
+    let (rows, live):(i64,i64)=sqlx::query_as("SELECT count(*),count(*) FILTER(WHERE accepted_at_ms>$1) FROM identity_authority.profile_operations")
+        .bind(future-DAY_MS).fetch_one(&f.owner).await?;
+    assert_eq!((rows, live), (8193, 0));
+    assert_eq!(
+        small
+            .read_local_profile(&actor, f.key, deadline())
+            .await?
+            .revision,
+        8193
+    );
+    assert!(
+        small
+            .local_profile_receipt(&actor, f.key, retry.operation_id, deadline())
+            .await?
+            .is_none()
+    );
+    assert_eq!(f.events().await?, audit + 2);
+    assert_eq!(
+        small
+            .update_local_profile(f.actor().await?, f.key, retry.clone(), deadline())
+            .await?
+            .revision,
+        8194
+    );
+    assert_eq!(
+        small
+            .update_local_profile(f.actor().await?, f.key, retry, deadline())
+            .await?
+            .revision,
+        8194
+    );
+    let physical: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity_authority.profile_operations")
+            .fetch_one(&f.owner)
+            .await?;
+    assert_eq!(physical, 8193 - 63);
+    assert_eq!(f.events().await?, audit + 3);
+    future += DAY_MS;
+    advance(&f, future).await?;
+    for i in 1..3 {
         let revision = 8193 + i;
         let first = change(operation(future), revision);
         let second = change(operation(future), revision);
@@ -336,6 +388,78 @@ async fn receipt_visibility_expiry_and_uncertain_writes() -> anyhow::Result<()> 
             Err(AuthorityError::ProfileOperationExpired)
         ));
     }
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn receipt_lookup_keeps_original_proof_deadline_while_waiting() -> anyhow::Result<()> {
+    use rss_identity_core::session::SessionSecret;
+    use std::time::Duration;
+
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let session = f.login().await?;
+    let secret = || SessionSecret::parse(session.secret().expose().into());
+    let actor = Arc::new(
+        f.store
+            .inspect_session(
+                binding(f.key.tenant),
+                secret()?,
+                OperationDeadline::from_remaining(Duration::from_secs(2)),
+            )
+            .await?,
+    );
+    let fresh = f
+        .store
+        .authenticate_session(binding(f.key.tenant), secret()?, deadline())
+        .await?;
+    let mut tx = f.owner.begin().await?;
+    let blocker: i32 = sqlx::query_scalar(
+        "SELECT pg_backend_pid() FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+    )
+    .bind(A)
+    .fetch_one(&mut *tx)
+    .await?;
+    let key = f.key;
+    let store = f.store.clone();
+    let reader = actor.clone();
+    let stale = operation(1);
+    let lookup = tokio::spawn(async move {
+        store
+            .local_profile_receipt(&reader, key, stale, deadline())
+            .await
+    });
+    wait_for_guard(&f, blocker).await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while actor.assurance().is_ok() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    tx.commit().await?;
+    assert!(matches!(lookup.await?, Err(AuthorityError::Rejected)));
+    let floor: i64 = sqlx::query_scalar(
+        "SELECT profile_receipt_time_ms FROM identity_authority.guard WHERE tenant_id=$1::uuid",
+    )
+    .bind(A)
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(floor, 0);
+    assert!(matches!(
+        f.store
+            .local_profile_receipt(&fresh, key, stale, deadline())
+            .await,
+        Err(AuthorityError::ProfileOperationExpired)
+    ));
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT profile_receipt_time_ms FROM identity_authority.guard WHERE tenant_id=$1::uuid",
+    )
+    .bind(A)
+    .fetch_one(&f.owner)
+    .await?;
+    assert!(persisted > 0);
     f.close().await;
     Ok(())
 }

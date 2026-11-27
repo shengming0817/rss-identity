@@ -326,7 +326,7 @@ impl Reader {
             return Err(reject().into());
         }
         crate::transaction::check_binding(c, self.binding).await?;
-        let loaded = crate::session_storage::lookup(
+        let mut loaded = crate::session_storage::lookup(
             c,
             self.key.tenant,
             &self.digest,
@@ -334,7 +334,11 @@ impl Reader {
             &self.checks,
         )
         .await?;
-        if loaded.view.id != self.session || loaded.state.key() != self.key {
+        loaded.expires = loaded.expires.min(self.expires);
+        if Instant::now() >= loaded.expires
+            || loaded.view.id != self.session
+            || loaded.state.key() != self.key
+        {
             return Err(reject().into());
         }
         Ok(loaded)
