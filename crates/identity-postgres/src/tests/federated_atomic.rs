@@ -2115,8 +2115,55 @@ async fn federation_link_budget_and_integrity() -> anyhow::Result<()> {
             expected["department_snapshot"] =
                 serde_json::json!({"status":"unavailable","reason":"invalid_claim"});
             assert_eq!(stored_facts(&f, &new).await?, expected);
+            let sequence_preserved: bool = sqlx::query_scalar(
+                "SELECT s.facts_sequence=i.source_facts_sequence FROM identity_authority.sessions s
+                 JOIN identity_authority.link_intents i USING(tenant_id,principal_id)
+                 WHERE s.session_id=$1 AND i.intent_id=$2",
+            )
+            .bind(new.view().id.as_uuid())
+            .bind(intent)
+            .fetch_one(&f.owner)
+            .await?;
+            assert!(sequence_preserved);
+            let tenant = binding(f.key.tenant);
+            let actor = f
+                .store
+                .inspect_session(tenant, secret(&new), deadline())
+                .await?;
+            let checked = f
+                .store
+                .recheck_session_reference(tenant, &actor.reference()?, deadline())
+                .await?;
+            for department in [actor.department_snapshot()?, checked.department_snapshot()?] {
+                assert!(matches!(
+                    department,
+                    VerifiedDepartmentSnapshot::Unavailable(
+                        rss_identity_core::department::DepartmentUnavailableReason::InvalidClaim
+                    )
+                ));
+            }
+            for groups in [actor.groups()?, checked.groups()?] {
+                let VerifiedGroups::Available(groups) = groups else {
+                    anyhow::bail!("missing independent groups")
+                };
+                assert_eq!(groups.values()?, &["staff"]);
+                assert_eq!(
+                    groups.snapshot_id().to_string(),
+                    expected["groups"]["snapshot_id"]
+                );
+                assert_eq!(
+                    groups.expires_at(),
+                    expected["groups"]["expires_at"].as_i64().unwrap()
+                );
+            }
         } else {
-            assert!(result.is_err());
+            assert!(matches!(
+                (mode, result),
+                (
+                    "corrupt",
+                    Err(AuthorityError::RolledBack(StorageFailure::Invariant))
+                ) | ("reject", Err(AuthorityError::Rejected))
+            ));
             let (stage, claimed): (i16,bool) = sqlx::query_as("SELECT stage,claimed FROM identity_authority.link_intents
                 JOIN identity_authority.oidc_transactions ON link_intent=intent_id WHERE intent_id=$1")
                 .bind(intent).fetch_one(&f.owner).await?;

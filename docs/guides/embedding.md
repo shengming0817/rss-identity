@@ -39,6 +39,8 @@ HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` �
 
 组与部门快照各数量支持 1024；部门树深仍为 16。`with_auth_facts_budget` 选择完整 JSONB 表示的字节预算，数量合法不保证任意长名称组合都能装入预算。普通资料由 core 限制 raw JSON，HTTP 另限制完整请求包络；JSONB 的空格和数值展开不再受另一份不等价的文本长度上限拦截，SQL 保留对象结构约束。
 
+关联意图和替换会话在写入时都使用当前宿主预算。预算足够时原样传递来源事实；若宿主收紧预算，组件可将整份部门快照标记为 `invalid_claim`，保留来源观察序号、组和认证信息。降级后仍超限则拒绝本次写入。宿主授权和会话引用复核读取目标会话实际接纳的事实及其原有期限。
+
 `with_future_skew`、`with_operation_proof_lifetime` 和 `PlatformVerifier::challenge_seconds` 持有相应时间选择。策略只决定新签发内容，已有事实、证明和在途登记执行冻结期限；任何本地预算都不能延长签名 exp、会话或已存 expiry。
 
 ## 请求与管理授权
