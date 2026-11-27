@@ -1543,7 +1543,7 @@ async fn maintenance_permissions_and_schema_are_exact() -> anyhow::Result<()> {
             StorageMismatch::SchemaVersion
         ))
     ));
-    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=19; ALTER TABLE identity_authority.schema_version ADD CHECK(version=19)").execute(&f.owner).await?;
+    sqlx::raw_sql("UPDATE identity_authority.schema_version SET version=20; ALTER TABLE identity_authority.schema_version ADD CHECK(version=20)").execute(&f.owner).await?;
     assert!(f.probe(AuthorityProfile::Runtime).await.is_ok());
     for (remove, restore, expected) in [
         (
