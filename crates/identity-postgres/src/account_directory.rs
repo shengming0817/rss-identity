@@ -27,6 +27,8 @@ pub struct AccountDirectoryRow {
     pub department_status: String,
     pub department_snapshot: Option<rss_identity_core::department::DepartmentSnapshot>,
 }
+/// Across pages, the directory guarantees consistency for the requested projection,
+/// filter and sort. Embedded callers should use `fields` to project each row.
 pub struct AccountPage {
     pub accounts: Vec<AccountDirectoryRow>,
     pub fields: Vec<Field>,
@@ -220,9 +222,11 @@ fn after(sql: &mut QueryBuilder<Postgres>, query: &AccountQuery, values: &[Value
     }
     sql.push(")");
 }
+const CURSOR_DOMAIN: &[u8] = b"identity.accounts.cursor.v2\0";
+
 fn encode(key: &[u8], cursor: &Cursor) -> Result<String, MutationError> {
     let plain = serde_json::to_vec(cursor).map_err(|_| corrupt())?;
-    let mut signed = b"identity.accounts.cursor.v1\0".to_vec();
+    let mut signed = CURSOR_DOMAIN.to_vec();
     signed.extend(&plain);
     let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), &signed);
     let mut bytes = tag.as_ref().to_vec();
@@ -236,7 +240,7 @@ fn decode(key: &[u8], raw: &str) -> Result<Cursor, MutationError> {
     if bytes.len() <= 32 || bytes.len() > 4096 {
         return Err(MutationError::InvalidInput);
     }
-    let mut signed = b"identity.accounts.cursor.v1\0".to_vec();
+    let mut signed = CURSOR_DOMAIN.to_vec();
     signed.extend(&bytes[32..]);
     hmac::verify(
         &hmac::Key::new(hmac::HMAC_SHA256, key),
@@ -293,13 +297,9 @@ impl Authority {
         self.read_sql(actor.binding, budget.remaining(), move |c| {
             Box::pin(async move {
                 let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
-                let profiles = query.needs_profiles();
-                let department_source = if query.needs_departments() {
-                    let source = query.source().ok_or_else(corrupt)?;
-                    Some(uuid::Uuid::parse_str(source).map_err(|_| corrupt())?)
-                } else {
-                    None
-                };
+                let deps = crate::directory_window::ReadDependencies::accounts(&query, max_age)?;
+                let profiles = deps.profile_age.is_some();
+                let department_source = deps.department;
                 for op in [
                     Some(ManagementOperation::ListAccounts),
                     profiles.then_some(ManagementOperation::ReadLatestProfile),
@@ -313,20 +313,20 @@ impl Authority {
                     crate::management::authorize(policy.as_ref(), instance, &loaded, op, None, c)
                         .await?;
                 }
-                let window = crate::personnel::read_window(
-                    c,
-                    actor.key.tenant,
-                    profiles.then_some(max_age),
-                    department_source,
-                    budget.0.instant(),
-                    Some(
-                        loaded
-                            .view
-                            .idle_expires_at
-                            .min(loaded.view.absolute_expires_at),
-                    ),
-                )
-                .await?;
+                let actor_deadline = crate::sessions::checked_expiry(&loaded, budget.0.instant())?;
+                let window = deps
+                    .window(
+                        c,
+                        actor.key.tenant,
+                        actor_deadline,
+                        Some(
+                            loaded
+                                .view
+                                .idle_expires_at
+                                .min(loaded.view.absolute_expires_at),
+                        ),
+                    )
+                    .await?;
                 // Persisted independently of any client credential; shared by all Authority instances.
                 let key: Vec<u8> = sqlx::query_scalar(
                     "SELECT account_cursor_key FROM identity_authority.deployment",
@@ -341,16 +341,19 @@ impl Authority {
                         actor.key.principal.as_uuid().to_string(),
                         loaded.view.id.to_string(),
                         window.generation,
+                        deps.profile_age,
                         &query,
                     ))
                     .map_err(|_| corrupt())?,
                 )
                 .to_vec();
                 let seek = cursor.as_ref().map(|raw| decode(&key, raw)).transpose()?;
+                let mut page_deadline = window.expires;
                 if let Some(seek) = &seek {
-                    if seek.binding != binding || seek.expires <= window.now {
+                    if seek.binding != binding || seek.expires <= window.clock.seconds() {
                         return Err(MutationError::CursorInvalidated);
                     }
+                    page_deadline = page_deadline.min(window.clock.deadline(seek.expires)?);
                     if seek.position.len() != query.sort().len()
                         || query
                             .sort()
@@ -373,6 +376,9 @@ impl Authority {
                 let mut sql = QueryBuilder::<Postgres>::with_arguments(
                     concat!(
                         include_str!("department-facts.sql"),
+                        ", profile_facts AS NOT MATERIALIZED (",
+                        include_str!("profile-facts.sql"),
+                        ")",
                         include_str!("account-directory.sql")
                     ),
                     {
@@ -381,7 +387,7 @@ impl Authority {
                         args.add(actor.key.tenant.to_string())
                             .map_err(|_| corrupt())?;
                         args.add(department_source).map_err(|_| corrupt())?;
-                        args.add(window.now).map_err(|_| corrupt())?;
+                        args.add(window.clock.seconds()).map_err(|_| corrupt())?;
                         args.add(query.source().filter(|_| profiles).map(str::to_owned))
                             .map_err(|_| corrupt())?;
                         args.add(i64::from(max_age)).map_err(|_| corrupt())?;
@@ -438,8 +444,12 @@ impl Authority {
                     .map(serde_json::from_value)
                     .collect::<Result<_, _>>()
                     .map_err(|_| corrupt())?;
-                if std::time::Instant::now() >= window.expires {
+                let finished = std::time::Instant::now();
+                if finished >= actor_deadline {
                     return Err(reject().into());
+                }
+                if finished >= page_deadline {
+                    return Err(MutationError::CursorInvalidated);
                 }
                 Ok(AccountPage {
                     accounts,

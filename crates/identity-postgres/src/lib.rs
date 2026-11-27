@@ -11,6 +11,7 @@ mod session_checks;
 #[cfg(feature = "test-support")]
 pub use session_checks::ControlledFactTime;
 mod account_directory;
+mod directory_window;
 mod federation;
 mod federation_state;
 pub use federation_state::StateSigner;

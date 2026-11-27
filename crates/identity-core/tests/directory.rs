@@ -121,3 +121,26 @@ fn department_predicates_require_an_exact_idp_source() {
         assert!(!q.needs_profiles());
     }
 }
+
+#[test]
+fn fields_used_by_a_continuation_include_nested_filters_and_ordering() {
+    let q = AccountQuery::parse(
+        Some("enabled==true;(login==alice,email=isnull=true)"),
+        Some("-departmentStatus"),
+        Some("principalId"),
+        Some("11111111-1111-4111-8111-111111111111"),
+        1,
+    )
+    .unwrap();
+    for field in [
+        Field::Enabled,
+        Field::Login,
+        Field::Email,
+        Field::DepartmentStatus,
+        Field::PrincipalId,
+    ] {
+        assert!(q.used_fields().contains(&field));
+    }
+    let plain = AccountQuery::parse(None, None, Some("principalId"), Some("local"), 1).unwrap();
+    assert!(!plain.needs_profiles() && !plain.needs_departments());
+}

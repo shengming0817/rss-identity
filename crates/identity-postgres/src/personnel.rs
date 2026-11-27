@@ -2,6 +2,7 @@
 //! ref: PostgreSQL REL_17_STABLE src/backend/commands/variable.c check_transaction_read_only.
 use crate::{
     AuthenticatedSession, Authority, AuthorityError, ManagementOperation,
+    directory_window::{ReadDependencies, ReadWindow},
     profiles::Reader,
     transaction::{MutationError, reject},
     types::Budget,
@@ -45,7 +46,7 @@ impl<'a> PersonnelRead<'a> {
     pub(crate) fn session_references(
         connection: &'a mut PgConnection,
         relation: String,
-        window: PersonnelWindow,
+        window: ReadWindow,
     ) -> Self {
         Self {
             connection,
@@ -180,27 +181,6 @@ impl Authority {
                             .await,
                         )?
                     };
-                    let window = read_window(
-                        c,
-                        reader.key.tenant,
-                        Some(max_age),
-                        None,
-                        expires,
-                        Some(
-                            loaded
-                                .view
-                                .idle_expires_at
-                                .min(loaded.view.absolute_expires_at),
-                        ),
-                    )
-                    .await?;
-                    let expires = window.expires;
-                    let PersonnelWindow {
-                        generation,
-                        valid_until,
-                        now,
-                        ..
-                    } = window;
                     let scope = if all {
                         PersonnelProfileScope::All
                     } else if own {
@@ -208,6 +188,28 @@ impl Authority {
                     } else {
                         PersonnelProfileScope::None
                     };
+                    let window = ReadDependencies::references(instance, platform.as_deref())
+                        .with_personnel(login, scope, reader.key.principal.as_uuid(), max_age)
+                        .window(
+                            c,
+                            reader.key.tenant,
+                            expires,
+                            Some(
+                                loaded
+                                    .view
+                                    .idle_expires_at
+                                    .min(loaded.view.absolute_expires_at),
+                            ),
+                        )
+                        .await?;
+                    let expires = window.expires;
+                    let ReadWindow {
+                        generation,
+                        valid_until,
+                        clock,
+                        ..
+                    } = window;
+                    let now = clock.seconds();
                     let profiles = if all {
                         "true".into()
                     } else if own {
@@ -216,6 +218,7 @@ impl Authority {
                         "false".into()
                     };
                     let relation = include_str!("personnel.sql")
+                        .replace("{profile_facts}", include_str!("profile-facts.sql"))
                         .replace("{logins}", if login { "true" } else { "false" })
                         .replace("{profiles}", &profiles)
                         .replace("{max_age}", &max_age.to_string())
@@ -268,80 +271,22 @@ fn permission(result: Result<(), AccountRuleError>) -> Result<bool, MutationErro
     }
 }
 
-pub(crate) struct PersonnelWindow {
-    pub generation: i64,
-    pub valid_until: i64,
-    pub now: i64,
-    pub expires: Instant,
-}
-pub(crate) async fn read_window(
-    c: &mut PgConnection,
-    tenant: TenantId,
-    max_age: Option<u32>,
-    department_source: Option<uuid::Uuid>,
-    expires: Instant,
-    actor_until: Option<i64>,
-) -> Result<PersonnelWindow, MutationError> {
-    let sampled = Instant::now();
-    let (generation, micros, mut next): (i64, i64, Option<i64>) = if let Some(max_age) = max_age {
-        sqlx::query_as("WITH sampled AS MATERIALIZED (SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint AS micros) SELECT value,sampled.micros,LEAST((SELECT min(idle_expires_at) FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND revoked_at IS NULL AND idle_expires_at>sampled.micros/1000000),(SELECT min(absolute_expires_at) FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND revoked_at IS NULL AND absolute_expires_at>sampled.micros/1000000),(SELECT min(expires_at) FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND expires_at>sampled.micros/1000000),(SELECT min(observed_at)+$2 FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND observed_at>sampled.micros/1000000-$2)) FROM identity_authority.tenant_state CROSS JOIN sampled WHERE tenant_id=$1::uuid AND kind='personnel_revision'").bind(tenant.to_string()).bind(i64::from(max_age)).fetch_one(&mut *c).await?
-    } else {
-        sqlx::query_as("WITH sampled AS MATERIALIZED (SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint AS micros) SELECT value,sampled.micros,LEAST((SELECT min(idle_expires_at) FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND revoked_at IS NULL AND idle_expires_at>sampled.micros/1000000),(SELECT min(absolute_expires_at) FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND revoked_at IS NULL AND absolute_expires_at>sampled.micros/1000000)) FROM identity_authority.tenant_state CROSS JOIN sampled WHERE tenant_id=$1::uuid AND kind='personnel_revision'")
-            .bind(tenant.to_string()).fetch_one(&mut *c).await?
-    };
-    let now = micros / 1_000_000;
-    if let Some(source) = department_source {
-        let until: Option<i64> = sqlx::query_scalar(concat!(
-            include_str!("department-facts.sql"),
-            include_str!("department-expiry.sql")
-        ))
-        .bind(tenant.to_string())
-        .bind(source)
-        .bind(now)
-        .fetch_one(&mut *c)
-        .await?;
-        next = match (next, until) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-    }
-    let valid_until = next
-        .unwrap_or(i64::MAX)
-        .min(actor_until.unwrap_or(i64::MAX))
-        .min(now.saturating_add(60));
-    let remaining = valid_until
-        .saturating_mul(1_000_000)
-        .saturating_sub(micros)
-        .saturating_sub(1)
-        .max(0) as u64;
-    let expires = expires.min(
-        sampled
-            .checked_add(std::time::Duration::from_micros(remaining))
-            .ok_or_else(reject)?,
-    );
-    Ok(PersonnelWindow {
-        generation,
-        valid_until,
-        now,
-        expires,
-    })
-}
 pub(crate) fn session_relation(
     instance: InstanceId,
     tenant: TenantId,
     now: i64,
     platform: Option<&str>,
 ) -> String {
+    // The host supplies its own positional query arguments. Keep these trusted context
+    // literals inside the reference relation; the internal deadline probe uses bindings.
+    let audience = platform.map_or_else(
+        || "NULL".to_owned(),
+        |s| format!("'{}'", s.replace('\'', "''")),
+    );
     include_str!("session_reference.sql")
-        .replace("{tenant}", &tenant.to_string())
-        .replace("{instance}", &instance.to_string())
-        .replace("{now}", &now.to_string())
+        .replace("{sessions}", "identity_authority.sessions")
         .replace(
-            "{platform_enabled}",
-            if platform.is_some() { "true" } else { "false" },
-        )
-        .replace(
-            "{platform_audience}",
-            &platform.unwrap_or("").replace("'", "''"),
+            "{context}",
+            &format!("'{tenant}'::uuid,'{instance}'::uuid,{now}::bigint,{audience}::text"),
         )
 }

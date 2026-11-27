@@ -1,7 +1,7 @@
--- Fresh schema v23 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v24 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=23));
-INSERT INTO identity_authority.schema_version VALUES(23);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=24));
+INSERT INTO identity_authority.schema_version VALUES(24);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),
@@ -15,14 +15,22 @@ CREATE TRIGGER protect_deployment BEFORE UPDATE OR DELETE ON identity_authority.
 CREATE TABLE identity_authority.tenants(tenant_id uuid PRIMARY KEY);
 CREATE TABLE identity_authority.tenant_state (
  tenant_id uuid NOT NULL REFERENCES identity_authority.tenants,
- kind text NOT NULL CHECK(kind IN ('profile_sequence','personnel_revision','receipt_clock','attempt_capacity')),
+ kind text NOT NULL CHECK(kind IN ('profile_sequence','receipt_clock','attempt_capacity')),
  value bigint NOT NULL DEFAULT 0 CHECK(value>=0),
  PRIMARY KEY(tenant_id,kind)
+);
+-- Source counters live as long as the tenant so a replaced source never reuses its old generation.
+CREATE TABLE identity_authority.directory_revisions (
+ tenant_id uuid NOT NULL REFERENCES identity_authority.tenants,
+ kind text NOT NULL CHECK(kind IN ('rows','enabled','member','epoch','login','password','origin','profile','department','groups','reference')),
+ source text NOT NULL,
+ value bigint NOT NULL CHECK(value>0),
+ PRIMARY KEY(tenant_id,kind,source)
 );
 CREATE FUNCTION identity_authority.initialize_tenant_state() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  INSERT INTO identity_authority.tenant_state(tenant_id,kind) VALUES
-  (NEW.tenant_id,'profile_sequence'),(NEW.tenant_id,'personnel_revision'),(NEW.tenant_id,'receipt_clock'),(NEW.tenant_id,'attempt_capacity');
+  (NEW.tenant_id,'profile_sequence'),(NEW.tenant_id,'receipt_clock'),(NEW.tenant_id,'attempt_capacity');
  RETURN NEW;
 END $$;
 CREATE TRIGGER initialize_state AFTER INSERT ON identity_authority.tenants
@@ -254,7 +262,7 @@ CREATE INDEX webauthn_ceremony_subject ON identity_authority.webauthn_ceremonies
 CREATE INDEX step_up_expiry ON identity_authority.step_up_grants(tenant_id,expires_at);
 CREATE INDEX webauthn_account_credentials ON identity_authority.webauthn_credentials(tenant_id,principal_id);
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['webauthn_rp','webauthn_accounts','webauthn_credentials','webauthn_ceremonies','step_up_grants','platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','tenants','tenant_state','local_credentials','accounts','memberships','password_attempts','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
+ FOREACH t IN ARRAY ARRAY['webauthn_rp','webauthn_accounts','webauthn_credentials','webauthn_ceremonies','step_up_grants','platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','tenants','tenant_state','directory_revisions','local_credentials','accounts','memberships','password_attempts','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
  EXECUTE format('ALTER TABLE identity_authority.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE identity_authority.%I FORCE ROW LEVEL SECURITY',t);
  EXECUTE format('CREATE POLICY tenant ON identity_authority.%I USING (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',t);
@@ -371,28 +379,75 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION identity_authority.lock_session(bytea,uuid,text,text,uuid) FROM PUBLIC;
 
--- Cursor generation follows every personnel/session-visible mutation, including maintenance.
-CREATE FUNCTION identity_authority.advance_personnel_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+-- Maintenance, cascades and ON CONFLICT use the same transactional write path.
+-- PostgreSQL fires same-event triggers in name order. Moves take both keys in order.
+-- ref: PostgreSQL REL_17_6 src/backend/commands/trigger.c
+CREATE FUNCTION identity_authority.advance_directory_revision() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+DECLARE prior_source text := ''; next_source text := '';
 BEGIN
- UPDATE identity_authority.tenant_state SET value=value+1
- WHERE tenant_id=COALESCE(NEW.tenant_id,OLD.tenant_id) AND kind='personnel_revision';
- IF NOT FOUND THEN RAISE EXCEPTION 'missing personnel revision'; END IF;
- IF TG_OP='DELETE' THEN RETURN OLD; END IF;
- RETURN NEW;
+ CASE TG_ARGV[1]
+  WHEN 'provider' THEN prior_source := OLD.provider_id::text; next_source := NEW.provider_id::text;
+  WHEN 'profile' THEN prior_source := OLD.source; next_source := NEW.source;
+  WHEN 'fact' THEN prior_source := OLD.source_provider_id::text; next_source := NEW.source_provider_id::text;
+  WHEN 'reference' THEN
+   prior_source := coalesce(OLD.source_provider_id::text,OLD.authentication_source);
+   next_source := coalesce(NEW.source_provider_id::text,NEW.authentication_source);
+  WHEN 'global' THEN NULL;
+  ELSE RAISE EXCEPTION 'unknown directory source';
+ END CASE;
+ INSERT INTO identity_authority.directory_revisions AS r(tenant_id,kind,source,value)
+ SELECT DISTINCT tenant,TG_ARGV[0],source,1 FROM
+  (VALUES (OLD.tenant_id,prior_source),(NEW.tenant_id,next_source)) affected(tenant,source)
+ WHERE tenant IS NOT NULL AND source IS NOT NULL ORDER BY 1,2,3
+ ON CONFLICT(tenant_id,kind,source) DO UPDATE SET value=r.value+1;
+ RETURN NULL;
 END $$;
-DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['accounts','memberships','local_credentials','providers','external_identities','profile_observations','local_profiles'] LOOP
- EXECUTE format('CREATE TRIGGER personnel_revision AFTER INSERT OR UPDATE OR DELETE ON identity_authority.%I FOR EACH ROW EXECUTE FUNCTION identity_authority.advance_personnel_revision()',t);
+REVOKE ALL ON FUNCTION identity_authority.advance_directory_revision() FROM PUBLIC;
+
+-- Each entry declares the facts observed by one revision family. UPDATE OF skips unrelated
+-- writes and WHEN skips assignments which preserve the value. INSERT/DELETE also track presence.
+DO $$ DECLARE item record; cols text; pred text; trg text;
+BEGIN
+ FOR item IN SELECT * FROM (VALUES
+  ('accounts','rows','global','principal_id'),
+  ('accounts','enabled','global','principal_id,enabled'),
+  ('accounts','epoch','global','principal_id,auth_epoch'),
+  ('memberships','rows','global','principal_id'),
+  ('memberships','member','global','principal_id,active'),
+  ('memberships','epoch','global','principal_id,epoch'),
+  ('local_credentials','password','global','principal_id'),
+  ('local_credentials','login','global','principal_id,login_key'),
+  ('providers','origin','provider','provider_id,enabled,config_version,revocation_epoch'),
+  ('external_identities','origin','provider','provider_id,principal_id,identity_id'),
+  ('profile_observations','profile','profile','source,principal_id,provider_id,config_version,source_epoch,snapshot_id,sequence,source_revision,collected_at,observed_at,expires_at,value'),
+  ('sessions','department','fact','source_provider_id,principal_id,session_id,auth_epoch,membership_epoch,provider_epoch,facts_sequence,auth_facts->''provider_config_version'',auth_facts->''department_snapshot'''),
+  ('sessions','groups','fact','source_provider_id,principal_id,session_id,auth_epoch,membership_epoch,provider_epoch,facts_sequence,auth_facts->''provider_config_version'',auth_facts->''groups'''),
+  ('sessions','reference','reference','source_provider_id,principal_id,session_id,authentication_source,platform_authentication,credential_kind,auth_epoch,membership_epoch,absolute_expires_at,revoked_at,external_identity_id,provider_epoch,auth_facts->''provider_config_version''')
+ ) AS rules(tab,kind,scope,observed)
+ LOOP
+  trg := 'revision_' || item.kind;
+  -- Flat predicates round-trip through pg_dump/pg_restore structural attestation.
+  SELECT string_agg(format('(OLD.%s IS DISTINCT FROM NEW.%s)',term,term),' OR ' ORDER BY pos),
+   string_agg(DISTINCT split_part(term,'->',1) COLLATE "C",',')
+  INTO pred,cols
+  FROM unnest(string_to_array('tenant_id,'||item.observed,',')) WITH ORDINALITY terms(term,pos);
+  -- Pure renewal preserves the validity already promised to a reference cursor.
+  IF item.kind='reference' THEN
+   pred := pred||' OR NEW.idle_expires_at < OLD.idle_expires_at';
+   cols := cols||',idle_expires_at';
+  END IF;
+  EXECUTE format('CREATE TRIGGER %I AFTER INSERT OR DELETE ON identity_authority.%I FOR EACH ROW EXECUTE FUNCTION identity_authority.advance_directory_revision(%L,%L)',trg,item.tab,item.kind,item.scope);
+  EXECUTE format('CREATE TRIGGER %I AFTER UPDATE OF %s ON identity_authority.%I FOR EACH ROW WHEN (%s) EXECUTE FUNCTION identity_authority.advance_directory_revision(%L,%L)',trg||'_update',cols,item.tab,pred,item.kind,item.scope);
  END LOOP;
 END $$;
-REVOKE ALL ON FUNCTION identity_authority.advance_personnel_revision() FROM PUBLIC;
-CREATE INDEX personnel_observation_expiry ON identity_authority.profile_observations(tenant_id,expires_at);
-CREATE INDEX personnel_observation_time ON identity_authority.profile_observations(tenant_id,observed_at);
-
-CREATE TRIGGER personnel_revision AFTER INSERT OR DELETE OR UPDATE OF principal_id,authentication_source,local_authenticated_at,platform_authentication,credential_kind,auth_epoch,membership_epoch,absolute_expires_at,revoked_at,external_identity_id,source_provider_id,provider_epoch,auth_facts,facts_sequence ON identity_authority.sessions FOR EACH ROW EXECUTE FUNCTION identity_authority.advance_personnel_revision();
+CREATE INDEX directory_profile_start ON identity_authority.profile_observations(tenant_id,source,observed_at);
+CREATE INDEX directory_profile_end ON identity_authority.profile_observations(tenant_id,source,expires_at);
+CREATE INDEX personnel_profile_start ON identity_authority.profile_observations(tenant_id,observed_at);
+CREATE INDEX personnel_profile_end ON identity_authority.profile_observations(tenant_id,expires_at);
+CREATE INDEX directory_link_source ON identity_authority.external_identities(tenant_id,provider_id,principal_id);
 
 CREATE INDEX personnel_session_idle ON identity_authority.sessions(tenant_id,idle_expires_at) WHERE revoked_at IS NULL;
-CREATE INDEX personnel_session_absolute ON identity_authority.sessions(tenant_id,absolute_expires_at) WHERE revoked_at IS NULL;
 
 -- Match serde_json/RFC 6901 array indices while preserving numeric object keys.
 CREATE FUNCTION identity_authority.profile_path_scalar(document jsonb, segments text[]) RETURNS jsonb
@@ -426,9 +481,10 @@ CREATE FUNCTION identity_authority.personnel_facts(
  observed_at bigint, expires_at bigint, value jsonb
 ) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
  WITH admitted AS MATERIALIZED (
-  SELECT g.value AS personnel_revision, floor(extract(epoch FROM statement_timestamp()))::bigint AS now_at
-  FROM identity_authority.tenant_state g
-  WHERE g.kind='personnel_revision' AND g.tenant_id=tenant AND tenant::text=current_setting('rss.tenant_id',true)
+  SELECT (SELECT coalesce(sum(r.value),0)::bigint FROM identity_authority.directory_revisions r
+    WHERE r.tenant_id=tenant AND r.kind IN ('rows','enabled','member','epoch','origin','profile','department','groups')) AS fact_generation, floor(extract(epoch FROM statement_timestamp()))::bigint AS now_at
+  FROM identity_authority.tenants g
+  WHERE g.tenant_id=tenant AND tenant::text=current_setting('rss.tenant_id',true)
     AND EXISTS (SELECT FROM identity_authority.deployment WHERE authority_id=instance_id)
     AND subjects IS NOT NULL AND cardinality(subjects)<=64
     AND NOT EXISTS (SELECT FROM unnest(subjects) s WHERE s IS NULL OR s='00000000-0000-0000-0000-000000000000')
@@ -491,7 +547,7 @@ CREATE FUNCTION identity_authority.personnel_facts(
    ELSE 'available' END AS state
   FROM selected s
  )
- SELECT personnel_revision,now_at,id,state,snap,CASE WHEN family='profile' THEN profile_version ELSE fact_version END,
+ SELECT fact_generation,now_at,id,state,snap,CASE WHEN family='profile' THEN profile_version ELSE fact_version END,
   CASE WHEN family='profile' THEN profile_sequence ELSE facts_sequence END,c.source_revision,collected_at,
   start_at,end_at,CASE WHEN state='available' THEN selected_value END
  FROM classified c ORDER BY id
