@@ -96,6 +96,8 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 
 pub(crate) struct Loaded {
     pub origin: Option<Box<crate::federation_storage::Origin>>,
+    /// Qualified on this transaction's connection, with the host's binding locks held.
+    pub verified_platform: Option<Box<crate::platform::PlatformBinding>>,
     pub source: rss_identity_core::session::AuthenticationSource,
     pub assurance: Assurance,
     pub groups: GroupFacts,
@@ -216,6 +218,7 @@ async fn restore(
         }
         _ => return Err(corrupt()),
     };
+    let mut verified_platform = None;
     let (assurance, groups) = match (source_kind.as_str(), &origin, source) {
         ("oidc", Some(origin), Some(source)) => (
             origin.facts.assurance.clone(),
@@ -233,8 +236,10 @@ async fn restore(
                     .map_err(|_| corrupt())?;
             let verifier = platform.verifier(key, instance, session_checks)?;
             crate::platform::recheck_binding(c, &platform.binding, verifier).await?;
+            let assurance = platform.assurance()?;
+            verified_platform = Some(Box::new(platform.binding));
             (
-                platform.assurance()?,
+                assurance,
                 rss_identity_core::groups::Groups::unavailable(
                     rss_identity_core::facts::FactUnavailableReason::NotConfigured,
                 ),
@@ -252,6 +257,7 @@ async fn restore(
     // instead of applying a new deployment policy to an already accepted fact.
     Ok(Loaded {
         origin: origin.map(Box::new),
+        verified_platform,
         source,
         assurance,
         groups: GroupFacts::new(groups, &fact_sample)?,

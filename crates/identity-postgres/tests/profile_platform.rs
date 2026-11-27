@@ -634,7 +634,13 @@ async fn session_page_rechecks_distinct_bindings_and_advances_over_rejections() 
                           "hardwareKey":true,"userPresence":false,"userVerification":false});
     // The first two rows share a stale source version. The third has the same binding ID
     // and the current version and is the first page's lookahead.
+    let current_secret = rss_identity_core::session::SessionSecret::generate()?;
     for n in 1..=3 {
+        let digest = if n == 3 {
+            current_secret.digest()
+        } else {
+            rss_identity_core::session::SessionSecret::generate()?.digest()
+        };
         let mut stored = platform.clone();
         if n < 3 {
             stored["binding"]["sourceVersion"] = json!(binding.source_version + 1);
@@ -642,9 +648,9 @@ async fn session_page_rechecks_distinct_bindings_and_advances_over_rejections() 
         sqlx::query("INSERT INTO identity_authority.sessions(tenant_id,principal_id,session_id,
             credential_kind,token_hash,authentication_source,platform_authentication,auth_epoch,membership_epoch,
             issued_at,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at)
-            SELECT tenant_id,principal_id,$2,credential_kind,sha256(uuid_send($2)),'platform',$3,auth_epoch,membership_epoch,
+            SELECT tenant_id,principal_id,$2,credential_kind,$4,'platform',$3,auth_epoch,membership_epoch,
             issued_at,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at FROM identity_authority.sessions WHERE session_id=$1")
-            .bind(local.view().id.as_uuid()).bind(Uuid::from_u128(n)).bind(stored).execute(&f.owner).await?;
+            .bind(local.view().id.as_uuid()).bind(Uuid::from_u128(n)).bind(stored).bind(digest.as_slice()).execute(&f.owner).await?;
     }
     let page = store
         .list_sessions(proof(&store, &f, &local).await?, None, 2, deadline())
@@ -669,6 +675,39 @@ async fn session_page_rechecks_distinct_bindings_and_advances_over_rejections() 
     );
     assert!(next.next_cursor.is_none());
     assert_eq!(verifier.rechecks.load(Ordering::SeqCst), 2);
+    let both = store
+        .list_sessions(proof(&store, &f, &local).await?, None, 3, deadline())
+        .await?;
+    assert_eq!(
+        both.sessions
+            .iter()
+            .map(|s| s.id.as_uuid())
+            .collect::<Vec<_>>(),
+        [Uuid::from_u128(3)]
+    );
+    assert_eq!(verifier.rechecks.load(Ordering::SeqCst), 4);
+
+    // Start a fresh list transaction using the current platform credential.
+    let actor = store
+        .inspect_session(
+            crate::support::binding(f.key.tenant),
+            current_secret,
+            deadline(),
+        )
+        .await?;
+    let before = verifier.rechecks.load(Ordering::SeqCst);
+    let from_platform = store
+        .list_sessions(actor, page.next_cursor, 2, deadline())
+        .await?;
+    assert_eq!(
+        from_platform
+            .sessions
+            .iter()
+            .map(|s| s.id.as_uuid())
+            .collect::<Vec<_>>(),
+        [Uuid::from_u128(3), local.view().id.as_uuid()]
+    );
+    assert_eq!(verifier.rechecks.load(Ordering::SeqCst) - before, 1);
     // A cached success may only cover the binding, never the next session's envelope.
     sqlx::query(
         "UPDATE identity_authority.sessions SET platform_authentication=$1 WHERE session_id=$2",

@@ -122,6 +122,9 @@ pub(crate) async fn read(
     rows.truncate(usize::from(limit));
     let origins = current_origins(c, actor, &rows).await?;
     let mut platforms = HashMap::new();
+    if let Some(binding) = loaded.verified_platform.as_deref() {
+        platforms.insert(binding.clone(), true);
+    }
     let mut accepted = Vec::with_capacity(rows.len());
     let mut scanned = None;
     for row in rows {
