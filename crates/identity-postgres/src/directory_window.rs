@@ -120,19 +120,29 @@ impl<'a> ReadDependencies<'a> {
             .saturating_add(CONSISTENCY_WINDOW_SECONDS)
             .min(actor_until.unwrap_or(i64::MAX));
         if let Some(max_age) = self.profile_age {
-            let next: Option<i64> = sqlx::query_scalar(concat!(
+            const TRANSITION: &str = concat!(
                 "WITH profile_facts AS NOT MATERIALIZED (",
                 include_str!("profile-facts.sql"),
                 ") ",
                 include_str!("profile-transition.sql")
-            ))
-            .bind(&tenant_id)
-            .bind(now)
-            .bind(i64::from(max_age))
-            .bind(self.source)
-            .bind(self.profile_subject)
-            .fetch_one(&mut *c)
-            .await?;
+            );
+            // Separate statement shapes keep the chosen source indexable in a generic prepared plan.
+            let filter = match (self.source, self.profile_subject) {
+                (Some(_), _) => " AND source=$4",
+                (None, Some(_)) => " AND principal_id=$4",
+                _ => "",
+            };
+            let mut query =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("{TRANSITION}{filter}")))
+                    .bind(&tenant_id)
+                    .bind(now)
+                    .bind(i64::from(max_age));
+            if let Some(source) = self.source {
+                query = query.bind(source);
+            } else if let Some(subject) = self.profile_subject {
+                query = query.bind(subject);
+            }
+            let next: Option<i64> = query.fetch_one(&mut *c).await?;
             if let Some(next) = next {
                 valid_until = valid_until.min(next);
             }
@@ -154,10 +164,10 @@ impl<'a> ReadDependencies<'a> {
         if let Some((instance, platform)) = self.references {
             let relation = session_relation(instance, tenant, now, platform);
             let sql = format!(
-                "WITH {relation} SELECT min(session_valid_until) FROM identity_session_references"
+                "WITH {relation} SELECT session_valid_until FROM identity_session_references ORDER BY session_valid_until LIMIT 1"
             );
             let next: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
-                .fetch_one(&mut *c)
+                .fetch_optional(&mut *c)
                 .await?;
             if let Some(next) = next {
                 valid_until = valid_until.min(next);

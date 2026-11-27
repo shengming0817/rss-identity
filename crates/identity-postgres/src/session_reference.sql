@@ -1,6 +1,7 @@
 identity_session_references AS NOT MATERIALIZED (
  SELECT '{instance}'::uuid AS instance_id,s.tenant_id,s.principal_id,s.session_id,s.credential_kind,
- least(s.idle_expires_at,s.absolute_expires_at) AS session_valid_until,
+ -- session_lifetime constrains idle_expires_at <= absolute_expires_at.
+ s.idle_expires_at AS session_valid_until,
  s.authentication_source,
  s.authentication_source='platform' AS requires_platform_check,
  CASE WHEN s.authentication_source='platform' THEN s.platform_authentication->'binding'->>'bindingId' END AS platform_binding_id,

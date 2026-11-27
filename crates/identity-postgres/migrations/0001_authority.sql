@@ -445,7 +445,6 @@ CREATE INDEX directory_profile_source ON identity_authority.profile_observations
 CREATE INDEX directory_link_source ON identity_authority.external_identities(tenant_id,provider_id,principal_id);
 
 CREATE INDEX personnel_session_idle ON identity_authority.sessions(tenant_id,idle_expires_at) WHERE revoked_at IS NULL;
-CREATE INDEX personnel_session_absolute ON identity_authority.sessions(tenant_id,absolute_expires_at) WHERE revoked_at IS NULL;
 
 -- Match serde_json/RFC 6901 array indices while preserving numeric object keys.
 CREATE FUNCTION identity_authority.profile_path_scalar(document jsonb, segments text[]) RETURNS jsonb
