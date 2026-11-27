@@ -147,7 +147,7 @@ http {
                     )
                 )
                 wait(f"http://127.0.0.1:{backend_ports[8080]}/ready")
-            _, ports = stack.enter_context(
+            proxy_id, ports = stack.enter_context(
                 container(
                     IMAGES["nginx"],
                     [8443],
@@ -185,6 +185,27 @@ http {
                 deploy.require(unavailable.status == 303 and
                                unavailable.getheader("location") == "/auth/error?reason=unavailable" and
                                unavailable.getheader("set-cookie") is None, "gateway callback outage")
+                # Only the closed fault classification should appear, never the original query.
+                logs = subprocess.check_output(["docker", "logs", proxy_id], stderr=subprocess.STDOUT, text=True, timeout=10)
+                deploy.require("component=identity-gateway classification=upstream_unavailable" in logs
+                               and "state=private" not in logs, "gateway redacted diagnosis")
+            for path in ["/api/v1/identity/oidc/callback", "/api/v1/identity/probe"]:
+                for method, target, headers, original in [
+                    ("GET", path + "?state=" + "a"*17000, {}, 414),
+                    ("GET", path, {"X-Fixture-Padding": "a"*17000}, 400),
+                    ("HEAD", path, {"X-Fixture-Padding": "a"*17000}, 400),
+                ]:
+                    client.request(method, target, headers=headers)
+                    rejected = client.getresponse()
+                    body = rejected.read()
+                    project = native_listener and method == "GET" and path.endswith("/oidc/callback")
+                    deploy.require(rejected.status == (303 if project else original), "gateway parser status")
+                    if project:
+                        deploy.require(rejected.getheader("Location") == "/auth/error?reason=failed"
+                                       and rejected.getheader("Set-Cookie") is None
+                                       and rejected.getheader("Cache-Control") == "no-store"
+                                       and rejected.getheader("Referrer-Policy") == "no-referrer"
+                                       and b"state=" not in body, "gateway parser projection")
             yield client, source, {
                 "IDENTITY_TEST_GATEWAY_URL": f"https://127.0.0.1:{ports[8443]}",
                 "IDENTITY_TEST_GATEWAY_CA": str(root / "cert"),

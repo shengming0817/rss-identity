@@ -459,7 +459,7 @@ async fn callback_result(
             } else {
                 return_url
             };
-            (location, Some(issued_cookie(&issued)?))
+            (location, Some(issued_cookie(&issued)?.header))
         }
     };
 

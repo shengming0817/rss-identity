@@ -80,13 +80,11 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 
 ## 可选程序化 Bearer
 
-宿主显式定义 Bearer 端点，对签发和选定业务 API 执行产品 IP 准入，然后通过公共凭据包调用 Bearer 认证。浏览器 router 不自动开启程序化路由。宿主仍负责 HTTPS、真实 peer/受信代理来源、租户路由、资源授权和秘密脱敏；API Key 属于消费产品，不进入 Identity。
+嵌入宿主定义登录和注销入口并执行网络来源准入。密码登录调用 `Authority::login_local_bearer`，以产品契约交付一次性令牌。后续请求通过 `authenticate_bearer_request` 验证已有 Authorization 头，获得本次请求的身份与凭据。活动认证更新空闲期限，`inspect_bearer` 仅复核；注销以同一会话证明调用 `Authority::revoke_current_session`。账户全注销、重置密码、停用账户和撤销成员资格均按原有会话代际生效。
 
-`POST /api/v1/identity/tenants/{tenant}/bearer/login` 使用 JSON 账号密码，返回一次性 `accessToken`、`tokenType`、`sessionId`、`principalId`、`idleExpiresAt` 和 `absoluteExpiresAt`。随后使用 `Authorization: Bearer`，通过 `authenticate_bearer_request` 获取真实身份和仅限当前请求的凭据。每次有效认证包括 GET 都续空闲期限，不延长绝对期限；宿主续查使用 `inspect_bearer`，不续空闲。不存在 refresh token；绝对到期后重新密码登录。
+凭据处理拒绝身份 Cookie、API Key 和重复 Authorization 混用。宿主负责 TLS、可信 peer、操作时限、资源授权及响应 `no-store`；凭据只通过凭据通道交付。密码登录的 assurance 仅表示密码认证。
 
-两种呈现共用账户、密码限流及签发时会话策略；数据库持久化用途，Cookie/Bearer 双向串用均拒绝。Bearer 路由不需要浏览器 Origin/CSRF，不设置或清除 Cookie，拒绝身份 Cookie、API Key、重复 Authorization 和 URL 查询参数。不得将凭据放入 URL、日志、审计或浏览器持久存储。响应为 `no-store`；没有凭据回查入口。
-
-`POST /api/v1/identity/tenants/{tenant}/bearer/logout` 只撤销当前 Bearer；浏览器当前注销不影响其它会话。账户全注销、密码重置、账户停用及成员撤销按既有 epoch/state 合同同时约束两种呈现。密码登录只证明密码认证，不产生 MFA；产品授权仍消费当前账户与可信 assurance。当前 schema 为全新安装，旧 schema 和旧引用结构不兼容。
+独立服务可选的固定路径、JSON 字段和 HTTP 状态归 `rss-identity-service-http`。[产品 HTTP 契约](../architecture/identity-http.md) 描述其行为。参考宿主默认关闭程序化端点。
 
 ## 组与可选可信部门树快照
 
@@ -232,7 +230,7 @@ HTTP 本地资料位于 `/api/v1/identity/tenants/{tenant}/accounts/{principal}/
 不接受 principal 或 assurance DTO。`verify` 在事务外验证来源、平台签名、用途、nonce 和用户证据，
 最终签发事务重新检查账户／成员、外部关联和宿主绑定，消费挑战并提交会话及安全事件。
 
-平台仅签发 Cookie；宿主通过 `rss_identity_web_credentials::issued_cookie(&issued)` 生成 Set-Cookie，按产品契约返回 CSRF 值，并添加 no-store。
+平台仅签发 Cookie；宿主通过 `rss_identity_web_credentials::issued_cookie(&issued)` 取得同一次签发的 Set-Cookie 和 CSRF 值，按产品契约投影响应，并添加 no-store。
 未知提交绝不返回秘密，不能通过重放挑战取回可能已经提交的凭据。
 verifier 随 Authority 持续存在，会话请求、refresh、管理和后台 session reference 都重新执行绑定复核；缺少 verifier 时拒绝。
 硬件持有、用户在场和用户验证不自动映射为 MFA；缺少真实用户认证时间时 assurance.auth_time 为 None。

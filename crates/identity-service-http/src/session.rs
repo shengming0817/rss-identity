@@ -22,14 +22,16 @@ struct Login {
     password: String,
 }
 pub(crate) fn issued(value: IssuedSession) -> Result<Response> {
-    let header = rss_identity_web_credentials::issued_cookie(&value)?;
+    let cookie = rss_identity_web_credentials::issued_cookie(&value)?;
     let mut response = Json(project_session(
         value.identity(),
         value.view(),
-        value.secret().csrf(),
+        cookie.csrf_token,
     ))
     .into_response();
-    response.headers_mut().insert(header::SET_COOKIE, header);
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, cookie.header);
     Ok(response)
 }
 fn project_session(

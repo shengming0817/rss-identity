@@ -1,3 +1,5 @@
+#[path = "installation/active.rs"]
+mod active;
 #[path = "../../../crates/identity-postgres/tests/federation_support/mod.rs"]
 mod federation_support;
 #[path = "installation/gateway.rs"]
@@ -214,6 +216,9 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             &config.public_origin,
             config.budgets.request(),
         )?;
+        if *key == keys[0] {
+            active::verify(&authority, &config, &issued, key.tenant, &mut owner).await?;
+        }
         let context = rss_identity_app::context::router(authority.clone(), &config, http)?;
         for (suffix, expected) in [
             ("", axum::http::StatusCode::OK),

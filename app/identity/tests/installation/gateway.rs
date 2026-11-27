@@ -56,6 +56,19 @@ pub(super) async fn verify(
     assert_eq!(rejected.headers()["cache-control"], "no-store");
     assert_eq!(rejected.headers()["referrer-policy"], "no-referrer");
     assert!(!rejected.headers().contains_key("set-cookie"));
+    let mut many_headers = client.get(format!(
+        "{gateway}/api/v1/identity/oidc/callback?state=private"
+    ));
+    for index in 0..80 {
+        many_headers = many_headers.header(format!("x-fixture-{index}"), "x");
+    }
+    let rejected = many_headers
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?;
+    assert_eq!(rejected.status(), StatusCode::SEE_OTHER);
+    assert_eq!(rejected.headers()["location"], "/auth/error?reason=failed");
+    assert!(!rejected.headers().contains_key("set-cookie"));
     let login = client
         .post(format!("{root}/login"))
         .header("origin", origin.origin().ascii_serialization())
@@ -129,6 +142,12 @@ pub(super) async fn verify(
         origin.clone(),
         serde_json::from_value(pending["options"].clone())?,
     )?;
+    let list = || {
+        client
+            .get(format!("{root}/webauthn/credentials"))
+            .header("cookie", &cookie)
+    };
+    assert_eq!(list().send().await?.status(), StatusCode::OK);
     let mut tx = owner.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
         .bind(tenant.to_string())
@@ -145,6 +164,17 @@ pub(super) async fn verify(
     .await?;
     assert_eq!(next, 8);
     tx.commit().await?;
+    // Listing has no challenge. Only the old RP generation makes this read fail.
+    assert_eq!(
+        client
+            .get(format!("{root}/session"))
+            .header("cookie", &cookie)
+            .send()
+            .await?
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(list().send().await?.status(), StatusCode::UNAUTHORIZED);
     let rejected = write(
         "authenticate/finish",
         json!({"id":pending["id"],"response":response}),

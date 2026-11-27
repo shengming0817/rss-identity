@@ -54,16 +54,24 @@ pub(crate) fn named_cookie<'a>(
     Ok(found)
 }
 
-/// Create the session header only from an authoritative, committed Cookie issuance.
-pub fn issued_cookie(issued: &IssuedSession) -> Result<HeaderValue, CredentialError> {
+/// Two presentations derived from a single committed browser session. The header is sensitive.
+pub struct IssuedCookie {
+    pub header: HeaderValue,
+    pub csrf_token: String,
+}
+pub fn issued_cookie(issued: &IssuedSession) -> Result<IssuedCookie, CredentialError> {
     let age = issued.cookie_max_age();
     if age == 0 || issued.view().credential_kind != CredentialKind::Cookie {
         return Err(AuthorityError::Unavailable.into());
     }
-    secret_header(format!(
+    let header = secret_header(format!(
         "{SESSION_COOKIE_NAME}={}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={age}",
         issued.secret().expose()
-    ))
+    ))?;
+    Ok(IssuedCookie {
+        header,
+        csrf_token: issued.secret().csrf(),
+    })
 }
 pub(crate) fn secret_header(value: String) -> Result<HeaderValue, CredentialError> {
     let mut header = HeaderValue::from_str(&value).map_err(|_| AuthorityError::Unavailable)?;

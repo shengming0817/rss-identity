@@ -9,7 +9,9 @@ pub use bearer::{authenticate_bearer_request, bearer_credential, bearer_presenta
 pub use browser_binding::{
     BrowserBinding, clear_operation_cookie, operation_cookie, read_operation_cookie,
 };
-pub use cookie::{clear_session_cookie, cookie, cookie_presentation, issued_cookie, login_cookie};
+pub use cookie::{
+    IssuedCookie, clear_session_cookie, cookie, cookie_presentation, issued_cookie, login_cookie,
+};
 pub use origin::{HttpConfig, HttpConfigError, csrf, request_marker, same_origin};
 use rss_identity_postgres::AuthorityError;
 pub use session::{SessionActivity, authenticate_request};
