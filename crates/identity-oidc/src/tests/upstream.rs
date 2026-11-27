@@ -81,6 +81,8 @@ pub(super) struct Peer {
     pub hold: AtomicBool,
     pub entered: Notify,
     pub release: Semaphore,
+    pub response_headers: Mutex<HeaderMap>,
+    pub last_modified_only: AtomicBool,
     pub headers: Mutex<Vec<(String, Option<String>)>>,
 }
 impl Peer {
@@ -127,6 +129,8 @@ impl Peer {
             entered: Notify::new(),
             release: Semaphore::new(0),
             headers: Mutex::default(),
+            response_headers: Mutex::default(),
+            last_modified_only: false.into(),
         });
         let routes = Router::new()
             .route("/realm/.well-known/openid-configuration", get(discovery))
@@ -145,8 +149,18 @@ impl Peer {
         Ok(peer)
     }
     async fn document(&self, path: &str, headers: HeaderMap, tag: &str, json: Value) -> Response {
+        let lm = self.last_modified_only.load(SeqCst);
+        let (validator, conditional, tag) = if lm {
+            (
+                header::LAST_MODIFIED,
+                header::IF_MODIFIED_SINCE,
+                "Fri, 01 Jan 2021 00:00:00 GMT",
+            )
+        } else {
+            (header::ETAG, header::IF_NONE_MATCH, tag)
+        };
         let condition = headers
-            .get(header::IF_NONE_MATCH)
+            .get(conditional)
             .map(|v| v.to_str().unwrap().to_owned());
         self.headers
             .lock()
@@ -156,10 +170,15 @@ impl Peer {
             self.entered.notify_one();
             self.release.acquire().await.unwrap().forget();
         }
-        if condition.as_deref() == Some(tag) {
-            return (StatusCode::NOT_MODIFIED, [(header::ETAG, tag)]).into_response();
-        }
-        ([(header::ETAG, tag)], Json(json)).into_response()
+        let mut response = if condition.as_deref() == Some(tag) {
+            (StatusCode::NOT_MODIFIED, [(validator, tag)]).into_response()
+        } else {
+            ([(validator, tag)], Json(json)).into_response()
+        };
+        response
+            .headers_mut()
+            .extend(self.response_headers.lock().unwrap().clone());
+        response
     }
 }
 async fn discovery(State(peer): State<Arc<Peer>>, headers: HeaderMap) -> Response {

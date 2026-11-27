@@ -242,7 +242,8 @@ impl Federation {
             let audit=event(tenant,action,&view,Some(actor.key.principal));Ok((view,vec![audit]))
         })).await?;
         self.oidc
-            .observe_revision(updated.revision(instance, tenant));
+            .revisions()
+            .observe(updated.revision(instance, tenant));
         Ok(updated)
     }
     pub(crate) async fn persist_list_providers(
@@ -320,8 +321,8 @@ impl Federation {
             .await?;
         // Cancel upstream work before the shared deadline: permission/version checks and
         // the security event must settle before any report is released.
-        let credentials = self
-            .provider_credentials(binding, id, view.credential_version, budget.remaining())
+        let (installed, credentials) = self
+            .provider_credentials(binding, &view, budget.remaining())
             .await?;
         let remaining = budget.remaining().timeout();
         let reserve = (remaining / 4).min(std::time::Duration::from_secs(1));
@@ -329,7 +330,7 @@ impl Federation {
         let result = tokio::time::timeout_at(
             upstream_deadline.into(),
             self.oidc.test(
-                view.bind(instance, tenant, &credentials),
+                installed.bind(&view.settings, &credentials),
                 rss_request_context::Deadline::at(upstream_deadline),
             ),
         )
@@ -564,7 +565,7 @@ impl Federation {
             Ok(((false, revisions),events))
         })).await?;
             for revision in revisions {
-                self.oidc.observe_revision(revision);
+                self.oidc.revisions().observe(revision);
             }
             if !more {
                 return Ok(());

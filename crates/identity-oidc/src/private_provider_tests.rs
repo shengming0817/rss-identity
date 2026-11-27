@@ -72,7 +72,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     assert!(
         adapter
             .test(
-                fixture_provider(tenant, &config, &credentials),
+                fixture_provider(&adapter, tenant, &config, &credentials),
                 upstream_deadline()
             )
             .await?
@@ -93,7 +93,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     assert!(
         denied
             .test(
-                fixture_provider(tenant, &config, &credentials),
+                fixture_provider(&denied, tenant, &config, &credentials),
                 upstream_deadline()
             )
             .await
@@ -107,7 +107,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     assert!(
         adapter
             .test(
-                fixture_provider(tenant, &config, &credentials),
+                fixture_provider(&adapter, tenant, &config, &credentials),
                 upstream_deadline()
             )
             .await
@@ -118,19 +118,26 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     assert!(
         adapter
             .test(
-                fixture_provider(other, &config, &credentials),
+                fixture_provider(&adapter, other, &config, &credentials),
                 upstream_deadline()
             )
             .await
             .is_err()
     );
     let untrusted = ProviderCredentials::new("fixture-secret".into(), None)?;
+    let template = fixture_provider(&adapter, tenant, &config, &credentials);
+    let revision = template.installed.revision();
+    let next = |version| {
+        adapter.revisions().install(ProviderRevision {
+            version,
+            ..revision
+        })
+    };
     assert!(
-        matches!(adapter.test(BoundProvider { revision: ProviderRevision { version: 2, ..fixture_provider(tenant, &config, &untrusted).revision }, ..fixture_provider(tenant, &config, &untrusted) }, upstream_deadline()).await,
+        matches!(adapter.test(next(2)?.bind(&config, &untrusted), upstream_deadline()).await,
         Err(FederationError::Provider(ref failure)) if failure.reason == ProviderReason::TlsRejected)
     );
-    let mut bound = fixture_provider(tenant, &config, &credentials);
-    bound.revision.version = 3;
+    let bound = next(3)?.bind(&config, &credentials);
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let authorize = adapter
         .prepare(
@@ -184,7 +191,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
         callback.query_pairs().into_owned().collect();
     assert_eq!(query["state"], material.state.as_str());
     // Force the next operation onto a new pool and a new DNS resolution.
-    bound.revision.version += 1;
+    let bound = next(4)?.bind(&config, &credentials);
     let before_exchange = calls.load(Ordering::SeqCst);
     let claims = adapter
         .exchange(

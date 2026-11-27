@@ -2011,6 +2011,7 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "http",
+ "httpdate",
  "ipnet",
  "jsonwebtoken",
  "openssl",

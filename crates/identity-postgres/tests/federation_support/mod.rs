@@ -17,6 +17,7 @@ pub const BROWSER: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 pub const RETURN: &str = "https://identity.example.test/done";
 type Hook = Box<dyn FnOnce() -> UpstreamFuture<'static, ()> + Send>;
 pub struct ScriptedOidc {
+    revisions: ProviderRevisions,
     pub fail: AtomicBool,
     pub trusted_assurance: AtomicBool,
     pub step_up_disabled: AtomicBool,
@@ -34,6 +35,7 @@ pub struct ScriptedOidc {
 impl ScriptedOidc {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            revisions: ProviderRevisions::new(1024),
             fail: AtomicBool::new(false),
             trusted_assurance: AtomicBool::new(true),
             step_up_disabled: AtomicBool::new(false),
@@ -70,7 +72,9 @@ impl UpstreamOidc for ScriptedOidc {
     ) -> Result<(), FederationError> {
         Ok(())
     }
-    fn observe_revision(&self, _: ProviderRevision) {}
+    fn revisions(&self) -> &ProviderRevisions {
+        &self.revisions
+    }
     fn prepare<'a>(
         &'a self,
         _: BoundProvider<'a>,

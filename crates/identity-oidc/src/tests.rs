@@ -145,9 +145,11 @@ fn adapter(issuer: &str) -> HttpOidc {
     .unwrap()
 }
 fn transport(origin: &str) -> Transport {
-    adapter(origin)
+    let adapter = adapter(origin);
+    adapter
         .transport(
             fixture_provider(
+                &adapter,
                 tenant(),
                 &config(origin),
                 &rss_identity_core::federation::ProviderCredentials::new(
@@ -243,9 +245,11 @@ async fn discovery_rejects_external_authorization_and_jwks() {
             let body = body.to_string();
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         });
-        let result = adapter(&issuer)
+        let adapter = adapter(&issuer);
+        let result = adapter
             .discover(
                 fixture_provider(
+                    &adapter,
                     tenant(),
                     &config(&issuer),
                     &rss_identity_core::federation::ProviderCredentials::new(
@@ -279,9 +283,11 @@ async fn discovery_preserves_unavailable_and_protocol_failure() {
         ("200 OK", b"invalid json".to_vec(), false),
     ] {
         let (issuer, handle) = server(status, "", body);
-        let error = adapter(&issuer)
+        let adapter = adapter(&issuer);
+        let error = adapter
             .discover(
                 fixture_provider(
+                    &adapter,
                     tenant(),
                     &config(&issuer),
                     &rss_identity_core::federation::ProviderCredentials::new(
@@ -368,20 +374,21 @@ async fn production_dns_denial_prevents_connecting_to_loopback() {
     .unwrap();
     let tenant = TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap();
     let credentials = ProviderCredentials::new("private-fixture".into(), None).unwrap();
+    let adapter = HttpOidc::new(
+        vec![],
+        vec![],
+        transport_policy(),
+        crate::test_support::reuse_policy(),
+    )
+    .unwrap();
     assert_eq!(
-        HttpOidc::new(
-            vec![],
-            vec![],
-            transport_policy(),
-            crate::test_support::reuse_policy()
-        )
-        .unwrap()
-        .test(
-            fixture_provider(tenant, &settings, &credentials),
-            upstream_deadline()
-        )
-        .await
-        .unwrap_err(),
+        adapter
+            .test(
+                fixture_provider(&adapter, tenant, &settings, &credentials),
+                upstream_deadline()
+            )
+            .await
+            .unwrap_err(),
         failure(ProviderStage::Discovery, ProviderReason::EgressDenied)
     );
     assert!(
@@ -614,9 +621,11 @@ async fn discovery_preserves_required_metadata_and_transport_boundaries() {
         ("no-token", false),
     ] {
         let (issuer, task) = discovery_server(case).await;
-        let result = adapter(&issuer)
+        let adapter = adapter(&issuer);
+        let result = adapter
             .test(
                 fixture_provider(
+                    &adapter,
                     tenant(),
                     &config(&issuer),
                     &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
@@ -643,9 +652,10 @@ async fn discovery_preserves_required_metadata_and_transport_boundaries() {
 async fn advertised_token_endpoint_must_match_the_exact_enterprise_binding() {
     let (issuer, task) = discovery_server("noncanonical-token").await;
     let credentials = ProviderCredentials::new("fixture-secret".into(), None).unwrap();
-    let (metadata, _, _) = adapter(&issuer)
+    let adapter = adapter(&issuer);
+    let (metadata, _, _) = adapter
         .discover(
-            fixture_provider(tenant(), &config(&issuer), &credentials),
+            fixture_provider(&adapter, tenant(), &config(&issuer), &credentials),
             upstream_deadline(),
         )
         .await
@@ -757,6 +767,7 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
         let url = adapter
             .prepare(
                 fixture_provider(
+                    &adapter,
                     tenant(),
                     &config(&issuer),
                     &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
@@ -821,7 +832,7 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
     assert!(matches!(
         adapter
             .prepare(
-                fixture_provider(tenant(), &settings, &credentials),
+                fixture_provider(&adapter, tenant(), &settings, &credentials),
                 &material,
                 AuthenticationMode::Login,
                 upstream_deadline()
@@ -833,7 +844,7 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
     assert!(matches!(
         adapter
             .exchange(
-                fixture_provider(tenant(), &settings, &credentials),
+                fixture_provider(&adapter, tenant(), &settings, &credentials),
                 material,
                 Zeroizing::new("fixture-code".into()),
                 upstream_deadline()
@@ -896,9 +907,11 @@ async fn one_upstream_deadline_covers_successive_requests() {
     let deadline = rss_request_context::Deadline::at(
         std::time::Instant::now() + std::time::Duration::from_millis(100),
     );
-    let transport = adapter(&origin)
+    let adapter = adapter(&origin);
+    let transport = adapter
         .transport(
             fixture_provider(
+                &adapter,
                 tenant(),
                 &config(&origin),
                 &rss_identity_core::federation::ProviderCredentials::new(

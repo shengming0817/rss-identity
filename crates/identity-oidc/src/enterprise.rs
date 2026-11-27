@@ -82,6 +82,7 @@ pub struct EnterpriseExchange<'a> {
 impl crate::HttpOidc {
     /// Exchange a one-use backend assertion through the existing bounded, vetted transport.
     /// `expected_subject` comes from the host's provisioned stable IdP mapping, never browser JSON.
+    /// Register the snapshot at authoritative installation; the host rechecks the current version before using the result.
     /// No retries: a network failure may follow successful upstream assertion consumption.
     pub async fn exchange_enterprise(
         &self,

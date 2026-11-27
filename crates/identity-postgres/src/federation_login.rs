@@ -84,13 +84,8 @@ impl Federation {
             )
         };
         self.check_assurance_profile(tenant, &view)?;
-        let credentials = self
-            .provider_credentials(
-                binding,
-                view.id,
-                view.credential_version,
-                budget.remaining(),
-            )
+        let (installed, credentials) = self
+            .provider_credentials(binding, &view, budget.remaining())
             .await?;
         if !view.enabled {
             return Err(FederationError::Rejected.into());
@@ -112,7 +107,7 @@ impl Federation {
             .upstream(
                 &budget,
                 self.oidc.prepare(
-                    view.bind(self.authority.instance(), tenant, &credentials),
+                    installed.bind(&view.settings, &credentials),
                     &material,
                     mode,
                     budget.0,
@@ -249,8 +244,8 @@ impl Federation {
                     ))
                 }) }).await?;
         self.check_assurance_profile(tenant, &view)?;
-        let credentials = self
-            .provider_credentials(binding, view.id, view.credential_version, budget.remaining())
+        let (installed, credentials) = self
+            .provider_credentials(binding, &view, budget.remaining())
             .await?;
         if !self.allowed_return(&attempt.return_url) {
             return Err(FederationError::Rejected.into());
@@ -259,7 +254,7 @@ impl Federation {
             .upstream(
                 &budget,
                 self.oidc
-                    .exchange(view.bind(self.authority.instance(), tenant, &credentials), material, code, budget.0),
+                    .exchange(installed.bind(&view.settings, &credentials), material, code, budget.0),
             )
             .await?;
         claims.validate()?;

@@ -4,15 +4,13 @@
 mod assurance;
 mod code;
 mod discovery;
+mod freshness;
 use discovery::Metadata;
 mod egress;
 mod resources;
 pub use resources::ReusePolicy;
 use resources::{ProviderResources, Resources};
-use std::{
-    collections::HashMap,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::{collections::HashMap, sync::Arc};
 #[cfg(test)]
 mod private_provider_tests;
 mod profile_token;
@@ -113,6 +111,7 @@ pub struct HttpOidc {
     policy: TransportPolicy,
     bindings: Bindings,
     resources: Arc<Resources>,
+    revisions: ProviderRevisions,
     loopback: bool,
     #[cfg(test)]
     lookup: Option<std::sync::Arc<dyn reqwest::dns::Resolve>>,
@@ -205,6 +204,9 @@ impl HttpOidc {
         Ok(Self {
             bindings,
             resources: Resources::new(reuse)?,
+            revisions: ProviderRevisions::new(
+                reuse.max_providers.saturating_add(reuse.max_refreshes),
+            ),
             policy,
             loopback,
             future_skew_seconds: 30,
@@ -259,7 +261,7 @@ impl HttpOidc {
         left(deadline, ProviderStage::Binding)?;
         let c = provider.settings;
         let cidrs = self.private_for(
-            provider.revision.tenant,
+            provider.installed.revision().tenant,
             c.issuer().as_str(),
             c.client_id().as_str(),
         );
@@ -267,11 +269,16 @@ impl HttpOidc {
             .origin()
             .ascii_serialization();
         parse_url(c.redirect_uri(), self.loopback, &[])?;
-        let slot = self.resources.bind(provider)?;
+        self.revisions.check(&provider.installed)?;
+        let slot = if probe {
+            None
+        } else {
+            Some(self.resources.bind(&provider)?)
+        };
         let http = if probe {
             self.build_client(provider.credentials, cidrs)?
         } else {
-            let mut pooled = slot.client.lock().unwrap();
+            let mut pooled = slot.as_ref().unwrap().client.lock().unwrap();
             if pooled.is_none() {
                 *pooled = Some(self.build_client(provider.credentials, cidrs)?);
             }
@@ -282,7 +289,7 @@ impl HttpOidc {
                 policy: self.policy,
                 http,
                 origin,
-                current: slot.current.clone(),
+                installed: provider.installed.clone(),
             },
             slot,
             deadline,
@@ -294,12 +301,14 @@ impl HttpOidc {
         provider: BoundProvider<'_>,
         deadline: rss_request_context::Deadline,
     ) -> Result<(Metadata, Arc<discovery::Representation>, Transport), FederationError> {
-        let t = self.transport(provider, deadline, false)?;
+        let t = self.transport(provider.clone(), deadline, false)?;
         let kind = discovery::Kind::Discovery {
             issuer: provider.settings.issuer().as_str().into(),
         };
-        let doc = t
+        let (doc, _) = t
             .slot
+            .as_ref()
+            .unwrap()
             .discovery
             .read(&self.resources, &t, kind, None)
             .await?;
@@ -314,18 +323,23 @@ impl HttpOidc {
     ) -> Result<discovery::Jwks, FederationError> {
         let (uri, slot) = doc.keys()?;
         let kind = || discovery::Kind::Keys { uri: uri.clone() };
-        let first = slot.read(&self.resources, t, kind(), None).await?;
+        let (first, cached) = slot.read(&self.resources, t, kind(), None).await?;
         let keys = first.jwks()?;
-        if kid.is_some_and(|id| {
-            !id.is_empty()
-                && !keys
-                    .keys
-                    .iter()
-                    .any(|v| v.get("kid").and_then(|v| v.as_str()) == Some(id))
-        }) {
+        if cached
+            && kid.is_some_and(|id| {
+                !id.is_empty()
+                    && !keys
+                        .keys
+                        .iter()
+                        .any(|v| v.get("kid").and_then(|v| v.as_str()) == Some(id))
+            })
+        {
+            let identity = first.identity.clone();
+            drop(first);
             return slot
-                .read(&self.resources, t, kind(), Some(&first))
+                .read(&self.resources, t, kind(), Some(&identity))
                 .await?
+                .0
                 .jwks();
         }
         Ok(keys)
@@ -378,7 +392,7 @@ fn parse_url(value: &str, loopback: bool, cidrs: &[IpNet]) -> Result<Url, Federa
 }
 struct Transport {
     channel: Channel,
-    slot: Arc<ProviderResources>,
+    slot: Option<Arc<ProviderResources>>,
     deadline: rss_request_context::Deadline,
     requests: AtomicU8,
 }
@@ -408,15 +422,11 @@ struct Channel {
     policy: TransportPolicy,
     http: reqwest::Client,
     origin: String,
-    current: Arc<AtomicBool>,
+    installed: InstalledRevision,
 }
 impl Channel {
     fn check(&self) -> Result<(), FederationError> {
-        if self.current.load(Ordering::Acquire) {
-            Ok(())
-        } else {
-            Err(FederationError::StaleConfiguration)
-        }
+        self.installed.check()
     }
     fn request_error(&self, stage: ProviderStage, error: reqwest::Error) -> FederationError {
         let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
@@ -522,8 +532,8 @@ impl UpstreamOidc for HttpOidc {
         }
         Ok(())
     }
-    fn observe_revision(&self, revision: ProviderRevision) {
-        self.resources.observe(revision);
+    fn revisions(&self) -> &ProviderRevisions {
+        &self.revisions
     }
     fn prepare<'a>(
         &'a self,
@@ -533,7 +543,7 @@ impl UpstreamOidc for HttpOidc {
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
-            let (tenant, c) = (provider.revision.tenant, provider.settings);
+            let (tenant, c) = (provider.installed.revision().tenant, provider.settings);
             if !code::valid_verifier(m.verifier.as_str()) {
                 return Err(FederationError::Rejected);
             }
@@ -591,7 +601,7 @@ impl UpstreamOidc for HttpOidc {
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
             let (tenant, c, credentials) = (
-                provider.revision.tenant,
+                provider.installed.revision().tenant,
                 provider.settings,
                 provider.credentials,
             );

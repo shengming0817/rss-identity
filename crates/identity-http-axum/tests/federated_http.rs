@@ -823,16 +823,17 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
-    fixture_transport(true)?
+    let transport = fixture_transport(true)?;
+    transport
         .test(
-            fixture_provider(tenant(), &config()?, &credentials(true)?),
+            fixture_provider(&transport, tenant(), &config()?, &credentials(true)?),
             upstream_deadline(),
         )
         .await?;
     assert_eq!(
-        fixture_transport(true)?
+        transport
             .test(
-                fixture_provider(tenant(), &config()?, &credentials(false)?),
+                fixture_provider(&transport, tenant(), &config()?, &credentials(false)?),
                 upstream_deadline()
             )
             .await

@@ -811,6 +811,15 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
         .await?;
     assert_ne!(unverified_proof.account(), fed_proof.account());
     let pending = begin(&f, &s, &p).await?;
+    let (snapshot, _) = s
+        .provider_credentials(crate::support::binding(f.key.tenant), &p, deadline())
+        .await?;
+    assert!(
+        s.enable_provider(actor(&f).await?, p.id, p.version - 1, false, deadline())
+            .await
+            .is_err()
+    );
+    snapshot.check()?;
     let edited = s
         .update_provider(
             actor(&f).await?,
@@ -822,6 +831,7 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
             deadline(),
         )
         .await?;
+    assert_eq!(snapshot.check(), Err(FederationError::StaleConfiguration));
     assert!(matches!(
         finish(&s, pending, "alice").await,
         Err(AuthorityError::Federation(

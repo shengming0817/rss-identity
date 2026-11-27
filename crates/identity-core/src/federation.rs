@@ -1,5 +1,7 @@
 mod credentials;
+mod revisions;
 pub use credentials::ProviderCredentials;
+pub use revisions::{InstalledRevision, ProviderRevisions};
 /// Maximum admitted providers in one tenant directory.
 pub const MAX_PROVIDERS: u16 = 1024;
 // Federation values and narrow upstream port. Values are not authentication proofs.
@@ -240,9 +242,9 @@ pub struct ProviderRevision {
 }
 
 /// One installed configuration and its matching credentials, borrowed for one operation.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct BoundProvider<'a> {
-    pub revision: ProviderRevision,
+    pub installed: InstalledRevision,
     pub settings: &'a ProviderSettings,
     pub credentials: &'a ProviderCredentials,
 }
@@ -254,19 +256,6 @@ impl ProviderView {
             tenant,
             provider: self.id,
             version: self.version,
-        }
-    }
-
-    pub fn bind<'a>(
-        &'a self,
-        instance: crate::InstanceId,
-        tenant: TenantId,
-        credentials: &'a ProviderCredentials,
-    ) -> BoundProvider<'a> {
-        BoundProvider {
-            revision: self.revision(instance, tenant),
-            settings: &self.settings,
-            credentials,
         }
     }
 }
@@ -351,8 +340,8 @@ pub trait UpstreamOidc: Send + Sync {
         config: &ProviderSettings,
         credentials: &ProviderCredentials,
     ) -> Result<(), FederationError>;
-    /// Retire older upstream resources after observing an authoritative configuration change.
-    fn observe_revision(&self, revision: ProviderRevision);
+    /// Registry shared by authoritative configuration reads and committed changes.
+    fn revisions(&self) -> &ProviderRevisions;
     fn prepare<'a>(
         &'a self,
         provider: BoundProvider<'a>,

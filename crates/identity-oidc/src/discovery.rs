@@ -16,7 +16,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 use url::Url;
 
@@ -66,6 +66,7 @@ impl TryFrom<String> for TokenEndpoint {
     }
 }
 
+#[derive(Clone)]
 pub(super) enum Kind {
     Discovery { issuer: String },
     Keys { uri: Url },
@@ -149,7 +150,12 @@ fn invalid(stage: ProviderStage) -> FederationError {
 fn decode<T: DeserializeOwned>(bytes: &[u8], stage: ProviderStage) -> Result<T, FederationError> {
     serde_json::from_slice(bytes).map_err(|_| invalid(stage))
 }
-type Flight = BoxFuture<'static, Result<Arc<Representation>, FederationError>>;
+struct Fetched {
+    value: Arc<Representation>,
+    // A no-store response may only satisfy one of the coalesced requests.
+    consumed: Option<AtomicBool>,
+}
+type Flight = BoxFuture<'static, Result<Arc<Fetched>, FederationError>>;
 
 #[derive(Default)]
 struct State {
@@ -160,14 +166,15 @@ struct State {
 struct Cached {
     value: Arc<Representation>,
     until: Instant,
-    lifetime: Duration,
+    freshness: crate::freshness::Freshness,
 }
 pub(super) struct Representation {
     bytes: Box<[u8]>,
     etag: Option<HeaderValue>,
     modified: Option<HeaderValue>,
     keys: Option<(Url, Arc<Document>)>,
-    _lease: ByteLease,
+    lease: ByteLease,
+    pub identity: Arc<()>,
 }
 impl Representation {
     pub fn metadata(&self) -> Result<Metadata, FederationError> {
@@ -203,29 +210,33 @@ impl Document {
         resources: &Arc<Resources>,
         t: &Transport,
         kind: Kind,
-        unknown_in: Option<&Arc<Representation>>,
-    ) -> Result<Arc<Representation>, FederationError> {
+        unknown_in: Option<&Arc<()>>,
+    ) -> Result<(Arc<Representation>, bool), FederationError> {
         let stage = kind.stage();
         self.check()?;
         t.channel.check()?;
         super::left(t.deadline, stage)?;
         let flight = {
             let mut state = self.state.lock().unwrap();
-            let now = Instant::now();
-            if let Some(seen) = unknown_in
-                && state.cached.is_none()
-            {
-                return Ok(seen.clone());
-            }
-            if let Some(hit) = &state.cached
-                && hit.until > now
-                && (unknown_in.is_none_or(|seen| !Arc::ptr_eq(seen, &hit.value))
-                    || state.next_unknown.is_some_and(|d| d > now))
-            {
-                return Ok(hit.value.clone());
+            let now = resources.now();
+            let running = state.flight.as_ref().and_then(WeakShared::upgrade);
+            if let Some(hit) = &state.cached {
+                let fresh = hit.until > now;
+                let reuse = match unknown_in {
+                    None => fresh,
+                    Some(seen) => {
+                        fresh && !Arc::ptr_eq(seen, &hit.value.identity)
+                            || running.is_none()
+                                && state.next_unknown.is_some_and(|deadline| deadline > now)
+                                && fresh
+                    }
+                };
+                if reuse {
+                    return Ok((hit.value.clone(), true));
+                }
             }
             t.charge(stage)?;
-            if let Some(running) = state.flight.as_ref().and_then(WeakShared::upgrade) {
+            if let Some(running) = running {
                 running
             } else {
                 let permit = resources
@@ -237,9 +248,10 @@ impl Document {
                 let resources = resources.clone();
                 let channel = t.channel.clone();
                 state.next_unknown = now.checked_add(resources.policy.refresh_cooldown);
+                let request_kind = kind.clone();
                 let work = async move {
                     let _permit = permit;
-                    let result = owner.fetch(&resources, &channel, kind).await;
+                    let result = owner.fetch(&resources, &channel, &request_kind).await;
                     owner.state.lock().unwrap().flight = None;
                     result
                 }
@@ -255,23 +267,44 @@ impl Document {
         self.check()?;
         t.channel.check()?;
         super::left(t.deadline, stage)?;
-        Ok(result)
+        if result
+            .consumed
+            .as_ref()
+            .is_some_and(|used| used.swap(true, Ordering::AcqRel))
+        {
+            let private = Document::default();
+            let _permit = resources
+                .refreshes
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| failure(stage, ProviderReason::Unavailable))?;
+            let own = tokio::time::timeout_at(
+                t.deadline.instant().into(),
+                private.fetch(resources, &t.channel, &kind),
+            )
+            .await
+            .map_err(|_| failure(stage, ProviderReason::Timeout))??;
+            self.check()?;
+            t.channel.check()?;
+            return Ok((own.value.clone(), false));
+        }
+        Ok((result.value.clone(), false))
     }
 
     async fn fetch(
         &self,
         resources: &Resources,
         channel: &Channel,
-        kind: Kind,
-    ) -> Result<Arc<Representation>, FederationError> {
+        kind: &Kind,
+    ) -> Result<Arc<Fetched>, FederationError> {
         let stage = kind.stage();
-        let mut previous = self
+        let previous = self
             .state
             .lock()
             .unwrap()
             .cached
             .as_ref()
-            .map(|c| (c.value.clone(), c.lifetime));
+            .map(|c| (c.value.clone(), c.freshness));
         let mut request = http::Request::get(kind.url()).header(header::ACCEPT, "application/json");
         if let Some((old, _)) = &previous {
             if let Some(tag) = &old.etag {
@@ -281,7 +314,8 @@ impl Document {
             }
         }
         self.check()?;
-        let cutoff = Instant::now()
+        let started = Instant::now();
+        let cutoff = started
             .checked_add(channel.policy.request_timeout)
             .ok_or(FederationError::Configuration)?;
         let response = channel
@@ -298,9 +332,13 @@ impl Document {
             Kind::Discovery { .. } => resources.policy.discovery_ttl,
             Kind::Keys { .. } => resources.policy.jwks_ttl,
         };
-        let mut upper = cap;
+        let mut state = self.state.lock().unwrap();
+        self.check()?;
+        channel.check()?;
+        let mut freshness = crate::freshness::Freshness::default();
         let value = if parts.status == http::StatusCode::NOT_MODIFIED {
-            let (old, prior_lifetime) = previous.as_ref().ok_or_else(|| invalid(stage))?;
+            let (old, prior) = previous.as_ref().ok_or_else(|| invalid(stage))?;
+            freshness = *prior;
             if old.etag.is_none() && old.modified.is_none()
                 || parts
                     .headers
@@ -308,9 +346,6 @@ impl Document {
                     .is_some_and(|v| Some(v) != old.etag.as_ref())
             {
                 return Err(invalid(stage));
-            }
-            if !parts.headers.contains_key(header::CACHE_CONTROL) {
-                upper = *prior_lifetime;
             }
             old.clone()
         } else {
@@ -333,58 +368,56 @@ impl Document {
             let overhead = etag.as_ref().map_or(0, |v| v.as_bytes().len())
                 + modified.as_ref().map_or(0, |v| v.as_bytes().len())
                 + keys.as_ref().map_or(0, |(u, _)| u.as_str().len());
-            // Discard an expired representation before charging its replacement. Live callers
-            // retain their own leases; a refresh cannot double-count an otherwise idle entry.
-            let mut state = self.state.lock().unwrap();
-            if state
+            drop(previous);
+            let replaced = state
                 .cached
-                .as_ref()
-                .is_some_and(|old| old.until <= Instant::now())
-                && let Some(old) = state.cached.take()
-            {
-                retire_changed_keys(&old.value, keys.as_ref());
-            }
-            drop(state);
-            drop(previous.take());
-            let lease = resources.reserve(
-                bytes
-                    .len()
-                    .checked_add(overhead)
-                    .ok_or(FederationError::Unavailable)?,
-            )?;
+                .as_mut()
+                .and_then(|old| Arc::get_mut(&mut old.value))
+                .map(|old| &mut old.lease);
+            let lease = resources
+                .reserve(
+                    bytes
+                        .len()
+                        .checked_add(overhead)
+                        .ok_or(FederationError::Unavailable)?,
+                    replaced,
+                )
+                .map_err(|_| failure(stage, ProviderReason::Unavailable))?;
             Arc::new(Representation {
                 bytes: bytes.into_boxed_slice(),
                 etag,
                 modified,
                 keys,
-                _lease: lease,
+                lease,
+                identity: Arc::new(()),
             })
         };
-        let (store, lifetime) = freshness(&parts.headers, upper);
-        let age = parts.headers.get(header::AGE).map_or(0, |v| {
-            v.to_str()
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(u64::MAX)
-        });
-        let mut state = self.state.lock().unwrap();
-        self.check()?;
-        channel.check()?;
+        let freshness = freshness.update(&parts.headers);
+        let ttl = freshness.remaining(
+            &parts.headers,
+            cap,
+            started.elapsed(),
+            std::time::SystemTime::now(),
+        );
         if let Some(old) = &state.cached {
             retire_changed_keys(&old.value, value.keys.as_ref());
         }
-        state.cached = if store {
+        state.cached = if freshness.storable() {
             Some(Cached {
                 value: value.clone(),
-                lifetime,
-                until: Instant::now()
-                    .checked_add(lifetime.saturating_sub(Duration::from_secs(age)))
+                freshness,
+                until: resources
+                    .now()
+                    .checked_add(ttl)
                     .ok_or(FederationError::Configuration)?,
             })
         } else {
             None
         };
-        Ok(value)
+        Ok(Arc::new(Fetched {
+            value,
+            consumed: (!freshness.storable()).then(|| AtomicBool::new(false)),
+        }))
     }
 }
 fn retire_changed_keys(old: &Representation, next: Option<&(Url, Arc<Document>)>) {
@@ -403,26 +436,4 @@ fn valid_media(headers: &HeaderMap, stage: ProviderStage) -> bool {
                     && media.eq_ignore_ascii_case("application/jwk-set+json")
         })
     })
-}
-fn freshness(headers: &HeaderMap, mut cap: Duration) -> (bool, Duration) {
-    for value in headers.get_all(header::CACHE_CONTROL) {
-        let Ok(s) = value.to_str() else {
-            return (false, Duration::ZERO);
-        };
-        for part in s.split(',').map(str::trim) {
-            let (name, value) = part.split_once('=').unwrap_or((part, ""));
-            if name.eq_ignore_ascii_case("no-store") {
-                return (false, Duration::ZERO);
-            }
-            if name.eq_ignore_ascii_case("no-cache") {
-                cap = Duration::ZERO;
-            }
-            if name.eq_ignore_ascii_case("max-age") {
-                cap = cap.min(Duration::from_secs(
-                    value.trim_matches('"').parse().unwrap_or(0),
-                ));
-            }
-        }
-    }
-    (true, cap)
 }

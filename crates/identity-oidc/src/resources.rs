@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -76,7 +76,7 @@ struct Trust {
 }
 pub(super) struct ProviderResources {
     pub discovery: Arc<Document>,
-    pub current: Arc<AtomicBool>,
+
     pub client: Mutex<Option<reqwest::Client>>,
     trust: Trust,
 }
@@ -87,9 +87,7 @@ struct Entry {
 }
 impl Entry {
     fn retire(&mut self, version: i64) {
-        if let Some(old) = self.resources.take() {
-            old.current.store(false, Ordering::Release);
-        }
+        self.resources = None;
         self.version = version;
     }
 }
@@ -99,6 +97,8 @@ pub(super) struct Resources {
     bytes: Arc<AtomicUsize>,
     pub refreshes: Arc<Semaphore>,
     pub policy: ReusePolicy,
+    #[cfg(test)]
+    offset: Mutex<Duration>,
 }
 impl Resources {
     pub fn new(policy: ReusePolicy) -> Result<Arc<Self>, FederationError> {
@@ -108,23 +108,30 @@ impl Resources {
             bytes: Arc::default(),
             refreshes: Arc::new(Semaphore::new(policy.max_refreshes)),
             policy,
+            #[cfg(test)]
+            offset: Mutex::default(),
         }))
     }
 
-    pub fn observe(&self, revision: ProviderRevision) {
-        let mut entries = self.entries.lock().unwrap();
-        if let Some(entry) = entries.get_mut(&key(revision))
-            && revision.version > entry.version
-        {
-            entry.retire(revision.version);
-        }
+    #[cfg(test)]
+    pub fn resident_bytes(&self) -> usize {
+        self.bytes.load(Ordering::Acquire)
     }
-
+    pub fn now(&self) -> Instant {
+        let now = Instant::now();
+        #[cfg(test)]
+        let now = now + *self.offset.lock().unwrap();
+        now
+    }
+    #[cfg(test)]
+    pub fn advance(&self, duration: Duration) {
+        *self.offset.lock().unwrap() += duration;
+    }
     pub fn bind(
         &self,
-        provider: BoundProvider<'_>,
+        provider: &BoundProvider<'_>,
     ) -> Result<Arc<ProviderResources>, FederationError> {
-        let revision = provider.revision;
+        let revision = provider.installed.revision();
         if revision.version <= 0 {
             return Err(FederationError::Configuration);
         }
@@ -134,7 +141,10 @@ impl Resources {
             && entries.len() >= self.policy.max_providers
             && !evict_idle(&mut entries)
         {
-            return Err(FederationError::Unavailable);
+            return Err(crate::failure(
+                rss_identity_core::federation::ProviderStage::Binding,
+                rss_identity_core::federation::ProviderReason::Unavailable,
+            ));
         }
         let now = Instant::now();
         let entry = entries.entry(id).or_insert_with(|| Entry {
@@ -171,7 +181,7 @@ impl Resources {
                 client: client.into(),
                 ca,
             },
-            current: Arc::new(AtomicBool::new(true)),
+
             client: Mutex::default(),
             discovery: Arc::default(),
         });
@@ -179,15 +189,21 @@ impl Resources {
         Ok(resources)
     }
 
-    pub fn reserve(&self, bytes: usize) -> Result<ByteLease, FederationError> {
+    pub fn reserve(
+        &self,
+        bytes: usize,
+        replaced: Option<&mut ByteLease>,
+    ) -> Result<ByteLease, FederationError> {
         if bytes > self.policy.max_resident_bytes {
             return Err(FederationError::Unavailable);
         }
         let mut entries = self.entries.lock().unwrap();
+        let credit = replaced.as_ref().map_or(0, |lease| lease.bytes);
         while self
             .bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(bytes)
+                used.checked_sub(credit)?
+                    .checked_add(bytes)
                     .filter(|total| *total <= self.policy.max_resident_bytes)
             })
             .is_err()
@@ -195,6 +211,9 @@ impl Resources {
             if !evict_idle(&mut entries) {
                 return Err(FederationError::Unavailable);
             }
+        }
+        if let Some(lease) = replaced {
+            lease.bytes = 0;
         }
         Ok(ByteLease {
             counter: self.bytes.clone(),

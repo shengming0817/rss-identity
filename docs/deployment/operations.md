@@ -4,7 +4,7 @@
 
 每个已由宿主登记 execution fence 并初始化的租户使用自己的登录 URL；将 origin 与该租户 UUID 组合后交给用户。根路径 `/` 不负责选择租户。运行配置不保存租户全集；`bootstrapAccounts` 只决定初始化身份和示范管理策略。安装器接收明确 `targets`，verify 不要求数据库只有这些租户。参考宿主以 `storage.generation` 作为操作期望 epoch，以显式 `webauthnGeneration` 作为 RP 期望代际；数据库不匹配时拒绝，不自动更新期望值。
 
-准备公共 TLS 证书及私钥，证书 SAN 覆盖 origin；PG 证书 SAN 含 postgres，database.caFile 信任其 CA。每个数据库角色用不同的私有 0600 密码文件，无尾部换行；口令长度和内容须满足宿主配置校验。OIDC 为空即本地模式。开启时配置 stateKeyFile、credentialKeyring、assuranceProfiles、groupFactsMaxAgeSeconds 及 `returnTargets: {"resume":"https://固定域名/auth/resume"}`，字段以 RuntimeConfig 为准。state/keyring 钥文件为非零 32 字节随机钥的 64 位十六进制，不能复用。
+准备公共 TLS 证书及私钥，证书 SAN 覆盖 origin；PG 证书 SAN 含 postgres，database.caFile 信任其 CA。每个数据库角色用不同的私有 0600 密码文件，无尾部换行；口令长度和内容须满足宿主配置校验。OIDC 为空即本地模式。开启时填写必需的 `runtime.oidc.reuse`（[容量与新鲜期示例](../guides/embedding.md)），并配置 stateKeyFile、credentialKeyring、assuranceProfiles、groupFactsMaxAgeSeconds 及 `returnTargets: {"resume":"https://固定域名/auth/resume"}`，字段以 RuntimeConfig 为准。state/keyring 钥文件为非零 32 字节随机钥的 64 位十六进制，不能复用。
 
 ```sh
 sudo python3 hack/deploy.py --input /private/deployment.json --output /private/rendered --identity-image rss-identity:my-version --web-image rss-identity-web:my-version

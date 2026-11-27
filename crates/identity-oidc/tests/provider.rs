@@ -91,6 +91,7 @@ async fn prepare(p: &HttpOidc, c: &ProviderSettings) -> anyhow::Result<(Url, Pro
     let url = p
         .prepare(
             fixture_provider(
+                p,
                 tenant(),
                 c,
                 &rss_identity_core::federation::ProviderCredentials::new(
@@ -122,6 +123,7 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
     let claims = p
         .exchange(
             fixture_provider(
+                &p,
                 tenant(),
                 &c,
                 &rss_identity_core::federation::ProviderCredentials::new(
@@ -144,6 +146,7 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
     assert!(
         p.exchange(
             fixture_provider(
+                &p,
                 tenant(),
                 &c,
                 &rss_identity_core::federation::ProviderCredentials::new(
@@ -179,7 +182,7 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
             .append_pair(field, value);
         let cb = keycloak_login(url).await?;
         assert!(
-            matches!(p.exchange(fixture_provider(tenant(), &c, &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None).unwrap()), material, Zeroizing::new(query(&cb,"code")?), upstream_deadline()).await,Err(e) if e==error)
+            matches!(p.exchange(fixture_provider(&p, tenant(), &c, &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None).unwrap()), material, Zeroizing::new(query(&cb,"code")?), upstream_deadline()).await,Err(e) if e==error)
         );
     }
     let (mut url, _) = prepare(&p, &c).await?;
@@ -210,6 +213,7 @@ async fn real_provider_flows() -> anyhow::Result<()> {
         assert!(
             p.test(
                 fixture_provider(
+                    &p,
                     tenant(),
                     &c,
                     &rss_identity_core::federation::ProviderCredentials::new(

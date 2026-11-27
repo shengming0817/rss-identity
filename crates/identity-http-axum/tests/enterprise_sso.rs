@@ -130,6 +130,7 @@ async fn login(State(rp): State<Arc<Rp>>, Json(input): Json<Value>) -> axum::res
             .exchange_enterprise(
                 rss_identity_oidc::enterprise::EnterpriseExchange {
                     provider: rss_identity_oidc::test_support::fixture_provider(
+                        &rp.oidc,
                         rp.tenant,
                         &rp.provider,
                         &rp.credentials,
@@ -482,6 +483,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
             .exchange_enterprise(
                 rss_identity_oidc::enterprise::EnterpriseExchange {
                     provider: rss_identity_oidc::test_support::fixture_provider(
+                        &transport,
                         f.key.tenant,
                         &provider,
                         &credentials
@@ -527,6 +529,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
             .exchange_enterprise(
                 rss_identity_oidc::enterprise::EnterpriseExchange {
                     provider: rss_identity_oidc::test_support::fixture_provider(
+                        &transport,
                         f.key.tenant,
                         &rp_settings(&targets[1], &issuer)?,
                         &credentials
@@ -552,6 +555,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
             .exchange_enterprise(
                 rss_identity_oidc::enterprise::EnterpriseExchange {
                     provider: rss_identity_oidc::test_support::fixture_provider(
+                        &transport,
                         f.key.tenant,
                         &provider,
                         &credentials
@@ -570,6 +574,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
         .exchange_enterprise(
             rss_identity_oidc::enterprise::EnterpriseExchange {
                 provider: rss_identity_oidc::test_support::fixture_provider(
+                    &transport,
                     f.key.tenant,
                     &provider,
                     &credentials,
@@ -587,6 +592,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
             .exchange_enterprise(
                 rss_identity_oidc::enterprise::EnterpriseExchange {
                     provider: rss_identity_oidc::test_support::fixture_provider(
+                        &transport,
                         f.key.tenant,
                         &provider,
                         &credentials
