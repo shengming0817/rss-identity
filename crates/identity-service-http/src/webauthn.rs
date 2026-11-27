@@ -92,7 +92,7 @@ async fn actor(
     s: &StateData,
     binding: ExecutionBinding,
     h: &HeaderMap,
-    b: RequestBudget,
+    b: Deadline,
     write: bool,
 ) -> Result<AuthenticatedSession, HttpError> {
     let secret = cookie(h)?.ok_or(UNAUTH)?;
@@ -104,19 +104,18 @@ async fn actor(
     }
     s.webauthn
         .authority()
-        .inspect_session(binding, secret, b.remaining())
+        .inspect_session(binding, secret, b)
         .await
         .map_err(Into::into)
 }
 async fn body<T: serde::de::DeserializeOwned>(
     request: Request,
-    b: RequestBudget,
+    b: Deadline,
 ) -> Result<T, HttpError> {
-    let bytes =
-        tokio::time::timeout_at(b.cutoff(), axum::body::to_bytes(request.into_body(), 65536))
-            .await
-            .map_err(|_| HttpError::request_timeout())?
-            .map_err(|_| BAD)?;
+    let bytes = read_body(request, b, |request| {
+        axum::body::to_bytes(request.into_body(), 65536)
+    })
+    .await?;
     serde_json::from_slice(&bytes).map_err(|_| BAD)
 }
 fn clear(mut response: Response) -> Response {
@@ -129,11 +128,11 @@ async fn list(
     State(s): State<StateData>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, &headers, b, false).await?;
-    Ok(Json(s.webauthn.list(actor, generation, b.remaining()).await?).into_response())
+    Ok(Json(s.webauthn.list(actor, generation, b).await?).into_response())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -145,15 +144,17 @@ async fn register_begin(
     State(s): State<StateData>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     request: Request,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, request.headers(), b, true).await?;
     let token = read_operation_cookie(request.headers())?;
     let input: Register = body(request, b).await?;
-    let authorization = token
-        .map(RegistrationAuthorization::StepUp)
-        .unwrap_or(RegistrationAuthorization::First);
+    let authorization = match token {
+        Some(token) => RegistrationAuthorization::StepUp(token),
+        None if input.recover => return Err(UNAUTH),
+        None => RegistrationAuthorization::First,
+    };
     Ok(clear(
         Json(
             s.webauthn
@@ -163,7 +164,7 @@ async fn register_begin(
                     input.label,
                     input.recover,
                     authorization,
-                    b.remaining(),
+                    b,
                 )
                 .await?,
         )
@@ -180,7 +181,7 @@ async fn register_finish(
     State(s): State<StateData>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     request: Request,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, request.headers(), b, true).await?;
@@ -192,7 +193,7 @@ async fn register_finish(
                 generation,
                 input.id,
                 serde_json::from_value(input.response).map_err(|_| BAD)?,
-                b.remaining(),
+                b,
             )
             .await?,
     )
@@ -207,7 +208,7 @@ async fn auth_begin(
     State(s): State<StateData>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     request: Request,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, request.headers(), b, true).await?;
@@ -216,7 +217,7 @@ async fn auth_begin(
     let context = input.operation.context(&actor, host)?;
     Ok(Json(
         s.webauthn
-            .begin_authentication(actor, generation, context, b.remaining())
+            .begin_authentication(actor, generation, context, b)
             .await?,
     )
     .into_response())
@@ -225,7 +226,7 @@ async fn auth_finish(
     State(s): State<StateData>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     request: Request,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, request.headers(), b, true).await?;
@@ -237,13 +238,14 @@ async fn auth_finish(
             generation,
             input.id,
             serde_json::from_value(input.response).map_err(|_| BAD)?,
-            b.remaining(),
+            b,
         )
         .await?;
     let mut response = Json(serde_json::json!({"expiresAt":grant.expires_at})).into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, operation_cookie(&grant)?);
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        operation_cookie(&grant, std::time::SystemTime::now())?,
+    );
     Ok(response)
 }
 async fn remove(
@@ -251,14 +253,12 @@ async fn remove(
     Path((_t, id)): Path<(String, Uuid)>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, &headers, b, true).await?;
     let token = read_operation_cookie(&headers)?.ok_or(UNAUTH)?;
-    s.webauthn
-        .remove(actor, generation, id, token, b.remaining())
-        .await?;
+    s.webauthn.remove(actor, generation, id, token, b).await?;
     Ok(clear(
         Json(serde_json::json!({"removed":true})).into_response(),
     ))
@@ -268,27 +268,25 @@ async fn cancel(
     Path((_t, id)): Path<(String, Uuid)>,
     Execution(binding): Execution,
     ExpectedRp(generation): ExpectedRp,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, &headers, b, true).await?;
-    s.webauthn
-        .cancel(actor, generation, id, b.remaining())
-        .await?;
+    s.webauthn.cancel(actor, generation, id, b).await?;
     Ok(Json(serde_json::json!({"cancelled":true})).into_response())
 }
 
 async fn cancel_operation(
     State(s): State<StateData>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, &headers, b, true).await?;
     if let Some(handle) = read_operation_cookie(&headers)? {
         s.webauthn
             .authority()
-            .cancel_step_up(actor, handle, b.remaining())
+            .cancel_step_up(actor, handle, b)
             .await?;
     }
     Ok(clear(

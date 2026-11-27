@@ -57,7 +57,7 @@ fn project_session(
 pub(crate) async fn login(
     State(state): State<AppState>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     request: Request,
 ) -> Result<Response> {
     if !request_marker(request.headers())? {
@@ -74,7 +74,7 @@ pub(crate) async fn login(
             let token = SessionSecret::parse(secret.expose().into()).map_err(|_| UNAUTH)?;
             match state
                 .authority
-                .inspect_session(binding, token, budget.remaining())
+                .inspect_session(binding, token, budget)
                 .await
             {
                 Ok(proof) => {
@@ -88,47 +88,37 @@ pub(crate) async fn login(
         None => None,
     };
     // Only inbound body reading is cancelled here; no write transaction has started.
-    let Json(input) = tokio::time::timeout_at(
-        budget.cutoff(),
-        Json::<Login>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<Login>::from_request(request, &state)
+    })
+    .await?;
     let password = Password::new(input.password).map_err(|_| UNAUTH)?;
     let login = LoginKey::parse(&input.login).map_err(|_| UNAUTH)?;
     issued(
         state
             .authority
-            .login_local(
-                binding,
-                login,
-                password,
-                source,
-                replacement,
-                budget.remaining(),
-            )
+            .login_local(binding, login, password, source, replacement, budget)
             .await?,
     )
 }
 pub(crate) async fn current(
     State(state): State<AppState>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     headers: HeaderMap,
 ) -> Result<Response> {
     let secret = cookie(&headers)?.ok_or(UNAUTH)?;
     let csrf = secret.csrf();
     let proof = state
         .authority
-        .inspect_session(binding, secret, budget.remaining())
+        .inspect_session(binding, secret, budget)
         .await?;
     Ok(Json(project_session(proof.identity(), proof.view(), csrf)).into_response())
 }
 pub(crate) async fn refresh(
     State(state): State<AppState>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     headers: HeaderMap,
 ) -> Result<Response> {
     let secret = cookie(&headers)?.ok_or(UNAUTH)?;
@@ -136,7 +126,7 @@ pub(crate) async fn refresh(
     issued(
         state
             .authority
-            .refresh_session(binding, secret, budget.remaining())
+            .refresh_session(binding, secret, budget)
             .await?,
     )
 }
@@ -144,25 +134,25 @@ async fn actor(
     state: &AppState,
     binding: ExecutionBinding,
     headers: &HeaderMap,
-    budget: RequestBudget,
+    budget: Deadline,
 ) -> Result<AuthenticatedSession> {
     let secret = cookie(headers)?.ok_or(UNAUTH)?;
     csrf(headers, &secret)?;
     Ok(state
         .authority
-        .inspect_session(binding, secret, budget.remaining())
+        .inspect_session(binding, secret, budget)
         .await?)
 }
 pub(crate) async fn logout(
     State(state): State<AppState>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     headers: HeaderMap,
 ) -> Result<Response> {
     let proof = actor(&state, binding, &headers, budget).await?;
     state
         .authority
-        .revoke_current_session(proof, budget.remaining())
+        .revoke_current_session(proof, budget)
         .await?;
     Ok((
         StatusCode::NO_CONTENT,
@@ -176,14 +166,11 @@ pub(crate) async fn logout(
 pub(crate) async fn logout_all(
     State(state): State<AppState>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     headers: HeaderMap,
 ) -> Result<Response> {
     let proof = actor(&state, binding, &headers, budget).await?;
-    state
-        .authority
-        .revoke_all_sessions(proof, budget.remaining())
-        .await?;
+    state.authority.revoke_all_sessions(proof, budget).await?;
     Ok((
         StatusCode::NO_CONTENT,
         [(
@@ -202,7 +189,7 @@ pub(crate) struct Pagination {
 pub(crate) async fn list(
     State(state): State<AppState>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     query: std::result::Result<Query<Pagination>, axum::extract::rejection::QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response> {
@@ -210,17 +197,12 @@ pub(crate) async fn list(
     let secret = cookie(&headers)?.ok_or(UNAUTH)?;
     let proof = state
         .authority
-        .inspect_session(binding, secret, budget.remaining())
+        .inspect_session(binding, secret, budget)
         .await?;
     Ok(Json(crate::dto::SessionPage::from(
         state
             .authority
-            .list_sessions(
-                proof,
-                page.cursor,
-                page.limit.unwrap_or(50),
-                budget.remaining(),
-            )
+            .list_sessions(proof, page.cursor, page.limit.unwrap_or(50), budget)
             .await?,
     ))
     .into_response())
@@ -234,7 +216,7 @@ struct Reauthentication {
 pub(crate) async fn reauthenticate(
     State(state): State<AppState>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     request: Request,
 ) -> Result<Response> {
     if !request_marker(request.headers())? {
@@ -247,13 +229,10 @@ pub(crate) async fn reauthenticate(
         .ok_or(HttpError::from(AuthorityError::Unavailable))?
         .0;
     let source = AttemptSource::parse(&peer.to_string())?;
-    let Json(input) = tokio::time::timeout_at(
-        budget.cutoff(),
-        Json::<Reauthentication>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<Reauthentication>::from_request(request, &state)
+    })
+    .await?;
     issued(
         state
             .authority
@@ -261,7 +240,7 @@ pub(crate) async fn reauthenticate(
                 proof,
                 Password::new(input.password).map_err(|_| UNAUTH)?,
                 source,
-                budget.remaining(),
+                budget,
             )
             .await?,
     )

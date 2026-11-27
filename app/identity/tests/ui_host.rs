@@ -1,7 +1,7 @@
 //! Consumer-owned production transport against public components and the reference host policy.
-#[path = "../../../crates/identity-postgres/tests/federation_support/mod.rs"]
+#[path = "../../../tests/support/federation.rs"]
 mod federation_support;
-#[path = "../../../crates/identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 use rss_identity_app::{assembly, config::RuntimeConfig};
 use rss_identity_postgres::{Federation, FederationConfig};
@@ -29,6 +29,7 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     );
     let authority = assembly::authority(
         &config,
+        assembly::authority_config(&config)?.with_oidc(federation_support::ScriptedOidc::new()),
         f.runtime.clone(),
         kdf.clone(),
         rss_identity_app::config::cutoff(config.budgets.startup_seconds)?,
@@ -37,7 +38,6 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     let federation = Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
         authority.clone(),
-        federation_support::ScriptedOidc::new(),
         rss_identity_postgres::StateSigner::new([7; 32], &origin)?,
         FederationConfig {
             callback: format!("{origin}/api/v1/identity/oidc/callback"),
@@ -135,5 +135,5 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[path = "../../../crates/identity-service-http/tests/request_support/mod.rs"]
+#[path = "../../../tests/support/request.rs"]
 mod request_support;

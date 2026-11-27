@@ -1,10 +1,10 @@
 #[path = "installation/active.rs"]
 mod active;
-#[path = "../../../crates/identity-postgres/tests/federation_support/mod.rs"]
+#[path = "../../../tests/support/federation.rs"]
 mod federation_support;
 #[path = "installation/gateway.rs"]
 mod gateway;
-#[path = "../../../crates/identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 // Real TLS PostgreSQL installation, host policy and startup seams; no deployed artifact/T3 claim.
 use rss_identity_app::{
@@ -17,7 +17,9 @@ use rss_identity_postgres::*;
 use rss_transactional_messaging_postgres::PgRuntime;
 use serde_json::json;
 use sqlx::Connection;
+use std::io::Write;
 use std::{path::PathBuf, sync::Arc, time::Duration};
+use support::deadline;
 
 const PASSWORD: &str = "fixture private account password";
 fn password() -> Password {
@@ -82,8 +84,19 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         );
         sqlx::raw_sql(restore).execute(&mut owner).await?;
     }
-    migration::install(install_config()).await?;
-    migration::verify(install_config()).await?;
+    let migration_file = root.join("migration.json");
+    std::fs::write(&migration_file, serde_json::to_vec(&install_value)?)?;
+    for options in [&[][..], &["--verify"][..]] {
+        assert!(
+            std::process::Command::new(env!("CARGO_BIN_EXE_identity-migrate"))
+                .arg("--config")
+                .arg(&migration_file)
+                .args(options)
+                .output()?
+                .status
+                .success()
+        );
+    }
     sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES('55555555-5555-4555-8555-555555555555',1)").execute(&mut owner).await?;
     migration::verify(install_config()).await?;
     for (corrupt, restore) in [
@@ -124,19 +137,37 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         "fresh-only installer must reject existing storage"
     );
     let config: RuntimeConfig = serde_json::from_value(value.clone())?;
-    let maintenance_db = rss_identity_app::config::DatabaseConfig {
-        user: "host_maintenance".into(),
-        password_file: root.join("maintenance").to_string_lossy().into_owned(),
-        ..owner_db.clone()
-    };
-    let maintenance_runtime = Arc::new(
-        PgRuntime::connect_producer(
-            maintenance_db.pg()?,
-            assembly::Timer,
-            config.storage.identity()?,
-        )
-        .await?,
-    );
+    let maintenance_file = root.join("maintenance.json");
+    let password_file = root.join("operator-password");
+    let mut maintenance = json!({});
+    for field in [
+        "formatVersion",
+        "instanceId",
+        "bootstrapAccounts",
+        "storage",
+        "database",
+        "authority",
+        "passwordWork",
+        "budgets",
+    ] {
+        maintenance[field] = value[field].clone();
+    }
+    maintenance["database"]["user"] = json!("host_maintenance");
+    maintenance["database"]["passwordFile"] = json!(root.join("maintenance"));
+    std::fs::write(&maintenance_file, serde_json::to_vec(&maintenance)?)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let initial_password = root.join("initial-password");
+    for (path, value) in [
+        (&initial_password, "initial fixture operator password"),
+        (&password_file, PASSWORD),
+    ] {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?
+            .write_all(value.as_bytes())?;
+    }
     let kdf = Arc::new(
         PasswordKdf::new(
             std::num::NonZeroUsize::new(4).unwrap(),
@@ -144,25 +175,26 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         )
         .unwrap(),
     );
-    let maintenance = Authority::connect_maintenance(
-        maintenance_runtime.clone(),
-        kdf.clone(),
-        assembly::authority_config(&config)?,
-        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
-        deadline(),
-    )
-    .await?;
     let keys = config.bootstrap_keys()?;
     for key in &keys {
-        maintenance
-            .initialize(
-                crate::support::binding(key.tenant),
-                *key,
-                LoginKey::parse("operator")?,
-                password(),
-                deadline(),
-            )
-            .await?;
+        for (command, target, secret) in [
+            ("initialize", "operator".to_owned(), &initial_password),
+            (
+                "recover",
+                key.principal.as_uuid().to_string(),
+                &password_file,
+            ),
+        ] {
+            assert!(
+                std::process::Command::new(env!("CARGO_BIN_EXE_identity-admin"))
+                    .arg(&maintenance_file)
+                    .args([command, &key.tenant.to_string(), &target])
+                    .arg(secret)
+                    .output()?
+                    .status
+                    .success()
+            );
+        }
     }
     value["database"]["user"] = json!("host_runtime");
     value["database"]["passwordFile"] = json!(root.join("runtime"));
@@ -179,18 +211,18 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         )
         .await?,
     );
+    let upstream = federation_support::ScriptedOidc::new();
     let authority = assembly::authority(
         &config,
+        assembly::authority_config(&config)?.with_oidc(upstream.clone()),
         runtime.clone(),
         kdf.clone(),
         rss_identity_app::config::cutoff(config.budgets.startup_seconds)?,
     )
     .await?;
-    let upstream = federation_support::ScriptedOidc::new();
     let federation = Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
         authority.clone(),
-        upstream.clone(),
         rss_identity_postgres::StateSigner::new([7; 32], &config.public_origin)?,
         FederationConfig {
             callback: format!("{}/api/v1/identity/oidc/callback", config.public_origin),
@@ -412,7 +444,6 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     rss_identity_app::rekey::run(install_config(), ring(true), install_config().targets, true)
         .await?;
     runtime.close().await;
-    maintenance_runtime.close().await;
     kdf.close();
     kdf.wait_closed().await;
     assert!(kdf.hash(password()).await.is_err());
@@ -729,7 +760,6 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
-    use std::io::Write;
     restore.stdin.take().unwrap().write_all(&dump.stdout)?;
     anyhow::ensure!(
         restore.wait_with_output()?.status.success(),
@@ -742,11 +772,5 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     Ok(())
 }
 
-fn deadline() -> rss_transactional_messaging::policy::OperationDeadline {
-    rss_transactional_messaging::policy::OperationDeadline::from_remaining(
-        std::time::Duration::from_secs(10),
-    )
-}
-
-#[path = "../../../crates/identity-service-http/tests/request_support/mod.rs"]
+#[path = "../../../tests/support/request.rs"]
 mod request_support;

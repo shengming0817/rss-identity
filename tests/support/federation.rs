@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -19,17 +19,14 @@ type Hook = Box<dyn FnOnce() -> UpstreamFuture<'static, ()> + Send>;
 pub struct ScriptedOidc {
     revisions: ProviderRevisions,
     pub fail: AtomicBool,
-    pub trusted_assurance: AtomicBool,
-    pub step_up_disabled: AtomicBool,
+
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
     pub email_verified: AtomicBool,
     pub profile: Mutex<Option<rss_identity_core::profile::Profile>>,
     pub groups: Mutex<Vec<String>>,
     pub department_snapshot: Mutex<rss_identity_core::department::UpstreamDepartmentSnapshot>,
-    pub issued_at_offset: AtomicI64,
-    pub gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    pub arrivals: AtomicUsize,
+
     pub hook: Mutex<Option<Hook>>,
 }
 impl ScriptedOidc {
@@ -37,8 +34,6 @@ impl ScriptedOidc {
         Arc::new(Self {
             revisions: ProviderRevisions::new(1024),
             fail: AtomicBool::new(false),
-            trusted_assurance: AtomicBool::new(true),
-            step_up_disabled: AtomicBool::new(false),
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
             email_verified: AtomicBool::new(true),
@@ -49,19 +44,15 @@ impl ScriptedOidc {
                     department_snapshot(Some("dept-01")),
                 ),
             ),
-            issued_at_offset: AtomicI64::new(0),
-            gate: Mutex::new(None),
-            arrivals: AtomicUsize::new(0),
             hook: Mutex::new(None),
         })
     }
 }
 impl UpstreamOidc for ScriptedOidc {
     fn assurance_profile(&self, _tenant: TenantId, _c: &ProviderSettings) -> AssuranceProfile {
-        let approved = self.trusted_assurance.load(Ordering::SeqCst);
         AssuranceProfile {
-            fingerprint: [u8::from(approved); 32],
-            supports_step_up: approved && !self.step_up_disabled.load(Ordering::SeqCst),
+            fingerprint: [1; 32],
+            supports_step_up: true,
         }
     }
     fn validate(
@@ -99,11 +90,6 @@ impl UpstreamOidc for ScriptedOidc {
         Box::pin(async move {
             let c = provider.settings();
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let gate = self.gate.lock().unwrap().clone();
-            if let Some(gate) = gate {
-                self.arrivals.fetch_add(1, Ordering::SeqCst);
-                gate.wait().await;
-            }
             let hook = self.hook.lock().unwrap().take();
             if let Some(hook) = hook {
                 hook().await?;
@@ -139,8 +125,7 @@ impl UpstreamOidc for ScriptedOidc {
                 issued_at: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() as i64
-                    + self.issued_at_offset.load(Ordering::SeqCst),
+                    .as_secs() as i64,
                 expires_at: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
@@ -191,11 +176,10 @@ impl UpstreamOidc for ScriptedOidc {
         })
     }
 }
-pub fn service(f: &Fixture, oidc: Arc<dyn UpstreamOidc>) -> Federation {
+pub fn service(f: &Fixture) -> Federation {
     Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
         f.store.clone(),
-        oidc,
         StateSigner::new([7; 32], "https://identity.example.test").unwrap(),
         FederationConfig {
             callback: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
@@ -229,19 +213,6 @@ pub async fn actor(f: &Fixture) -> anyhow::Result<AuthenticatedSession> {
 }
 pub async fn enabled(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
     enabled_settings(f, s, settings()).await
-}
-pub async fn enabled_department(
-    f: &Fixture,
-    s: &Federation,
-    max_age: i64,
-) -> anyhow::Result<ProviderView> {
-    let mut input = settings().input();
-    input.claims.department_snapshot =
-        Some(rss_identity_core::department::DepartmentSnapshotClaim::new(
-            "organization_snapshot".into(),
-            max_age,
-        )?);
-    enabled_settings(f, s, input.try_into()?).await
 }
 async fn enabled_settings(
     f: &Fixture,
@@ -316,9 +287,6 @@ pub fn issued(outcome: FederatedOutcome) -> IssuedSession {
 }
 pub async fn session(f: &Fixture) -> anyhow::Result<IssuedSession> {
     f.login().await
-}
-pub fn secret(s: &IssuedSession) -> rss_identity_core::session::SessionSecret {
-    rss_identity_core::session::SessionSecret::parse(s.secret().expose().into()).unwrap()
 }
 
 /// Small complete organization assertion used by the trusted scripted adapter.

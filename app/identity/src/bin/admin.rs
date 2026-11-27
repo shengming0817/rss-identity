@@ -53,16 +53,7 @@ async fn run() -> Result<(), AppError> {
     let config: MaintenanceConfig = load(Path::new(&args[0]))?;
     config.validate()?;
     let cutoff = rss_identity_app::config::cutoff(config.budgets.maintenance_seconds)?;
-    let authority_config = config.authority.apply(
-        AuthorityConfig::new(
-            rss_identity_core::InstanceId::parse(&config.instance_id)
-                .map_err(|_| AppError::Configuration)?,
-            rss_identity_core::session::SessionPolicy::new(900, 14400)
-                .map_err(|_| AppError::Budget)?,
-            rss_audit_postgres::Integrity::Plain,
-        )?,
-        rss_identity_app::config::finite_seconds(config.budgets.maintenance_seconds)?,
-    )?;
+    let authority_config = config.authority_config()?;
     let database = config.database.pg()?;
     let binding = config.storage.identity()?;
     let runtime = Arc::new(
@@ -84,7 +75,7 @@ async fn run() -> Result<(), AppError> {
         kdf.clone(),
         authority_config,
         config.storage.binding(command.tenant()?)?,
-        assembly::deadline(cutoff),
+        cutoff,
     )
     .await;
     let result = match authority {
@@ -122,7 +113,7 @@ async fn execute(
                 config.bootstrap_key(TenantId::parse(tenant).map_err(|_| AppError::Tenant)?)?,
                 login(name)?,
                 password(pw)?,
-                assembly::deadline(cutoff),
+                cutoff,
             )
             .await
         }
@@ -133,7 +124,7 @@ async fn execute(
                     .binding(TenantId::parse(target).map_err(|_| AppError::Tenant)?)?,
                 key(target, principal)?,
                 password(pw)?,
-                assembly::deadline(cutoff),
+                cutoff,
             )
             .await
         }

@@ -41,7 +41,7 @@ async fn actor(
     s: &AppState,
     binding: ExecutionBinding,
     h: &HeaderMap,
-    b: RequestBudget,
+    b: Deadline,
     write: bool,
 ) -> Result<rss_identity_postgres::AuthenticatedSession, Error> {
     let secret = cookie(h)?.ok_or(UNAUTH)?;
@@ -51,9 +51,7 @@ async fn actor(
         }
         csrf(h, &secret)?;
     }
-    Ok(s.authority
-        .inspect_session(binding, secret, b.remaining())
-        .await?)
+    Ok(s.authority.inspect_session(binding, secret, b).await?)
 }
 fn target(t: &str, p: &str) -> Result<AccountKey, Error> {
     Ok(AccountKey {
@@ -64,24 +62,24 @@ fn target(t: &str, p: &str) -> Result<AccountKey, Error> {
 async fn current(
     State(s): State<AppState>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     h: HeaderMap,
 ) -> Result<Response, Error> {
     let actor = actor(&s, binding, &h, b, false).await?;
-    let profile = s.authority.current_profile(&actor, b.remaining()).await?;
+    let profile = s.authority.current_profile(&actor, b).await?;
     Ok(Json(dto::Observation::from(profile.view()?)).into_response())
 }
 async fn local(
     State(s): State<AppState>,
     Path((t, p)): Path<(String, String)>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     h: HeaderMap,
 ) -> Result<Response, Error> {
     let actor = actor(&s, binding, &h, b, false).await?;
     Ok(Json(dto::Local::from(
         s.authority
-            .read_local_profile(&actor, target(&t, &p)?, b.remaining())
+            .read_local_profile(&actor, target(&t, &p)?, b)
             .await?,
     ))
     .into_response())
@@ -90,22 +88,19 @@ async fn update(
     State(s): State<AppState>,
     Path((t, p)): Path<(String, String)>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     request: Request,
 ) -> Result<Response, Error> {
     let actor = actor(&s, binding, request.headers(), b, true).await?;
-    let bytes = tokio::time::timeout_at(
-        b.cutoff(),
-        axum::body::to_bytes(request.into_body(), 98_304),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let bytes = read_body(request, b, |request| {
+        axum::body::to_bytes(request.into_body(), 98_304)
+    })
+    .await?;
     let change: dto::Change = serde_json::from_slice(&bytes).map_err(|_| BAD)?;
     let change = change.try_into().map_err(|_| BAD)?;
     Ok(Json(dto::Receipt::from(
         s.authority
-            .update_local_profile(actor, target(&t, &p)?, change, b.remaining())
+            .update_local_profile(actor, target(&t, &p)?, change, b)
             .await?,
     ))
     .into_response())
@@ -114,7 +109,7 @@ async fn receipt(
     State(s): State<AppState>,
     Path((t, p, o)): Path<(String, String, String)>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     h: HeaderMap,
 ) -> Result<Response, Error> {
     let actor = actor(&s, binding, &h, b, false).await?;
@@ -124,7 +119,7 @@ async fn receipt(
         .map_err(|_| BAD)?;
     Ok(Json(
         s.authority
-            .local_profile_receipt(&actor, target(&t, &p)?, operation, b.remaining())
+            .local_profile_receipt(&actor, target(&t, &p)?, operation, b)
             .await?
             .map(dto::Receipt::from),
     )

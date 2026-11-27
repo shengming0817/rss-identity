@@ -1,5 +1,5 @@
 //! Password-file to maintenance authority seam; not a binary/configuration T3.
-#[path = "../../../crates/identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 use rss_identity_app::read_secret;
 use rss_identity_core::account::Password;

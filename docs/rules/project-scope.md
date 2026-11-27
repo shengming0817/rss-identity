@@ -1,6 +1,6 @@
 # 产品范围
 
-rss-identity 拥有可嵌入的本地认证、租户成员身份、联合 IdP 登录/关联、实例内服务端会话和原子安全事件。core、postgres、oidc、web-credentials 为公开能力包，独立服务契约由仓内私有的 service-http 持有；app/identity 是参考宿主，不成为消费方的运行依赖。宿主接入见[嵌入指南](../guides/embedding.md)。
+rss-identity 拥有独立服务的 HTTP 契约、应用、网关、安装与运维。service-http 提供产品路由，app/identity 装配 RSS 持有的 core、postgres、oidc 和 web-credentials 公共能力包。宿主接入见[嵌入指南](../guides/embedding.md)。
 
 宿主持有管理角色、防锁死、资源授权、配置、实例标识、租户 admission、数据库角色与 fenced PgRuntime；组件强制实例/租户/主体/epoch/会话绑定并在事务内调用宿主策略。组、可选部门树快照和 assurance 仅提供可信认证事实，不生成资源权限。MDM/ZT 持有设备 authority、attestation、posture 和业务授权。
 
@@ -12,7 +12,7 @@ RSS 公共 runtime、事务消息及必要基础库使用同一 Git URL/完整 S
 
 不建设通用 IAM、OAuth 授权服务器、API proxy、中央 ABAC 或设备 authority。账号密码签发的实例内 Bearer 呈现已由 #2795 接纳，复用现有会话 owner；API Key 与程序化来源准入归消费产品。新增 SAML/LDAP/SCIM、机器身份平台、自助注册、passkey 按独立需求接纳。参考宿主持有部署运维；MDM 和 Web 持有各自的产品接入。工作项记录具体交付及验证结果。
 
-Identity 拥有账户、会话和联合身份事件到 Audit 的解释、脱敏与同事务直接追加。Audit 公共包从 rss-audit 独立固定 Git revision 消费；其 RSS 基础库与 Identity 统一来源和 revision。Audit 为必需持久化；宿主持有原业务事务与生命周期，参考宿主固定 Plain，不提供审计 worker 或禁用分支。
+Identity 拥有账户、会话和联合身份事件到 Audit 的解释、脱敏与同事务直接追加。Identity、Audit 和基础库由产品固定到同一 RSS Git 提交。Audit 为必需持久化；宿主持有原业务事务与生命周期，参考宿主固定 Plain，不提供审计 worker 或禁用分支。
 
 
 登录资料由 Identity 持有：固定常用资料、批准根内的有界动态 JSON、本地资料管理及每账户／来源的最新登录观察。

@@ -1,6 +1,6 @@
 # 嵌入认证组件
 
-宿主通过公开能力包装配本地认证和可选 OIDC，不依赖参考应用。每个来源仓库的依赖使用固定 URL 与完整 Git revision，由宿主 manifest/lock 持有；不使用本机跨仓 path。实际装配示例见 [参考宿主](../../app/identity/src/assembly.rs)，接口以各能力的 Rust API 为准。
+宿主通过公开能力包装配本地认证和可选 OIDC，不依赖参考应用。四个公共 Identity 包、Audit 与基础库使用同一 RSS URL 与完整 Git revision，由宿主 manifest/lock 持有；不使用本机跨仓 path。实际装配示例见 [参考宿主](../../app/identity/src/assembly.rs)，接口以各能力的 Rust API 为准。
 
 ## 本地认证与安装
 
@@ -9,7 +9,7 @@
 `connect_runtime/connect_maintenance` 以宿主提供的一次性 probe binding 验证 schema、数据库角色、Audit 与 instance，之后丢弃 probe，不将其作为服务租户名单。宿主登记新 tenant fence 后，已有 Authority 和 router 可立即接收该租户的明确 scope。普通 HTTP 请求必须由可信宿主注入 RSS `ExecutionBinding` extension；组件核对路径 tenant，登录后生成的不可构造证明保存完整原 scope。借用连接的证明复核同样比较 storage、lineage、tenant 和 epoch。
 
 `StateSigner` 由 `rss_identity_postgres` 导出。OIDC state v2 签名绑定 instance 和完整执行坐标；callback 从验签结果继续原 scope，旧 epoch/lineage 不能用新配置重认。state 不是当前用户或资源授权证明。
-2. 数据库 owner 先安装所选 RSS 版本的完整消息 migration，再以独立受限 owner 安装 Audit schema，安装 Identity schema 并授予 runtime/maintenance profile。仅接受当前全新安装；在提交安装事务前，以实际目标角色验证有效权限和结构。入口见 [schema owner](../../crates/identity-postgres/src/schema.rs)；生产迁移执行属于宿主。
+2. 在全新 PostgreSQL 17 数据库中，数据库 owner 先安装所选 RSS 版本的完整消息 migration，再以独立受限 owner 安装 Audit schema，安装 Identity schema 并授予 runtime/maintenance profile。仅接受当前全新安装；在提交安装事务前，以实际目标角色验证有效权限和结构。入口见 [schema owner](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-postgres/src/schema.rs&version=GC8f50018ade8b32f797698b7b0290d11ea90502bf)；生产迁移执行属于宿主。
 3. 维护身份只用于初始化和本地密码恢复，凭据不注入日常服务。恢复推进失效代际，保留账户/成员启停状态，不授予宿主角色。
 4. runtime Authority 必须接收宿主 ManagementPolicy。密码校验和凭据签发经单一登录入口完成；浏览器 JSON、普通账户快照或上游结构值不能构造可信会话。
 
@@ -35,7 +35,7 @@ Cookie 登录、Bearer 登录、密码重认证及本人改密共用密码防护
 
 ## 执行与事实预算
 
-HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` 及 enterprise exchange 显式接收 RSS `Deadline`；整个调用链只消耗该绝对截止，`OperationDeadline` 仅在数据库等边界提供当时的剩余时长。
+HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` 及 enterprise exchange 显式接收 RSS `Deadline`；整个调用链只消耗该绝对截止，PG 事务沿用该截止和宿主执行时钟。
 
 组与部门快照各数量支持 1024；部门树深仍为 16。`with_auth_facts_budget` 选择完整 JSONB 表示的字节预算，数量合法不保证任意长名称组合都能装入预算。普通资料由 core 限制 raw JSON，HTTP 另限制完整请求包络；JSONB 的空格和数值展开不再受另一份不等价的文本长度上限拦截，SQL 保留对象结构约束。
 
@@ -58,7 +58,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 
 异步业务可在认证原请求后，通过 `AuthenticatedSession::reference()` 将非凭据会话引用存入宿主可信数据。后续用 `Authority::recheck_session_reference` 复核原会话、账户和来源，取得本次有界的 `RevalidatedSession` 身份/组/部门事实。被撤销、失效或过期的会话不能通过；检查不延长 idle 或快照期限。引用不是登录凭据，不能从 HTTP 请求接收它替代认证，返回事实也不能用于管理操作；宿主仍负责资源授权和原请求归属。
 
-宿主业务写入需要与会话撤销串行化时，在自己已有的、绑定 actor 租户的 READ COMMITTED 事务内调用 `recheck_authenticated_session_on(connection, &actor)`。它复用当前凭据与会话来源复核，Identity 在本连接锁定当前来源、账户、成员和会话，保持至宿主提交或回滚；不消费 step-up、不续期、不产生新身份事实。调用顺序为已有 Audit/Ledger 锁 → Identity 来源、账户及会话锁 → 平台 verifier 权威锁及宿主授权/业务锁。平台 binding/source 写入必须遵守 verifier 使用同一连接取得的权威锁，不能仅依赖 Identity 资格锁。不要在已持有这些锁时调用自开事务的引用复核接口。
+宿主业务写入需要与会话撤销串行化时，在自己已有的、绑定 actor 租户的 READ COMMITTED 事务内调用 `authority.recheck_authenticated_session_on(connection, &actor)`。它复用当前凭据与会话来源复核，Identity 在本连接锁定当前来源、账户、成员和会话，保持至宿主提交或回滚；不消费 step-up、不续期、不产生新身份事实。调用顺序为已有 Audit/Ledger 锁 → Identity 来源、账户及会话锁 → 平台 verifier 权威锁及宿主授权/业务锁。平台 binding/source 写入必须遵守 verifier 使用同一连接取得的权威锁，不能仅依赖 Identity 资格锁。不要在已持有这些锁时调用自开事务的引用复核接口。
 
 单会话先定位，再按 Provider、账户与成员、会话的顺序取锁。同层对象按 UUID 排序，同一对象直接取本次操作所需的最强模式。锁后重新读取凭据、代际、来源和期限。
 
@@ -72,7 +72,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 
 宿主在业务锁之前完成会话准入和 step-up。已准入的组合在同连接内复用保护，平台 binding/source 写入遵循 verifier 的权威锁。宿主提交或回滚释放全部锁。纯续期和凭据轮换保留原人员版本。
 
-通过 `PgRuntime::local_tx` 组合时，`with_connection` 回调的外层错误类型是 SQLx；使用 `tx.with_connection(|c| Box::pin(async move { Ok(recheck_authenticated_session_on(c, &actor).await) })).await??` 将内部 `PgError` 原样传播到宿主事务，不能吞掉内层错误后继续提交。
+通过 `PgRuntime::local_tx_until(binding, deadline, ...)` 组合时，`with_connection` 回调的外层错误类型是 SQLx；使用 `tx.with_connection(|c| Box::pin(async move { Ok(authority.recheck_authenticated_session_on(c, &actor).await) })).await??` 将内部 `PgError` 原样传播到宿主事务，不能吞掉内层错误后继续提交。
 
 任何复核错误都要求宿主回滚；宿主继续负责 fencing、操作预算、资源授权和最终结算。复核成功不等于业务已提交，`CommitUnknown` 与回滚失败必须保留原结算语义。资格行锁串行化相应状态变更，不冻结自然时间或延长 actor 的原期限，不得跨事务缓存成功结果。该接口只接受当前请求的 `AuthenticatedSession`；异步保存的 `SessionReference` 不含当前凭据摘要，其独立复核用途不变。
 
@@ -88,7 +88,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 
 ## 组与可选可信部门树快照
 
-组与部门是带来源和固定期限的认证事实，不是资源权限。缺失、空值、非法断言与过期不同；宿主应显式处理不可用状态。当前模型、受控构造和边界见 [组](../../crates/identity-core/src/groups.rs) 与 [部门](../../crates/identity-core/src/department.rs)。
+组与部门是带来源和固定期限的认证事实，不是资源权限。缺失、空值、非法断言与过期不同；宿主应显式处理不可用状态。当前模型、受控构造和边界见 [组](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/groups.rs&version=GC8f50018ade8b32f797698b7b0290d11ea90502bf) 与 [部门](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/department.rs&version=GC8f50018ade8b32f797698b7b0290d11ea90502bf)。
 
 组 Available 视图只能借自本次可信认证结果，每次读取 `values()` 都检查请求证明和快照截止；部门通过 `snapshot()` 做同样检查。请求证明到期使读取失败，事实独立到期不自动否定基础身份。未来观察在下次权威请求前保持不可用。已经复制的值、借出的引用和已经产生的业务效果由宿主负责。宿主需维持可信数据库时钟；请求内单调期限不能修正数据库墙钟偏差。
 
@@ -101,7 +101,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 ],"memberships":["engineering"]}
 ```
 
-树必须完整、单根、有界；稳定标识精确匹配，显示名不提供身份。空成员表示未分配，缺失不是未分配声明。配置与输入结构由 [OIDC 适配器](../../crates/identity-oidc/src/lib.rs) 和 core 模型持有。
+树必须完整、单根、有界；稳定标识精确匹配，显示名不提供身份。空成员表示未分配，缺失不是未分配声明。配置与输入结构由 [OIDC 适配器](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-oidc/src/lib.rs&version=GC8f50018ade8b32f797698b7b0290d11ea90502bf) 和 core 模型持有。
 
 instance、tenant、principal、provider 和配置版本由权威会话绑定；观察来自 signed iat，期限为 signed iat 加显式配置的有界 TTL，且不超过 token exp。refresh、活动请求和组件重建不延长快照。provider 更新/禁用及主体/session 撤销作用于旧会话和在途流程；link target 不覆盖当前 source 快照。sourceRevision 是上游不透明版本，不表示 Identity 全局最新目录。
 
@@ -111,7 +111,7 @@ Keycloak 使用内置 JSON UserAttributeMapper，把管理员维护的单个完�
 
 ## 可选 OIDC 与 HTTP 装配
 
-Federation 接收 Authority、上游适配器、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。Authority 不保存租户名单；无认证证明的操作接收 `ExecutionBinding`，已认证操作沿用证明的原 binding。连接固定 storage，每次事务核对 tenant/epoch，不从数据库自动更新代际。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
+HttpOidc 和 HttpEntra 构造时接收 `ProviderClock::new(runtime.execution_timer().clone(), SystemTime::now)`，以宿主执行时钟处理绝对截止，以 UTC 墙钟检查协议时间。宿主通过 `AuthorityConfig::with_oidc` 安装上游适配器，登录、会话复核和管理授权复用此配置。Federation 接收该 Authority、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。Authority 不保存租户名单；无认证证明的操作接收 `ExecutionBinding`，已认证操作沿用证明的原 binding。连接固定 storage，每次事务核对 tenant/epoch，不从数据库自动更新代际。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
 
 宿主登录入口用 `BrowserBinding::start` 获取关联值及首次签发的 Cookie，将关联值和可信执行绑定传给 `Federation::begin_login`。回调用 `BrowserBinding::require` 取回关联值，经 `CallbackOutcome::from_parts` 判定结果后调用 `Federation::complete` 或 `cancel`。独立服务的示例见[OIDC 路由](../../crates/identity-service-http/src/oidc.rs)。
 
@@ -148,7 +148,7 @@ JWKS 只从固定 Microsoft tenant 地址经有界、禁重定向的 HTTPS 取�
 ## 认证审计交付
 
 Identity 直接将内部安全事件映射成准备好的 Audit 记录，在原业务事务内批量追加。
-`AuthorityConfig::new(instance, sessions, integrity)` 必须显式选择完整性；参考宿主使用
+`AuthorityConfig::new(instance, sessions, integrity, audit_budget)` 接收宿主共享的审计写入预算。独立服务按每个数据库连接最多一个 8 行、1 MiB 批次设置总容量，使用
 `rss_audit_postgres::Integrity::Plain`，不存在禁用审计分支。嵌入宿主可通过同源 Audit feature
 启用 Ledger，并注入其认证器。启动在实际业务连接上验证 Audit；无专用审计池、worker、通知或恢复密钥。
 
@@ -169,17 +169,6 @@ RSS schema/权限保留，不代表 Identity 仍发布审计 Outbox 消息。Led
 先用 `prepare_local_account` 处理密码，再在宿主目标事务中调用 `authorize_in`（包括历史回执重放）和 `create_local_account_in`。组件在源租户作用域复查真实会话与宿主 ProvisionAccount 权限，恢复目标作用域后才写账户及安全事件；组件通过 RSS 同连接接缝校验源租户 execution binding 并持有源栅栏直至目标事务结算，源 epoch 失效时拒绝操作。宿主在同事务写产品授权和回执，任何组件错误均须传播并回滚，禁止捕获错误后继续提交。组件不签发目标租户会话，也不赋予产品管理员权限。
 
 `identity.account.provisioning/v1` 事件包含源 actor 的实例、租户和主体，在原目标事务内直接追加 Audit。产品持有操作幂等、密码安全指纹和首次使用登记；不得用随机盐密码编码作为请求指纹或把明文秘密写进回执。
-
-## 消费方的事实到期测试
-
-仅测试构建可启用 `rss-identity-postgres/test-support`，以
-`Authority::with_fact_time(ControlledFactTime::default())` 给指定 Authority 配置事实时间。
-保留该控制句柄，在首次成功读取后用 `advance_to(fact.expires_at())` 推进后续读取；
-`inspect_session`、活动认证、reference 重检及管理事务仍走实际存储与身份校验。
-时间只影响新加载的 group/department 事实投影，不改变 JWT、持久事实、会话有效期、
-借用中的旧证明或事务预算。已有 Authority 克隆不受新配置影响，后续克隆共享该控制句柄；
-生产装配不启用此 feature。借用事实的即时到期边界由组件 T1 持有，无需消费方重复真实等待。
-
 
 ## 登录资料与属性
 

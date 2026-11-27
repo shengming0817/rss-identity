@@ -6,10 +6,7 @@ use rss_identity_core::{
 };
 use rss_identity_postgres::*;
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
-use rss_transactional_messaging::{
-    fence::{Epoch, ExecutionBinding, StorageIdentity},
-    policy::OperationDeadline,
-};
+use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
 use rss_transactional_messaging_postgres::{PgConfig, PgPassword, PgRuntime};
 use sqlx::{
     PgPool,
@@ -32,8 +29,8 @@ pub fn login(s: &str) -> LoginKey {
 pub fn source() -> AttemptSource {
     AttemptSource::parse("local-test").unwrap()
 }
-pub fn deadline() -> OperationDeadline {
-    OperationDeadline::from_remaining(Duration::from_secs(30))
+pub fn deadline() -> Deadline {
+    Deadline::from_timeout(&Timer, Duration::from_secs(30)).unwrap()
 }
 pub fn credential_keys() -> Arc<CredentialKeys> {
     Arc::new(CredentialKeys::new("fixture".into(), vec![("fixture".into(), [8; 32])]).unwrap())
@@ -99,7 +96,8 @@ pub struct Fixture {
     pub owner: PgPool,
     pub admin: PgPool,
     pub database: String,
-    pub port: u16,
+    config: AuthorityConfig,
+    kdf: Arc<rss_identity_core::account::PasswordKdf>,
     pub runtime: Arc<PgRuntime>,
     pub maintenance_runtime: Arc<PgRuntime>,
     pub store: Authority,
@@ -112,9 +110,7 @@ pub struct Fixture {
 }
 impl Fixture {
     pub async fn new() -> anyhow::Result<Self> {
-        Self::with_instance(InstanceId::generate()).await
-    }
-    pub async fn with_instance(instance: InstanceId) -> anyhow::Result<Self> {
+        let instance = InstanceId::generate();
         let port = std::env::var("IDENTITY_TEST_PG_PORT")?.parse()?;
         let options = PgConnectOptions::new()
             .host("127.0.0.1")
@@ -180,16 +176,15 @@ impl Fixture {
             managers: RwLock::new(vec![key, system_key]),
             recent: RwLock::new(ReauthenticationRequirement::None),
         });
+        let config = config(instance);
+        let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?);
         let store = Authority::connect_runtime(
             runtime.clone(),
-            Arc::new(
-                rss_identity_core::account::PasswordKdf::new(
-                    std::num::NonZeroUsize::new(4).unwrap(),
-                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
-                )
-                .unwrap(),
-            ),
-            config(instance),
+            kdf.clone(),
+            config.clone(),
             crate::support::binding(
                 rss_request_context::TenantId::parse(crate::support::A).unwrap(),
             ),
@@ -199,14 +194,8 @@ impl Fixture {
         .await?;
         let maintenance = Authority::connect_maintenance(
             maintenance_runtime.clone(),
-            Arc::new(
-                rss_identity_core::account::PasswordKdf::new(
-                    std::num::NonZeroUsize::new(4).unwrap(),
-                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
-                )
-                .unwrap(),
-            ),
-            config(instance),
+            kdf.clone(),
+            config.clone(),
             crate::support::binding(
                 rss_request_context::TenantId::parse(crate::support::A).unwrap(),
             ),
@@ -217,7 +206,8 @@ impl Fixture {
             owner,
             admin,
             database,
-            port,
+            config,
+            kdf,
             runtime,
             maintenance_runtime,
             store,
@@ -229,51 +219,21 @@ impl Fixture {
             management_cookie: tokio::sync::Mutex::new(None),
         })
     }
+    pub async fn configure_runtime(&mut self, config: AuthorityConfig) -> anyhow::Result<()> {
+        self.store = Authority::connect_runtime(
+            self.runtime.clone(),
+            self.kdf.clone(),
+            config.clone(),
+            binding(self.key.tenant),
+            self.policy.clone(),
+            deadline(),
+        )
+        .await?;
+        self.config = config;
+        Ok(())
+    }
     pub fn config(&self) -> AuthorityConfig {
-        config(self.instance)
-    }
-    pub async fn runtime_as(&self, role: &str) -> anyhow::Result<Arc<PgRuntime>> {
-        connect(self.port, &self.database, role).await
-    }
-    pub async fn additional_runtime(&self) -> anyhow::Result<Arc<PgRuntime>> {
-        connect(self.port, &self.database, "identity_runtime").await
-    }
-    pub async fn probe(&self, profile: AuthorityProfile) -> Result<Authority, AuthorityError> {
-        let kdf = Arc::new(
-            rss_identity_core::account::PasswordKdf::new(
-                std::num::NonZeroUsize::new(4).unwrap(),
-                std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
-            )
-            .unwrap(),
-        );
-        match profile {
-            AuthorityProfile::Provisioning => Err(AuthorityError::Configuration),
-            AuthorityProfile::Runtime => {
-                Authority::connect_runtime(
-                    self.runtime.clone(),
-                    kdf,
-                    self.config(),
-                    crate::support::binding(
-                        rss_request_context::TenantId::parse(crate::support::A).unwrap(),
-                    ),
-                    self.policy.clone(),
-                    deadline(),
-                )
-                .await
-            }
-            AuthorityProfile::Maintenance => {
-                Authority::connect_maintenance(
-                    self.runtime.clone(),
-                    kdf,
-                    self.config(),
-                    crate::support::binding(
-                        rss_request_context::TenantId::parse(crate::support::A).unwrap(),
-                    ),
-                    deadline(),
-                )
-                .await
-            }
-        }
+        self.config.clone()
     }
     pub async fn bootstrap(&self) -> anyhow::Result<()> {
         self.maintenance
@@ -346,26 +306,6 @@ impl Fixture {
             .await?;
         Ok(())
     }
-    pub async fn account_events(&self) -> anyhow::Result<i64> {
-        let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT canonical FROM rss_audit.records")
-            .fetch_all(&self.owner)
-            .await?;
-        let mut count = 0;
-        for bytes in rows {
-            if rss_audit_core::decode_untrusted(&bytes)?
-                .event()
-                .identity()
-                .source()
-                .contract()
-                .id()
-                .as_str()
-                == "identity.account.security"
-            {
-                count += 1;
-            }
-        }
-        Ok(count)
-    }
     pub async fn events(&self) -> anyhow::Result<i64> {
         Ok(sqlx::query_scalar("SELECT count(*) FROM rss_audit.records")
             .fetch_one(&self.owner)
@@ -392,11 +332,12 @@ pub fn binding(tenant: TenantId) -> ExecutionBinding {
         Epoch::new(1).unwrap(),
     )
 }
-pub fn config(instance: InstanceId) -> AuthorityConfig {
+fn config(instance: InstanceId) -> AuthorityConfig {
     AuthorityConfig::new(
         instance,
         SessionPolicy::new(900, 14400).unwrap(),
         rss_audit_postgres::Integrity::Plain,
+        rss_audit_postgres::WriteBudget::new(8, 1024 * 1024, 4 * 1024 * 1024).unwrap(),
     )
     .unwrap()
 }
@@ -416,31 +357,6 @@ async fn connect(port: u16, database: &str, role: &str) -> anyhow::Result<Arc<Pg
         .await?,
     ))
 }
-// Exercise the concrete session APIs while sharing the existing account transition matrix.
-pub async fn apply_change(
-    store: &Authority,
-    actor: AuthenticatedSession,
-    target: rss_identity_core::account::AccountKey,
-    change: rss_identity_core::account::AccountChange,
-    deadline: rss_transactional_messaging::policy::OperationDeadline,
-) -> Result<rss_identity_core::account::AccountState, AuthorityError> {
-    use rss_identity_core::account::AccountChange;
-    match change {
-        AccountChange::Enabled(v) => store.set_account_enabled(actor, target, v, deadline).await,
-        AccountChange::Membership(v) => {
-            store
-                .set_account_membership(actor, target, v, deadline)
-                .await
-        }
-        AccountChange::Password(v) if actor.account() == target => {
-            store
-                .change_own_password(actor, password(), v, source(), deadline)
-                .await
-        }
-        AccountChange::Password(v) => store.reset_local_password(actor, target, v, deadline).await,
-    }
-}
-
 /// The fixture host establishes the same complete fence as a real host transaction.
 pub async fn fence(c: &mut sqlx::PgConnection, binding: ExecutionBinding) -> anyhow::Result<()> {
     let hex = |bytes: [u8; 16]| {
@@ -456,16 +372,4 @@ pub async fn fence(c: &mut sqlx::PgConnection, binding: ExecutionBinding) -> any
         .execute(c)
         .await?;
     Ok(())
-}
-
-// Observe a real backend waiting on the exact owner, rather than infer a lock from elapsed time.
-pub async fn wait_for_blocked_backend(f: &Fixture, blocker: i32) -> anyhow::Result<i32> {
-    tokio::time::timeout(Duration::from_secs(10),async {
-        loop {
-            let pid:Option<i32>=sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))")
-                .bind(blocker).fetch_optional(&f.owner).await?;
-            if let Some(pid)=pid {return Ok::<_,anyhow::Error>(pid);}
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await?
 }

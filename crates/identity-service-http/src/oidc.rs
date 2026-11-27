@@ -73,12 +73,12 @@ pub fn federated_router(
 async fn reconcile_profiles(
     State(federation): State<Federation>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     request: Request,
     next: axum::middleware::Next,
 ) -> Response {
     if let Err(error) = federation
-        .reconcile_assurance_profiles(binding, budget.remaining())
+        .reconcile_assurance_profiles(binding, budget)
         .await
     {
         let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -93,12 +93,12 @@ async fn reconcile_profiles(
 async fn options(
     State(s): State<FederationState>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
 ) -> Result<Response, crate::accounts::Error> {
     Ok(Json(dto::LoginOptions {
         providers: s
             .federation
-            .login_options(binding, b.remaining())
+            .login_options(binding, b)
             .await?
             .into_iter()
             .map(Into::into)
@@ -109,18 +109,18 @@ async fn options(
 async fn security(
     State(state): State<FederationState>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let secret = cookie(&headers)?.ok_or(UNAUTH)?;
     let actor = state
         .local
         .authority
-        .inspect_session(binding, secret, budget.remaining())
+        .inspect_session(binding, secret, budget)
         .await?;
     let security = state
         .federation
-        .current_session_security(actor, budget.remaining())
+        .current_session_security(actor, budget)
         .await?;
     Ok(Json(crate::dto::SessionSecurity::from(security)).into_response())
 }
@@ -159,7 +159,7 @@ async fn actor(
     state: &FederationState,
     binding: ExecutionBinding,
     headers: &HeaderMap,
-    budget: RequestBudget,
+    budget: Deadline,
     required: bool,
 ) -> Result<Option<AuthenticatedSession>, HttpError> {
     if !request_marker(headers)? {
@@ -173,7 +173,7 @@ async fn actor(
             .inspect_session(
                 binding,
                 SessionSecret::parse(secret.expose().into()).map_err(|_| UNAUTH)?,
-                budget.remaining(),
+                budget,
             )
             .await
         {
@@ -212,7 +212,7 @@ async fn begin(
     State(state): State<FederationState>,
     Path((_raw, provider)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     request: Request,
 ) -> Result<Response, HttpError> {
     let actor = actor(&state, binding, request.headers(), budget, false).await?;
@@ -221,13 +221,10 @@ async fn begin(
 
     let source = source(&request)?;
 
-    let Json(input) = tokio::time::timeout_at(
-        budget.cutoff(),
-        Json::<Begin>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<Begin>::from_request(request, &state)
+    })
+    .await?;
 
     let redirect = state
         .federation
@@ -240,7 +237,7 @@ async fn begin(
                 replacement: actor,
                 source,
             },
-            budget.remaining(),
+            budget,
         )
         .await?;
 
@@ -251,7 +248,7 @@ async fn step_up(
     State(state): State<FederationState>,
     Path((_raw, provider)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     request: Request,
 ) -> Result<Response, HttpError> {
     let actor = actor(&state, binding, request.headers(), budget, true).await?;
@@ -264,13 +261,10 @@ async fn step_up(
         .extensions()
         .get::<rss_identity_core::step_up::StepUpContext>()
         .cloned();
-    let Json(input) = tokio::time::timeout_at(
-        budget.cutoff(),
-        Json::<BeginStepUp>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<BeginStepUp>::from_request(request, &state)
+    })
+    .await?;
 
     let actor = actor.ok_or(UNAUTH)?;
     let context = input.operation.context(&actor, host)?;
@@ -286,7 +280,7 @@ async fn step_up(
                 source,
             },
             context,
-            budget.remaining(),
+            budget,
         )
         .await?;
 
@@ -297,7 +291,7 @@ async fn link(
     State(state): State<FederationState>,
     Path((_raw, provider)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     request: Request,
 ) -> Result<Response, HttpError> {
     let actor = actor(&state, binding, request.headers(), budget, true)
@@ -308,11 +302,10 @@ async fn link(
 
     let source = source(&request)?;
 
-    let Json(input) =
-        tokio::time::timeout_at(budget.cutoff(), Json::<Link>::from_request(request, &state))
-            .await
-            .map_err(|_| HttpError::request_timeout())?
-            .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<Link>::from_request(request, &state)
+    })
+    .await?;
 
     let password = input
         .password
@@ -331,7 +324,7 @@ async fn link(
                 target: input.return_target,
                 source,
             },
-            budget.remaining(),
+            budget,
         )
         .await?;
 
@@ -355,7 +348,7 @@ struct Callback {
 
 async fn callback(
     state: State<FederationState>,
-    budget: Extension<RequestBudget>,
+    budget: Extension<Deadline>,
     headers: HeaderMap,
     query: Result<Query<Callback>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
@@ -400,7 +393,7 @@ pub(crate) fn callback_error_response(response: Response) -> Response {
 
 async fn callback_result(
     State(state): State<FederationState>,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     headers: HeaderMap,
     query: Result<Query<Callback>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Response, HttpError> {
@@ -419,7 +412,7 @@ async fn callback_result(
                     browser,
                     query.iss,
                     login_cookie(&headers)?,
-                    budget.remaining(),
+                    budget,
                 )
                 .await?;
             return Ok(callback_failure(if cancelled {
@@ -437,15 +430,16 @@ async fn callback_result(
             code,
             query.iss,
             login_cookie(&headers)?,
-            budget.remaining(),
+            budget,
         )
         .await?;
 
     let (location, cookie) = match outcome {
         FederatedOutcome::Redirect(redirect) => (redirect.url, None),
-        FederatedOutcome::StepUp { grant, return_url } => {
-            (return_url, Some(operation_cookie(&grant)?))
-        }
+        FederatedOutcome::StepUp { grant, return_url } => (
+            return_url,
+            Some(operation_cookie(&grant, std::time::SystemTime::now())?),
+        ),
         FederatedOutcome::Session {
             issued,
             return_url,

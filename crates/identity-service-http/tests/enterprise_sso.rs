@@ -1,5 +1,5 @@
 //! Real PG, TLS Keycloak and two HTTP RP sessions. Software device key is a fixture only.
-#[path = "../../identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 use axum::{
     Json, Router,
@@ -321,7 +321,8 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
         },
         key: Ed25519KeyPair::from_seed_unchecked(&[17; 32]).unwrap(),
     });
-    let config = support::config(f.instance)
+    let config = f
+        .config()
         .with_platform(device.clone())
         .with_enterprise(EnterpriseConfig::new(targets.clone(), signer)?);
     let authority = Authority::connect_runtime(
@@ -365,6 +366,10 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
                 Some(ca.clone()),
             )?,
             oidc: HttpOidc::for_loopback_test(
+                rss_identity_oidc::ProviderClock::new(
+                    rss_request_context::SharedExecutionTimer::new(crate::support::Timer),
+                    std::time::SystemTime::now,
+                ),
                 vec![],
                 transport_policy(),
                 rss_identity_oidc::test_support::reuse_policy(),
@@ -473,6 +478,10 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
     let credentials =
         ProviderCredentials::new("fixture-enterprise-secret".into(), Some(ca.clone()))?;
     let transport = HttpOidc::for_loopback_test(
+        rss_identity_oidc::ProviderClock::new(
+            rss_request_context::SharedExecutionTimer::new(crate::support::Timer),
+            std::time::SystemTime::now,
+        ),
         vec![],
         transport_policy(),
         rss_identity_oidc::test_support::reuse_policy(),
@@ -507,7 +516,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
             )
             .unwrap(),
         ),
-        support::config(f.instance)
+        f.config()
             .with_platform(device.clone())
             .with_enterprise(EnterpriseConfig::new(
                 targets.clone(),

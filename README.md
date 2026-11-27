@@ -1,8 +1,6 @@
 # rss-identity
 
-可嵌入 Rust 产品的本地认证、租户 OIDC 联合身份与实例内会话组件。宿主提供数据库 runtime、实例与租户、管理策略和资源生命周期；Identity 提供可信认证事实，产品持有资源授权。
-
-core、postgres、可选 oidc 和 web-credentials 四个能力包由宿主显式装配；具体 package 与依赖见 [workspace](Cargo.toml)。本地认证不依赖 OIDC 或参考应用。仅支持当前接口和全新安装，无旧中央服务、Hydra bridge、旧 schema/config 兼容分支。
+独立 Identity 服务提供本地认证、租户 OIDC 联合身份与实例内会话。本仓维护产品 HTTP 契约、服务装配、安装、维护和部署。公共认证库、Audit 和基础库从同一个 RSS 提交构建，固定版本见 [Cargo.toml](Cargo.toml)。
 
 - [嵌入指南](docs/guides/embedding.md)：宿主责任、本地与 OIDC 装配。
 - [产品需求](docs/product/rss-identity-prd.md)。

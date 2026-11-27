@@ -12,7 +12,4 @@ class ManagementSurface(unittest.TestCase):
         library = (ROOT / 'app/identity/src/lib.rs').read_text()
         self.assertNotIn('IdpInputError', library)
         self.assertNotIn('expected member, admin or emergency', library)
-    def test_no_generic_public_account_change(self):
-        source = (ROOT / 'crates/identity-postgres/src/operations.rs').read_text()
-        self.assertNotRegex(source, r'pub async fn change_account\(')
 if __name__ == '__main__': unittest.main()

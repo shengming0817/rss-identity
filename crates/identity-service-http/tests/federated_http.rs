@@ -3,13 +3,13 @@
 use rss_identity_oidc::test_support::fixture_provider;
 use rss_identity_postgres::StateSigner;
 mod department_lifecycle;
-#[path = "../../identity-postgres/tests/federation_support/mod.rs"]
+#[path = "../../../tests/support/federation.rs"]
 mod federation_support;
 #[path = "group_lifecycle/mod.rs"]
 mod group_lifecycle;
 mod keycloak_support;
 mod profile_lifecycle;
-#[path = "../../identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 use axum::{
     Router,
@@ -33,6 +33,10 @@ const CALLBACK: &str = "https://identity.example.test/api/v1/identity/oidc/callb
 const BROWSER: &str = "__Host-identity-oidc-browser=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 fn fixture_transport(keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
     Ok(HttpOidc::for_loopback_test(
+        rss_identity_oidc::ProviderClock::new(
+            rss_request_context::SharedExecutionTimer::new(crate::support::Timer),
+            std::time::SystemTime::now,
+        ),
         vec![TrustedAssuranceProfile {
             keycloak_totp,
             tenant: tenant(),
@@ -78,19 +82,18 @@ fn config() -> anyhow::Result<ProviderSettings> {
     .try_into()
     .unwrap())
 }
-fn service(f: &Fixture, upstream: Arc<dyn UpstreamOidc>) -> Federation {
-    Federation::new(
+async fn service(f: &mut Fixture, upstream: Arc<dyn UpstreamOidc>) -> anyhow::Result<Federation> {
+    f.configure_runtime(f.config().with_oidc(upstream)).await?;
+    Ok(Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
         f.store.clone(),
-        upstream,
         StateSigner::new([7; 32], ORIGIN).unwrap(),
         FederationConfig {
             callback: CALLBACK.into(),
             credential_keys: credential_keys(),
             targets: BTreeMap::from([("home".into(), format!("{ORIGIN}/done"))]),
         },
-    )
-    .unwrap()
+    )?)
 }
 fn app(s: &Federation) -> Router {
     routes(
@@ -313,21 +316,13 @@ async fn gateway_login(app: &Router, provider: &ProviderView) -> anyhow::Result<
 #[ignore = "requires make test-federated"]
 async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     let mut f = Fixture::new().await?;
-    f.store = Authority::connect_runtime(
-        f.runtime.clone(),
-        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(
-            std::num::NonZeroUsize::new(4).unwrap(),
-            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
-        )?),
+    f.configure_runtime(
         f.config()
             .with_operation_proof_lifetime(std::num::NonZeroU32::new(600).unwrap()),
-        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
-        f.policy.clone(),
-        deadline(),
     )
     .await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(fixture_transport(true)?));
+    let s = service(&mut f, Arc::new(fixture_transport(true)?)).await?;
     let p = provider(&f, &s).await?;
     let app = app(&s);
     // The directory case consumes Alice's TOTP; this case owns an independent credential.
@@ -455,7 +450,9 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     let context = webauthn_management_context(current.account(), "register", None)?;
     let mut tx = f.owner.begin().await?;
     crate::support::fence(&mut tx, crate::support::binding(f.key.tenant)).await?;
-    consume_step_up_on(&mut tx, &current, &context, handle).await?;
+    f.store
+        .consume_step_up_on(&mut tx, &current, &context, handle)
+        .await?;
     tx.rollback().await?;
     let replay = callback(&app, &cb, &browser).await?;
     assert!(!replay.headers().contains_key("set-cookie"));
@@ -474,7 +471,7 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
         1
     );
     // A real adapter profile withdrawal is applied before startup opens HTTP admission.
-    let withdrawn = service(&f, Arc::new(fixture_transport(false)?));
+    let withdrawn = service(&mut f, Arc::new(fixture_transport(false)?)).await?;
     withdrawn
         .reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
@@ -495,7 +492,7 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     s.reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
     assert!(
-        f.store
+        s.authority()
             .inspect_session(
                 crate::support::binding(f.key.tenant),
                 secret(&original),
@@ -512,9 +509,9 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
-    let old = service(&f, Arc::new(fixture_transport(true)?));
+    let old = service(&mut f, Arc::new(fixture_transport(true)?)).await?;
     let p = provider(&f, &old).await?;
     let old_app = app(&old);
     let url = begin(&old_app, &p, BROWSER, None, None, false).await?;
@@ -570,6 +567,10 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
     assert_eq!(rejected.headers()["location"], "/auth/error?reason=failed");
     assert!(!rejected.headers().contains_key("set-cookie"));
     let next = HttpOidc::for_loopback_test(
+        rss_identity_oidc::ProviderClock::new(
+            rss_request_context::SharedExecutionTimer::new(crate::support::Timer),
+            std::time::SystemTime::now,
+        ),
         vec![TrustedAssuranceProfile {
             tenant: f.key.tenant,
             issuer,
@@ -579,7 +580,7 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
         transport_policy(),
         rss_identity_oidc::test_support::reuse_policy(),
     )?;
-    let next = service(&f, Arc::new(next));
+    let next = service(&mut f, Arc::new(next)).await?;
     let settings = p.settings.input();
     let updated = next
         .update_provider(
@@ -603,9 +604,9 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn real_federated_login_and_linking() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(fixture_transport(true)?));
+    let s = service(&mut f, Arc::new(fixture_transport(true)?)).await?;
     let p = provider(&f, &s).await?;
     let app = app(&s);
     f.store
@@ -762,9 +763,9 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(fixture_transport(true)?));
+    let s = service(&mut f, Arc::new(fixture_transport(true)?)).await?;
     let p = provider(&f, &s).await?;
     let app = app(&s);
     let url = begin(&app, &p, BROWSER, None, None, false).await?;
@@ -857,7 +858,7 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
     );
     assert!(!response.headers().contains_key("set-cookie"));
     let scripted = federation_support::ScriptedOidc::new();
-    let mocked = service(&f, scripted.clone());
+    let mocked = service(&mut f, scripted.clone()).await?;
     mocked
         .reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
@@ -925,6 +926,10 @@ async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
     private.issuer = "https://127.0.0.1".into();
     assert!(
         HttpOidc::new(
+            rss_identity_oidc::ProviderClock::new(
+                rss_request_context::SharedExecutionTimer::new(crate::support::Timer),
+                std::time::SystemTime::now
+            ),
             vec![],
             vec![],
             transport_policy(),
@@ -943,9 +948,9 @@ fn tenant() -> rss_request_context::TenantId {
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn real_invalid_department_preserves_authenticated_identity() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
-    let federation = service(&f, Arc::new(fixture_transport(true)?));
+    let federation = service(&mut f, Arc::new(fixture_transport(true)?)).await?;
     let mut input = config()?.input();
     // Keycloak signs groups as an array. A valid token with the wrong department
     // shape withholds that fact without invalidating the authenticated subject.
@@ -1004,9 +1009,9 @@ async fn real_invalid_department_preserves_authenticated_identity() -> anyhow::R
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn real_provider_management_and_encrypted_credentials() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
-    let s = service(&f, Arc::new(fixture_transport(true)?));
+    let s = service(&mut f, Arc::new(fixture_transport(true)?)).await?;
     let p = s
         .create_provider(f.actor().await?, config()?, credentials(true)?, deadline())
         .await?;
@@ -1052,5 +1057,5 @@ fn upstream_deadline() -> rss_request_context::Deadline {
     )
 }
 
-#[path = "request_support/mod.rs"]
+#[path = "../../../tests/support/request.rs"]
 mod request_support;

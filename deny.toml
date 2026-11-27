@@ -17,7 +17,7 @@ exceptions = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = ["https://dev.azure.com/shengming0923/rss/_git/rss", "https://dev.azure.com/shengming0923/rss/_git/rss-audit"]
+allow-git = ["https://dev.azure.com/shengming0923/rss/_git/rss"]
 # Exact revision and the resolved RSS closure are checked by check_dependencies.py.
 
 [advisories]

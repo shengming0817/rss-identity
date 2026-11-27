@@ -3,7 +3,6 @@
 import contextlib
 from enum import Enum
 import json
-import ipaddress
 import os
 import re
 from pathlib import Path
@@ -112,80 +111,67 @@ def report_tests(package, test, expected, result):
             print(f'{package}/{test}: {name}: {status}')
     print(f'{package}/{test}: cargo exit={result.returncode}; raw output withheld')
 
-SUITES = {('rss-identity-oidc', 'private_provider_tests'): {'real_private_provider_transport'}, ('rss-identity-app', 'ui_host'): {'ui_host_public_components'}, ('rss-identity-service-http', 'management_http'): {'management_rejects_password_for_federated_only_account', 'callback_cancellation_consumes_only_bound_attempts', 'management_rechecks_inflight_provider_authority', 'provider_capacity_is_atomic_and_keeps_management_available', 'management_accounts_sessions_and_boundaries', 'management_provider_operations_safe_and_scoped'}, ('rss-identity-service-http', 'federated_http'): {'real_invalid_department_preserves_authenticated_identity', 'department_lifecycle::administrator_snapshot_moves_members_and_keeps_old_observations', 'group_lifecycle::real_group_snapshot_lifecycle', 'federated_http_rejects_mismatch_and_uncertain_commit', 'real_provider_management_and_encrypted_credentials', 'real_federated_login_and_linking', 'real_upstream_client_secret_rotation', 'real_step_up_proves_only_the_bound_operation', 'federated_tls_and_self_service_policy'}, ('rss-identity-postgres', 'federated_atomic'): {'tenant_reencryption_is_atomic_scoped_and_authenticates_every_value', 'session_security_is_subject_bound_and_revocable', 'federation_jit_isolated_subjects_and_membership', 'federation_atomic_events_and_unknown_commit', 'federation_link_conflict_logout_and_wrong_reauthentication', 'federation_assurance_change_revokes_attempts_and_sessions', 'federation_signed_time_skew_preserves_identity', 'federation_state_restart_expiry_and_replay', 'federation_config_races_and_provider_revocation', 'federation_group_snapshot_storage_bounds', 'federation_concurrent_linking_keeps_one_owner', 'federation_concurrent_jit_rls_and_schema_drift', 'federation_configuration_authorization_and_versions', 'federation_step_up_binding_and_settlement', 'federation_local_and_federated_linking', 'federation_step_up_unknown_commit_and_event_rollback'}, ('rss-identity-postgres', 'atomic'): {'maintenance_races_preserve_current_state', 'maintenance_permissions_and_schema_are_exact', 'attempts_are_shared_and_bounded', 'password_failures_reset_and_claims_are_fenced', 'password_claim_cancellation_and_unknown_settlement', 'account_transition_matrix_and_events', 'maintenance_runbook_respects_forced_rls', 'storage_contract_is_checked', 'settlement_never_releases_uncertain_success', 'initialization_and_recovery', 'maintenance_deadline_fencing_and_overflow', 'fencing_and_generation_overflow', 'account_races_and_isolation', 'source_budgets_are_shared'}, ('rss-identity-postgres', 'session_atomic'): {'bearer_session_presentation_and_lifetime', 'bearer_account_changes_and_logout_are_current', 'bearer_issuance_settlement_never_exposes_uncertain_secret', 'durable_reference_is_passive_exact_and_revocable', 'session_isolation_replacement_and_restart', 'session_expiry_deadline_permissions_and_overflow', 'session_logout_rotation_races_and_invalid_storage', 'session_events_match_committed_operations', 'session_settlement_and_event_failure_are_atomic', 'session_rotation_and_revocation', 'session_account_changes_fence_racing_credentials'}, ('rss-identity-service-http', 'session_http'): {'bearer_http_lifecycle_and_presentation_are_independent', 'bearer_http_admission_shared_limits_and_failed_issuance', 'public_host_requests_enforce_activity_and_revocation', 'session_http_login_cookie_csrf_and_replacement', 'session_http_recovery_current_logout_and_deadline', 'session_http_settlement_never_sets_uncertain_cookie', 'session_http_origin_expiry_and_transport_boundaries', 'session_http_pending_commit_preserves_settlement', 'session_http_lookup_never_inserts_tenant_guard', 'session_http_reauthentication_preserves_identity_and_rotates_credentials'}, ('rss-identity-app', 'operator'): {'maintenance_file_and_settlement'}, ('rss-identity-oidc', 'provider'): {'real_provider_flows'}, ('rss-identity-postgres', 'embedded'): {'department_lifecycle::department_expiry_refresh_and_management', 'department_lifecycle::oversized_assertions_withhold_departments_but_corrupt_storage_rejects_identity', 'department_lifecycle::department_configuration_revokes_sessions_and_pending_attempts', 'department_lifecycle::department_source_is_instance_tenant_principal_and_provider_bound', 'department_lifecycle::department_subject_and_provider_revocations_are_current', 'refresh_rejects_expiry_during_writes_without_rotating_or_emitting', 'group_deadline_includes_session_touch_latency', 'own_password_change_requires_current_host_policy', 'dynamic_tenant_scope_reuses_authority_and_fences_proofs', 'trusted_groups_expire_without_extending_identity_or_snapshot', 'host_role_names_and_session_policy_survive_composition', 'local_facade_reauthenticates_and_host_policy_is_current', 'instances_tenants_and_borrowed_pool_are_separate'}, ('rss-identity-app', 'installation'): {'installation_and_reference_host_seams_are_verified'}}
-
-SUITES[("rss-identity-service-http", "webauthn_http")] = {"webauthn_http_csrf_lifecycle_and_one_use_proof"}
-
-SUITES[("rss-identity-postgres", "federated_atomic")].add("federation_link_budget_and_integrity")
-SUITES[("rss-identity-postgres", "federated_atomic")].add("federation_step_up_rechecks_expiry_after_settlement_wait")
-
-SUITES[("rss-identity-postgres", "webauthn")] = {"webauthn_self_service_and_atomic_operation_proofs", "webauthn_cancellation_expiry_revocation_and_origin", "webauthn_uv_and_registration_event_rollback", "webauthn_add_and_recovery_revoke_prior_authorization_atomically", "webauthn_rp_generation_fences_old_processes_and_proofs", "expired_other_subject_backlog_does_not_lock_out_self_service", "same_configuration_rotation_invalidates_pending_first_enrollment"}
-
-SUITES[("rss-identity-postgres", "entra")] = {
-    "native_jit_is_unique_sessionless_and_revocable",
-    "native_unknown_users_and_provider_changes_reject",
-    "native_jit_commit_unknown_does_not_return_proof",
-    "browser_and_native_share_one_canonical_identity",
+SUITES = {
+    ("rss-identity-app", "installation"): {
+        "installation_and_reference_host_seams_are_verified",
+    },
+    ("rss-identity-app", "operator"): {
+        "maintenance_file_and_settlement",
+    },
+    ("rss-identity-app", "ui_host"): {
+        "ui_host_public_components",
+    },
+    ("rss-identity-service-http", "enterprise_sso"): {
+        "real_enterprise_assertions_reach_only_the_registered_rp",
+    },
+    ("rss-identity-service-http", "federated_http"): {
+        "department_lifecycle::administrator_snapshot_moves_members_and_keeps_old_observations",
+        "federated_http_rejects_mismatch_and_uncertain_commit",
+        "federated_tls_and_self_service_policy",
+        "group_lifecycle::real_group_snapshot_lifecycle",
+        "profile_lifecycle::real_profile_login_updates_and_removes_values",
+        "real_federated_login_and_linking",
+        "real_invalid_department_preserves_authenticated_identity",
+        "real_provider_management_and_encrypted_credentials",
+        "real_step_up_proves_only_the_bound_operation",
+        "real_upstream_client_secret_rotation",
+    },
+    ("rss-identity-service-http", "management_http"): {
+        "account_query_projection_detail_and_cursor_context",
+        "callback_cancellation_consumes_only_bound_attempts",
+        "management_accounts_sessions_and_boundaries",
+        "management_provider_operations_safe_and_scoped",
+        "management_rechecks_inflight_provider_authority",
+        "management_rejects_password_for_federated_only_account",
+        "provider_capacity_is_atomic_and_keeps_management_available",
+    },
+    ("rss-identity-service-http", "session_http"): {
+        "bearer_http_admission_shared_limits_and_failed_issuance",
+        "bearer_http_lifecycle_and_presentation_are_independent",
+        "profile_http_requires_policy_csrf_and_exact_receipts",
+        "public_host_requests_enforce_activity_and_revocation",
+        "session_http_login_cookie_csrf_and_replacement",
+        "session_http_lookup_never_inserts_tenant_guard",
+        "session_http_origin_expiry_and_transport_boundaries",
+        "session_http_pending_commit_preserves_settlement",
+        "session_http_reauthentication_preserves_identity_and_rotates_credentials",
+        "session_http_recovery_current_logout_and_deadline",
+        "session_http_settlement_never_sets_uncertain_cookie",
+    },
+    ("rss-identity-service-http", "webauthn_http"): {
+        "webauthn_http_csrf_lifecycle_and_one_use_proof",
+    },
 }
-SUITES[("rss-identity-oidc", "entra")] = {"signed_entra_resource_tokens", "jwks_refresh_cooldown_expiry_and_capacity"}
 
-SUITES[('rss-identity-postgres', 'provisioning')] = {'provisioned_account_and_event_share_host_commit_and_revalidate_source'}
-
-SUITES[("rss-identity-service-http","federated_http")].add("profile_lifecycle::real_profile_login_updates_and_removes_values")
-SUITES[("rss-identity-postgres","profile_platform")] = {"personnel_facts::bounded_source_observations_under_reader_role","trusted_reference_join_preserves_host_only_scope_and_expiry","personnel_query_is_scoped_readonly_and_revision_bound","local_profile_observation_receipts_and_revocation","platform_challenges_are_one_use_and_all_session_paths_recheck","older_oidc_completion_cannot_replace_a_newer_observation","platform_binding_errors_and_uncertain_commit_never_issue_a_secret","platform_external_identity_and_fresh_profile_are_bound_and_revocable","source_admission_borrows_transaction_with_no_credential_privileges","platform_subject_admission_fences_native_settlement","platform_subject_admission_requires_current_external_identity","malformed_extension_replaces_old_values_without_rejecting_login","latest_source_discovery_is_target_bound_and_policy_checked","platform_evidence_admission_preserves_authentication_time","profile_receipts::receipt_write_deadline_covers_receipt_insert_wait","profile_receipts::concurrent_accounts_share_one_operation_id_namespace","profile_receipts::admission_after_quota_changes_and_concurrent_reclamation","profile_receipts::receipt_visibility_expiry_and_uncertain_writes","profile_receipts::receipt_lookup_keeps_original_proof_deadline_while_waiting"}
-
-SUITES[("rss-identity-service-http","session_http")].add("profile_http_requires_policy_csrf_and_exact_receipts")
-
-SUITES[("rss-identity-postgres", "live_session")] = {
-    "independent_subject_completes_while_host_admission_is_open",
-    "cancelled_session_wait_releases_transaction_locks",
-    "host_deadlock_victim_rolls_back_and_releases_admission",
-    "host_settlement_orders_account_eligibility_changes",
-    "host_admission_is_passive_and_transaction_scoped",
-    "host_admission_serializes_commit_rollback_and_revocation",
-    "host_admission_rejects_stale_credentials_and_subjects",
-    "host_admission_preserves_unknown_and_failed_settlement",
-    "host_admission_rechecks_federated_source",
-    "host_admission_checks_expiry_after_session_wait",
-}
-
-SUITES[("rss-identity-postgres", "profile_platform")].update({"live_session_admission_retains_platform_source_locks","reference_window_limits_stale_session_candidates"})
-
-SUITES[("rss-identity-postgres", "embedded")].update({
-    "account_directory::cursor_dependencies_under_writes",
-    "account_directory::original_cursor_expiry_bounds_a_renewed_session_read",
-    "account_directory::cursor_source_clock_and_actor_boundaries",
-    "account_directory::disjoint_sources_commit_while_a_revision_write_rolls_back",
-    "account_directory::selected_account_page_capacity_round_trips_long_names",
-    "account_directory::account_directory_filters_before_stable_pagination_and_invalidates_changes",
-    "account_directory::account_directory_profiles_are_source_selected_and_authorized_for_predicates",
-    "account_directory::department_directory_uses_latest_accepted_fact_without_resurrecting_older_memberships",
-    "account_directory::account_directory_null_and_equal_values_keep_total_order",
-    "account_directory::account_detail_rejects_expiry_during_target_read",
-    "account_directory::department_link_preserves_source_observation_acceptance_order",
-})
-SUITES[("rss-identity-service-http", "management_http")].add("account_query_projection_detail_and_cursor_context")
-
-SUITES[("rss-identity-postgres","profile_platform")].add("session_page_rechecks_distinct_bindings_and_advances_over_rejections")
-
-SUITES[("rss-identity-postgres","embedded")].add("session_reads_only_require_password_presence")
-SUITES[("rss-identity-postgres","session_atomic")].add("session_updates_match_activity_and_rotation")
-
-def cargo(package, test, env, features=()):
+def cargo(package, test, env):
     expected = SUITES[(package,test)]
-    internal = (package=="rss-identity-postgres" and test in {"atomic","session_atomic","federated_atomic"}) or (package=="rss-identity-oidc" and test=="private_provider_tests")
-    module = "account_atomic" if test == "atomic" else test
-    if internal: expected={f"{module}::{name}" for name in expected}
-    filtered = 0
-    command = ['cargo', 'test', '--locked', '-p', package, *(['--lib',module+'::'] if internal else ['--test',test]), *features, '--', '--ignored', '--test-threads=1']
+    command = ['cargo', 'test', '--locked', '-p', package, '--test', test,
+               '--', '--ignored', '--test-threads=1']
     environment = {**os.environ, **env}
     listing = bounded_run([*command, '--list'], timeout=900, cwd=ROOT, env=environment, check=True, text=True, stdout=subprocess.PIPE).stdout
     names = re.findall(r'^(.+): test$', listing, re.M)
     if set(names) != expected or len(names) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test set missing or changed')
-    if internal:
-        all_listing = bounded_run(['cargo','test','--locked','-p',package,'--lib','--','--list'],timeout=900,cwd=ROOT,env=environment,check=True,text=True,stdout=subprocess.PIPE).stdout
-        filtered=len(re.findall(r'^(.+): test$',all_listing,re.M))-len(expected)
     completed = bounded_run([*command, '--nocapture', '--format', 'pretty'], timeout=max(180,len(expected)*180), cwd=ROOT, env=environment, text=True, capture_output=True)
     result = completed.stdout
     report_tests(package, test, expected, completed)
@@ -193,7 +179,7 @@ def cargo(package, test, env, features=()):
         raise RuntimeError(f'{package}/{test}: cargo exit={completed.returncode}')
     counts = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out', result, re.M)
     executed = re.findall(r'^test (.+) \.\.\. ok$', result, re.M)
-    if counts != [(str(len(expected)), '0', '0', '0', str(filtered))] or set(executed) != expected or len(executed) != len(expected):
+    if counts != [(str(len(expected)), '0', '0', '0', '0')] or set(executed) != expected or len(executed) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test execution incomplete')
 
 @contextlib.contextmanager
@@ -209,16 +195,7 @@ def postgres(on_container=None):
 def pg():
     with postgres() as (_, ports):
         env = {"IDENTITY_TEST_PG_PORT": str(ports[5432])}
-        cargo("rss-identity-postgres", "entra", env)
-        cargo("rss-identity-postgres", "federated_atomic", env)
-        cargo("rss-identity-postgres", "atomic", env)
-        cargo("rss-identity-postgres", "embedded", env)
-        cargo("rss-identity-postgres", "profile_platform", env)
-        cargo("rss-identity-postgres", "live_session", env)
-        cargo("rss-identity-postgres", "webauthn", env)
         cargo("rss-identity-service-http", "webauthn_http", env)
-        cargo("rss-identity-postgres", "provisioning", env)
-        cargo("rss-identity-postgres", "session_atomic", env)
         cargo("rss-identity-service-http", "session_http", env)
         cargo("rss-identity-service-http", "management_http", env)
         cargo("rss-identity-app", "operator", env)
@@ -281,27 +258,6 @@ def configure_department_profile(issuer, context=None):
     admin('POST','/users/'+user['id']+'/role-mappings/clients/'+account['id'],
         [role for role in roles if role['name'] in {'manage-account','view-profile'}])
 
-def oidc():
-    cargo("rss-identity-oidc", "entra", {}, ["--features", "test-support"])
-    realm = {"realm": "identity", "enabled": True, "sslRequired": "none",
-             "clients": [{"clientId": "identity-test", "secret": "fixture-secret", "publicClient": False,
-                          "standardFlowEnabled": True, "directAccessGrantsEnabled": False,
-                          "redirectUris": ["http://127.0.0.1:19999/auth/callback"],
-                          "attributes": {"pkce.code.challenge.method": "S256"}, "protocolMappers":[DEPARTMENT_MAPPER, PROFILE_MAPPER]}],
-             "users": [{"username": "alice", "enabled": True, "email": "alice@example.test", "emailVerified": True,
-                        "firstName": "Alice", "lastName": "Fixture", "attributes":{},
-                        "credentials": [{"type": "password", "value": "fixture-password", "temporary": False}]}]}
-    with tempfile.TemporaryDirectory(prefix="identity-oidc-") as tmp, contextlib.ExitStack() as stack:
-        realm_file = Path(tmp) / "identity-realm.json"
-        realm_file.write_text(json.dumps(realm))
-        _, kc_ports = stack.enter_context(container(KEYCLOAK, [8080], env=[("KC_BOOTSTRAP_ADMIN_USERNAME","fixture-operator"),("KC_BOOTSTRAP_ADMIN_PASSWORD","fixture-operator-password")], args=["start-dev", "--import-realm"], mounts=[f"{realm_file}:/opt/keycloak/data/import/identity-realm.json:ro"]))
-        kc = f"http://127.0.0.1:{kc_ports[8080]}/realms/identity"
-        wait(kc + "/.well-known/openid-configuration")
-        configure_department_profile(kc)
-        cargo("rss-identity-oidc", "provider", {"IDENTITY_TEST_KEYCLOAK_ISSUER": kc}, ["--features", "test-support"])
-
-    private_oidc()
-
 def configure_totp(realm):
     """Keycloak 26.7.3 conditional LoA flow; test credentials, never production defaults.
     ref: Keycloak server_admin Creating a browser login flow with step-up mechanism.
@@ -343,41 +299,8 @@ def keycloak(redirect_uri="https://identity.example.test/api/v1/identity/oidc/ca
                     if response.status==200:break
             except (OSError,urllib.error.URLError):time.sleep(.5)
         else:raise RuntimeError("Keycloak TLS readiness timed out")
-        # The private-provider fixture advertises an intentionally unresolvable issuer.
-        # Provision through the owned, certificate-verified listener used for readiness.
         configure_department_profile(f"https://{host}:{port}/realms/identity", context)
         yield {"IDENTITY_TEST_FEDERATED_ISSUER":issuer,"IDENTITY_TEST_FEDERATED_CA":str(cert),"IDENTITY_TEST_KEYCLOAK_CONTAINER":kc_id}
-
-def private_host():
-    """Use an owned RFC1918 interface, never weaken the production address policy."""
-    candidates=[]
-    configured=os.environ.get('IDENTITY_TEST_PRIVATE_HOST')
-    if configured:
-        candidates=[configured]
-    else:
-        try:candidates.extend(a[4][0] for a in socket.getaddrinfo(socket.gethostname(),None,socket.AF_INET))
-        except OSError:pass
-        try:
-            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as route:
-                route.connect(('10.255.255.255',9));candidates.append(route.getsockname()[0])
-        except OSError:pass
-    networks=[ipaddress.ip_network(n) for n in ['10.0.0.0/8','172.16.0.0/12','192.168.0.0/16']]
-    for value in dict.fromkeys(candidates):
-        address=ipaddress.ip_address(value)
-        if any(address in network for network in networks):
-            try:
-                with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as probe:probe.bind((value,0))
-                return value
-            except OSError:pass
-    raise RuntimeError('production private OIDC T2 requires an owned RFC1918 interface; set IDENTITY_TEST_PRIVATE_HOST')
-
-def private_oidc():
-    address=private_host()
-    with keycloak(host=address, hostname='private-idp.invalid') as env:
-        cargo('rss-identity-oidc','private_provider_tests',{**env,'IDENTITY_TEST_PRIVATE_ADDRESS':address})
-
-
-SUITES[("rss-identity-service-http","enterprise_sso")]={"real_enterprise_assertions_reach_only_the_registered_rp"}
 
 def federated():
     from gateway_t2 import gateway_server
@@ -407,8 +330,6 @@ def assembly():
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["pg"]: pg()
-    elif sys.argv[1:] == ["oidc"]: oidc()
-    elif sys.argv[1:] == ["private-oidc"]: private_oidc()
     elif sys.argv[1:] == ["federated"]: federated()
     elif sys.argv[1:] == ["assembly"]: assembly()
-    else: raise SystemExit("usage: providers.py pg|oidc|private-oidc|federated|assembly")
+    else: raise SystemExit("usage: providers.py pg|federated|assembly")

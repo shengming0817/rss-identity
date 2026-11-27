@@ -25,6 +25,16 @@ pub struct DatabaseConfig {
     pub acquire_seconds: u64,
 }
 impl DatabaseConfig {
+    pub(crate) fn audit_budget(&self) -> Result<rss_audit_postgres::WriteBudget, AppError> {
+        // One maximum Identity mutation batch per concurrent database transaction.
+        const ROWS: usize = 8;
+        const BYTES: u32 = 1024 * 1024;
+        let total = BYTES
+            .checked_mul(self.max_connections)
+            .ok_or(AppError::Budget)?;
+        rss_audit_postgres::WriteBudget::new(ROWS, BYTES, total).map_err(|_| AppError::Budget)
+    }
+
     pub fn pg(&self) -> Result<PgConfig, AppError> {
         if self.host.is_empty()
             || self.database.is_empty()
@@ -487,15 +497,19 @@ impl MaintenanceConfig {
         bootstrap_keys(&self.bootstrap_accounts)?;
         self.budgets.validate()?;
         self.password_work.build()?;
+        self.authority_config()?;
+        Ok(())
+    }
+    pub fn authority_config(&self) -> Result<rss_identity_postgres::AuthorityConfig, AppError> {
         self.authority.apply(
             rss_identity_postgres::AuthorityConfig::new(
                 InstanceId::parse(&self.instance_id).map_err(|_| AppError::Configuration)?,
                 crate::assembly::session_policy()?,
                 rss_audit_postgres::Integrity::Plain,
+                self.database.audit_budget()?,
             )?,
             finite_seconds(self.budgets.maintenance_seconds)?,
-        )?;
-        Ok(())
+        )
     }
     pub fn bootstrap_key(&self, tenant: TenantId) -> Result<AccountKey, AppError> {
         self.validate()?;

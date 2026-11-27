@@ -24,7 +24,7 @@ reqwest.workspace = true
 rss-runtime.workspace = true
 rss-axum = { workspace = true, features = ["http1"] }
 rss-identity-service-http = { path = "../../crates/identity-service-http" }
-rss-identity-oidc = { path = "../../crates/identity-oidc" }
+rss-identity-oidc.workspace = true
 axum = { version = "=0.8.9", default-features = false, features = ["tokio", "http1", "json"] }
 sha2.workspace = true
 uuid.workspace = true
@@ -34,7 +34,7 @@ http-body = "1"
 http-body-util = "0.1"
 
 rss-identity-core.workspace = true
-rss-identity-postgres = { path = "../../crates/identity-postgres" }
+rss-identity-postgres.workspace = true
 rss-request-context.workspace = true
 rss-transactional-messaging.workspace = true
 rss-transactional-messaging-postgres.workspace = true
@@ -47,7 +47,6 @@ libc = "0.2"
 sqlx = { workspace = true, features = ["uuid"] }
 [dev-dependencies]
 webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = ["softpasskey"] }
-rss-audit-core.workspace = true
 tower = { version = "0.5", features = ["util"] }
 anyhow.workspace = true
 uuid.workspace = true

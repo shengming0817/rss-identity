@@ -1,5 +1,5 @@
 //! Same-origin HTTP boundary with real PG and software WebAuthn signatures.
-#[path = "../../identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 use axum::{
     body::{Body, to_bytes},
@@ -92,6 +92,20 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
     let session = f.login().await?;
     let cookie = format!("__Host-identity-session={}", session.secret().expose());
     let csrf = session.secret().csrf();
+    let missing_proof = app
+        .clone()
+        .oneshot(crate::request_support::scoped(request(
+            "register/begin",
+            &cookie,
+            Some(&csrf),
+            json!({"label":"browser key","recover":true}),
+        )))
+        .await?;
+    assert_eq!(missing_proof.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        json_body(missing_proof).await?,
+        json!({"code":"invalid_credential"})
+    );
     let body = json!({"label":"browser key","recover":false});
     assert!(
         app.clone()
@@ -286,5 +300,5 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
     Ok(())
 }
 
-#[path = "request_support/mod.rs"]
+#[path = "../../../tests/support/request.rs"]
 mod request_support;

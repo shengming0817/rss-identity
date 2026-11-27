@@ -134,6 +134,7 @@ fn record_failure(response: &Response, mut output: impl std::io::Write) {
     }
 }
 struct Health {
+    authority_config: rss_identity_postgres::AuthorityConfig,
     config: Arc<RuntimeConfig>,
     pool: Arc<PgRuntime>,
     kdf: Arc<PasswordKdf>,
@@ -151,8 +152,14 @@ async fn ready(State(h): State<Arc<Health>>) -> StatusCode {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
     let result = tokio::time::timeout_at(cutoff.instant().into(), async {
-        if let Err(error) =
-            assembly::authority(&h.config, h.pool.clone(), h.kdf.clone(), cutoff).await
+        if let Err(error) = assembly::authority(
+            &h.config,
+            h.authority_config.clone(),
+            h.pool.clone(),
+            h.kdf.clone(),
+            cutoff,
+        )
+        .await
         {
             eprintln!("component=postgres readiness=failed reason={error}");
             return Err(error);
@@ -235,9 +242,19 @@ pub async fn serve(
                         kdf: kdf.clone(),
                         timeout: per,
                     }));
-                    let authority =
-                        assembly::authority(&config, pool.clone(), kdf.clone(), cutoff).await?;
-                    let federation = assembly::federation(&config, authority.clone())?;
+                    let (authority_config, federation) =
+                        assembly::runtime_inputs(&config, pool.execution_timer().clone())?;
+                    let authority = assembly::authority(
+                        &config,
+                        authority_config.clone(),
+                        pool.clone(),
+                        kdf.clone(),
+                        cutoff,
+                    )
+                    .await?;
+                    let federation = federation
+                        .map(|inputs| inputs.connect(authority.clone()))
+                        .transpose()?;
                     let http = HttpConfig::new(&config.public_origin, config.budgets.request())
                         .map_err(|_| AppError::Configuration)?;
                     let gate = Arc::new(OnceLock::new());
@@ -277,6 +294,7 @@ pub async fn serve(
                     );
                     let app = protected_routes(app, config.clone(), gate.clone());
                     let health = Arc::new(Health {
+                        authority_config,
                         config: config.clone(),
                         pool,
                         kdf,
