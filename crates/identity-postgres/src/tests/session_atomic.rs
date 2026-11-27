@@ -514,7 +514,7 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
     assert!(proof(&f, &live).await.is_ok());
     let mut lock = f.owner.begin().await?;
     sqlx::query(
-        "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+        "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR UPDATE",
     )
     .bind(A)
     .fetch_one(&mut *lock)

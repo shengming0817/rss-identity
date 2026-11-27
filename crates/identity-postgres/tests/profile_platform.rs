@@ -387,6 +387,12 @@ impl PlatformVerifier for Verifier {
             if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(PlatformError::Unavailable);
             }
+            admit_platform_subject_on(c, binding.instance, binding, None)
+                .await
+                .map_err(|e| match e {
+                    PlatformSubjectAdmissionError::Rejected => PlatformError::Rejected,
+                    PlatformSubjectAdmissionError::Storage(_) => PlatformError::Unavailable,
+                })?;
             let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
                 .fetch_one(&mut *c)
                 .await
@@ -1700,7 +1706,7 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
     })).await?;
     let _ = other;
     // A side-effecting SELECT is rejected by PostgreSQL READ ONLY, even though host code installed it.
-    sqlx::raw_sql("CREATE FUNCTION public.personnel_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.guard SET personnel_revision=personnel_revision+1 RETURNING personnel_revision'").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.personnel_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.tenant_state SET value=value+1 WHERE kind=''personnel_revision'' RETURNING value'").execute(&f.owner).await?;
     assert!(
         f.store
             .with_personnel_read(&actor, deadline(), |mut read| Box::pin(async move {
@@ -1845,7 +1851,7 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
             .await
             .is_err()
     );
-    sqlx::raw_sql("CREATE FUNCTION public.reference_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.guard SET personnel_revision=personnel_revision+1 RETURNING personnel_revision'").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reference_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.tenant_state SET value=value+1 WHERE kind=''personnel_revision'' RETURNING value'").execute(&f.owner).await?;
     assert!(
         f.store
             .with_session_references_read(
@@ -2018,7 +2024,7 @@ async fn platform_subject_admission_fences_native_settlement() -> anyhow::Result
     let mut writer = f.owner.begin().await?;
     let mut guard = Box::pin(
         sqlx::query(
-            "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+            "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR UPDATE",
         )
         .bind(f.key.tenant.to_string())
         .execute(&mut *writer),

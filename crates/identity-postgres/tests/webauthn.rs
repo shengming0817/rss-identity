@@ -29,6 +29,7 @@ async fn consume(
     sqlx::query("SET LOCAL ROLE identity_runtime")
         .execute(&mut *tx)
         .await?;
+    recheck_authenticated_session_on(&mut tx, &proof).await?;
     let accepted = consume_step_up_on(&mut tx, &proof, context, grant)
         .await
         .is_ok();

@@ -93,7 +93,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         ),
         (
             "DELETE FROM identity_authority.schema_version",
-            "INSERT INTO identity_authority.schema_version VALUES(21)",
+            "INSERT INTO identity_authority.schema_version VALUES(22)",
         ),
         (
             "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2",
@@ -109,7 +109,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         sqlx::raw_sql(restore).execute(&mut owner).await?;
     }
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_authority.guard")
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_authority.tenants")
             .fetch_one(&mut owner)
             .await?,
         0,

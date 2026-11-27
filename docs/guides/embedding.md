@@ -49,7 +49,11 @@ HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` �
 
 异步业务可在认证原请求后，通过 `AuthenticatedSession::reference()` 将非凭据会话引用存入宿主可信数据。后续用 `Authority::recheck_session_reference` 复核原会话、账户和来源，取得本次有界的 `RevalidatedSession` 身份/组/部门事实。被撤销、失效或过期的会话不能通过；检查不延长 idle 或快照期限。引用不是登录凭据，不能从 HTTP 请求接收它替代认证，返回事实也不能用于管理操作；宿主仍负责资源授权和原请求归属。
 
-宿主业务写入需要与会话撤销串行化时，在自己已有的、绑定 actor 租户的 READ COMMITTED 事务内调用 `recheck_authenticated_session_on(connection, &actor)`。它复用当前凭据与会话来源复核，Identity guard 保持至宿主提交或回滚；不消费 step-up、不续期、不产生新身份事实。调用顺序为已有 Audit/Ledger 锁 → Identity guard → 平台 verifier 权威锁及宿主授权/业务锁。平台 binding/source 写入必须遵守 verifier 使用同一连接取得的权威锁，不能仅依赖 Identity guard。不要在已持有这些锁时调用自开事务的引用复核接口。
+宿主业务写入需要与会话撤销串行化时，在自己已有的、绑定 actor 租户的 READ COMMITTED 事务内调用 `recheck_authenticated_session_on(connection, &actor)`。它复用当前凭据与会话来源复核，Identity 在本连接锁定当前来源、账户、成员和会话，保持至宿主提交或回滚；不消费 step-up、不续期、不产生新身份事实。调用顺序为已有 Audit/Ledger 锁 → Identity 来源、账户及会话锁 → 平台 verifier 权威锁及宿主授权/业务锁。平台 binding/source 写入必须遵守 verifier 使用同一连接取得的权威锁，不能仅依赖 Identity guard。不要在已持有这些锁时调用自开事务的引用复核接口。
+
+单会话先定位，再按 Provider、账户与成员、会话的顺序取锁；管理多个同类对象按 UUID 排序。被动复核持共享锁，续期、轮换和撤销在入口选择写锁，锁后重新检查凭据和有效期。借用准入与平台回调共享租户准入锁，可能持有主体写锁调用宿主策略的变更在入口与其互斥。跨主体的宿主组合应先完成准入与 step-up，再取得业务锁。人员及会话引用的全租户读窗口持集合锁直到回调结束。
+
+资料序号、人员版本和回执时钟各占一个事务状态行；来源限流和密码 claim 共用单独的容量锁。回执 GET、PUT 都在取得时钟锁后采样。人员版本由原业务事务的触发器推进，纯续期和凭据轮换保留原人员版本。
 
 通过 `PgRuntime::local_tx` 组合时，`with_connection` 回调的外层错误类型是 SQLx；使用 `tx.with_connection(|c| Box::pin(async move { Ok(recheck_authenticated_session_on(c, &actor).await) })).await??` 将内部 `PgError` 原样传播到宿主事务，不能吞掉内层错误后继续提交。
 
@@ -209,7 +213,7 @@ HTTP 本地资料位于 `/api/v1/identity/tenants/{tenant}/accounts/{principal}/
 宿主持有的原生平台协议在签发或接受令牌前，调用 `platform::admit_platform_subject_on`，借用同实例、同租户的显式 READ COMMITTED 事务。
 该接口只复核账户、成员资格、外部身份关联和 provider 当前代际，不签发 Cookie，也不读取密码。
 首次受控注册保存返回的 `PlatformSubjectVersion`，后续使用必须传回该版本；禁用再启用不能恢复旧注册。
-锁顺序为 Audit/可选 Ledger → Identity tenant guard → 宿主设备、绑定与业务锁，保持同一事务直到原生操作提交或回滚。
+锁顺序为 Audit/可选 Ledger → Identity 主体与来源准入 → 宿主设备、绑定与业务锁，保持同一事务直到原生操作提交或回滚。
 宿主仍须校验平台签名、用途、挑战、设备、绑定和业务授权；返回版本不是认证凭据或 assurance。
 部署使用 `grant_platform_subject_admission` 并在启动时调用 `verify_platform_subject_admission`。
 此组合权限包含来源发布元数据准入，替代该角色原来的 profile-source-only 权限校验；不授予完整 Runtime 权限。
@@ -239,7 +243,7 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 宿主将字段定义写入与来源准入组合时，使用 `admit_profile_source_on` 借用已打开 READ COMMITTED 事务、已设置租户 fence 的 PG 连接。
 部署使用 `grant_profile_source_admission` 为该业务角色授权，并在启动时用 `verify_profile_source_admission` 验证；
 不授予完整 Runtime 或 Provisioning 权限。该接口只读取来源发布元数据，不授予用户资料或管理权限。
-锁顺序为 Audit/可选 Ledger → Identity tenant guard → 宿主授权锁 → 业务定义/回执；
+锁顺序为 Audit/可选 Ledger → Identity 资料来源准入 → 宿主授权锁 → 业务定义/回执；
 调用方保持同一事务直至提交或回滚，不能在已持有宿主授权锁后调用该接口。
 
 
@@ -254,7 +258,7 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 
 `identity_session_references` 提供同租户、账户/成员 epoch、会话期限及来源当前性已筛选的定位关系，供产品按完整 SessionReference 坐标集合关联；它不是 AuthenticatedSession。平台来源的 `requires_platform_check` 为 true，产品必须再 JOIN 自己持有的当前平台绑定/来源资格关系，核对返回的绑定 ID/epoch 和来源 ID/version，不能仅凭该关系宣称平台资格有效。原请求 actor 的平台检查仍由既有 verifier 执行。
 
-没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(binding, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用宿主提供的明确 binding、实例和执行 fencing，锁定现有租户 guard 后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，期限只受会话当前性和原调用预算限制。
+没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(binding, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用宿主提供的明确 binding、实例和执行 fencing，取得覆盖全租户集合的锁后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，期限只受会话当前性和原调用预算限制。
 
 会话关系通过完整定位坐标关联当前会话。列 `session_valid_until` 是读取当时该会话空闲期限与绝对期限的较早者，续期会更新该值。宿主用它限制投影的有效期。分页按稳定定位坐标排序，cursor 沿用签发时的保守期限，到期后重新查询。人员回调也受资料和会话最早到期时间限制。
 

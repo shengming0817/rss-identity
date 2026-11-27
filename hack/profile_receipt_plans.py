@@ -39,6 +39,7 @@ def prepare_fixture(container):
         GRANT USAGE ON SCHEMA identity_authority TO identity_runtime;
         GRANT SELECT, INSERT, DELETE ON identity_authority.profile_operations TO identity_runtime;
     """)
+    psql(container, f"INSERT INTO identity_authority.tenants VALUES ('{TENANT}')")
     for principal, (_, revision, physical, active, _) in enumerate(CASES, 1):
         key = f"'{TENANT}', '{UUID(int=principal)}'"
         psql(container, f"""

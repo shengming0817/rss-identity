@@ -905,7 +905,7 @@ async fn session_http_lookup_never_inserts_tenant_guard() -> anyhow::Result<()> 
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let app = app(&f);
-    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.guard")
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.tenants")
         .fetch_one(&f.owner)
         .await?;
     let fake = format!("__Host-identity-session={}", "a".repeat(64));
@@ -927,14 +927,14 @@ async fn session_http_lookup_never_inserts_tenant_guard() -> anyhow::Result<()> 
         }
     }
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_authority.guard")
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_authority.tenants")
             .fetch_one(&f.owner)
             .await?,
         before
     );
     let (cookie, _, _) = successful_login(&app).await?;
     // Even ON CONFLICT attempts fire BEFORE INSERT. Authentication must not attempt a write.
-    sqlx::raw_sql("CREATE FUNCTION public.reject_guard_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'unexpected guard insert'; END $$; CREATE TRIGGER reject_guard_insert BEFORE INSERT ON identity_authority.guard FOR EACH ROW EXECUTE FUNCTION public.reject_guard_insert();").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reject_guard_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'unexpected guard insert'; END $$; CREATE TRIGGER reject_guard_insert BEFORE INSERT ON identity_authority.tenants FOR EACH ROW EXECUTE FUNCTION public.reject_guard_insert();").execute(&f.owner).await?;
     for (method, path) in [
         ("GET", "session"),
         ("HEAD", "session"),
@@ -956,7 +956,7 @@ async fn session_http_lookup_never_inserts_tenant_guard() -> anyhow::Result<()> 
         );
     }
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_authority.guard")
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_authority.tenants")
             .fetch_one(&f.owner)
             .await?,
         before
