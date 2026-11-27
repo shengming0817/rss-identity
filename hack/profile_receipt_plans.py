@@ -1,5 +1,7 @@
 """Measure Profile receipt heap/index rows in the normal PG fixture, using production SQL."""
 import argparse
+from contextlib import contextmanager
+import select
 import json
 import subprocess
 from pathlib import Path
@@ -41,8 +43,8 @@ def prepare_fixture(container):
         key = f"'{TENANT}', '{UUID(int=principal)}'"
         psql(container, f"""
             INSERT INTO identity_authority.accounts VALUES ({key},true,1);
-            INSERT INTO identity_authority.local_profiles(tenant_id,principal_id,revision)
-             SELECT {key},{revision} WHERE {revision}>0;
+            INSERT INTO identity_authority.local_profiles(tenant_id,principal_id,revision,reclaimed_through)
+             SELECT {key},{revision},{revision-physical} WHERE {revision}>0;
             INSERT INTO identity_authority.profile_operations
              (tenant_id,principal_id,operation_id,actor,digest,revision,accepted_at_ms)
              SELECT {key},
@@ -84,7 +86,7 @@ def explain(container, filename, arguments, mode, evidence):
             raise RuntimeError(f"unexpected {kind} in {filename}")
         if "Index Name" in node:
             keys = ["tenant_id", "operation_id"] if filename == "replay_receipt.sql" else ["tenant_id", "principal_id"]
-            if filename == "receipt_capacity.sql":
+            if filename in {"receipt_capacity.sql", "oldest_receipt.sql", "reclaim_receipts.sql"}:
                 keys.append("revision")
             condition = node.get("Index Cond", "")
             if any(key not in condition for key in keys):
@@ -93,6 +95,56 @@ def explain(container, filename, arguments, mode, evidence):
                        ("Actual Rows", "Rows Removed by Filter", "Rows Removed by Index Recheck"))
         rows += node["Actual Loops"] * examined
     return rows
+
+
+@contextmanager
+def pinned_snapshot(container):
+    cmd = ["docker", "exec", "-i", container, "psql", "-XqAt", "-U", "postgres", "-v", "ON_ERROR_STOP=1"]
+    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as reader:
+        try:
+            reader.stdin.write("BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM identity_authority.profile_operations;\n")
+            reader.stdin.flush()
+            if not select.select([reader.stdout], [], [], 15)[0] or int(reader.stdout.readline()) < 8192:
+                raise RuntimeError("could not pin receipt snapshot")
+            yield
+        finally:
+            reader.communicate("ROLLBACK;\n", timeout=15)
+
+
+def snapshot_cost(container, evidence):
+    # Case 6 starts with 8192 expired receipts. Keep xmin pinned across 64 committed batches.
+    account = f"'{TENANT}','{UUID(int=6)}'"
+    statement = (SQL / "reclaim_receipts.sql").read_text()
+    baseline = {}
+    with pinned_snapshot(container):
+        for floor in (0, 2048, 4096):
+            if floor:
+                batches = "\n".join(
+                    f"EXECUTE reclaim({account},14263296,{lower});" for lower in range(floor-2048, floor, 64)
+                )
+                result = psql(container, f"""
+                    SET ROLE identity_runtime;
+                    SET rss.tenant_id='{TENANT}';
+                    PREPARE reclaim AS {statement};
+                    {batches}
+                """)
+                actual = [int(value) for value in result.splitlines()]
+                if actual != list(range(floor-2048+64, floor+1, 64)):
+                    raise RuntimeError(f"unexpected reclaimed revision at {floor}")
+            for mode in ("custom", "generic"):
+                sample = evidence[mode][f"pinned-{floor}"] = {}
+                for filename, args in (("oldest_receipt.sql", f"{account},{floor}"),
+                                       ("reclaim_receipts.sql", f"{account},14263296,{floor}")):
+                    explain(container, filename, args, mode, sample)
+                    # Exclude ModifyTable WAL/FPI costs and target pages. Measure index traversal itself.
+                    index_scan, = (node for node in scans(sample[filename]["Plan"])
+                                   if "Index Name" in node)
+                    blocks = index_scan["Shared Hit Blocks"] + index_scan["Shared Read Blocks"]
+                    first = baseline.setdefault((mode,filename), blocks)
+                    print(f"pinned | {mode} | reclaimed {floor} | {filename} | index buffers {blocks}", flush=True)
+                    # Permit a page boundary split, while rejecting work proportional to the deleted prefix.
+                    if blocks > first + 8:
+                        raise RuntimeError(f"index visits grow with pinned history in {mode}/{filename}")
 
 
 def main():
@@ -114,13 +166,15 @@ def main():
 
                     miss = measure("replay_receipt.sql", f"'{TENANT}','00000000-0000-7000-8000-000000000000',14263296")
                     pivot = measure("receipt_capacity.sql", f"{account},{revision-capacity+1},14263296") if revision >= capacity else 0
-                    oldest = measure("oldest_receipt.sql", account) if active < capacity else 0
-                    cleanup = measure("reclaim_receipts.sql", f"{account},14263296") if physical > active and active < capacity else 0
+                    floor = revision - physical
+                    oldest = measure("oldest_receipt.sql", f"{account},{floor}") if active < capacity else 0
+                    cleanup = measure("reclaim_receipts.sql", f"{account},14263296,{floor}") if physical > active and active < capacity else 0
                     blocks = sum(result["Plan"].get(field, 0) for result in case.values()
                                  for field in ("Shared Hit Blocks", "Shared Read Blocks"))
                     print(f"{mode} | {name} | {miss} | {pivot} | {oldest} | {cleanup} | {blocks}", flush=True)
                     if miss > 1 or pivot > 1 or oldest > 1 or cleanup > 128:
                         raise RuntimeError(f"receipt scan bound exceeded in {mode}/{name}")
+            snapshot_cost(container, evidence)
     finally:
         if plans:
             plans.write_text(json.dumps(evidence, indent=2) + "\n")

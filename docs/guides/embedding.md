@@ -189,6 +189,7 @@ refresh、idle 和 GET 不重新采集。组与部门的独立短期合同不变
 本地资料管理使用 `ReadLocalProfile/UpdateLocalProfile`，来源目录使用 `ReadProfileSources`，
 必须由宿主明确授权，不能默认把字段配置写权限映射为这些权限。
 HTTP 本地资料位于 `/api/v1/identity/tenants/{tenant}/accounts/{principal}/profile`，
+账户资料 GET 返回 revision 与 value。PUT 必须同时提供 operationId、expectedRevision 和 value；省略 value 返回 HTTP 400。
 提交时用 UUIDv7 生成一次 operationId；Rust 使用 `ProfileOperationId::now()`。保存原 ID、expectedRevision 和 value（显式 null 表示删除）。首次提交须在 ID 时间起 5 分钟内到达事务接纳点，客户端时钟最多可快 30 秒。其它 UUID 版本或过大的未来偏差返回 HTTP 400。
 成功事务以 PostgreSQL 记录的接纳时间为起点保留回执 24 小时。期间经当前授权原样重提交返回原 revision；用同 ID 更换目标账户、actor、expectedRevision 或 value 返回 409 `operation_conflict`。新操作的 CAS 失败返回 409 `revision_conflict`。
 响应丢失时，原 actor 用 `GET /operations/{operationId}`（相对账户资料路径）查询。返回回执即已提交；首次提交窗口内没有可见回执返回 200 null。窗口关闭且没有可见有效回执时，查询或原请求重试返回 410 `profile_operation_expired`。此时历史结果可能未知，重新读取资料，确认仍需变更后再生成新 ID。查询和重放均须当前会话与宿主授权。

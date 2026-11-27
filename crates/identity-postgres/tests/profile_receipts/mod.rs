@@ -139,6 +139,11 @@ async fn admission_after_quota_changes_and_concurrent_reclamation() -> anyhow::R
     let (rows, live):(i64,i64)=sqlx::query_as("SELECT count(*),count(*) FILTER(WHERE accepted_at_ms>$1) FROM identity_authority.profile_operations")
         .bind(future-DAY_MS).fetch_one(&f.owner).await?;
     assert_eq!((rows, live), (8193, 0));
+    let progress = || {
+        sqlx::query_scalar::<_, i64>("SELECT reclaimed_through FROM identity_authority.local_profiles WHERE tenant_id=$1::uuid AND principal_id=$2")
+        .bind(A).bind(f.key.principal.as_uuid()).fetch_one(&f.owner)
+    };
+    assert_eq!(progress().await?, 0);
     assert_eq!(
         small
             .read_local_profile(&actor, f.key, deadline())
@@ -172,6 +177,7 @@ async fn admission_after_quota_changes_and_concurrent_reclamation() -> anyhow::R
             .fetch_one(&f.owner)
             .await?;
     assert_eq!(physical, 8193 - 63);
+    assert_eq!(progress().await?, 64);
     assert_eq!(f.events().await?, audit + 3);
     future += DAY_MS;
     advance(&f, future).await?;
@@ -193,6 +199,7 @@ async fn admission_after_quota_changes_and_concurrent_reclamation() -> anyhow::R
         let (rows,live):(i64,i64)=sqlx::query_as("SELECT count(*),count(*) FILTER(WHERE accepted_at_ms>$1) FROM identity_authority.profile_operations")
             .bind(future-DAY_MS).fetch_one(&f.owner).await?;
         assert_eq!((rows, live), (8193 - (i + 1) * 63, 1));
+        assert_eq!(progress().await?, 64 * (i + 1));
         assert_eq!(
             small
                 .read_local_profile(&actor, f.key, deadline())

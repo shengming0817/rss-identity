@@ -485,34 +485,42 @@ impl Authority {
                 if !load(c, target).await?.state.active() {
                     return Err(reject().into());
                 }
-                local_view(c, target).await
+                load_local_profile(c, target).await.map(|(view, _)| view)
             })
         })
         .await
     }
 }
-async fn local_view(
+async fn load_local_profile(
     c: &mut PgConnection,
     key: AccountKey,
-) -> Result<LocalProfileView, transaction::MutationError> {
-    let row=sqlx::query("SELECT revision,value FROM identity_authority.local_profiles WHERE tenant_id=$1::uuid AND principal_id=$2")
-        .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_optional(c).await?;
-    match row {
-        None => Ok(LocalProfileView {
-            revision: 0,
-            value: None,
-        }),
-        Some(row) => {
-            let value: Option<serde_json::Value> = row.try_get("value")?;
-            Ok(LocalProfileView {
-                revision: row.try_get("revision")?,
-                value: value
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|_| corrupt())?,
-            })
-        }
-    }
+) -> Result<(LocalProfileView, i64), transaction::MutationError> {
+    let row = sqlx::query(
+        "SELECT revision,value,reclaimed_through FROM identity_authority.local_profiles
+                           WHERE tenant_id=$1::uuid AND principal_id=$2",
+    )
+    .bind(key.tenant.to_string())
+    .bind(key.principal.as_uuid())
+    .fetch_optional(c)
+    .await?;
+    let Some(row) = row else {
+        return Ok((
+            LocalProfileView {
+                revision: 0,
+                value: None,
+            },
+            0,
+        ));
+    };
+    let value: Option<serde_json::Value> = row.try_get("value")?;
+    let view = LocalProfileView {
+        revision: row.try_get("revision")?,
+        value: value
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| corrupt())?,
+    };
+    Ok((view, row.try_get("reclaimed_through")?))
 }
 
 #[derive(Clone, Serialize)]

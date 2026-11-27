@@ -46,21 +46,25 @@ async fn reclaim(
     c: &mut PgConnection,
     target: AccountKey,
     cutoff: i64,
-) -> Result<(), MutationError> {
+    reclaimed_through: i64,
+) -> Result<i64, MutationError> {
+    // Seek beyond the last deleted prefix even when another snapshot pins its index tuples.
     let oldest: Option<i64> = sqlx::query_scalar(include_str!("oldest_receipt.sql"))
         .bind(target.tenant.to_string())
         .bind(target.principal.as_uuid())
+        .bind(reclaimed_through)
         .fetch_optional(&mut *c)
         .await?;
-    if oldest.is_some_and(|accepted| accepted <= cutoff) {
-        sqlx::query(include_str!("reclaim_receipts.sql"))
-            .bind(target.tenant.to_string())
-            .bind(target.principal.as_uuid())
-            .bind(cutoff)
-            .execute(c)
-            .await?;
+    if oldest.is_none_or(|accepted| accepted > cutoff) {
+        return Ok(reclaimed_through);
     }
-    Ok(())
+    Ok(sqlx::query_scalar(include_str!("reclaim_receipts.sql"))
+        .bind(target.tenant.to_string())
+        .bind(target.principal.as_uuid())
+        .bind(cutoff)
+        .bind(reclaimed_through)
+        .fetch_one(c)
+        .await?)
 }
 
 impl Authority {
@@ -112,7 +116,7 @@ impl Authority {
                 clock.persist(c, target.tenant).await?;
                 return Ok((Err(AuthorityError::ProfileOperationExpired), vec![]));
             }
-            let old = local_view(c, target).await?;
+            let (old, reclaimed_through) = load_local_profile(c, target).await?;
             // Each committed revision earns one receipt. The live revisions form a suffix.
             if old.revision >= capacity && sqlx::query_scalar::<_,bool>(include_str!("receipt_capacity.sql"))
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid())
@@ -128,12 +132,12 @@ impl Authority {
             }
             let value = change.value.map(serde_json::to_value).transpose().map_err(|_| corrupt())?;
             clock.persist(c, target.tenant).await?;
-            reclaim(c, target, clock.cutoff()).await?;
-            sqlx::query("INSERT INTO identity_authority.local_profiles(tenant_id,principal_id,revision,value)
-                         VALUES($1::uuid,$2,$3,$4) ON CONFLICT(tenant_id,principal_id)
-                         DO UPDATE SET revision=excluded.revision,value=excluded.value")
+            let reclaimed_through = reclaim(c, target, clock.cutoff(), reclaimed_through).await?;
+            sqlx::query("INSERT INTO identity_authority.local_profiles(tenant_id,principal_id,revision,value,reclaimed_through)
+                         VALUES($1::uuid,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_id)
+                         DO UPDATE SET revision=excluded.revision,value=excluded.value,reclaimed_through=excluded.reclaimed_through")
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(revision)
-                .bind(value).execute(&mut *c).await?;
+                .bind(value).bind(reclaimed_through).execute(&mut *c).await?;
             sqlx::query("INSERT INTO identity_authority.profile_operations(tenant_id,operation_id,principal_id,actor,digest,revision,accepted_at_ms)
                          VALUES($1::uuid,$2,$3,$4,$5,$6,$7)")
                 .bind(target.tenant.to_string()).bind(id.as_uuid()).bind(target.principal.as_uuid())

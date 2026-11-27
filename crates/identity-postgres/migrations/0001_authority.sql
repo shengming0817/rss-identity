@@ -170,6 +170,7 @@ CREATE TABLE identity_authority.platform_challenges (
 CREATE INDEX platform_challenge_expiry ON identity_authority.platform_challenges(tenant_id,expires_at);
 CREATE TABLE identity_authority.local_profiles (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL, revision bigint NOT NULL CHECK(revision>0),
+ reclaimed_through bigint NOT NULL DEFAULT 0 CHECK(reclaimed_through>=0 AND reclaimed_through<=revision),
  value jsonb CHECK(value IS NULL OR (jsonb_typeof(value)='object')),
  PRIMARY KEY(tenant_id,principal_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
