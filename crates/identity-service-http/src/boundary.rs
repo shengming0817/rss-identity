@@ -30,6 +30,35 @@ pub(crate) fn request_deadline(
     }
     Ok(deadline)
 }
+pub(crate) fn bind_deadline(request: &mut Request, state: &AppState) -> Result<(), HttpError> {
+    use rss_request_context::Clock;
+    let timer = state.authority.execution_timer();
+    let deadline = request_deadline(request, state.config.timeout(), timer.now())?;
+    request.extensions_mut().insert(deadline);
+    request.extensions_mut().insert(timer.clone());
+    Ok(())
+}
+
+/// Only cancel the inbound body reader. Transaction settlement owns its own deadline arbitration.
+pub(crate) async fn read_body<T, E, F>(
+    mut request: Request,
+    deadline: Deadline,
+    read: impl FnOnce(Request) -> F,
+) -> Result<T, HttpError>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    use rss_request_context::{ExecutionTimer, SharedExecutionTimer};
+    let timer = request
+        .extensions_mut()
+        .remove::<SharedExecutionTimer>()
+        .ok_or_else(|| HttpError::from(AuthorityError::Unavailable))?;
+    tokio::select! {
+        biased;
+        _ = timer.sleep_until(deadline) => Err(HttpError::request_timeout()),
+        value = read(request) => value.map_err(|_| BAD),
+    }
+}
 pub(crate) fn tenant(value: &str) -> Result<TenantId, HttpError> {
     TenantId::parse(value).map_err(|_| BAD)
 }
@@ -39,15 +68,9 @@ pub(crate) async fn request_boundary(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let budget = match request_deadline(
-        &request,
-        state.config.timeout(),
-        rss_request_context::Clock::now(state.authority.execution_timer()),
-    ) {
-        Ok(budget) => budget,
-        Err(error) => return private_response(error.into_response()),
-    };
-    request.extensions_mut().insert(budget);
+    if let Err(error) = bind_deadline(&mut request, &state) {
+        return private_response(error.into_response());
+    }
     let origin = if original_uri.to_string().len() > 8192
         || cookie_presentation(request.headers()).is_err()
     {
@@ -131,5 +154,56 @@ mod rate_limit_tests {
                 serde_json::json!({"code":"rate_limited"})
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod body_deadline_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use rss_request_context::{Clock, ExecutionTimer, SharedExecutionTimer};
+
+    struct ManualTimer(tokio::sync::watch::Receiver<Instant>);
+    impl Clock for ManualTimer {
+        fn now(&self) -> Instant {
+            *self.0.borrow()
+        }
+    }
+    impl ExecutionTimer for ManualTimer {
+        async fn sleep_until(&self, deadline: Deadline) {
+            self.0
+                .clone()
+                .wait_for(|now| deadline.is_expired(*now))
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_body_expires_on_the_host_clock() {
+        let now = Instant::now() + Duration::from_secs(3600);
+        let deadline = Deadline::at(now + Duration::from_secs(30));
+        let (advance, clock) = tokio::sync::watch::channel(now);
+        let mut request = Request::default();
+        request
+            .extensions_mut()
+            .insert(SharedExecutionTimer::new(ManualTimer(clock)));
+        let (started, reading) = tokio::sync::oneshot::channel();
+        let reader = tokio::spawn(read_body(request, deadline, |_| async move {
+            started.send(()).unwrap();
+            std::future::pending::<Result<(), ()>>().await
+        }));
+        reading.await.unwrap();
+        advance.send(deadline.instant()).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), reader)
+            .await
+            .unwrap()
+            .unwrap();
+        let response = outcome.unwrap_err().into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.extensions().get::<HttpFailure>(),
+            Some(&HttpFailure::RequestTimeout)
+        );
     }
 }

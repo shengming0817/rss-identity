@@ -92,13 +92,10 @@ async fn update(
     request: Request,
 ) -> Result<Response, Error> {
     let actor = actor(&s, binding, request.headers(), b, true).await?;
-    let bytes = tokio::time::timeout_at(
-        b.instant().into(),
-        axum::body::to_bytes(request.into_body(), 98_304),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let bytes = read_body(request, b, |request| {
+        axum::body::to_bytes(request.into_body(), 98_304)
+    })
+    .await?;
     let change: dto::Change = serde_json::from_slice(&bytes).map_err(|_| BAD)?;
     let change = change.try_into().map_err(|_| BAD)?;
     Ok(Json(dto::Receipt::from(

@@ -221,13 +221,10 @@ async fn begin(
 
     let source = source(&request)?;
 
-    let Json(input) = tokio::time::timeout_at(
-        budget.instant().into(),
-        Json::<Begin>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<Begin>::from_request(request, &state)
+    })
+    .await?;
 
     let redirect = state
         .federation
@@ -264,13 +261,10 @@ async fn step_up(
         .extensions()
         .get::<rss_identity_core::step_up::StepUpContext>()
         .cloned();
-    let Json(input) = tokio::time::timeout_at(
-        budget.instant().into(),
-        Json::<BeginStepUp>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<BeginStepUp>::from_request(request, &state)
+    })
+    .await?;
 
     let actor = actor.ok_or(UNAUTH)?;
     let context = input.operation.context(&actor, host)?;
@@ -308,13 +302,10 @@ async fn link(
 
     let source = source(&request)?;
 
-    let Json(input) = tokio::time::timeout_at(
-        budget.instant().into(),
-        Json::<Link>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<Link>::from_request(request, &state)
+    })
+    .await?;
 
     let password = input
         .password

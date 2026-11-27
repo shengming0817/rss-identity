@@ -112,13 +112,10 @@ async fn body<T: serde::de::DeserializeOwned>(
     request: Request,
     b: Deadline,
 ) -> Result<T, HttpError> {
-    let bytes = tokio::time::timeout_at(
-        b.instant().into(),
-        axum::body::to_bytes(request.into_body(), 65536),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let bytes = read_body(request, b, |request| {
+        axum::body::to_bytes(request.into_body(), 65536)
+    })
+    .await?;
     serde_json::from_slice(&bytes).map_err(|_| BAD)
 }
 fn clear(mut response: Response) -> Response {

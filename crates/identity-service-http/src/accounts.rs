@@ -141,13 +141,10 @@ async fn actor(
     Ok(s.authority.inspect_session(binding, secret, b).await?)
 }
 pub(crate) async fn body<T: DeserializeOwned>(request: Request, b: Deadline) -> Result<T> {
-    let bytes = tokio::time::timeout_at(
-        b.instant().into(),
-        axum::body::to_bytes(request.into_body(), 32768),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let bytes = read_body(request, b, |request| {
+        axum::body::to_bytes(request.into_body(), 32768)
+    })
+    .await?;
     serde_json::from_slice(&bytes).map_err(|_| BAD.into())
 }
 fn target(t: &str, p: &str) -> Result<AccountKey> {

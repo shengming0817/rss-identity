@@ -46,15 +46,9 @@ fn secure(mut response: Response) -> Response {
     response
 }
 async fn boundary(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let budget = match request_deadline(
-        &request,
-        state.config.timeout(),
-        rss_request_context::Clock::now(state.authority.execution_timer()),
-    ) {
-        Ok(budget) => budget,
-        Err(error) => return secure(error.into_response()),
-    };
-    request.extensions_mut().insert(budget);
+    if let Err(error) = bind_deadline(&mut request, &state) {
+        return secure(error.into_response());
+    }
     let admitted = if request.uri().to_string().len() > 8192 || request.uri().query().is_some() {
         Err(BAD)
     } else {
@@ -86,13 +80,10 @@ async fn login(
         .ok_or(HttpError::from(AuthorityError::Unavailable))?
         .0;
     let source = AttemptSource::parse(&address.to_string())?;
-    let Json(input) = tokio::time::timeout_at(
-        budget.instant().into(),
-        Json::<Login>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<Login>::from_request(request, &state)
+    })
+    .await?;
     let issued = state
         .authority
         .login_local_bearer(

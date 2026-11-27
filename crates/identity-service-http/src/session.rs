@@ -88,13 +88,10 @@ pub(crate) async fn login(
         None => None,
     };
     // Only inbound body reading is cancelled here; no write transaction has started.
-    let Json(input) = tokio::time::timeout_at(
-        budget.instant().into(),
-        Json::<Login>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<Login>::from_request(request, &state)
+    })
+    .await?;
     let password = Password::new(input.password).map_err(|_| UNAUTH)?;
     let login = LoginKey::parse(&input.login).map_err(|_| UNAUTH)?;
     issued(
@@ -232,13 +229,10 @@ pub(crate) async fn reauthenticate(
         .ok_or(HttpError::from(AuthorityError::Unavailable))?
         .0;
     let source = AttemptSource::parse(&peer.to_string())?;
-    let Json(input) = tokio::time::timeout_at(
-        budget.instant().into(),
-        Json::<Reauthentication>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| HttpError::request_timeout())?
-    .map_err(|_| BAD)?;
+    let Json(input) = read_body(request, budget, |request| {
+        Json::<Reauthentication>::from_request(request, &state)
+    })
+    .await?;
     issued(
         state
             .authority

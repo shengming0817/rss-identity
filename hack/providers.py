@@ -163,21 +163,15 @@ SUITES = {
     },
 }
 
-def cargo(package, test, env, features=()):
+def cargo(package, test, env):
     expected = SUITES[(package,test)]
-    internal = (package=="rss-identity-postgres" and test in {"atomic","session_atomic","federated_atomic"}) or (package=="rss-identity-oidc" and test=="private_provider_tests")
-    module = "account_atomic" if test == "atomic" else test
-    if internal: expected={f"{module}::{name}" for name in expected}
-    filtered = 0
-    command = ['cargo', 'test', '--locked', '-p', package, *(['--lib',module+'::'] if internal else ['--test',test]), *features, '--', '--ignored', '--test-threads=1']
+    command = ['cargo', 'test', '--locked', '-p', package, '--test', test,
+               '--', '--ignored', '--test-threads=1']
     environment = {**os.environ, **env}
     listing = bounded_run([*command, '--list'], timeout=900, cwd=ROOT, env=environment, check=True, text=True, stdout=subprocess.PIPE).stdout
     names = re.findall(r'^(.+): test$', listing, re.M)
     if set(names) != expected or len(names) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test set missing or changed')
-    if internal:
-        all_listing = bounded_run(['cargo','test','--locked','-p',package,'--lib','--','--list'],timeout=900,cwd=ROOT,env=environment,check=True,text=True,stdout=subprocess.PIPE).stdout
-        filtered=len(re.findall(r'^(.+): test$',all_listing,re.M))-len(expected)
     completed = bounded_run([*command, '--nocapture', '--format', 'pretty'], timeout=max(180,len(expected)*180), cwd=ROOT, env=environment, text=True, capture_output=True)
     result = completed.stdout
     report_tests(package, test, expected, completed)
@@ -185,7 +179,7 @@ def cargo(package, test, env, features=()):
         raise RuntimeError(f'{package}/{test}: cargo exit={completed.returncode}')
     counts = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out', result, re.M)
     executed = re.findall(r'^test (.+) \.\.\. ok$', result, re.M)
-    if counts != [(str(len(expected)), '0', '0', '0', str(filtered))] or set(executed) != expected or len(executed) != len(expected):
+    if counts != [(str(len(expected)), '0', '0', '0', '0')] or set(executed) != expected or len(executed) != len(expected):
         raise RuntimeError(f'{package}/{test}: canonical test execution incomplete')
 
 @contextlib.contextmanager
@@ -305,8 +299,6 @@ def keycloak(redirect_uri="https://identity.example.test/api/v1/identity/oidc/ca
                     if response.status==200:break
             except (OSError,urllib.error.URLError):time.sleep(.5)
         else:raise RuntimeError("Keycloak TLS readiness timed out")
-        # The private-provider fixture advertises an intentionally unresolvable issuer.
-        # Provision through the owned, certificate-verified listener used for readiness.
         configure_department_profile(f"https://{host}:{port}/realms/identity", context)
         yield {"IDENTITY_TEST_FEDERATED_ISSUER":issuer,"IDENTITY_TEST_FEDERATED_CA":str(cert),"IDENTITY_TEST_KEYCLOAK_CONTAINER":kc_id}
 

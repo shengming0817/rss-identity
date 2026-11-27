@@ -12,4 +12,4 @@
 
 Web 接入由 rss-web 的现有联合测试持有；MDM 接入归其产品。需要真实浏览器、部署和恢复闭环时，独立评估并使用[参考运行入口](../deployment/images.md#功能验收)，不重复模拟 consumer 或容量验证。
 
-公共库的独立消费与库级 PG、OIDC 验收归 RSS。其运行入口见[固定提交中的凭据库指南](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-web-credentials/README.md&version=GCc3e0fd4d1288d513a1f1c73cf57c103bdc4843b7)。
+在 Cargo.toml 固定的 RSS checkout 中，运行 `cargo test --locked -p identity-postgres-integration -p identity-oidc-integration` 执行库级 PostgreSQL 和 Keycloak 验收。四个公共包的独立 Git 消费验证见[凭据库指南](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-web-credentials/README.md&version=GCc3e0fd4d1288d513a1f1c73cf57c103bdc4843b7)。
