@@ -75,7 +75,9 @@ pub(crate) struct Origin {
     pub facts: crate::auth_facts::AuthenticationFacts,
     pub facts_sequence: i64,
 }
-pub(crate) fn decode_origin(r: &sqlx::postgres::PgRow) -> Result<Option<Origin>, rss_transactional_messaging_postgres::PgError> {
+pub(crate) fn decode_origin(
+    r: &sqlx::postgres::PgRow,
+) -> Result<Option<Origin>, rss_transactional_messaging_postgres::PgError> {
     let id: Option<Uuid> = r.try_get("external_identity_id")?;
     match id {
         Some(identity) => Ok(Some(Origin {

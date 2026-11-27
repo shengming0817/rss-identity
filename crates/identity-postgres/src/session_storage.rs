@@ -88,7 +88,7 @@ pub(crate) struct Loaded {
     pub assurance: Assurance,
     pub groups: GroupFacts,
     pub department_snapshot: Box<crate::department::DepartmentFacts>,
-    sample: TimeSample,
+    pub(crate) sample: TimeSample,
     pub expires: Instant,
     pub state: AccountState,
     pub view: SessionView,
@@ -119,33 +119,57 @@ macro_rules! session_row {
 }
 
 pub(crate) async fn lookup_locked(
-    c: &mut PgConnection, tenant: TenantId, digest: &[u8; 32], kind: CredentialKind,
-    instance: uuid::Uuid, session_checks: &crate::session_checks::SessionChecks,
+    c: &mut PgConnection,
+    tenant: TenantId,
+    digest: &[u8; 32],
+    kind: CredentialKind,
+    instance: uuid::Uuid,
+    session_checks: &crate::session_checks::SessionChecks,
 ) -> Result<Loaded, PgError> {
     let row = session_row!("token_hash=$2 AND credential_kind=$3")
-        .bind(tenant.to_string()).bind(digest.as_slice()).bind(kind.as_str())
-        .fetch_optional(&mut *c).await?.ok_or_else(reject)?;
+        .bind(tenant.to_string())
+        .bind(digest.as_slice())
+        .bind(kind.as_str())
+        .fetch_optional(&mut *c)
+        .await?
+        .ok_or_else(reject)?;
     restore(c, tenant, &row, instance, session_checks).await
 }
 
 pub(crate) async fn by_id_locked(
-    c: &mut PgConnection, key: AccountKey, sid: SessionId, kind: CredentialKind,
-    instance: uuid::Uuid, session_checks: &crate::session_checks::SessionChecks,
+    c: &mut PgConnection,
+    key: AccountKey,
+    sid: SessionId,
+    kind: CredentialKind,
+    instance: uuid::Uuid,
+    session_checks: &crate::session_checks::SessionChecks,
 ) -> Result<Loaded, PgError> {
     let row = session_row!("session_id=$2 AND principal_id=$3 AND credential_kind=$4")
-        .bind(key.tenant.to_string()).bind(sid.as_uuid()).bind(key.principal.as_uuid()).bind(kind.as_str())
-        .fetch_optional(&mut *c).await?.ok_or_else(reject)?;
+        .bind(key.tenant.to_string())
+        .bind(sid.as_uuid())
+        .bind(key.principal.as_uuid())
+        .bind(kind.as_str())
+        .fetch_optional(&mut *c)
+        .await?
+        .ok_or_else(reject)?;
     restore(c, key.tenant, &row, instance, session_checks).await
 }
 
 async fn restore(
-    c: &mut PgConnection, tenant: TenantId, row: &sqlx::postgres::PgRow,
-    instance: uuid::Uuid, session_checks: &crate::session_checks::SessionChecks,
+    c: &mut PgConnection,
+    tenant: TenantId,
+    row: &sqlx::postgres::PgRow,
+    instance: uuid::Uuid,
+    session_checks: &crate::session_checks::SessionChecks,
 ) -> Result<Loaded, PgError> {
-    let id = session_id(&row.try_get::<uuid::Uuid,_>("session_id")?.to_string())?;
-    let key = AccountKey {tenant, principal: principal(&row.try_get::<uuid::Uuid,_>("principal_id")?.to_string())?};
-    let state = account_state_locked(c,key).await?;
-    if !state.active() || row.try_get::<i64, _>("auth_epoch")? != state.epoch()
+    let id = session_id(&row.try_get::<uuid::Uuid, _>("session_id")?.to_string())?;
+    let key = AccountKey {
+        tenant,
+        principal: principal(&row.try_get::<uuid::Uuid, _>("principal_id")?.to_string())?,
+    };
+    let state = account_state_locked(c, key).await?;
+    if !state.active()
+        || row.try_get::<i64, _>("auth_epoch")? != state.epoch()
         || row.try_get::<i64, _>("membership_epoch")? != state.membership_epoch()
         || row.try_get::<Option<i64>, _>("revoked_at")?.is_some()
     {
@@ -156,13 +180,7 @@ async fn restore(
         Some(origin) => Some(crate::federation_storage::check_origin(c, key, origin).await?),
         None => None,
     };
-    let lifetime = SessionLifetime::restore(
-        row.try_get("issued_at")?,
-        row.try_get("idle_expires_at")?,
-        row.try_get("absolute_expires_at")?,
-        lifetime_policy(row)?,
-    )
-    .map_err(|_| corrupt())?;
+    let lifetime = lifetime(row)?;
     let sample = TimeSample::read(c).await?;
     let now = sample.seconds();
     if !lifetime.valid_at(now) {
@@ -201,7 +219,8 @@ async fn restore(
             let platform: crate::platform::PlatformAuthentication =
                 serde_json::from_value(row.try_get("platform_authentication")?)
                     .map_err(|_| corrupt())?;
-            crate::platform::recheck(c, key, instance, &platform, session_checks).await?;
+            let verifier = platform.verifier(key, instance, session_checks)?;
+            crate::platform::recheck_binding(c, &platform.binding, verifier).await?;
             (
                 platform.assurance()?,
                 rss_identity_core::groups::Groups::unavailable(
@@ -269,7 +288,10 @@ pub(crate) async fn recheck(
 }
 
 /// The caller has established the proof's exact deployment and execution binding in this transaction.
-pub(crate) async fn recheck_locked(c: &mut PgConnection, proof: &AuthenticatedSession) -> Result<Loaded, PgError> {
+pub(crate) async fn recheck_locked(
+    c: &mut PgConnection,
+    proof: &AuthenticatedSession,
+) -> Result<Loaded, PgError> {
     let mut loaded = lookup_locked(
         c,
         proof.key.tenant,
@@ -319,6 +341,16 @@ pub(crate) async fn close(
     .execute(c)
     .await?;
     Ok(())
+}
+
+pub(crate) fn lifetime(row: &sqlx::postgres::PgRow) -> Result<SessionLifetime, PgError> {
+    SessionLifetime::restore(
+        row.try_get("issued_at")?,
+        row.try_get("idle_expires_at")?,
+        row.try_get("absolute_expires_at")?,
+        lifetime_policy(row)?,
+    )
+    .map_err(|_| corrupt())
 }
 
 pub(crate) fn lifetime_policy(row: &sqlx::postgres::PgRow) -> Result<SessionPolicy, PgError> {

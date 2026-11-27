@@ -3,7 +3,7 @@
 use crate::{
     AuthenticatedSession, Authority, AuthorityConfig, AuthorityError, AuthorityProfile, Budget,
     ExecutionBinding, ManagementOperation, ManagementPolicy,
-    storage::{authority_id, insert_account, account_state_locked},
+    storage::{account_state_locked, authority_id, insert_account},
     transaction::{self, MutationError, SecurityEvent},
 };
 use rss_identity_core::{

@@ -129,7 +129,15 @@ impl Authority {
                 connection(tx, move |c| {
                     Box::pin(async move {
                         lock_guard(c, tenant).await?;
-                        let loaded = db::by_id_locked(c, key, session, reference.credential_kind, reference.instance, &session_checks).await?;
+                        let loaded = db::by_id_locked(
+                            c,
+                            key,
+                            session,
+                            reference.credential_kind,
+                            reference.instance,
+                            &session_checks,
+                        )
+                        .await?;
                         let expires = checked_expiry(&loaded, budget.0.instant())?;
                         Ok(RevalidatedSession {
                             reference,

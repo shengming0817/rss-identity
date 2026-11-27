@@ -323,7 +323,7 @@ impl Reader {
             return Err(reject().into());
         }
         crate::transaction::check_binding(c, self.binding).await?;
-        lock_guard(c,self.key.tenant).await?;
+        lock_guard(c, self.key.tenant).await?;
         let loaded = crate::session_storage::lookup_locked(
             c,
             self.key.tenant,

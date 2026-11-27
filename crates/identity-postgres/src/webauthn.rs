@@ -510,7 +510,7 @@ impl WebauthnAuthority {
                     if storage::authority_id(c).await? != authority {
                         return Err(reject().into());
                     }
-                    storage::lock_guard(c,key.tenant).await?;
+                    storage::lock_guard(c, key.tenant).await?;
                     let loaded = session_storage::lookup_locked(
                         c,
                         key.tenant,

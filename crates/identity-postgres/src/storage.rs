@@ -20,7 +20,10 @@ pub(crate) async fn lock_guard(c: &mut PgConnection, tenant: TenantId) -> Result
     Ok(())
 }
 /// Read current account/membership state while the caller holds the tenant guard.
-pub(crate) async fn account_state_locked(c: &mut PgConnection, key: AccountKey) -> Result<AccountState, PgError> {
+pub(crate) async fn account_state_locked(
+    c: &mut PgConnection,
+    key: AccountKey,
+) -> Result<AccountState, PgError> {
     let row = sqlx::query(
         "SELECT a.enabled, a.auth_epoch, m.active, m.epoch, l.principal_id IS NOT NULL AS has_local_password
          FROM identity_authority.accounts a
@@ -30,8 +33,15 @@ pub(crate) async fn account_state_locked(c: &mut PgConnection, key: AccountKey) 
         .bind(key.tenant.to_string())
         .bind(key.principal.as_uuid())
         .fetch_optional(c).await?.ok_or_else(reject)?;
-    AccountState::restore(key, row.try_get("enabled")?, row.try_get("active")?, row.try_get("auth_epoch")?,
-        row.try_get("has_local_password")?, row.try_get("epoch")?).map_err(|_| corrupt())
+    AccountState::restore(
+        key,
+        row.try_get("enabled")?,
+        row.try_get("active")?,
+        row.try_get("auth_epoch")?,
+        row.try_get("has_local_password")?,
+        row.try_get("epoch")?,
+    )
+    .map_err(|_| corrupt())
 }
 
 pub(crate) async fn authority_id(c: &mut PgConnection) -> Result<Uuid, PgError> {

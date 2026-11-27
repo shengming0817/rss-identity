@@ -555,6 +555,7 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
     );
     let session = login_department(&f, &federation, &provider).await?;
     let original = facts(&f, &session).await?;
+    let other = login_department(&f, &federation, &provider).await?;
     for bad in [
         serde_json::json!({"version":1,"sourceRevision":"r1","nodes":[{"id":"dept","displayName":"Department","parentId":"missing"}],"memberships":["dept"]}),
         serde_json::json!({"version":2,"sourceRevision":"r1","nodes":[],"memberships":[]}),
@@ -567,6 +568,17 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
             .bind(corrupted)
             .execute(&f.owner)
             .await?;
+        let actor = f
+            .store
+            .inspect_session(binding(f.key.tenant), secret(&other), deadline())
+            .await?;
+        let listed = f.store.list_sessions(actor, None, 100, deadline()).await?;
+        assert!(
+            listed
+                .sessions
+                .iter()
+                .any(|item| item.id == session.view().id)
+        );
         assert!(
             f.store
                 .inspect_session(

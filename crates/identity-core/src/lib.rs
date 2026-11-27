@@ -11,7 +11,7 @@ pub mod session;
 use uuid::Uuid;
 
 /// Non-nil Identity InstanceId; bound to the persisted authentication instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstanceId(Uuid);
 impl InstanceId {
     pub fn generate() -> Self {
@@ -31,7 +31,7 @@ impl InstanceId {
 }
 
 /// Non-nil Identity PrincipalId; never inferred from browser claims.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PrincipalId(Uuid);
 impl PrincipalId {
     pub fn generate() -> Self {

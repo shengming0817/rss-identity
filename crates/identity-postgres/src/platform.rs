@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformBinding {
     #[serde(with = "instance_codec")]
@@ -36,7 +36,7 @@ pub struct PlatformBinding {
     pub source_version: i64,
     pub external_identity: Option<ExternalBinding>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExternalBinding {
     pub identity_id: Uuid,
@@ -174,28 +174,32 @@ fn failure(error: PlatformError) -> rss_transactional_messaging_postgres::PgErro
         ),
     }
 }
-pub(crate) async fn recheck(
-    c: &mut PgConnection,
-    key: AccountKey,
-    instance: Uuid,
-    stored: &PlatformAuthentication,
-    checks: &crate::session_checks::SessionChecks,
-) -> Result<(), rss_transactional_messaging_postgres::PgError> {
-    let verifier = checks.platform.as_ref().ok_or_else(reject)?;
-    if !stored.binding.valid()
-        || stored.binding.account != key
-        || stored.binding.instance.as_uuid() != instance
-        || verifier.audience() != stored.audience
-    {
-        return Err(reject());
+impl PlatformAuthentication {
+    pub(crate) fn verifier<'a>(
+        &self,
+        key: AccountKey,
+        instance: Uuid,
+        checks: &'a crate::session_checks::SessionChecks,
+    ) -> Result<&'a dyn PlatformVerifier, rss_transactional_messaging_postgres::PgError> {
+        let verifier = checks.platform.as_deref().ok_or_else(reject)?;
+        if !self.binding.valid()
+            || self.binding.account != key
+            || self.binding.instance.as_uuid() != instance
+            || verifier.audience() != self.audience
+        {
+            return Err(reject());
+        }
+        Ok(verifier)
     }
-    verifier
-        .recheck(&stored.binding, c)
-        .await
-        .map_err(failure)?;
-    external(c, &stored.binding).await?;
-    stored.assurance()?;
-    Ok(())
+}
+
+pub(crate) async fn recheck_binding(
+    c: &mut PgConnection,
+    binding: &PlatformBinding,
+    verifier: &dyn PlatformVerifier,
+) -> Result<(), rss_transactional_messaging_postgres::PgError> {
+    verifier.recheck(binding, c).await.map_err(failure)?;
+    external(c, binding).await
 }
 async fn external(
     c: &mut PgConnection,
@@ -357,7 +361,7 @@ impl Authority {
             if actual!=stored.binding || row.try_get::<String,_>("audience")?!=stored.audience {return Err(reject().into());}
             let key=actual.account;let state=account_state_locked(c,key).await?;
             if !state.active() || state.epoch()!=row.try_get::<i64,_>("auth_epoch")? || state.membership_epoch()!=row.try_get::<i64,_>("membership_epoch")? {return Err(reject().into());}
-            recheck(c,key,instance,&stored,&checks).await?;
+            recheck_binding(c,&stored.binding,stored.verifier(key,instance,&checks)?).await?;
             let purpose:PlatformPurpose=serde_json::from_value(row.try_get("purpose")?).map_err(|_|corrupt())?;
             if purpose != context.purpose {return Err(reject().into());}
             verifier.authorize_purpose(&actual,&purpose,c).await.map_err(failure)?;

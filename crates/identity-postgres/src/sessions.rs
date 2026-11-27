@@ -422,8 +422,10 @@ impl Authority {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
-                        lock_guard(c,tenant).await?;
-                        let mut loaded = db::lookup_locked(c, tenant, &digest, kind, authority, &session_checks).await?;
+                        lock_guard(c, tenant).await?;
+                        let mut loaded =
+                            db::lookup_locked(c, tenant, &digest, kind, authority, &session_checks)
+                                .await?;
                         if touch {
                             db::touch(c, &mut loaded).await?;
                         }
@@ -523,27 +525,20 @@ impl Authority {
         }
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.shortened_to(actor.expires);
-        self.read(actor.binding,budget.remaining(),move|tx|Box::pin(async move {
-            connection(tx,move|c|Box::pin(async move {
-                let loaded = db::recheck(c,&actor).await?;
-                let ids: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT session_id FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND principal_id=$2 AND auth_epoch=$3 AND membership_epoch=$4 AND revoked_at IS NULL AND issued_at<=$5 AND idle_expires_at>$5 AND absolute_expires_at>$5 AND ($6::uuid IS NULL OR session_id>$6::uuid) ORDER BY session_id LIMIT $7")
-                    .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(loaded.state.epoch()).bind(loaded.state.membership_epoch()).bind(loaded.now).bind(cursor.map(|v|v.to_string())).bind(i64::from(limit)+1).fetch_all(&mut *c).await?;
-                let more=ids.len()>usize::from(limit);
-                let mut sessions=Vec::new();
-                let mut scanned=None;
-                for id in ids.into_iter().take(usize::from(limit)) {
-                    let id=db::session_id(&id.to_string())?;
-                    scanned=Some(id);
-                    match db::by_id(c,actor.key,id,&actor.session_checks).await {
-                        Ok(current)=>sessions.push(current.view),
-                        Err(error) if error.kind()==rss_transactional_messaging::error::MessagingErrorKind::Conflict => {},
-                        Err(error)=>return Err(error),
-                    }
-                }
-                let next_cursor=if more {scanned}else{None};
-                Ok(SessionPage {sessions,next_cursor})
-            })).await
-        })).await
+        if actor.authority != self.instance.as_uuid() {
+            return Err(AuthorityError::Rejected);
+        }
+        self.read_sql(actor.binding, budget.remaining(), move |c| {
+            Box::pin(async move {
+                // read_sql has just verified this instance and entered the actor's exact fenced binding.
+                lock_guard(c, actor.key.tenant).await?;
+                let loaded = db::recheck_locked(c, &actor).await?;
+                let page = crate::session_page::read(c, &actor, &loaded, cursor, limit).await?;
+                checked_expiry(&loaded, budget.0.instant())?;
+                Ok(page)
+            })
+        })
+        .await
     }
 }
 

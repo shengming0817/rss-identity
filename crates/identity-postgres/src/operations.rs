@@ -75,7 +75,9 @@ impl Authority {
             return Err(AuthorityError::Rejected);
         }
         let candidate = AuthenticationCandidate {
-            binding, state, authority,
+            binding,
+            state,
+            authority,
             expires: budget.0.instant(),
             authenticated_at,
         };
