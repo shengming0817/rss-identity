@@ -220,9 +220,11 @@ fn after(sql: &mut QueryBuilder<Postgres>, query: &AccountQuery, values: &[Value
     }
     sql.push(")");
 }
+const CURSOR_DOMAIN: &[u8] = b"identity.accounts.cursor.v2\0";
+
 fn encode(key: &[u8], cursor: &Cursor) -> Result<String, MutationError> {
     let plain = serde_json::to_vec(cursor).map_err(|_| corrupt())?;
-    let mut signed = b"identity.accounts.cursor.v1\0".to_vec();
+    let mut signed = CURSOR_DOMAIN.to_vec();
     signed.extend(&plain);
     let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), &signed);
     let mut bytes = tag.as_ref().to_vec();
@@ -236,7 +238,7 @@ fn decode(key: &[u8], raw: &str) -> Result<Cursor, MutationError> {
     if bytes.len() <= 32 || bytes.len() > 4096 {
         return Err(MutationError::InvalidInput);
     }
-    let mut signed = b"identity.accounts.cursor.v1\0".to_vec();
+    let mut signed = CURSOR_DOMAIN.to_vec();
     signed.extend(&bytes[32..]);
     hmac::verify(
         &hmac::Key::new(hmac::HMAC_SHA256, key),
@@ -293,13 +295,9 @@ impl Authority {
         self.read_sql(actor.binding, budget.remaining(), move |c| {
             Box::pin(async move {
                 let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
-                let profiles = query.needs_profiles();
-                let department_source = if query.needs_departments() {
-                    let source = query.source().ok_or_else(corrupt)?;
-                    Some(uuid::Uuid::parse_str(source).map_err(|_| corrupt())?)
-                } else {
-                    None
-                };
+                let deps = crate::directory_window::ReadDependencies::accounts(&query, max_age)?;
+                let profiles = deps.profile_age.is_some();
+                let department_source = deps.department;
                 for op in [
                     Some(ManagementOperation::ListAccounts),
                     profiles.then_some(ManagementOperation::ReadLatestProfile),
@@ -313,20 +311,19 @@ impl Authority {
                     crate::management::authorize(policy.as_ref(), instance, &loaded, op, None, c)
                         .await?;
                 }
-                let window = crate::personnel::read_window(
-                    c,
-                    actor.key.tenant,
-                    profiles.then_some(max_age),
-                    department_source,
-                    budget.0.instant(),
-                    Some(
-                        loaded
-                            .view
-                            .idle_expires_at
-                            .min(loaded.view.absolute_expires_at),
-                    ),
-                )
-                .await?;
+                let window = deps
+                    .window(
+                        c,
+                        actor.key.tenant,
+                        crate::sessions::checked_expiry(&loaded, budget.0.instant())?,
+                        Some(
+                            loaded
+                                .view
+                                .idle_expires_at
+                                .min(loaded.view.absolute_expires_at),
+                        ),
+                    )
+                    .await?;
                 // Persisted independently of any client credential; shared by all Authority instances.
                 let key: Vec<u8> = sqlx::query_scalar(
                     "SELECT account_cursor_key FROM identity_authority.deployment",
@@ -341,6 +338,7 @@ impl Authority {
                         actor.key.principal.as_uuid().to_string(),
                         loaded.view.id.to_string(),
                         window.generation,
+                        deps.profile_age,
                         &query,
                     ))
                     .map_err(|_| corrupt())?,
@@ -373,6 +371,9 @@ impl Authority {
                 let mut sql = QueryBuilder::<Postgres>::with_arguments(
                     concat!(
                         include_str!("department-facts.sql"),
+                        ", profile_facts AS NOT MATERIALIZED (",
+                        include_str!("profile-facts.sql"),
+                        ")",
                         include_str!("account-directory.sql")
                     ),
                     {
