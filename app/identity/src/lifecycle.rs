@@ -91,12 +91,25 @@ async fn admit(
 }
 
 /// Attach the lease to the final body, including a sanitized callback redirect.
-async fn finish_response(State(oidc): State<bool>, request: Request, next: Next) -> Response {
+async fn finish_response(
+    State((oidc, seconds)): State<(bool, u64)>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let Ok(cutoff) = crate::config::cutoff(seconds) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let cutoff = request
+        .extensions()
+        .get::<rss_request_context::Deadline>()
+        .map_or(cutoff, |host| cutoff.shortened_to(host.instant()));
+    request.extensions_mut().insert(cutoff);
     let mut response = if oidc {
         protect_callback(request, next).await
     } else {
         next.run(request).await
     };
+    record_failure(&response, std::io::stderr().lock());
     match response.extensions_mut().remove::<Arc<AdmissionPermit>>() {
         Some(permit) => response.map(|inner| {
             Body::new(LeasedBody {
@@ -109,14 +122,16 @@ async fn finish_response(State(oidc): State<bool>, request: Request, next: Next)
 }
 // HttpFailure contains only closed, non-secret classifications. Never log the request or body.
 fn record_failure(response: &Response, mut output: impl std::io::Write) {
+    if response
+        .extensions()
+        .get::<transport::IngressRejected>()
+        .is_some()
+    {
+        let _ = writeln!(output, "component=identity-http failure=UntrustedIngress");
+    }
     if let Some(failure) = response.extensions().get::<HttpFailure>() {
         let _ = writeln!(output, "component=identity-http failure={failure:?}");
     }
-}
-async fn diagnose(request: Request, next: Next) -> Response {
-    let response = next.run(request).await;
-    record_failure(&response, std::io::stderr().lock());
-    response
 }
 struct Health {
     config: Arc<RuntimeConfig>,
@@ -215,7 +230,7 @@ pub async fn serve(
                         authority,
                         http,
                         ServiceEndpoints {
-                            federation: federation.clone(),
+                            federation,
                             webauthn: Some(webauthn),
                             programmatic_bearer: false,
                         },
@@ -236,16 +251,11 @@ pub async fn serve(
                             )
                         }),
                     );
-                    let execution = crate::execution::ExecutionState {
-                        config: config.clone(),
-                        federation: federation.clone(),
-                    };
                     let app = app
                         .layer(middleware::from_fn_with_state(
-                            execution,
+                            config.clone(),
                             crate::execution::scope,
                         ))
-                        .layer(middleware::from_fn(diagnose))
                         .layer(middleware::from_fn_with_state(gate.clone(), admit))
                         .layer(middleware::from_fn_with_state(
                             transport::Ingress {
@@ -253,8 +263,10 @@ pub async fn serve(
                             },
                             transport::trusted,
                         ));
-                    let app =
-                        app.layer(middleware::from_fn_with_state(enable_oidc, finish_response));
+                    let app = app.layer(middleware::from_fn_with_state(
+                        (enable_oidc, config.budgets.request_seconds),
+                        finish_response,
+                    ));
                     let health = Arc::new(Health {
                         config: config.clone(),
                         pool,

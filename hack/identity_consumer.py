@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import tomllib
 from providers import postgres
+from check_dependencies import check_public_closure
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,14 +38,7 @@ def main():
         env={**os.environ,'CARGO_TARGET_DIR':str(ROOT/'target/independent-consumer'),
              'CARGO_NET_GIT_FETCH_WITH_CLI':'true','PATH':'/usr/bin:'+os.environ.get('PATH','')}
         subprocess.run(['cargo','generate-lockfile'],cwd=directory,env=env,check=True)
-        closure = subprocess.check_output(
-            ['cargo', 'tree', '--locked', '-p', 'rss-identity-web-credentials', '-e', 'normal,build',
-             '--target', 'all', '--prefix', 'none', '--format', '{p}'],
-            cwd=directory, env=env, text=True)
-        packages = {line.split()[0] for line in closure.splitlines() if line.strip()}
-        forbidden = packages & {'axum', 'axum-core', 'rss-identity-service-http'}
-        if forbidden:
-            raise RuntimeError(f'Unexpected public credential dependencies: {sorted(forbidden)}')
+        check_public_closure(directory, env)
         with postgres() as (_, ports):
             subprocess.run(['cargo','run','--locked'],cwd=directory,env={**env,'IDENTITY_TEST_PG_PORT':str(ports[5432])},check=True)
         print(f'Identity revision verified: {args.revision}')

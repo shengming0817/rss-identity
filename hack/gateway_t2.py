@@ -57,6 +57,12 @@ def gateway_server(native_listener=False):
             source, backend = str(subnet[2]), str(subnet[3])
             data["backendSubnet"] = str(subnet)
             data["runtime"]["publicGateway"] = source
+            if native_listener:
+                data["runtime"]["oidc"] = {
+                    "stateKeyFile": str(root / "runtime"),
+                    "credentialKeyring": {"activeKeyId": "a", "keys": [{"keyId": "a", "path": str(root / "owner")}]},
+                    "returnTargets": {"resume": data["runtime"]["publicOrigin"] + "/auth/resume"},
+                }
             subprocess.run(
                 [
                     "openssl",
@@ -170,10 +176,20 @@ http {
                     if time.monotonic() >= deadline:
                         raise
                     time.sleep(0.1)
+            if native_listener:
+                # The native listener has not started yet. Only this canonical GET has
+                # the OIDC browser contract when the gateway cannot reach the service.
+                client.request("GET", "/api/v1/identity/oidc/callback?state=private")
+                unavailable = client.getresponse()
+                unavailable.read()
+                deploy.require(unavailable.status == 303 and
+                               unavailable.getheader("location") == "/auth/error?reason=unavailable" and
+                               unavailable.getheader("set-cookie") is None, "gateway callback outage")
             yield client, source, {
                 "IDENTITY_TEST_GATEWAY_URL": f"https://127.0.0.1:{ports[8443]}",
                 "IDENTITY_TEST_GATEWAY_CA": str(root / "cert"),
                 "IDENTITY_TEST_GATEWAY_BACKEND": listen,
+                "IDENTITY_TEST_GATEWAY_PEER": source if sys.platform == "linux" else "127.0.0.1",
             }
     finally:
         failed = sys.exception() is not None

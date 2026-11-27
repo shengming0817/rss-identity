@@ -38,10 +38,7 @@ fn app(
                 ..Default::default()
             },
         )
-        .unwrap()
-        .layer(axum::middleware::from_fn(
-            rss_identity_service_http::protect_callback,
-        )),
+        .unwrap(),
         service,
         upstream,
     )

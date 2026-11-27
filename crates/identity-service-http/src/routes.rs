@@ -9,6 +9,13 @@ pub struct ServiceEndpoints {
     pub programmatic_bearer: bool,
 }
 
+/// Mount behind TLS at the configured origin. Host middleware must insert [`ClientAddress`]
+/// from its trusted transport, and an explicit `ExecutionBinding` extension, before entering these routes. Axum `ConnectInfo<SocketAddr>`
+/// alone is insufficient. For a direct connection use the accepted peer's IP; behind a
+/// proxy validate the peer before interpreting any forwarded header. See the embedding guide.
+/// The standalone API uses the fixed /api/v1/identity prefix. Mount bearer endpoints only
+/// behind the host's programmatic-source admission. Wrap *outer* host rejections with
+/// [`protect_callback`] when federation is enabled; the routes handle their own rejections.
 pub fn routes(
     authority: Authority,
     config: HttpConfig,
@@ -16,7 +23,10 @@ pub fn routes(
 ) -> Result<Router, AuthorityError> {
     let mut routes = local_routes(authority.clone(), config.clone())?;
     if let Some(federation) = endpoints.federation {
-        routes = routes.merge(oidc::federated_router(federation, config.clone())?);
+        routes = routes.merge(
+            oidc::federated_router(federation, config.clone())?
+                .layer(middleware::from_fn(protect_callback)),
+        );
     }
     if let Some(webauthn) = endpoints.webauthn {
         routes = routes.merge(webauthn::webauthn_router(webauthn, config.clone())?);
@@ -26,10 +36,6 @@ pub fn routes(
     }
     Ok(routes)
 }
-/// Mount behind TLS at the configured origin. Host middleware must insert [`ClientAddress`]
-/// from its trusted transport, and an explicit `ExecutionBinding` extension, before entering these routes. Axum `ConnectInfo<SocketAddr>`
-/// alone is insufficient. For a direct connection use the accepted peer's IP; behind a
-/// proxy validate the peer before interpreting any forwarded header. See the embedding guide.
 fn local_routes(authority: Authority, config: HttpConfig) -> Result<Router, AuthorityError> {
     authority.require_runtime()?;
     let management = accounts::management_router(authority.clone(), config.clone())?;

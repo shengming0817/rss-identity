@@ -102,9 +102,6 @@ fn app(s: &Federation) -> Router {
         },
     )
     .unwrap()
-    .layer(axum::middleware::from_fn(
-        rss_identity_service_http::protect_callback,
-    ))
 }
 async fn provider(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
     let p = s
@@ -297,6 +294,8 @@ async fn gateway_login(app: &Router, provider: &ProviderView) -> anyhow::Result<
             ("state", state.as_ref()),
             ("iss", provider.settings.issuer().as_str()),
             ("error", "access_denied"),
+            ("error_description", "private-upstream-detail"),
+            ("error_uri", "https://untrusted.invalid/message"),
         ])
         .send()
         .await
@@ -304,6 +303,9 @@ async fn gateway_login(app: &Router, provider: &ProviderView) -> anyhow::Result<
     assert_eq!(denied.status(), StatusCode::SEE_OTHER);
     assert_eq!(denied.headers()["location"], "/auth/error?reason=cancelled");
     assert!(!denied.headers().contains_key("set-cookie"));
+    assert_eq!(denied.headers()["cache-control"], "no-store");
+    assert_eq!(denied.headers()["referrer-policy"], "no-referrer");
+    assert!(denied.bytes().await?.is_empty());
     server.abort();
     Ok(credential)
 }
@@ -866,10 +868,7 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
             federation: Some(mocked.clone()),
             ..Default::default()
         },
-    )?
-    .layer(axum::middleware::from_fn(
-        rss_identity_service_http::protect_callback,
-    ));
+    )?;
     let url = begin(&mock_app, &p, BROWSER, None, None, false).await?;
     let state = reqwest::Url::parse(&url)?
         .query_pairs()

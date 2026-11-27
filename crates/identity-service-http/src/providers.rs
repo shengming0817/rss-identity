@@ -29,7 +29,6 @@ pub(crate) fn router(
     let authority = federation.authority();
     authority.require_runtime()?;
     Ok(Router::new()
-        .route("/tenants/{tenant}/login-options", get(options))
         .route(
             "/tenants/{tenant}/providers",
             get(providers).post(create_provider),
@@ -71,22 +70,6 @@ async fn actor(
         .authority()
         .inspect_session(binding, secret, b.remaining())
         .await?)
-}
-async fn options(
-    State(s): State<Management>,
-    Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
-) -> Result<Response> {
-    Ok(Json(dto::LoginOptions {
-        providers: s
-            .federation
-            .login_options(binding, b.remaining())
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-    })
-    .into_response())
 }
 async fn providers(
     State(s): State<Management>,

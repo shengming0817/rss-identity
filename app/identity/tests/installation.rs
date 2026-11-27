@@ -1,5 +1,7 @@
 #[path = "../../../crates/identity-postgres/tests/federation_support/mod.rs"]
 mod federation_support;
+#[path = "installation/gateway.rs"]
+mod gateway;
 #[path = "../../../crates/identity-postgres/tests/support/mod.rs"]
 mod support;
 // Real TLS PostgreSQL installation, host policy and startup seams; no deployed artifact/T3 claim.
@@ -686,6 +688,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .await?,
         0
     );
+    gateway::verify(value.clone(), keys[1].tenant, &mut owner).await?;
     // Native logical backup must preserve the exact structural attestation after PG re-parses DDL.
     let container = std::env::var("IDENTITY_TEST_PG_CONTAINER")?;
     let dump = std::process::Command::new("docker")

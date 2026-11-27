@@ -30,7 +30,6 @@ struct AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[tokio::test]
     async fn session_failure_classes_remain_internal_and_distinct() {
         use crate::boundary::{HttpError, HttpFailure};

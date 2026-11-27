@@ -29,6 +29,9 @@ impl Ingress {
         value.parse().ok()
     }
 }
+#[derive(Clone, Copy)]
+pub(crate) struct IngressRejected;
+
 pub async fn trusted(State(ingress): State<Ingress>, mut request: Request, next: Next) -> Response {
     let source = request
         .extensions()
@@ -41,7 +44,7 @@ pub async fn trusted(State(ingress): State<Ingress>, mut request: Request, next:
             )
         });
     let Some(source) = source else {
-        return StatusCode::FORBIDDEN.into_response();
+        return (axum::Extension(IngressRejected), StatusCode::FORBIDDEN).into_response();
     };
     for name in [
         "forwarded",

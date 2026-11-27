@@ -104,11 +104,26 @@ def stage(data,out,images,final):
     # PostgreSQL loopback is operator-only; every remote connection requires TLS and SCRAM.
     write('pg_hba.conf','local all all trust\nhostssl all all 0.0.0.0/0 scram-sha-256\nhostssl all all ::/0 scram-sha-256\nhostnossl all all 0.0.0.0/0 reject\nhostnossl all all ::/0 reject\n')
     proxy=f'proxy_bind {gateway}; proxy_http_version 1.1; proxy_set_header Connection ""; proxy_set_header X-Forwarded-For $remote_addr; proxy_set_header Forwarded ""; proxy_set_header X-Real-IP ""; proxy_set_header X-Forwarded-Host ""; proxy_set_header X-Forwarded-Proto ""; proxy_set_header Host {u.hostname}; proxy_ignore_client_abort on; proxy_pass http://identity_backend;'
+    callback_location = ""
+    if c['oidc'] is not None:
+        # Intercept gateway-generated failures only after nginx has selected the configured callback.
+        callback_location = f"""
+  location = /api/v1/identity/oidc/callback {{
+   if ($canonical_oidc_get) {{
+    error_page 400 403 408 413 414 429 = @oidc_failed;
+    error_page 500 502 503 504 = @oidc_unavailable;
+   }}
+   {proxy}
+  }}
+  location @oidc_failed {{ absolute_redirect off; return 303 /auth/error?reason=failed; }}
+  location @oidc_unavailable {{ absolute_redirect off; return 303 /auth/error?reason=unavailable; }}
+"""
     write('gateway.conf',f'''pid /tmp/nginx.pid;
 error_log stderr crit;
 events {{}}
 http {{
  access_log off; include /etc/nginx/mime.types;
+ map "$request_method:$request_uri" $canonical_oidc_get {{ default 0; "~^GET:/api/v1/identity/oidc/callback(?:[?]|$)" 1; }}
  upstream identity_backend {{ server {identity}:8080; keepalive 32; }}
  client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi;
  proxy_next_upstream off; proxy_read_timeout {c['budgets']['requestSeconds']+c['budgets']['resourceSeconds']}s; proxy_send_timeout {c['budgets']['requestSeconds']}s; client_body_timeout {c['budgets']['requestSeconds']}s; send_timeout {c['budgets']['requestSeconds']}s; client_max_body_size 96k;
@@ -123,6 +138,7 @@ http {{
   location = /identity-security {{ {proxy} }}
   location = /identity-security.js {{ {proxy} }}
   location = /api/v1/identity-host/config.json {{ alias /run/config/ui.json; default_type application/json; }}
+  {callback_location}
   location ^~ /api/v1/identity/ {{ {proxy} }}
   location ~ "^/api/v1/identity-host/tenants/[0-9a-f-]{{36}}/context$" {{ {proxy} }}
   location ^~ /internal/ {{ return 404; }}

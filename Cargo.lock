@@ -1944,6 +1944,7 @@ dependencies = [
  "tower",
  "url",
  "uuid",
+ "webauthn-authenticator-rs",
  "zeroize",
 ]
 

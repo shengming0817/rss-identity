@@ -59,7 +59,7 @@ pub(crate) async fn request_boundary(
 ) -> Response {
     let budget = match RequestBudget::for_request(&request, state.config.timeout()) {
         Ok(budget) => budget,
-        Err(error) => return error.into_response(),
+        Err(error) => return private_response(error.into_response()),
     };
     request.extensions_mut().insert(budget);
     let origin = if original_uri.to_string().len() > 8192
@@ -71,12 +71,16 @@ pub(crate) async fn request_boundary(
     } else {
         same_origin(request.headers(), &state.config).map_err(HttpError::from)
     };
-    let mut response = match origin {
+    let response = match origin {
         // Authority/RSS owns bounded settlement after a transaction starts. A second
         // timeout around this future could discard its CommitUnknown/RollbackFailed result.
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     };
+    private_response(response)
+}
+
+fn private_response(mut response: Response) -> Response {
     response.headers_mut().insert(
         header::REFERRER_POLICY,
         header::HeaderValue::from_static("no-referrer"),

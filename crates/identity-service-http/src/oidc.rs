@@ -43,16 +43,19 @@ pub fn federated_router(
         config: config.clone(),
     };
 
+    let reconcile = middleware::from_fn_with_state(federation.clone(), reconcile_profiles);
     let state = FederationState {
         federation,
         local: local.clone(),
     };
 
     let routes = Router::new()
+        .route("/tenants/{tenant}/login-options", get(options))
         .route("/tenants/{tenant}/session/security", get(security))
         .route("/tenants/{tenant}/oidc/{provider}/login", post(begin))
         .route("/tenants/{tenant}/oidc/{provider}/link", post(link))
         .route("/tenants/{tenant}/oidc/{provider}/step-up", post(step_up))
+        .route_layer(reconcile)
         .route(
             "/oidc/callback",
             get(callback).head(|| async { StatusCode::METHOD_NOT_ALLOWED }),
@@ -67,6 +70,42 @@ pub fn federated_router(
     Ok(crate::mount(routes.merge(management)))
 }
 
+async fn reconcile_profiles(
+    State(federation): State<Federation>,
+    Execution(binding): Execution,
+    Extension(budget): Extension<RequestBudget>,
+    request: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Err(error) = federation
+        .reconcile_assurance_profiles(binding, budget.remaining())
+        .await
+    {
+        let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
+        response
+            .extensions_mut()
+            .insert(HttpFailure::Authority(error));
+        return response;
+    }
+    next.run(request).await
+}
+
+async fn options(
+    State(s): State<FederationState>,
+    Execution(binding): Execution,
+    Extension(b): Extension<RequestBudget>,
+) -> Result<Response, crate::accounts::Error> {
+    Ok(Json(dto::LoginOptions {
+        providers: s
+            .federation
+            .login_options(binding, b.remaining())
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    })
+    .into_response())
+}
 async fn security(
     State(state): State<FederationState>,
     Execution(binding): Execution,

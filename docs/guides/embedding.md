@@ -47,6 +47,13 @@ HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` �
 
 浏览器 HTTP 宿主通过公共 Rust 包 `rss-identity-web-credentials` 的 `authenticate_request` 取得当前请求的 AuthenticatedSession，再执行产品资源授权。Active 请求检查 cookie、同源、请求标记和 CSRF 后续期；Passive 只读验证，不延长 idle。会话保留签发时的 idle/absolute 策略，宿主配置变更只影响新会话；refresh 旋转凭据但不延长绝对期限，重新认证只能绑定当前主体。不要跨请求缓存成功身份、组或部门事实。
 
+```rust,ignore
+let (proof, _) = rss_identity_web_credentials::authenticate_request(
+    &authority, &http, binding, &headers,
+    rss_identity_web_credentials::SessionActivity::Passive, deadline,
+).await?;
+```
+
 每次管理事务重新核对实例、租户、账户、成员、会话和失效代际后调用宿主 ManagementPolicy。策略是有界异步回调，借用当前事务连接读取宿主权威规则，不另开连接、不提交或修改租户作用域；组件落实策略要求的重新认证/MFA。宿主持有管理角色、防锁死和并发一致性，Identity 不保存 administrator/emergency/platform 角色。
 
 异步业务可在认证原请求后，通过 `AuthenticatedSession::reference()` 将非凭据会话引用存入宿主可信数据。后续用 `Authority::recheck_session_reference` 复核原会话、账户和来源，取得本次有界的 `RevalidatedSession` 身份/组/部门事实。被撤销、失效或过期的会话不能通过；检查不延长 idle 或快照期限。引用不是登录凭据，不能从 HTTP 请求接收它替代认证，返回事实也不能用于管理操作；宿主仍负责资源授权和原请求归属。
@@ -108,12 +115,7 @@ Keycloak 使用内置 JSON UserAttributeMapper，把管理员维护的单个完�
 
 Federation 接收 Authority、上游适配器、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。Authority 不保存租户名单；无认证证明的操作接收 `ExecutionBinding`，已认证操作沿用证明的原 binding。连接固定 storage，每次事务核对 tenant/epoch，不从数据库自动更新代际。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
 
-```rust,ignore
-let (proof, _) = rss_identity_web_credentials::authenticate_request(
-    &authority, &http, binding, &headers,
-    rss_identity_web_credentials::SessionActivity::Passive, deadline,
-).await?;
-```
+宿主登录入口用 `BrowserBinding::start` 获取关联值及首次签发的 Cookie，将关联值和可信执行绑定传给 `Federation::begin_login`。回调用 `BrowserBinding::require` 取回关联值，经 `CallbackOutcome::from_parts` 判定结果后调用 `Federation::complete` 或 `cancel`。独立服务的示例见[OIDC 路由](../../crates/identity-service-http/src/oidc.rs)。
 
 OIDC 使用 Code/PKCE、state/nonce 和浏览器绑定，登录事务原子单次消费；邮箱不是自动关联依据。显式关联与 step-up 绑定当前主体，provider 配置变化使旧流程失效。唯一 callback 是宿主 origin 下的 `/api/v1/identity/oidc/callback`，回跳只接受宿主白名单键。
 
@@ -127,7 +129,7 @@ OIDC 使用 Code/PKCE、state/nonce 和浏览器绑定，登录事务原子单�
 
 宿主持有 TLS、listener、可信代理、日志脱敏和有界关闭。从已核实的连接取得客户端地址，并在密码登录等操作中显式传入 `AttemptSource`。独立 Identity 宿主将验证后的地址通过产品 HTTP 扩展注入。
 
-直连 listener 还须通过 `into_make_service_with_connect_info::<SocketAddr>()` 提供 peer。RSS listener 的参考宿主使用 AcceptedConnectionInfo；反代须先验证真实 peer 是可信网关，再读取它覆盖的来源头。不能直接信任浏览器 forwarded headers。
+使用 Axum ConnectInfo 的直连 listener 通过 `into_make_service_with_connect_info::<SocketAddr>()` 提供 peer。RSS listener 的参考宿主使用 AcceptedConnectionInfo；反代须先验证真实 peer 是可信网关，再读取它覆盖的来源头。不能直接信任浏览器 forwarded headers。
 
 不要用通用 timeout 丢弃数据库写 future。组件/RSS 持有有界事务结算；CommitUnknown、RollbackFailed 等内部结果保留在公共凭据错误的 Authority 分类中，不能据 503 推断可安全重试。对外错误、cookie 与 CSRF 规则见 [HTTP 接入](../architecture/identity-http.md)。安全事件 schema 由 postgres 持有，不含凭据或上游 token。
 

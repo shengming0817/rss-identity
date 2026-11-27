@@ -589,6 +589,28 @@ async fn session_http_settlement_never_sets_uncertain_cookie() -> anyhow::Result
                 .contains("private-http-marker")
         );
     }
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::RollbackFailedAfterAck);
+    let response = app
+        .clone()
+        .oneshot(crate::request_support::scoped(request(
+            "POST",
+            "session/refresh",
+            Some(&cookie),
+            Some(&csrf),
+            json!(null),
+        )))
+        .await?;
+    assert!(matches!(
+        response
+            .extensions()
+            .get::<rss_identity_service_http::HttpFailure>(),
+        Some(rss_identity_service_http::HttpFailure::Authority(
+            rss_identity_postgres::AuthorityError::RollbackFailed(_)
+        ))
+    ));
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!response.headers().contains_key("set-cookie"));
     assert_eq!(f.events().await?, before);
     assert_eq!(
         app.clone()
@@ -890,6 +912,15 @@ async fn session_http_recovery_current_logout_and_deadline() -> anyhow::Result<(
         HttpConfig::new(ORIGIN, Duration::from_millis(40))?,
         ServiceEndpoints::default(),
     )?;
+    let mut expired =
+        crate::request_support::scoped(request("GET", "session", None, None, json!(null)));
+    expired
+        .extensions_mut()
+        .insert(rss_request_context::Deadline::at(std::time::Instant::now()));
+    let rejected = short.clone().oneshot(expired).await?;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.headers()["cache-control"], "no-store");
+    assert_eq!(rejected.headers()["referrer-policy"], "no-referrer");
     let mut req = login_request(None, None);
     *req.body_mut() = Body::from_stream(futures::stream::pending::<
         Result<&'static str, std::io::Error>,
