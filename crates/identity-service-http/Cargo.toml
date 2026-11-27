@@ -8,7 +8,7 @@ publish.workspace = true
 rss-identity-web-credentials.workspace = true
 uuid.workspace = true
 rss-identity-core.workspace = true
-rss-identity-postgres = { path = "../identity-postgres" }
+rss-identity-postgres.workspace = true
 rss-request-context.workspace = true
 rss-transactional-messaging.workspace = true
 axum = { version = "=0.8.9", default-features = false, features = ["json", "query", "tokio", "http1", "original-uri"] }
@@ -25,7 +25,7 @@ ring.workspace = true
 webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = ["softpasskey"] }
 hmac = "0.13"
 sha1 = { version = "0.11", default-features = false }
-rss-identity-oidc = { path = "../identity-oidc", features = ["test-support"] }
+rss-identity-oidc = { workspace = true, features = ["test-support"] }
 reqwest = { workspace = true, features = ["cookies"] }
 scraper = "0.26"
 uuid.workspace = true

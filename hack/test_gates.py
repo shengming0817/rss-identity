@@ -17,24 +17,7 @@ class Gates(unittest.TestCase):
         cls.metadata = json.loads(subprocess.check_output(['cargo','metadata','--locked','--format-version','1']))
         cls.manifest = tomllib.loads(Path('Cargo.toml').read_text())
 
-    def test_workspace_identity_and_binary(self):
-        members = [p for p in self.metadata['packages'] if p['id'] in self.metadata['workspace_members']]
-        self.assertEqual({p['name'] for p in members}, {'rss-identity-core', 'rss-identity-postgres', 'rss-identity-oidc', 'rss-identity-app', 'rss-identity-service-http', 'rss-identity-web-credentials'})
-        binaries = [t['name'] for p in members for t in p['targets'] if 'bin' in t['kind']]
-        self.assertEqual(set(binaries), {'identity-admin','identity-server','identity-migrate'})
-
-    def test_local_component_closure_excludes_concrete_oidc_and_reference_host(self):
-        packages={p['id']:p['name'] for p in self.metadata['packages']}
-        nodes={n['id']:n['deps'] for n in self.metadata['resolve']['nodes']}
-        pending=[next(i for i,n in packages.items() if n=='rss-identity-postgres')];seen=set()
-        while pending:
-            current=pending.pop()
-            if current in seen:continue
-            seen.add(current)
-            pending.extend(d['pkg'] for d in nodes[current] if any(k['kind'] is None for k in d['dep_kinds']))
-        self.assertTrue({'rss-identity-oidc','rss-identity-app','openidconnect','reqwest'}.isdisjoint({packages[i] for i in seen}))
-
-    def test_local_identity_packages_preserve_rss_source_checks(self):
+    def test_resolved_source_is_checked(self):
         deps.check(self.metadata, self.manifest)
         data = copy.deepcopy(self.metadata)
         next(p for p in data['packages'] if p['name'] == 'rss-contract')['source'] = None
@@ -42,7 +25,7 @@ class Gates(unittest.TestCase):
             deps.check(data, self.manifest)
 
     def test_audit_source_and_revision_drift_are_rejected(self):
-        for name in ['rss-audit-core','rss-audit-postgres']:
+        for name in ['rss-audit-core','rss-audit-postgres','rss-identity-core','rss-identity-postgres','rss-identity-web-credentials','rss-identity-oidc']:
             data=copy.deepcopy(self.metadata)
             next(p for p in data['packages'] if p['name']==name)['source']='git+https://invalid.test/audit#'+'a'*40
             with self.subTest(name=name),self.assertRaises(ValueError): deps.check(data,self.manifest)
@@ -52,7 +35,7 @@ class Gates(unittest.TestCase):
             with self.subTest(field=field),self.assertRaises(ValueError): deps.check(self.metadata,manifest)
 
     def test_optimized_interpreter_rejects_source(self):
-        script = "import check_dependencies as d,json,tomllib; m=json.load(open('/dev/stdin')); c=tomllib.load(open('Cargo.toml','rb')); c['workspace']['dependencies']['rss-contract']['git']='https://invalid.test'; d.check(m,c)"
+        script = "import check_dependencies as d,json,tomllib; m=json.load(open('/dev/stdin')); c=tomllib.load(open('Cargo.toml','rb')); c['workspace']['dependencies']['rss-runtime']['git']='https://invalid.test'; d.check(m,c)"
         result = subprocess.run([sys.executable,'-O','-c',script], input=json.dumps(self.metadata),text=True,capture_output=True,env={**os.environ,'PYTHONPATH':'hack'})
         self.assertNotEqual(result.returncode,0)
 
@@ -75,18 +58,19 @@ class Gates(unittest.TestCase):
 
     def test_provider_zero_tests_rejected(self):
         with patch('providers.bounded_run',return_value=subprocess.CompletedProcess([],0,stdout='0 tests, 0 benchmarks\n')):
-            with self.assertRaises(RuntimeError): providers.cargo('rss-identity-oidc','provider',{})
+            with self.assertRaises(RuntimeError): providers.cargo('rss-identity-service-http','enterprise_sso',{})
 
     def test_provider_partial_execution_rejected(self):
-        listing='real_provider_flows: test\n\n1 test, 0 benchmarks\n'
+        listing='real_enterprise_assertions_reach_only_the_registered_rp: test\n\n1 test, 0 benchmarks\n'
         result='test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\n'
         with patch('providers.bounded_run',side_effect=[subprocess.CompletedProcess([],0,stdout=listing),subprocess.CompletedProcess([],0,stdout=result)]):
-            with self.assertRaises(RuntimeError): providers.cargo('rss-identity-oidc','provider',{})
+            with self.assertRaises(RuntimeError): providers.cargo('rss-identity-service-http','enterprise_sso',{})
 
     def test_production_features_do_not_include_test_support(self):
         actual = {k:set(v) for k,v in deps.RSS_FEATURES.items()}
         with self.assertRaises(ValueError): deps.check_features(actual,'production')
-        actual['rss-transactional-messaging-postgres']=set()
+        actual['rss-transactional-messaging-postgres']={'default'}
+        actual['rss-identity-oidc']=set()
         del actual['rss-ledger']
         del actual['rss-ledger-postgres']
         deps.check_features(actual,'production')
