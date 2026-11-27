@@ -68,33 +68,33 @@ pub(crate) async fn read_provider(
         })
         .await
 }
-#[derive(Clone)]
 pub(crate) struct Origin {
     pub identity: Uuid,
-    pub epoch: i64,
-    pub facts: crate::auth_facts::AuthenticationFacts,
-    pub facts_sequence: i64,
+    epoch: i64,
+    version: i64,
 }
+
 pub(crate) fn decode_origin(
-    r: &sqlx::postgres::PgRow,
-) -> Result<Option<Origin>, rss_transactional_messaging_postgres::PgError> {
-    let id: Option<Uuid> = r.try_get("external_identity_id")?;
-    match id {
-        Some(identity) => Ok(Some(Origin {
-            identity,
-            epoch: r.try_get("provider_epoch")?,
-            facts_sequence: r.try_get("facts_sequence")?,
-            facts: crate::auth_facts::AuthenticationFacts::decode(r.try_get("auth_facts")?)?,
-        })),
-        None => {
-            if r.try_get::<Option<i64>, _>("provider_epoch")?.is_some()
-                || r.try_get::<Option<serde_json::Value>, _>("auth_facts")?
-                    .is_some()
-            {
-                return Err(corrupt());
-            }
-            Ok(None)
-        }
+    row: &sqlx::postgres::PgRow,
+) -> Result<
+    Option<(Origin, crate::auth_facts::AuthenticationFacts)>,
+    rss_transactional_messaging_postgres::PgError,
+> {
+    match (
+        row.try_get("external_identity_id")?,
+        row.try_get("provider_epoch")?,
+        crate::auth_facts::AuthenticationFacts::read(row)?,
+    ) {
+        (Some(identity), Some(epoch), Some(facts)) => Ok(Some((
+            Origin {
+                identity,
+                epoch,
+                version: facts.provider_config_version,
+            },
+            facts,
+        ))),
+        (None, None, None) => Ok(None),
+        _ => Err(corrupt()),
     }
 }
 pub(crate) async fn check_origin(
@@ -108,7 +108,7 @@ pub(crate) async fn check_origin(
         "ND e.identity_id=$2 AND p.enabled AND p.revocation_epoch=$3 AND p.config_version=$4 AND e.principal_id=$5"
     ))
     .bind(key.tenant.to_string()).bind(origin.identity).bind(origin.epoch)
-    .bind(origin.facts.provider_config_version).bind(key.principal.as_uuid())
+    .bind(origin.version).bind(key.principal.as_uuid())
     .fetch_optional(c).await?.ok_or_else(reject)?;
     rss_identity_core::facts::FactSource::new(row.try_get("provider_id")?, row.try_get("issuer")?)
         .map_err(|_| corrupt())

@@ -476,8 +476,8 @@ impl Federation {
         self.authority.read_sql(actor.binding, deadline, move |c| Box::pin(async move {
             let loaded = crate::session_storage::recheck(c, &actor).await?;
             // A persisted authentication fact must still match this process's approved interpretation.
-            if let Some(origin) = loaded.origin.as_deref() {
-                let (provider, _, _) = db::identity(c, actor.key.tenant, origin.identity).await?;
+            if let Some(identity) = loaded.source_identity {
+                let (provider, _, _) = db::identity(c, actor.key.tenant, identity).await?;
                 let view = db::provider(c, actor.key.tenant, provider).await?;
                 if oidc.assurance_profile(actor.key.tenant, &view.settings).fingerprint != view.assurance_profile {
                     return Err(FederationError::StaleConfiguration.into());

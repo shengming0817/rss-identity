@@ -1152,6 +1152,15 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         )
         .await?,
     );
+    let (same_facts, same_sequence): (bool, bool) = sqlx::query_as(
+        "SELECT i.source_facts=s.auth_facts, i.source_facts_sequence=s.facts_sequence
+         FROM identity_authority.link_intents i JOIN identity_authority.sessions s
+         USING (tenant_id,principal_id,session_id) WHERE i.session_id=$1 AND i.stage=0",
+    )
+    .bind(fed.view().id.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    assert!(same_facts && same_sequence);
     let second = match s
         .complete(
             reauth,
@@ -1225,6 +1234,41 @@ async fn federation_local_and_federated_linking() -> anyhow::Result<()> {
         stored_facts(&f, &linked).await?,
         source_facts,
         "link must copy the source snapshot unchanged"
+    );
+    let same_sequence: bool = sqlx::query_scalar(
+        "SELECT s.facts_sequence=i.source_facts_sequence FROM identity_authority.sessions s
+         JOIN identity_authority.link_intents i USING (tenant_id,principal_id)
+         WHERE s.session_id=$1 AND i.session_id=$2 AND i.stage=2",
+    )
+    .bind(linked.view().id.as_uuid())
+    .bind(fed.view().id.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    assert!(same_sequence);
+    let actor = f
+        .store
+        .inspect_session(binding(f.key.tenant), secret(&linked), deadline())
+        .await?;
+    let VerifiedGroups::Available(groups) = actor.groups()? else {
+        anyhow::bail!("missing source groups")
+    };
+    assert_eq!(groups.values()?, &["/source/new"]);
+    assert_eq!(
+        groups.snapshot_id().to_string(),
+        source_facts["groups"]["snapshot_id"]
+    );
+    let VerifiedDepartmentSnapshot::Available(department) = actor.department_snapshot()? else {
+        anyhow::bail!("missing source department")
+    };
+    assert_eq!(
+        department.snapshot_id().to_string(),
+        source_facts["department_snapshot"]["snapshot_id"]
+    );
+    assert_eq!(
+        department.expires_at(),
+        source_facts["department_snapshot"]["expires_at"]
+            .as_i64()
+            .unwrap()
     );
     assert_eq!(linked_profile(&f, &linked).await?, original_profile);
     let linked = link_again(&f, &s, &linked, other.id, "new-subject", Some("alice")).await?;
@@ -1889,9 +1933,11 @@ async fn federation_group_snapshot_storage_bounds() -> anyhow::Result<()> {
     let upstream = ScriptedOidc::new();
     let s = service(&f, upstream.clone());
     let p = enabled(&f, &s).await?;
-    *upstream.groups.lock().unwrap() = (0..100)
+    let mut boundary: Vec<String> = (0..100)
         .map(|i| format!("{i:03}{}", "x".repeat(253)))
         .collect();
+    boundary[99].replace_range(248..256, "界é\\\"x");
+    *upstream.groups.lock().unwrap() = boundary.clone();
     let sized = issued(finish(&s, begin(&f, &s, &p).await?, "size-valid").await?);
     assert_eq!(
         stored_facts(&f, &sized).await?["groups"]["values"]
@@ -1901,14 +1947,13 @@ async fn federation_group_snapshot_storage_bounds() -> anyhow::Result<()> {
         100
     );
     let sample = stored_facts(&f, &sized).await?;
-    let bytes: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
-        .bind(sample)
-        .fetch_one(&f.owner)
-        .await?;
+    let (bytes, chars): (i32, i32) =
+        sqlx::query_as("SELECT octet_length($1::jsonb::text), length($1::jsonb::text)")
+            .bind(sample)
+            .fetch_one(&f.owner)
+            .await?;
+    assert!(bytes > chars);
     let extra = 32768 - bytes;
-    let mut boundary: Vec<String> = (0..100)
-        .map(|i| format!("{i:03}{}", "x".repeat(253)))
-        .collect();
     for n in 0..extra as usize {
         boundary[n / 253].replace_range(3 + n % 253..4 + n % 253, "\"");
     }
@@ -1955,6 +2000,180 @@ async fn federation_group_snapshot_storage_bounds() -> anyhow::Result<()> {
             .await
             .is_ok()
     );
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn federation_link_budget_and_integrity() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let upstream = ScriptedOidc::new();
+    let s = service(&f, upstream.clone());
+    let provider = enabled_department(&f, &s, 60).await?;
+    let target = enabled_department(&f, &s, 60).await?;
+    let old = issued(finish(&s, begin(&f, &s, &provider).await?, "source").await?);
+    let reduced: i32 = sqlx::query_scalar(
+        "SELECT octet_length(jsonb_set(auth_facts,'{department_snapshot}',
+         '{\"status\":\"unavailable\",\"reason\":\"invalid_claim\"}')::text)
+         FROM identity_authority.sessions WHERE session_id=$1",
+    )
+    .bind(old.view().id.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    let mut tight = s.clone();
+    tight.authority.max_auth_facts_bytes = std::num::NonZeroU32::new(reduced as u32).unwrap();
+    let mut tiny = s.clone();
+    tiny.authority.max_auth_facts_bytes = std::num::NonZeroU32::MIN;
+    let begin = async |service: &Federation| {
+        let proof = f
+            .store
+            .inspect_session(binding(f.key.tenant), secret(&old), deadline())
+            .await?;
+        service
+            .begin_link(
+                LinkRequest {
+                    actor: proof,
+                    target_provider: target.id,
+                    password: None,
+                    browser: BROWSER.into(),
+                    target: "home".into(),
+                    source: source(),
+                },
+                deadline(),
+            )
+            .await
+    };
+    assert!(matches!(begin(&tiny).await, Err(AuthorityError::Rejected)));
+    let reauth = state(begin(&tight).await?);
+    let (id, initial): (uuid::Uuid, serde_json::Value) = sqlx::query_as(
+        "SELECT intent_id,source_facts FROM identity_authority.link_intents WHERE session_id=$1",
+    )
+    .bind(old.view().id.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    let mut expected = stored_facts(&f, &old).await?;
+    expected["department_snapshot"] =
+        serde_json::json!({"status":"unavailable","reason":"invalid_claim"});
+    assert_eq!(initial, expected);
+    let audit = f.events().await?;
+    assert!(matches!(
+        step_finish(&tiny, reauth.clone(), &old, "source").await,
+        Err(AuthorityError::Rejected)
+    ));
+    let (stage, stored, claimed): (i16,serde_json::Value,bool) = sqlx::query_as(
+        "SELECT i.stage,i.source_facts,t.claimed FROM identity_authority.link_intents i
+         JOIN identity_authority.oidc_transactions t ON t.link_intent=i.intent_id WHERE i.intent_id=$1")
+        .bind(id).fetch_one(&f.owner).await?;
+    assert_eq!((stage, stored, claimed), (0, initial, true));
+    assert!(step_finish(&s, reauth, &old, "source").await.is_err());
+    assert_eq!(f.events().await?, audit);
+
+    for mode in ["corrupt", "reject", "degrade"] {
+        f.reset_attempts().await?;
+        let reauth = state(begin(&s).await?);
+        let source_service = if mode == "reject" { &tight } else { &s };
+        let FederatedOutcome::Redirect(next) =
+            step_finish(source_service, reauth, &old, "source").await?
+        else {
+            anyhow::bail!("expected target attempt");
+        };
+        let next_state = state(next);
+        let locator = s.signer.verify(s.authority.instance(), &next_state)?;
+        let (intent, source): (uuid::Uuid,serde_json::Value) = sqlx::query_as(
+            "SELECT i.intent_id,i.source_facts FROM identity_authority.link_intents i
+             JOIN identity_authority.oidc_transactions t ON t.link_intent=i.intent_id AND t.tenant_id=i.tenant_id
+             WHERE t.attempt_id=$1 AND i.stage=1")
+            .bind(locator.id().as_slice()).fetch_one(&f.owner).await?;
+        if mode == "reject" {
+            assert_eq!(source["department_snapshot"]["reason"], "invalid_claim");
+            assert_eq!(source["groups"]["values"], serde_json::json!(["staff"]));
+        }
+        let audit = f.events().await?;
+        if mode == "corrupt" {
+            let owner = f.owner.clone();
+            *upstream.hook.lock().unwrap() = Some(Box::new(move || {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE identity_authority.link_intents SET source_facts=jsonb_set(
+                            source_facts,'{groups,values}','[1]') WHERE intent_id=$1",
+                    )
+                    .bind(intent)
+                    .execute(&owner)
+                    .await
+                    .map_err(|_| FederationError::Unavailable)?;
+                    Ok(())
+                })
+            }));
+        }
+        let service = if mode == "reject" { &tiny } else { &tight };
+        let result = step_finish(service, next_state, &old, "target").await;
+        if mode == "degrade" {
+            let new = issued(result?);
+            let mut expected = source;
+            expected["department_snapshot"] =
+                serde_json::json!({"status":"unavailable","reason":"invalid_claim"});
+            assert_eq!(stored_facts(&f, &new).await?, expected);
+            let sequence_preserved: bool = sqlx::query_scalar(
+                "SELECT s.facts_sequence=i.source_facts_sequence FROM identity_authority.sessions s
+                 JOIN identity_authority.link_intents i USING(tenant_id,principal_id)
+                 WHERE s.session_id=$1 AND i.intent_id=$2",
+            )
+            .bind(new.view().id.as_uuid())
+            .bind(intent)
+            .fetch_one(&f.owner)
+            .await?;
+            assert!(sequence_preserved);
+            let tenant = binding(f.key.tenant);
+            let actor = f
+                .store
+                .inspect_session(tenant, secret(&new), deadline())
+                .await?;
+            let checked = f
+                .store
+                .recheck_session_reference(tenant, &actor.reference()?, deadline())
+                .await?;
+            for department in [actor.department_snapshot()?, checked.department_snapshot()?] {
+                assert!(matches!(
+                    department,
+                    VerifiedDepartmentSnapshot::Unavailable(
+                        rss_identity_core::department::DepartmentUnavailableReason::InvalidClaim
+                    )
+                ));
+            }
+            for groups in [actor.groups()?, checked.groups()?] {
+                let VerifiedGroups::Available(groups) = groups else {
+                    anyhow::bail!("missing independent groups")
+                };
+                assert_eq!(groups.values()?, &["staff"]);
+                assert_eq!(
+                    groups.snapshot_id().to_string(),
+                    expected["groups"]["snapshot_id"]
+                );
+                assert_eq!(
+                    groups.expires_at(),
+                    expected["groups"]["expires_at"].as_i64().unwrap()
+                );
+            }
+        } else {
+            assert!(matches!(
+                (mode, result),
+                (
+                    "corrupt",
+                    Err(AuthorityError::RolledBack(StorageFailure::Invariant))
+                ) | ("reject", Err(AuthorityError::Rejected))
+            ));
+            let (stage, claimed): (i16,bool) = sqlx::query_as("SELECT stage,claimed FROM identity_authority.link_intents
+                JOIN identity_authority.oidc_transactions ON link_intent=intent_id WHERE intent_id=$1")
+                .bind(intent).fetch_one(&f.owner).await?;
+            assert_eq!((stage, claimed), (1, true));
+            assert_eq!(f.events().await?, audit);
+            f.store
+                .inspect_session(binding(f.key.tenant), secret(&old), deadline())
+                .await?;
+        }
+    }
     f.close().await;
     Ok(())
 }
