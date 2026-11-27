@@ -9,13 +9,16 @@ mod egress;
 mod resources;
 pub use resources::ReusePolicy;
 use resources::{ProviderResources, Resources};
-use std::{collections::HashMap, sync::{Arc, atomic::AtomicBool}};
-/// Protocol fixture helpers for explicitly test-enabled hosts.
-#[cfg(any(test, feature = "test-support"))]
-pub mod test_support;
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::AtomicBool},
+};
 #[cfg(test)]
 mod private_provider_tests;
 mod profile_token;
+/// Protocol fixture helpers for explicitly test-enabled hosts.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub use ipnet::IpNet;
 pub mod entra;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -64,7 +67,10 @@ impl TransportPolicy {
 fn remaining(deadline: rss_request_context::Deadline) -> Result<Duration, FederationError> {
     left(deadline, ProviderStage::Exchange)
 }
-fn left(deadline: rss_request_context::Deadline, stage: ProviderStage) -> Result<Duration, FederationError> {
+fn left(
+    deadline: rss_request_context::Deadline,
+    stage: ProviderStage,
+) -> Result<Duration, FederationError> {
     deadline
         .remaining(std::time::Instant::now())
         .filter(|d| !d.is_zero())
@@ -127,36 +133,84 @@ impl HttpOidc {
 
     /// Production uses HTTPS and vetted public or explicitly authorized private addresses.
     /// Every DNS answer is checked against the current tenant/issuer/client permission.
-    pub fn new(profiles: Vec<TrustedAssuranceProfile>, private_access: Vec<PrivateProviderAccess>, policy: TransportPolicy, reuse: ReusePolicy) -> Result<Self, FederationError> {
+    pub fn new(
+        profiles: Vec<TrustedAssuranceProfile>,
+        private_access: Vec<PrivateProviderAccess>,
+        policy: TransportPolicy,
+        reuse: ReusePolicy,
+    ) -> Result<Self, FederationError> {
         Self::build(profiles, private_access, false, policy, reuse)
     }
     /// Explicit loopback protocol fixture.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_loopback_test(profiles: Vec<TrustedAssuranceProfile>, policy: TransportPolicy, reuse: ReusePolicy) -> Result<Self, FederationError> {
+    pub fn for_loopback_test(
+        profiles: Vec<TrustedAssuranceProfile>,
+        policy: TransportPolicy,
+        reuse: ReusePolicy,
+    ) -> Result<Self, FederationError> {
         Self::build(profiles, vec![], true, policy, reuse)
     }
-    fn build(profiles: Vec<TrustedAssuranceProfile>, private_access: Vec<PrivateProviderAccess>, loopback: bool, policy: TransportPolicy, reuse: ReusePolicy) -> Result<Self, FederationError> {
-        if profiles.len() > 1024 || private_access.len() > 1024 { return Err(FederationError::Configuration); }
+    fn build(
+        profiles: Vec<TrustedAssuranceProfile>,
+        private_access: Vec<PrivateProviderAccess>,
+        loopback: bool,
+        policy: TransportPolicy,
+        reuse: ReusePolicy,
+    ) -> Result<Self, FederationError> {
+        if profiles.len() > 1024 || private_access.len() > 1024 {
+            return Err(FederationError::Configuration);
+        }
         let mut bindings = Bindings::new();
         for mut grant in private_access {
             grant.cidrs.sort_unstable();
-            if grant.cidrs.is_empty() || grant.cidrs.len() > 16 || grant.cidrs.iter().any(|n| !egress::private_network(*n)) ||
-                grant.cidrs.windows(2).any(|pair| pair[0] == pair[1]) { return Err(FederationError::Configuration); }
-            rss_identity_core::IssuerId::parse(&grant.issuer).map_err(|_| FederationError::Configuration)?;
-            rss_identity_core::ClientId::parse(&grant.client_id).map_err(|_| FederationError::Configuration)?;
+            if grant.cidrs.is_empty()
+                || grant.cidrs.len() > 16
+                || grant.cidrs.iter().any(|n| !egress::private_network(*n))
+                || grant.cidrs.windows(2).any(|pair| pair[0] == pair[1])
+            {
+                return Err(FederationError::Configuration);
+            }
+            rss_identity_core::IssuerId::parse(&grant.issuer)
+                .map_err(|_| FederationError::Configuration)?;
+            rss_identity_core::ClientId::parse(&grant.client_id)
+                .map_err(|_| FederationError::Configuration)?;
             parse_url(&grant.issuer, false, &grant.cidrs)?;
-            let entry = bindings.entry(grant.tenant).or_default().entry(grant.issuer).or_default().entry(grant.client_id).or_default();
-            if !entry.cidrs.is_empty() { return Err(FederationError::Configuration); }
+            let entry = bindings
+                .entry(grant.tenant)
+                .or_default()
+                .entry(grant.issuer)
+                .or_default()
+                .entry(grant.client_id)
+                .or_default();
+            if !entry.cidrs.is_empty() {
+                return Err(FederationError::Configuration);
+            }
             entry.cidrs = grant.cidrs;
         }
         for profile in profiles {
-            if profile.client_id.is_empty() || profile.client_id.len() > 256 { return Err(FederationError::Configuration); }
-            let clients = bindings.entry(profile.tenant).or_default().entry(profile.issuer.clone()).or_default();
+            if profile.client_id.is_empty() || profile.client_id.len() > 256 {
+                return Err(FederationError::Configuration);
+            }
+            let clients = bindings
+                .entry(profile.tenant)
+                .or_default()
+                .entry(profile.issuer.clone())
+                .or_default();
             let entry = clients.entry(profile.client_id).or_default();
             parse_url(&profile.issuer, loopback, &entry.cidrs)?;
-            if entry.assurance.replace(profile.keycloak_totp).is_some() { return Err(FederationError::Configuration); }
+            if entry.assurance.replace(profile.keycloak_totp).is_some() {
+                return Err(FederationError::Configuration);
+            }
         }
-        Ok(Self { bindings, resources: Resources::new(reuse)?, policy, loopback, future_skew_seconds: 30, #[cfg(test)] lookup: None })
+        Ok(Self {
+            bindings,
+            resources: Resources::new(reuse)?,
+            policy,
+            loopback,
+            future_skew_seconds: 30,
+            #[cfg(test)]
+            lookup: None,
+        })
     }
     fn grant(&self, tenant: TenantId, issuer: &str, client: &str) -> Option<&Grant> {
         self.bindings.get(&tenant)?.get(issuer)?.get(client)
@@ -165,50 +219,114 @@ impl HttpOidc {
         self.grant(tenant, issuer, client).map_or(&[], |g| &g.cidrs)
     }
     fn trusted(&self, tenant: TenantId, c: &ProviderSettings) -> bool {
-        self.grant(tenant, c.issuer().as_str(), c.client_id().as_str()).and_then(|g| g.assurance) == Some(true)
+        self.grant(tenant, c.issuer().as_str(), c.client_id().as_str())
+            .and_then(|g| g.assurance)
+            == Some(true)
     }
-    fn build_client(&self, credentials: &ProviderCredentials, cidrs: &[IpNet]) -> Result<reqwest::Client, FederationError> {
+    fn build_client(
+        &self,
+        credentials: &ProviderCredentials,
+        cidrs: &[IpNet],
+    ) -> Result<reqwest::Client, FederationError> {
         let resolver = egress::VettedResolver::new(self.loopback, cidrs.to_vec());
         #[cfg(test)]
-        let resolver = match &self.lookup { Some(lookup) => resolver.with_lookup(lookup.clone()), None => resolver };
-        let mut builder = reqwest::Client::builder().no_proxy().dns_resolver(Arc::new(resolver))
-            .redirect(reqwest::redirect::Policy::none()).retry(reqwest::retry::never())
-            .pool_max_idle_per_host(self.resources.policy.max_idle_per_host).pool_idle_timeout(self.resources.policy.idle_timeout)
-            .timeout(self.policy.request_timeout).connect_timeout(self.policy.connect_timeout);
-        for root in certificates(credentials)? { builder = builder.add_root_certificate(root); }
-        builder.build().map_err(|_| failure(ProviderStage::Binding, ProviderReason::InvalidTrustAnchor))
+        let resolver = match &self.lookup {
+            Some(lookup) => resolver.with_lookup(lookup.clone()),
+            None => resolver,
+        };
+        let mut builder = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(resolver))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .pool_max_idle_per_host(self.resources.policy.max_idle_per_host)
+            .pool_idle_timeout(self.resources.policy.idle_timeout)
+            .timeout(self.policy.request_timeout)
+            .connect_timeout(self.policy.connect_timeout);
+        for root in certificates(credentials)? {
+            builder = builder.add_root_certificate(root);
+        }
+        builder
+            .build()
+            .map_err(|_| failure(ProviderStage::Binding, ProviderReason::InvalidTrustAnchor))
     }
-    fn transport(&self, provider: BoundProvider<'_>, deadline: rss_request_context::Deadline, probe: bool) -> Result<Transport, FederationError> {
+    fn transport(
+        &self,
+        provider: BoundProvider<'_>,
+        deadline: rss_request_context::Deadline,
+        probe: bool,
+    ) -> Result<Transport, FederationError> {
         left(deadline, ProviderStage::Binding)?;
         let c = provider.settings;
-        let cidrs = self.private_for(provider.revision.tenant, c.issuer().as_str(), c.client_id().as_str());
-        let origin = parse_url(c.issuer().as_str(), self.loopback, cidrs)?.origin().ascii_serialization();
+        let cidrs = self.private_for(
+            provider.revision.tenant,
+            c.issuer().as_str(),
+            c.client_id().as_str(),
+        );
+        let origin = parse_url(c.issuer().as_str(), self.loopback, cidrs)?
+            .origin()
+            .ascii_serialization();
         parse_url(c.redirect_uri(), self.loopback, &[])?;
         let slot = self.resources.bind(provider)?;
-        let http = if probe { self.build_client(provider.credentials, cidrs)? } else {
+        let http = if probe {
+            self.build_client(provider.credentials, cidrs)?
+        } else {
             let mut pooled = slot.client.lock().unwrap();
-            if pooled.is_none() { *pooled = Some(self.build_client(provider.credentials, cidrs)?); }
+            if pooled.is_none() {
+                *pooled = Some(self.build_client(provider.credentials, cidrs)?);
+            }
             pooled.as_ref().unwrap().clone()
         };
-        Ok(Transport { channel: Channel { policy: self.policy, http, origin, current: slot.current.clone() },
-            slot, deadline, requests: AtomicU8::new(0) })
+        Ok(Transport {
+            channel: Channel {
+                policy: self.policy,
+                http,
+                origin,
+                current: slot.current.clone(),
+            },
+            slot,
+            deadline,
+            requests: AtomicU8::new(0),
+        })
     }
-    async fn discover(&self, provider: BoundProvider<'_>, deadline: rss_request_context::Deadline)
-        -> Result<(Metadata, Arc<discovery::Representation>, Transport), FederationError> {
+    async fn discover(
+        &self,
+        provider: BoundProvider<'_>,
+        deadline: rss_request_context::Deadline,
+    ) -> Result<(Metadata, Arc<discovery::Representation>, Transport), FederationError> {
         let t = self.transport(provider, deadline, false)?;
-        let kind = discovery::Kind::Discovery { issuer: provider.settings.issuer().as_str().into() };
-        let doc = t.slot.discovery.read(&self.resources, &t, kind, None).await?;
+        let kind = discovery::Kind::Discovery {
+            issuer: provider.settings.issuer().as_str().into(),
+        };
+        let doc = t
+            .slot
+            .discovery
+            .read(&self.resources, &t, kind, None)
+            .await?;
         Ok((doc.metadata()?, doc, t))
     }
 
-    async fn signing_keys(&self, doc: &discovery::Representation, t: &Transport, kid: Option<&str>)
-        -> Result<discovery::Jwks, FederationError> {
+    async fn signing_keys(
+        &self,
+        doc: &discovery::Representation,
+        t: &Transport,
+        kid: Option<&str>,
+    ) -> Result<discovery::Jwks, FederationError> {
         let (uri, slot) = doc.keys()?;
         let kind = || discovery::Kind::Keys { uri: uri.clone() };
         let first = slot.read(&self.resources, t, kind(), None).await?;
         let keys = first.jwks()?;
-        if kid.is_some_and(|id| !id.is_empty() && !keys.keys.iter().any(|v| v.get("kid").and_then(|v| v.as_str()) == Some(id))) {
-            return slot.read(&self.resources, t, kind(), Some(&first)).await?.jwks();
+        if kid.is_some_and(|id| {
+            !id.is_empty()
+                && !keys
+                    .keys
+                    .iter()
+                    .any(|v| v.get("kid").and_then(|v| v.as_str()) == Some(id))
+        }) {
+            return slot
+                .read(&self.resources, t, kind(), Some(&first))
+                .await?
+                .jwks();
         }
         Ok(keys)
     }
@@ -269,11 +387,18 @@ impl Transport {
         self.channel.check()?;
         left(self.deadline, stage)?;
         // Discovery, token POST, JWKS, and one directed key refresh.
-        self.requests.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 4).then(|| n + 1))
+        self.requests
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < 4).then(|| n + 1)
+            })
             .map_err(|_| failure(stage, ProviderReason::Unavailable))?;
         Ok(())
     }
-    async fn call(&self, stage: ProviderStage, request: http::Request<Vec<u8>>) -> Result<http::Response<Vec<u8>>, FederationError> {
+    async fn call(
+        &self,
+        stage: ProviderStage,
+        request: http::Request<Vec<u8>>,
+    ) -> Result<http::Response<Vec<u8>>, FederationError> {
         self.charge(stage)?;
         self.channel.call(stage, self.deadline, request).await
     }
@@ -287,7 +412,11 @@ struct Channel {
 }
 impl Channel {
     fn check(&self) -> Result<(), FederationError> {
-        if self.current.load(Ordering::Acquire) { Ok(()) } else { Err(FederationError::StaleConfiguration) }
+        if self.current.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(FederationError::StaleConfiguration)
+        }
     }
     fn request_error(&self, stage: ProviderStage, error: reqwest::Error) -> FederationError {
         let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
@@ -315,7 +444,12 @@ impl Channel {
             },
         )
     }
-    async fn call(&self, stage: ProviderStage, deadline: rss_request_context::Deadline, request: http::Request<Vec<u8>>) -> Result<http::Response<Vec<u8>>, FederationError> {
+    async fn call(
+        &self,
+        stage: ProviderStage,
+        deadline: rss_request_context::Deadline,
+        request: http::Request<Vec<u8>>,
+    ) -> Result<http::Response<Vec<u8>>, FederationError> {
         self.check()?;
         let u = Url::parse(&request.uri().to_string())
             .map_err(|_| failure(stage, ProviderReason::InvalidResponse))?;
@@ -340,7 +474,11 @@ impl Channel {
         }
         let headers = response.headers().clone();
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|e| self.request_error(stage, e))? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| self.request_error(stage, e))?
+        {
             if bytes.len().saturating_add(chunk.len()) > self.policy.max_response_bytes {
                 return Err(failure(stage, ProviderReason::InvalidResponse));
             }
@@ -384,7 +522,9 @@ impl UpstreamOidc for HttpOidc {
         }
         Ok(())
     }
-    fn observe_revision(&self, revision: ProviderRevision) { self.resources.observe(revision); }
+    fn observe_revision(&self, revision: ProviderRevision) {
+        self.resources.observe(revision);
+    }
     fn prepare<'a>(
         &'a self,
         provider: BoundProvider<'a>,
@@ -402,7 +542,7 @@ impl UpstreamOidc for HttpOidc {
             {
                 return Err(FederationError::Configuration);
             }
-            let (metadata, _, _) = self.discover(provider, deadline).await?;
+            let (metadata, _, transport) = self.discover(provider, deadline).await?;
 
             let scope = std::iter::once("openid")
                 .chain(
@@ -436,6 +576,7 @@ impl UpstreamOidc for HttpOidc {
                 }
             }
             let url = url.into();
+            transport.channel.check()?;
             remaining(deadline)?;
             Ok(url)
         })
@@ -449,7 +590,11 @@ impl UpstreamOidc for HttpOidc {
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
-            let (tenant, c, credentials) = (provider.revision.tenant, provider.settings, provider.credentials);
+            let (tenant, c, credentials) = (
+                provider.revision.tenant,
+                provider.settings,
+                provider.credentials,
+            );
             if code.is_empty() || code.len() > 4096 || !code::valid_verifier(m.verifier.as_str()) {
                 return Err(FederationError::Rejected);
             }
@@ -463,11 +608,25 @@ impl UpstreamOidc for HttpOidc {
             let id_token =
                 code::exchange(&transport, &endpoint.url, c, credentials, &m, &code).await?;
             let header = profile_token::approved_header(&id_token, &metadata)?;
-            let keys = if profile_token::symmetric(header.alg) { None } else {
-                Some(self.signing_keys(&doc, &transport, header.kid.as_deref()).await?)
+            let keys = if profile_token::symmetric(header.alg) {
+                None
+            } else {
+                Some(
+                    self.signing_keys(&doc, &transport, header.kid.as_deref())
+                        .await?,
+                )
             };
-            let key = profile_token::signing_key(&header, keys.as_ref(), credentials.client_secret())?;
-            let claims = profile_token::verify(&id_token, header.alg, &key, &metadata, &m.nonce, c.client_id().as_str(), self.future_skew_seconds)?;
+            let key =
+                profile_token::signing_key(&header, keys.as_ref(), credentials.client_secret())?;
+            let claims = profile_token::verify(
+                &id_token,
+                header.alg,
+                &key,
+                &metadata,
+                &m.nonce,
+                c.client_id().as_str(),
+                self.future_skew_seconds,
+            )?;
             let all = serde_json::to_value(&claims).map_err(|_| FederationError::Claims)?;
 
             let groups = mapped_groups(c.claims().groups.as_deref(), &all)?;
@@ -495,6 +654,7 @@ impl UpstreamOidc for HttpOidc {
             };
 
             value.validate()?;
+            transport.channel.check()?;
 
             remaining(deadline)?;
             Ok(value)
@@ -509,9 +669,18 @@ impl UpstreamOidc for HttpOidc {
         Box::pin(async move {
             let c = provider.settings;
             let t = self.transport(provider, deadline, true)?;
-            let bytes = discovery::Kind::Discovery { issuer: c.issuer().as_str().into() }.probe(&t, &self.resources).await?;
-            let metadata: Metadata = serde_json::from_slice(&bytes).map_err(|_| failure(ProviderStage::Discovery, ProviderReason::InvalidResponse))?;
-            discovery::Kind::Keys { uri: metadata.jwks_uri.clone() }.probe(&t, &self.resources).await?;
+            let bytes = discovery::Kind::Discovery {
+                issuer: c.issuer().as_str().into(),
+            }
+            .probe(&t, &self.resources)
+            .await?;
+            let metadata: Metadata = serde_json::from_slice(&bytes)
+                .map_err(|_| failure(ProviderStage::Discovery, ProviderReason::InvalidResponse))?;
+            discovery::Kind::Keys {
+                uri: metadata.jwks_uri.clone(),
+            }
+            .probe(&t, &self.resources)
+            .await?;
             t.channel.check()?;
             if !metadata.authorization_response_iss_parameter_supported {
                 return Err(failure(

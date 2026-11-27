@@ -101,6 +101,14 @@ let routes = rss_identity_http_axum::router(authority, http.clone())?
 
 OIDC 使用 Code/PKCE、state/nonce 和浏览器绑定，登录事务原子单次消费；邮箱不是自动关联依据。显式关联与 step-up 绑定当前主体，provider 配置变化使旧流程失效。唯一 callback 是宿主 origin 下的 `/api/v1/identity/oidc/callback`，回跳只接受宿主白名单键。
 
+通用 OIDC 宿主在构造 `HttpOidc` 时显式提供 `TransportPolicy` 和 `ReusePolicy`。运行入口使用 `BoundProvider` 绑定实例、租户、Provider ID、单调配置版本与本次凭据。直接调用企业交换的宿主也须提供此绑定，替换配置或凭据时推进版本并通知旧实例。参考宿主的 `oidc.reuse` 必填，例如：
+
+```json
+{"maxProviders":128,"maxResidentBytes":8388608,"maxRefreshes":8,"maxIdlePerHost":2,"idleSeconds":30,"discoverySeconds":300,"jwksSeconds":60,"refreshCooldownSeconds":10}
+```
+
+登录准备只获取 Discovery。回调按签名算法读取密钥，JWKS 故障可能在完成上游登录后才报告，失败后须重新登录。每次 token 交换仅提交一次；管理员连接测试始终新建连接并读取两份文档。复用、冷却与在途撤权均以适配器实例为界，最终认证结果仍复核数据库版本。
+
 宿主持有 TLS、listener、可信代理、日志脱敏和有界关闭，必须注入 `ClientAddress`；仅有 ConnectInfo 不会自动转换，缺失来源时登录拒绝。直连中间件可从真实 peer 注入：
 
 ```rust,ignore

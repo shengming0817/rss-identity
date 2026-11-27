@@ -241,7 +241,8 @@ impl Federation {
             sqlx::query("UPDATE identity_authority.providers SET settings=$3,config_version=$4,enabled=$5,revocation_epoch=$6,assurance_profile=$7,credential_version=$8 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(tenant.to_string()).bind(id.to_string()).bind(serde_json::to_value(&view.settings).map_err(|_|transaction::corrupt())?).bind(view.version).bind(view.enabled).bind(view.revocation_epoch).bind(view.assurance_profile.as_slice()).bind(view.credential_version).execute(c).await?;
             let audit=event(tenant,action,&view,Some(actor.key.principal));Ok((view,vec![audit]))
         })).await?;
-        self.oidc.observe_revision(updated.revision(instance, tenant));
+        self.oidc
+            .observe_revision(updated.revision(instance, tenant));
         Ok(updated)
     }
     pub(crate) async fn persist_list_providers(
@@ -285,7 +286,10 @@ impl Federation {
                 }) }).await
     }
     pub async fn test_provider(
-        &self, actor: AuthenticatedSession, id: ProviderId, deadline: OperationDeadline,
+        &self,
+        actor: AuthenticatedSession,
+        id: ProviderId,
+        deadline: OperationDeadline,
     ) -> Result<ConnectionReport, AuthorityError> {
         self.authority.require_runtime()?;
         let policy = self.authority.policy.clone();
@@ -324,7 +328,10 @@ impl Federation {
         let upstream_deadline = budget.0.instant() - reserve;
         let result = tokio::time::timeout_at(
             upstream_deadline.into(),
-            self.oidc.test(view.bind(instance, tenant, &credentials), rss_request_context::Deadline::at(upstream_deadline)),
+            self.oidc.test(
+                view.bind(instance, tenant, &credentials),
+                rss_request_context::Deadline::at(upstream_deadline),
+            ),
         )
         .await
         .unwrap_or(Err(FederationError::Unavailable));
@@ -556,7 +563,9 @@ impl Federation {
             }
             Ok(((false, revisions),events))
         })).await?;
-            for revision in revisions { self.oidc.observe_revision(revision); }
+            for revision in revisions {
+                self.oidc.observe_revision(revision);
+            }
             if !more {
                 return Ok(());
             }

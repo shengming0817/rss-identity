@@ -27,7 +27,10 @@ pub(super) enum Audiences {
     Many(Vec<String>),
 }
 
-pub(super) fn approved_header(raw: &str, metadata: &super::Metadata) -> Result<jsonwebtoken::Header, FederationError> {
+pub(super) fn approved_header(
+    raw: &str,
+    metadata: &super::Metadata,
+) -> Result<jsonwebtoken::Header, FederationError> {
     if raw.is_empty() {
         return Err(FederationError::Claims);
     }
@@ -54,7 +57,11 @@ pub(super) fn approved_header(raw: &str, metadata: &super::Metadata) -> Result<j
 pub(super) fn symmetric(alg: Algorithm) -> bool {
     matches!(alg, Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512)
 }
-pub(super) fn signing_key(header: &jsonwebtoken::Header, keys: Option<&super::discovery::Jwks>, client_secret: &str) -> Result<DecodingKey, FederationError> {
+pub(super) fn signing_key(
+    header: &jsonwebtoken::Header,
+    keys: Option<&super::discovery::Jwks>,
+    client_secret: &str,
+) -> Result<DecodingKey, FederationError> {
     let algorithm = serde_json::to_value(header.alg).map_err(|_| FederationError::Claims)?;
     let key = if symmetric(header.alg) {
         DecodingKey::from_secret(client_secret.as_bytes())
@@ -96,8 +103,15 @@ pub(super) fn signing_key(header: &jsonwebtoken::Header, keys: Option<&super::di
     };
     Ok(key)
 }
-pub(super) fn verify(raw: &str, alg: Algorithm, key: &DecodingKey, metadata: &super::Metadata,
-    nonce: &str, client: &str, future_skew_seconds: u32) -> Result<Claims, FederationError> {
+pub(super) fn verify(
+    raw: &str,
+    alg: Algorithm,
+    key: &DecodingKey,
+    metadata: &super::Metadata,
+    nonce: &str,
+    client: &str,
+    future_skew_seconds: u32,
+) -> Result<Claims, FederationError> {
     let mut validation = Validation::new(alg);
 
     validation.set_required_spec_claims(&["iss", "sub", "aud", "exp"]);

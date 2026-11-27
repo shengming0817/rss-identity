@@ -66,11 +66,15 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
             cidrs: vec![format!("{address}/32").parse()?],
         }],
         transport_policy(),
+        crate::test_support::reuse_policy(),
     )?;
     controlled(&mut adapter, vec![endpoint], calls.clone());
     assert!(
         adapter
-            .test(fixture_provider(tenant, &config, &credentials), upstream_deadline())
+            .test(
+                fixture_provider(tenant, &config, &credentials),
+                upstream_deadline()
+            )
             .await?
             .tls_verified
     );
@@ -79,11 +83,19 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
         discovery_calls > 0,
         "real discovery must traverse the production resolver"
     );
-    let mut denied = HttpOidc::new(vec![], vec![], transport_policy())?;
+    let mut denied = HttpOidc::new(
+        vec![],
+        vec![],
+        transport_policy(),
+        crate::test_support::reuse_policy(),
+    )?;
     controlled(&mut denied, vec![endpoint], calls.clone());
     assert!(
         denied
-            .test(fixture_provider(tenant, &config, &credentials), upstream_deadline())
+            .test(
+                fixture_provider(tenant, &config, &credentials),
+                upstream_deadline()
+            )
             .await
             .is_err()
     );
@@ -94,7 +106,10 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     );
     assert!(
         adapter
-            .test(fixture_provider(tenant, &config, &credentials), upstream_deadline())
+            .test(
+                fixture_provider(tenant, &config, &credentials),
+                upstream_deadline()
+            )
             .await
             .is_err()
     );
@@ -102,18 +117,28 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     let other = TenantId::parse("22222222-2222-4222-8222-222222222222")?;
     assert!(
         adapter
-            .test(fixture_provider(other, &config, &credentials), upstream_deadline())
+            .test(
+                fixture_provider(other, &config, &credentials),
+                upstream_deadline()
+            )
             .await
             .is_err()
     );
     let untrusted = ProviderCredentials::new("fixture-secret".into(), None)?;
     assert!(
-        matches!(adapter.test(fixture_provider(tenant, &config, &untrusted), upstream_deadline()).await,
+        matches!(adapter.test(BoundProvider { revision: ProviderRevision { version: 2, ..fixture_provider(tenant, &config, &untrusted).revision }, ..fixture_provider(tenant, &config, &untrusted) }, upstream_deadline()).await,
         Err(FederationError::Provider(ref failure)) if failure.reason == ProviderReason::TlsRejected)
     );
+    let mut bound = fixture_provider(tenant, &config, &credentials);
+    bound.revision.version = 3;
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let authorize = adapter
-        .prepare(fixture_provider(tenant, &config, &credentials), &material, AuthenticationMode::Login, upstream_deadline())
+        .prepare(
+            bound,
+            &material,
+            AuthenticationMode::Login,
+            upstream_deadline(),
+        )
         .await?;
     let client = Client::builder()
         .no_proxy()
@@ -158,9 +183,16 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     let query: std::collections::BTreeMap<String, String> =
         callback.query_pairs().into_owned().collect();
     assert_eq!(query["state"], material.state.as_str());
+    // Force the next operation onto a new pool and a new DNS resolution.
+    bound.revision.version += 1;
     let before_exchange = calls.load(Ordering::SeqCst);
     let claims = adapter
-        .exchange(fixture_provider(tenant, &config, &credentials), material, query["code"].clone().into(), upstream_deadline())
+        .exchange(
+            bound,
+            material,
+            query["code"].clone().into(),
+            upstream_deadline(),
+        )
         .await?;
     assert!(
         calls.load(Ordering::SeqCst) > before_exchange,

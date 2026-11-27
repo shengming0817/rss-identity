@@ -1,8 +1,8 @@
 #![cfg(feature = "test-support")]
 
-use rss_identity_oidc::test_support::fixture_provider;
 use reqwest::{Client, Response, Url};
 use rss_identity_core::federation::*;
+use rss_identity_oidc::test_support::fixture_provider;
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -38,6 +38,7 @@ fn provider(issuer: &str) -> anyhow::Result<(HttpOidc, ProviderSettings)> {
             client_id: "identity-test".into(),
         }],
         transport_policy(),
+        rss_identity_oidc::test_support::reuse_policy(),
     )?;
     let c = (rss_identity_core::federation::ProviderSettingsInput {
         issuer: issuer.into(),
@@ -88,8 +89,20 @@ async fn keycloak_login(url: Url) -> anyhow::Result<Url> {
 async fn prepare(p: &HttpOidc, c: &ProviderSettings) -> anyhow::Result<(Url, ProtocolMaterial)> {
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let url = p
-        .prepare(fixture_provider(tenant(), c, &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
-                .unwrap()), &material, rss_identity_core::assurance::AuthenticationMode::Login, upstream_deadline())
+        .prepare(
+            fixture_provider(
+                tenant(),
+                c,
+                &rss_identity_core::federation::ProviderCredentials::new(
+                    "fixture-secret".into(),
+                    None,
+                )
+                .unwrap(),
+            ),
+            &material,
+            rss_identity_core::assurance::AuthenticationMode::Login,
+            upstream_deadline(),
+        )
         .await?;
     Ok((Url::parse(&url)?, material))
 }
@@ -107,8 +120,20 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
     assert_eq!(query(&cb, "state")?, material.state.as_str());
     let code = query(&cb, "code")?;
     let claims = p
-        .exchange(fixture_provider(tenant(), &c, &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
-                .unwrap()), material, Zeroizing::new(code.clone()), upstream_deadline())
+        .exchange(
+            fixture_provider(
+                tenant(),
+                &c,
+                &rss_identity_core::federation::ProviderCredentials::new(
+                    "fixture-secret".into(),
+                    None,
+                )
+                .unwrap(),
+            ),
+            material,
+            Zeroizing::new(code.clone()),
+            upstream_deadline(),
+        )
         .await?;
     assert_eq!(claims.issuer, issuer);
     assert!(claims.subject.validate().is_ok());
@@ -117,8 +142,20 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
     );
     let (_, material) = prepare(&p, &c).await?;
     assert!(
-        p.exchange(fixture_provider(tenant(), &c, &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
-                .unwrap()), material, Zeroizing::new(code), upstream_deadline())
+        p.exchange(
+            fixture_provider(
+                tenant(),
+                &c,
+                &rss_identity_core::federation::ProviderCredentials::new(
+                    "fixture-secret".into(),
+                    None
+                )
+                .unwrap()
+            ),
+            material,
+            Zeroizing::new(code),
+            upstream_deadline()
+        )
         .await
         .is_err()
     );
@@ -171,11 +208,18 @@ async fn real_provider_flows() -> anyhow::Result<()> {
         flow(&std::env::var("IDENTITY_TEST_KEYCLOAK_ISSUER")?).await?;
         let (p, c) = provider("http://127.0.0.1:1")?;
         assert!(
-            p.test(fixture_provider(tenant(), &c, &rss_identity_core::federation::ProviderCredentials::new(
-                    "fixture-secret".into(),
-                    None
-                )
-                .unwrap()), upstream_deadline())
+            p.test(
+                fixture_provider(
+                    tenant(),
+                    &c,
+                    &rss_identity_core::federation::ProviderCredentials::new(
+                        "fixture-secret".into(),
+                        None
+                    )
+                    .unwrap()
+                ),
+                upstream_deadline()
+            )
             .await
             .is_err()
         );

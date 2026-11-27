@@ -98,7 +98,7 @@ fn group_facts_policy_is_required_only_when_oidc_is_configured() {
     use rss_identity_core::groups::GroupFactsMaxAge;
     let mut example: serde_json::Value =
         serde_json::from_str(include_str!("../../../deployment/example.json")).unwrap();
-    example["oidc"] = serde_json::json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[],"stateKeyFile":"/host/state.key","credentialKeyring":{"activeKeyId":"host","keys":[{"keyId":"host","path":"/host/credential.key"}]},"returnTargets":{"home":"https://identity.example.test/"}});
+    example["oidc"] = serde_json::json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,"reuse":{"maxProviders":128,"maxResidentBytes":8388608,"maxRefreshes":8,"maxIdlePerHost":2,"idleSeconds":30,"discoverySeconds":300,"jwksSeconds":60,"refreshCooldownSeconds":10},"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[],"stateKeyFile":"/host/state.key","credentialKeyring":{"activeKeyId":"host","keys":[{"keyId":"host","path":"/host/credential.key"}]},"returnTargets":{"home":"https://identity.example.test/"}});
     for value in [0, 1, 3600, i64::MAX] {
         let mut runtime = example.clone();
         runtime["oidc"]["groupFactsMaxAgeSeconds"] = value.into();
@@ -148,7 +148,7 @@ fn configured_directories_load_at_the_supported_capacity() {
             .map(|tenant| json!({"tenantId":tenant,"principalId":uuid::Uuid::new_v4()}))
             .collect::<Vec<_>>()
     );
-    value["oidc"] = json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,
+    value["oidc"] = json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,"reuse":{"maxProviders":128,"maxResidentBytes":8388608,"maxRefreshes":8,"maxIdlePerHost":2,"idleSeconds":30,"discoverySeconds":300,"jwksSeconds":60,"refreshCooldownSeconds":10},
         "groupFactsMaxAgeSeconds":300,"stateKeyFile":"/host/state","credentialKeyring":{"activeKeyId":"key","keys":[{"keyId":"key","path":"/host/key"}]},"returnTargets":{"resume":"https://identity.example.test/auth/resume"},
         "assuranceProfiles":tenants.iter().map(|tenant|json!({"tenantId":tenant,"issuer":issuer,"clientId":"c".repeat(256),"keycloakTotp":false})).collect::<Vec<_>>(),
         "privateProviders":tenants.iter().map(|tenant|json!({"tenantId":tenant,"issuer":issuer,"clientId":"c".repeat(256),"cidrs":["10.42.0.0/16"]})).collect::<Vec<_>>()});
@@ -173,7 +173,8 @@ fn configured_directories_load_at_the_supported_capacity() {
         rss_identity_oidc::HttpOidc::new(
             profiles,
             oidc.private_access().unwrap(),
-            oidc.transport().unwrap()
+            oidc.transport().unwrap(),
+            oidc.reuse.policy().unwrap()
         )
         .is_ok()
     );

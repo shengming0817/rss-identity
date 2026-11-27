@@ -39,6 +39,7 @@ fn fixture_transport(keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
             client_id: "identity-test".into(),
         }],
         transport_policy(),
+        rss_identity_oidc::test_support::reuse_policy(),
     )?)
 }
 fn credentials(ca: bool) -> anyhow::Result<ProviderCredentials> {
@@ -499,6 +500,7 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
             keycloak_totp: true,
         }],
         transport_policy(),
+        rss_identity_oidc::test_support::reuse_policy(),
     )?;
     let next = service(&f, Arc::new(next));
     let settings = p.settings.input();
@@ -822,11 +824,17 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
 #[ignore = "requires make test-federated"]
 async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
     fixture_transport(true)?
-        .test(fixture_provider(tenant(), &config()?, &credentials(true)?), upstream_deadline())
+        .test(
+            fixture_provider(tenant(), &config()?, &credentials(true)?),
+            upstream_deadline(),
+        )
         .await?;
     assert_eq!(
         fixture_transport(true)?
-            .test(fixture_provider(tenant(), &config()?, &credentials(false)?), upstream_deadline())
+            .test(
+                fixture_provider(tenant(), &config()?, &credentials(false)?),
+                upstream_deadline()
+            )
             .await
             .unwrap_err(),
         FederationError::provider(ProviderStage::Discovery, ProviderReason::TlsRejected)
@@ -834,9 +842,14 @@ async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
     let mut private = config()?.input();
     private.issuer = "https://127.0.0.1".into();
     assert!(
-        HttpOidc::new(vec![], vec![], transport_policy())?
-            .validate(tenant(), &private.try_into()?, &credentials(false)?)
-            .is_err()
+        HttpOidc::new(
+            vec![],
+            vec![],
+            transport_policy(),
+            rss_identity_oidc::test_support::reuse_policy()
+        )?
+        .validate(tenant(), &private.try_into()?, &credentials(false)?)
+        .is_err()
     );
     Ok(())
 }

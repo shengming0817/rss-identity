@@ -5,7 +5,10 @@ use rss_identity_core::federation::{BoundProvider, FederationError, ProviderId};
 use rss_request_context::TenantId;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
@@ -33,10 +36,23 @@ pub struct ReusePolicy {
 impl ReusePolicy {
     /// Check all capacities before installing a host configuration.
     pub fn validate(self) -> Result<Self, FederationError> {
-        if [self.max_providers, self.max_resident_bytes, self.max_idle_per_host, self.max_refreshes].contains(&0)
+        if [
+            self.max_providers,
+            self.max_resident_bytes,
+            self.max_idle_per_host,
+            self.max_refreshes,
+        ]
+        .contains(&0)
             || self.max_refreshes > Semaphore::MAX_PERMITS
-            || [self.idle_timeout, self.discovery_ttl, self.jwks_ttl, self.refresh_cooldown].into_iter()
-                .any(|d| d.is_zero() || Instant::now().checked_add(d).is_none()) {
+            || [
+                self.idle_timeout,
+                self.discovery_ttl,
+                self.jwks_ttl,
+                self.refresh_cooldown,
+            ]
+            .into_iter()
+            .any(|d| d.is_zero() || Instant::now().checked_add(d).is_none())
+        {
             return Err(FederationError::Configuration);
         }
         Ok(self)
@@ -45,7 +61,11 @@ impl ReusePolicy {
 
 type ProviderKey = (uuid::Uuid, TenantId, ProviderId);
 fn key(revision: ProviderRevision) -> ProviderKey {
-    (revision.instance.as_uuid(), revision.tenant, revision.provider)
+    (
+        revision.instance.as_uuid(),
+        revision.tenant,
+        revision.provider,
+    )
 }
 
 #[derive(Eq, PartialEq)]
@@ -83,60 +103,116 @@ pub(super) struct Resources {
 impl Resources {
     pub fn new(policy: ReusePolicy) -> Result<Arc<Self>, FederationError> {
         let policy = policy.validate()?;
-        Ok(Arc::new(Self { entries: Mutex::default(), bytes: Arc::default(),
-            refreshes: Arc::new(Semaphore::new(policy.max_refreshes)), policy }))
+        Ok(Arc::new(Self {
+            entries: Mutex::default(),
+            bytes: Arc::default(),
+            refreshes: Arc::new(Semaphore::new(policy.max_refreshes)),
+            policy,
+        }))
     }
 
     pub fn observe(&self, revision: ProviderRevision) {
         let mut entries = self.entries.lock().unwrap();
-        if let Some(entry) = entries.get_mut(&key(revision)) && revision.version > entry.version {
+        if let Some(entry) = entries.get_mut(&key(revision))
+            && revision.version > entry.version
+        {
             entry.retire(revision.version);
         }
     }
 
-    pub fn bind(&self, provider: BoundProvider<'_>) -> Result<Arc<ProviderResources>, FederationError> {
+    pub fn bind(
+        &self,
+        provider: BoundProvider<'_>,
+    ) -> Result<Arc<ProviderResources>, FederationError> {
         let revision = provider.revision;
-        if revision.version <= 0 { return Err(FederationError::Configuration); }
+        if revision.version <= 0 {
+            return Err(FederationError::Configuration);
+        }
         let id = key(revision);
         let mut entries = self.entries.lock().unwrap();
-        if !entries.contains_key(&id) && entries.len() >= self.policy.max_providers && !evict_idle(&mut entries) {
+        if !entries.contains_key(&id)
+            && entries.len() >= self.policy.max_providers
+            && !evict_idle(&mut entries)
+        {
             return Err(FederationError::Unavailable);
         }
         let now = Instant::now();
-        let entry = entries.entry(id).or_insert_with(|| Entry { version: revision.version, last_used: now, resources: None });
-        if revision.version < entry.version { return Err(FederationError::StaleConfiguration); }
-        if revision.version > entry.version { entry.retire(revision.version); }
+        let entry = entries.entry(id).or_insert_with(|| Entry {
+            version: revision.version,
+            last_used: now,
+            resources: None,
+        });
+        if revision.version < entry.version {
+            return Err(FederationError::StaleConfiguration);
+        }
+        if revision.version > entry.version {
+            entry.retire(revision.version);
+        }
         entry.last_used = now;
         // The adapter owns the immutable CIDR policy indexed by (tenant, exact issuer, client).
         let issuer = provider.settings.issuer().as_str();
         let client = provider.settings.client_id().as_str();
-        let ca = provider.credentials.ca_pem().map(rss_identity_core::federation::digest);
+        let ca = provider
+            .credentials
+            .ca_pem()
+            .map(rss_identity_core::federation::digest);
         if let Some(resources) = &entry.resources {
-            if resources.trust.issuer != issuer || resources.trust.client != client || resources.trust.ca != ca {
+            if resources.trust.issuer != issuer
+                || resources.trust.client != client
+                || resources.trust.ca != ca
+            {
                 return Err(FederationError::Configuration);
             }
             return Ok(resources.clone());
         }
-        let resources = Arc::new(ProviderResources { trust: Trust { issuer: issuer.into(), client: client.into(), ca },
-            current: Arc::new(AtomicBool::new(true)), client: Mutex::default(), discovery: Arc::default() });
+        let resources = Arc::new(ProviderResources {
+            trust: Trust {
+                issuer: issuer.into(),
+                client: client.into(),
+                ca,
+            },
+            current: Arc::new(AtomicBool::new(true)),
+            client: Mutex::default(),
+            discovery: Arc::default(),
+        });
         entry.resources = Some(resources.clone());
         Ok(resources)
     }
 
     pub fn reserve(&self, bytes: usize) -> Result<ByteLease, FederationError> {
-        if bytes > self.policy.max_resident_bytes { return Err(FederationError::Unavailable); }
-        let mut entries = self.entries.lock().unwrap();
-        while self.bytes.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used|
-            used.checked_add(bytes).filter(|total| *total <= self.policy.max_resident_bytes)).is_err() {
-            if !evict_idle(&mut entries) { return Err(FederationError::Unavailable); }
+        if bytes > self.policy.max_resident_bytes {
+            return Err(FederationError::Unavailable);
         }
-        Ok(ByteLease { counter: self.bytes.clone(), bytes })
+        let mut entries = self.entries.lock().unwrap();
+        while self
+            .bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes)
+                    .filter(|total| *total <= self.policy.max_resident_bytes)
+            })
+            .is_err()
+        {
+            if !evict_idle(&mut entries) {
+                return Err(FederationError::Unavailable);
+            }
+        }
+        Ok(ByteLease {
+            counter: self.bytes.clone(),
+            bytes,
+        })
     }
 }
 fn evict_idle(entries: &mut HashMap<ProviderKey, Entry>) -> bool {
-    let oldest = entries.iter()
-        .filter(|(_, entry)| entry.resources.as_ref().is_none_or(|r| Arc::strong_count(r) == 1))
-        .min_by_key(|(_, entry)| entry.last_used).map(|(k,_)| *k);
+    let oldest = entries
+        .iter()
+        .filter(|(_, entry)| {
+            entry
+                .resources
+                .as_ref()
+                .is_none_or(|r| Arc::strong_count(r) == 1)
+        })
+        .min_by_key(|(_, entry)| entry.last_used)
+        .map(|(k, _)| *k);
     if let Some(key) = oldest {
         entries.remove(&key);
         return true;
@@ -144,7 +220,12 @@ fn evict_idle(entries: &mut HashMap<ProviderKey, Entry>) -> bool {
     false
 }
 
-pub(super) struct ByteLease { counter: Arc<AtomicUsize>, bytes: usize }
+pub(super) struct ByteLease {
+    counter: Arc<AtomicUsize>,
+    bytes: usize,
+}
 impl Drop for ByteLease {
-    fn drop(&mut self) { self.counter.fetch_sub(self.bytes, Ordering::AcqRel); }
+    fn drop(&mut self) {
+        self.counter.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
 }

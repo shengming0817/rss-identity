@@ -108,9 +108,7 @@ impl crate::HttpOidc {
         {
             return Err(FederationError::Configuration);
         }
-        let (metadata, doc, transport) = self
-            .discover(bound, deadline)
-            .await?;
+        let (metadata, doc, transport) = self.discover(bound, deadline).await?;
         let endpoint = metadata.bound_token_endpoint(&target.token_endpoint)?;
         let form = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
@@ -128,7 +126,12 @@ impl crate::HttpOidc {
             .header("content-type", "application/x-www-form-urlencoded")
             .body(form.into_bytes())
             .map_err(|_| FederationError::Configuration)?;
-        let response = transport.call(rss_identity_core::federation::ProviderStage::Exchange, request).await?;
+        let response = transport
+            .call(
+                rss_identity_core::federation::ProviderStage::Exchange,
+                request,
+            )
+            .await?;
         if !response.status().is_success() {
             return Err(FederationError::Rejected);
         }
@@ -145,9 +148,14 @@ impl crate::HttpOidc {
         if header.alg != Algorithm::RS256 {
             return Err(FederationError::Claims);
         }
-        let kid = header.kid.as_deref().filter(|v| !v.is_empty()).ok_or(FederationError::Claims)?;
+        let kid = header
+            .kid
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or(FederationError::Claims)?;
         let keys = self.signing_keys(&doc, &transport, Some(kid)).await?;
-        let key = crate::profile_token::signing_key(&header, Some(&keys), credentials.client_secret())?;
+        let key =
+            crate::profile_token::signing_key(&header, Some(&keys), credentials.client_secret())?;
         let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
         validation.set_audience(&[&target.client_id]);
         validation.set_issuer(&[provider.issuer().as_str()]);

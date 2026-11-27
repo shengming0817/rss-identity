@@ -111,7 +111,8 @@ impl Federation {
         let url = self
             .upstream(
                 &budget,
-                self.oidc.prepare(view.bind(self.authority.instance(), tenant, &credentials),
+                self.oidc.prepare(
+                    view.bind(self.authority.instance(), tenant, &credentials),
                     &material,
                     mode,
                     budget.0,

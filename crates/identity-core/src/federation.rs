@@ -249,11 +249,25 @@ pub struct BoundProvider<'a> {
 
 impl ProviderView {
     pub fn revision(&self, instance: crate::InstanceId, tenant: TenantId) -> ProviderRevision {
-        ProviderRevision { instance, tenant, provider: self.id, version: self.version }
+        ProviderRevision {
+            instance,
+            tenant,
+            provider: self.id,
+            version: self.version,
+        }
     }
 
-    pub fn bind<'a>(&'a self, instance: crate::InstanceId, tenant: TenantId, credentials: &'a ProviderCredentials) -> BoundProvider<'a> {
-        BoundProvider { revision: self.revision(instance, tenant), settings: &self.settings, credentials }
+    pub fn bind<'a>(
+        &'a self,
+        instance: crate::InstanceId,
+        tenant: TenantId,
+        credentials: &'a ProviderCredentials,
+    ) -> BoundProvider<'a> {
+        BoundProvider {
+            revision: self.revision(instance, tenant),
+            settings: &self.settings,
+            credentials,
+        }
     }
 }
 
