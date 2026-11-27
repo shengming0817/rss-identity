@@ -35,6 +35,7 @@ def check_features(actual, profile):
     if profile == 'production':
         expected['rss-transactional-messaging-postgres'] = {'default'}
         expected['rss-identity-oidc'] = set()
+        expected['rss-audit-core'] = set()
         del expected['rss-ledger']
         del expected['rss-ledger-postgres']
     require(actual == expected, f'{profile} RSS feature closure drift: {actual}')

@@ -92,7 +92,8 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 .arg("--config")
                 .arg(&migration_file)
                 .args(options)
-                .status()?
+                .output()?
+                .status
                 .success()
         );
     }
@@ -189,7 +190,8 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                     .arg(&maintenance_file)
                     .args([command, &key.tenant.to_string(), &target])
                     .arg(secret)
-                    .status()?
+                    .output()?
+                    .status
                     .success()
             );
         }

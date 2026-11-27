@@ -71,6 +71,7 @@ class Gates(unittest.TestCase):
         with self.assertRaises(ValueError): deps.check_features(actual,'production')
         actual['rss-transactional-messaging-postgres']={'default'}
         actual['rss-identity-oidc']=set()
+        actual['rss-audit-core']=set()
         del actual['rss-ledger']
         del actual['rss-ledger-postgres']
         deps.check_features(actual,'production')

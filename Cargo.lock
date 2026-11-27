@@ -1922,7 +1922,6 @@ dependencies = [
  "libc",
  "reqwest",
  "ring",
- "rss-audit-core",
  "rss-audit-postgres",
  "rss-axum",
  "rss-identity-core",
