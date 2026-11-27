@@ -2,6 +2,7 @@ GRANT USAGE ON SCHEMA identity_authority TO {role};
 GRANT SELECT ON identity_authority.schema_version TO {role};
 GRANT SELECT ON identity_authority.deployment TO {role};
 GRANT SELECT,UPDATE ON identity_authority.tenants TO {role};
+GRANT SELECT ON identity_authority.directory_revisions TO {role};
 GRANT SELECT,UPDATE ON identity_authority.tenant_state TO {role};
 GRANT SELECT,INSERT,UPDATE ON identity_authority.accounts TO {role};
 GRANT SELECT,INSERT,UPDATE ON identity_authority.memberships TO {role};
