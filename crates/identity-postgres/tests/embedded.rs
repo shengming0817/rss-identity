@@ -673,6 +673,13 @@ async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
         )
         .await?,
     );
+    // Make this activity extend idle even when issuance and authentication share a second.
+    sqlx::query(
+        "UPDATE identity_authority.sessions SET idle_expires_at=issued_at+300 WHERE session_id=$1",
+    )
+    .bind(session.view().id.as_uuid())
+    .execute(&f.owner)
+    .await?;
     sqlx::raw_sql("CREATE FUNCTION identity_authority.delay_session_touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(3); RETURN NEW; END $$; CREATE TRIGGER delay_session_touch BEFORE UPDATE OF idle_expires_at ON identity_authority.sessions FOR EACH ROW EXECUTE FUNCTION identity_authority.delay_session_touch();")
         .execute(&f.owner).await?;
     let actor = f
@@ -705,7 +712,7 @@ async fn group_deadline_includes_session_touch_latency() -> anyhow::Result<()> {
 async fn refresh_rejects_expiry_during_writes_without_rotating_or_emitting() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
-    // Cover both blocking writes and both session limits. Only the selected write sleeps.
+    // Delay the rotation UPDATE past each of the two session limits.
     for (column, idle, absolute) in [("idle_expires_at", 2, 120), ("token_hash", 120, 120)] {
         let session = f.login().await?;
         sqlx::query("UPDATE identity_authority.sessions SET issued_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2 - $3,local_authenticated_at=CASE WHEN authentication_source='local_password' THEN floor(extract(epoch FROM clock_timestamp()))::bigint + 2 - $3 ELSE local_authenticated_at END, idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2, absolute_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint + 2, idle_timeout=$2, absolute_timeout=$3 WHERE session_id=$1")

@@ -160,6 +160,7 @@ SUITES[("rss-identity-http-axum", "management_http")].add("account_query_project
 SUITES[("rss-identity-postgres","profile_platform")].add("session_page_rechecks_distinct_bindings_and_advances_over_rejections")
 
 SUITES[("rss-identity-postgres","embedded")].add("session_reads_only_require_password_presence")
+SUITES[("rss-identity-postgres","session_atomic")].add("session_updates_match_activity_and_rotation")
 
 def cargo(package, test, env, features=()):
     expected = SUITES[(package,test)]

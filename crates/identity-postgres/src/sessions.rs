@@ -470,8 +470,14 @@ impl Authority {
                     Box::pin(async move {
                         lock_guard(c, tenant).await?;
                         let mut loaded = db::lookup_locked(
-                            c, tenant, &old.digest(), CredentialKind::Cookie, instance, &session_checks,
-                        ).await?;
+                            c,
+                            tenant,
+                            &old.digest(),
+                            CredentialKind::Cookie,
+                            instance,
+                            &session_checks,
+                        )
+                        .await?;
                         loaded.renew_idle()?;
                         sqlx::query(
                             "UPDATE identity_authority.sessions SET idle_expires_at=$3, token_hash=$4
@@ -484,12 +490,17 @@ impl Authority {
                         .execute(c)
                         .await?;
                         checked_expiry(&loaded, budget.0.instant())?;
-                        let fact = event(SessionAction::Refreshed, loaded.state, loaded.view.id, None, loaded.source);
-                        Ok((IssuedSession::new(secret, loaded.view, loaded.now, loaded.state), fact))
+                        let fact = event(
+                            SessionAction::Refreshed, loaded.state, loaded.view.id, None, loaded.source,
+                        );
+                        let issued = IssuedSession::new(secret, loaded.view, loaded.now, loaded.state);
+                        Ok((issued, fact))
                     })
-                }).await
+                })
+                .await
             })
-        }).await
+        })
+        .await
     }
     pub async fn revoke_current_session(
         &self,
