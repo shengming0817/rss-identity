@@ -290,9 +290,30 @@ async fn account_directory_filters_before_stable_pagination_and_invalidates_chan
         .await?;
     let continued = f
         .store
-        .list_accounts(f.actor().await?, q, page.next_cursor, deadline())
+        .list_accounts(f.actor().await?, q.clone(), page.next_cursor, deadline())
         .await?;
     assert_eq!(continued.accounts[0].login.as_deref(), Some("beta"));
+    // The row-set revision is tenant-wide. Inserting a nonmatching login still changes it.
+    let prior = f
+        .store
+        .list_accounts(f.actor().await?, q.clone(), None, deadline())
+        .await?
+        .next_cursor
+        .unwrap();
+    f.store
+        .create_local_account(
+            f.actor().await?,
+            login("outside-filter"),
+            password(),
+            deadline(),
+        )
+        .await?;
+    assert!(matches!(
+        f.store
+            .list_accounts(f.actor().await?, q, Some(prior), deadline())
+            .await,
+        Err(AuthorityError::CursorInvalidated)
+    ));
     let disabled = f
         .store
         .list_accounts(
@@ -852,39 +873,17 @@ async fn cursor_source_clock_and_actor_boundaries() -> anyhow::Result<()> {
     };
     assert_eq!(signed_expiry(&prof)?, profile_start);
     assert!(signed_expiry(&base)? > profile_start);
-    let mut gate = f.owner.begin().await?;
-    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(3337)")
-        .fetch_one(&mut *gate)
-        .await?;
-    // Only the second directory row waits. Actor authentication and cursor validation run first.
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION public.wait_directory_page() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared(3337); RETURN true; END $$; CREATE POLICY wait_directory_page ON identity_authority.local_credentials AS RESTRICTIVE FOR SELECT USING (CASE WHEN principal_id='{}'::uuid THEN public.wait_directory_page() ELSE true END)",second.principal.as_uuid()))).execute(&f.owner).await?;
-    let store = f.store.clone();
-    let actor = f.actor().await?;
-    let continued = tokio::spawn(async move {
-        store
-            .list_accounts(actor, profiled, Some(prof), deadline())
-            .await
-    });
-    let blocked = wait_for_blocked_backend(&f, pid).await?;
-    let query: String = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE pid=$1")
-        .bind(blocked)
-        .fetch_one(&f.owner)
-        .await?;
-    assert!(
-        query.contains("department_facts"),
-        "expected directory page read"
-    );
-    let before: i64 =
-        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
-            .fetch_one(&f.owner)
-            .await?;
-    assert!(before < reference_end && reference_end < profile_start);
-    sqlx::query("SELECT pg_sleep(greatest(0,$1::bigint-extract(epoch FROM clock_timestamp()))::double precision)").bind(profile_start).execute(&f.owner).await?;
-    gate.commit().await?;
-    assert!(matches!(
-        continued.await?,
-        Err(AuthorityError::CursorInvalidated)
-    ));
+    assert!(reference_end < profile_start);
+    continued_page_crosses(
+        &f,
+        second,
+        f.actor().await?,
+        profiled,
+        prof,
+        reference_end,
+        profile_start,
+    )
+    .await?;
     assert_eq!(
         f.store
             .list_accounts(
@@ -978,6 +977,84 @@ async fn disjoint_sources_commit_while_a_revision_write_rolls_back() -> anyhow::
     held.rollback().await?;
     let restored:(bool,i64)=sqlx::query_as("SELECT p.enabled,r.value FROM identity_authority.providers p JOIN identity_authority.directory_revisions r ON r.tenant_id=p.tenant_id AND r.source=p.provider_id::text AND r.kind='origin' WHERE p.provider_id=$1::uuid").bind(a.id.to_string()).fetch_one(&f.owner).await?;
     assert_eq!(restored, (true, before));
+    f.close().await;
+    Ok(())
+}
+
+async fn continued_page_crosses(
+    f: &Fixture,
+    target: AccountKey,
+    actor: AuthenticatedSession,
+    query: AccountQuery,
+    cursor: String,
+    first_boundary: i64,
+    finish_at: i64,
+) -> anyhow::Result<()> {
+    let mut gate = f.owner.begin().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(3337)")
+        .fetch_one(&mut *gate)
+        .await?;
+    // Only the second directory row waits. Actor authentication and cursor validation run first.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION public.wait_directory_page() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared(3337); RETURN true; END $$; CREATE POLICY wait_directory_page ON identity_authority.local_credentials AS RESTRICTIVE FOR SELECT USING (CASE WHEN principal_id='{}'::uuid THEN public.wait_directory_page() ELSE true END)",target.principal.as_uuid()))).execute(&f.owner).await?;
+    let store = f.store.clone();
+    let continued = tokio::spawn(async move {
+        store
+            .list_accounts(actor, query, Some(cursor), deadline())
+            .await
+    });
+    let blocked = wait_for_blocked_backend(f, pid).await?;
+    let query: String = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE pid=$1")
+        .bind(blocked)
+        .fetch_one(&f.owner)
+        .await?;
+    assert!(
+        query.contains("department_facts"),
+        "expected directory page read"
+    );
+    let before: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    assert!(before < first_boundary);
+    sqlx::query("SELECT pg_sleep(greatest(0,$1::bigint-extract(epoch FROM clock_timestamp()))::double precision)").bind(finish_at).execute(&f.owner).await?;
+    gate.commit().await?;
+    assert!(matches!(
+        continued.await?,
+        Err(AuthorityError::CursorInvalidated)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn original_cursor_expiry_bounds_a_renewed_session_read() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let target = f
+        .store
+        .create_local_account(f.actor().await?, login("second"), password(), deadline())
+        .await?
+        .key();
+    let session = f.login().await?;
+    let until:i64=sqlx::query_scalar("UPDATE identity_authority.sessions SET idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+5 WHERE session_id=$1 RETURNING idle_expires_at")
+        .bind(session.view().id.as_uuid()).fetch_one(&f.owner).await?;
+    let query = AccountQuery::parse(None, Some("login"), Some("principalId"), None, 1)?;
+    let actor = f
+        .store
+        .inspect_session(binding(f.key.tenant), secret(&session), deadline())
+        .await?;
+    let cursor = f
+        .store
+        .list_accounts(actor, query.clone(), None, deadline())
+        .await?
+        .next_cursor
+        .unwrap();
+    let renewed = f
+        .store
+        .authenticate_session(binding(f.key.tenant), secret(&session), deadline())
+        .await?;
+    assert!(renewed.view().idle_expires_at > until);
+    continued_page_crosses(&f, target, renewed, query, cursor, until, until).await?;
     f.close().await;
     Ok(())
 }

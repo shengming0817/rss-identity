@@ -2367,3 +2367,46 @@ async fn live_session_admission_retains_platform_source_locks() -> anyhow::Resul
     f.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn reference_window_limits_stale_session_candidates() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    let fixture = &f;
+    let add = |n: i32, delta: i64| async move {
+        let f = fixture;
+        sqlx::query("INSERT INTO identity_authority.sessions(tenant_id,principal_id,session_id,authentication_source,local_authenticated_at,credential_kind,token_hash,auth_epoch,membership_epoch,issued_at,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at)
+          SELECT $1::uuid,$2,gen_random_uuid(),'local_password',$3::bigint-1,'cookie',sha256(uuid_send(gen_random_uuid())),99,1,$3-1,100,100,$3+$4,$3+99 FROM generate_series(1,$5)")
+            .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).bind(now).bind(delta).bind(n).execute(&f.owner).await
+    };
+    let window = || {
+        f.store
+            .with_session_references_read(binding(f.key.tenant), deadline(), |mut read| {
+                Box::pin(async move {
+                    let until = read.revision()?.valid_until;
+                    let rows = read
+                        .query(
+                            "SELECT count(*)::bigint AS n FROM identity_session_references",
+                            Default::default(),
+                            1,
+                        )
+                        .await?;
+                    Ok((until, rows[0].get::<i64, _>("n")))
+                })
+            })
+    };
+    add(31, 20).await?;
+    assert!(window().await?.0 >= now + 60);
+    add(1, 30).await?;
+    add(1, 35).await?;
+    assert_eq!(window().await?, (now + 30, 0));
+    sqlx::query("UPDATE identity_authority.sessions SET auth_epoch=1 WHERE session_id=(SELECT session_id FROM identity_authority.sessions WHERE idle_expires_at=$1 LIMIT 1)").bind(now+20).execute(&f.owner).await?;
+    assert_eq!(window().await?, (now + 20, 1));
+    f.close().await;
+    Ok(())
+}

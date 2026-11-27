@@ -209,7 +209,7 @@ impl Authority {
                     let relation = crate::personnel::session_relation(
                         instance,
                         tenant,
-                        window.now,
+                        window.clock.seconds(),
                         platform.as_deref(),
                     );
                     sqlx::query("SET TRANSACTION READ ONLY")

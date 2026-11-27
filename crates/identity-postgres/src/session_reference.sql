@@ -9,7 +9,7 @@ identity_session_references AS NOT MATERIALIZED (
  CASE WHEN s.authentication_source='platform' THEN s.platform_authentication->'binding'->>'bindingEpoch' END AS platform_binding_epoch,
  CASE WHEN s.authentication_source='platform' THEN s.platform_authentication->'binding'->>'sourceId' END AS platform_source_id,
  CASE WHEN s.authentication_source='platform' THEN s.platform_authentication->'binding'->>'sourceVersion' END AS platform_source_version
- FROM identity_authority.sessions s
+ FROM {sessions} s
  JOIN identity_authority.accounts a USING(tenant_id,principal_id)
  JOIN identity_authority.memberships m USING(tenant_id,principal_id)
  CROSS JOIN ctx

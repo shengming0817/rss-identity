@@ -348,10 +348,12 @@ impl Authority {
                 )
                 .to_vec();
                 let seek = cursor.as_ref().map(|raw| decode(&key, raw)).transpose()?;
+                let mut page_deadline = window.expires;
                 if let Some(seek) = &seek {
-                    if seek.binding != binding || seek.expires <= window.now {
+                    if seek.binding != binding || seek.expires <= window.clock.seconds() {
                         return Err(MutationError::CursorInvalidated);
                     }
+                    page_deadline = page_deadline.min(window.clock.deadline(seek.expires)?);
                     if seek.position.len() != query.sort().len()
                         || query
                             .sort()
@@ -385,7 +387,7 @@ impl Authority {
                         args.add(actor.key.tenant.to_string())
                             .map_err(|_| corrupt())?;
                         args.add(department_source).map_err(|_| corrupt())?;
-                        args.add(window.now).map_err(|_| corrupt())?;
+                        args.add(window.clock.seconds()).map_err(|_| corrupt())?;
                         args.add(query.source().filter(|_| profiles).map(str::to_owned))
                             .map_err(|_| corrupt())?;
                         args.add(i64::from(max_age)).map_err(|_| corrupt())?;
@@ -446,7 +448,7 @@ impl Authority {
                 if finished >= actor_deadline {
                     return Err(reject().into());
                 }
-                if finished >= window.expires {
+                if finished >= page_deadline {
                     return Err(MutationError::CursorInvalidated);
                 }
                 Ok(AccountPage {

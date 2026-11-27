@@ -206,9 +206,10 @@ impl Authority {
                     let ReadWindow {
                         generation,
                         valid_until,
-                        now,
+                        clock,
                         ..
                     } = window;
+                    let now = clock.seconds();
                     let profiles = if all {
                         "true".into()
                     } else if own {
@@ -282,8 +283,10 @@ pub(crate) fn session_relation(
         || "NULL".to_owned(),
         |s| format!("'{}'", s.replace('\'', "''")),
     );
-    include_str!("session_reference.sql").replace(
-        "{context}",
-        &format!("'{tenant}'::uuid,'{instance}'::uuid,{now}::bigint,{audience}::text"),
-    )
+    include_str!("session_reference.sql")
+        .replace("{sessions}", "identity_authority.sessions")
+        .replace(
+            "{context}",
+            &format!("'{tenant}'::uuid,'{instance}'::uuid,{now}::bigint,{audience}::text"),
+        )
 }

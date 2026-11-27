@@ -1,7 +1,8 @@
 //! Revision and clock dependencies of the relations installed for one collection read.
 use crate::{
     PersonnelProfileScope,
-    transaction::{MutationError, corrupt, reject},
+    session_storage::TimeSample,
+    transaction::{MutationError, corrupt},
 };
 use rss_identity_core::{
     InstanceId,
@@ -9,11 +10,12 @@ use rss_identity_core::{
 };
 use rss_request_context::TenantId;
 use sqlx::PgConnection;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use uuid::Uuid;
 
 // Bounds the age of a single signed continuation or borrowed read even if every fact stays current.
 const CONSISTENCY_WINDOW_SECONDS: i64 = 60;
+const REFERENCE_EXPIRY_CANDIDATES: i64 = 32;
 
 pub(crate) struct ReadDependencies<'a> {
     kinds: Vec<&'static str>,
@@ -114,7 +116,8 @@ impl<'a> ReadDependencies<'a> {
                 .bind(self.source)
                 .fetch_one(&mut *c)
                 .await?;
-        let now = micros / 1_000_000;
+        let clock = TimeSample::from_database(sampled, micros)?;
+        let now = clock.seconds();
         let mut valid_until = now
             .saturating_add(CONSISTENCY_WINDOW_SECONDS)
             .min(actor_until.unwrap_or(i64::MAX));
@@ -164,35 +167,26 @@ impl<'a> ReadDependencies<'a> {
         }
         if let Some((instance, platform)) = self.references {
             let relation = include_str!("session_reference.sql")
-                .replace("{context}", "$1::uuid,$2::uuid,$3::bigint,$4::text");
-            let sql = format!(
-                "WITH {relation} SELECT session_valid_until FROM identity_session_references WHERE session_valid_until<=$5 ORDER BY session_valid_until LIMIT 1"
-            );
+                .replace("{context}", "$1::uuid,$2::uuid,$3::bigint,$4::text")
+                .replace("{sessions}", "candidates");
+            let sql = include_str!("reference-transition.sql").replace("{relation}", &relation);
             let next: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
                 .bind(&tenant_id)
                 .bind(instance.as_uuid())
                 .bind(now)
                 .bind(platform)
                 .bind(valid_until)
-                .fetch_optional(&mut *c)
+                .bind(REFERENCE_EXPIRY_CANDIDATES)
+                .fetch_one(&mut *c)
                 .await?;
             if let Some(next) = next {
                 valid_until = valid_until.min(next);
             }
         }
-        let remaining = valid_until
-            .saturating_mul(1_000_000)
-            .saturating_sub(micros)
-            .saturating_sub(1)
-            .max(0) as u64;
-        let expires = deadline.min(
-            sampled
-                .checked_add(Duration::from_micros(remaining))
-                .ok_or_else(reject)?,
-        );
+        let expires = deadline.min(clock.deadline(valid_until)?);
         Ok(ReadWindow {
             generation,
-            now,
+            clock,
             valid_until,
             expires,
         })
@@ -202,6 +196,6 @@ impl<'a> ReadDependencies<'a> {
 pub(crate) struct ReadWindow {
     pub generation: i64,
     pub valid_until: i64,
-    pub now: i64,
+    pub clock: TimeSample,
     pub expires: Instant,
 }

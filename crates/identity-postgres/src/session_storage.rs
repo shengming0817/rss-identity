@@ -27,6 +27,9 @@ impl TimeSample {
         )
         .fetch_one(c)
         .await?;
+        Self::from_database(started, micros)
+    }
+    pub(crate) fn from_database(started: Instant, micros: i64) -> Result<Self, PgError> {
         if micros <= 0 {
             return Err(corrupt());
         }

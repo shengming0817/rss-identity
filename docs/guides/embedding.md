@@ -268,9 +268,9 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 
 `identity_session_references` 提供同租户、账户/成员 epoch、会话期限及来源当前性已筛选的定位关系，供产品按完整 SessionReference 坐标集合关联；它不是 AuthenticatedSession。平台来源的 `requires_platform_check` 为 true，产品必须再 JOIN 自己持有的当前平台绑定/来源资格关系，核对返回的绑定 ID/epoch 和来源 ID/version，不能仅凭该关系宣称平台资格有效。原请求 actor 的平台检查仍由既有 verifier 执行。
 
-没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(binding, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用宿主提供的明确 binding、实例和执行 fencing，取得覆盖全租户集合的锁后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，修订有效期取当前可见会话的最早到期时间与 60 秒一致性上限的较早者，回调还受原调用预算约束。
+没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(binding, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用宿主提供的明确 binding、实例和执行 fencing，取得覆盖全租户集合的锁后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，修订有效期受会话集合的有界到期探针与 60 秒一致性上限约束，回调还受原调用预算约束。
 
-会话关系通过完整定位坐标关联当前会话。列 `session_valid_until` 是读取当时该会话空闲期限与绝对期限的较早者，续期会更新该值。宿主用它限制投影的有效期。分页按稳定定位坐标排序，cursor 沿用签发时的保守期限，到期后重新查询。人员回调受可见资料的下次生效或到期、会话引用到期及单次 60 秒一致性窗口限制。仅安装会话引用的入口按当前有效的会话集合计算。
+会话关系通过完整定位坐标关联当前会话。列 `session_valid_until` 是读取当时该会话空闲期限与绝对期限的较早者，续期会更新该值。宿主用它限制投影的有效期。分页按稳定定位坐标排序，cursor 沿用签发时的保守期限，到期后重新查询。人员回调受可见资料的下次生效或到期、会话引用到期及单次 60 秒一致性窗口限制。引用期限探针按到期顺序最多复核 32 条候选会话。达到上限时，窗口最晚到最后一条已检查候选的到期时刻，集中撤权后可能提前重查。返回给宿主的每条引用仍完整复核资格。
 
 ## 企业 RP 与 WebAuthn 操作证明
 

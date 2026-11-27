@@ -149,10 +149,11 @@ SUITES[("rss-identity-postgres", "live_session")] = {
     "host_admission_checks_expiry_after_session_wait",
 }
 
-SUITES[("rss-identity-postgres", "profile_platform")].add("live_session_admission_retains_platform_source_locks")
+SUITES[("rss-identity-postgres", "profile_platform")].update({"live_session_admission_retains_platform_source_locks","reference_window_limits_stale_session_candidates"})
 
 SUITES[("rss-identity-postgres", "embedded")].update({
     "account_directory::cursor_dependencies_under_writes",
+    "account_directory::original_cursor_expiry_bounds_a_renewed_session_read",
     "account_directory::cursor_source_clock_and_actor_boundaries",
     "account_directory::disjoint_sources_commit_while_a_revision_write_rolls_back",
     "account_directory::selected_account_page_capacity_round_trips_long_names",
