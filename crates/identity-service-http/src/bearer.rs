@@ -46,7 +46,7 @@ fn secure(mut response: Response) -> Response {
     response
 }
 async fn boundary(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let budget = match RequestBudget::for_request(&request, state.config.timeout()) {
+    let budget = match request_deadline(&request, state.config.timeout(), rss_request_context::Clock::now(state.authority.execution_timer())) {
         Ok(budget) => budget,
         Err(error) => return secure(error.into_response()),
     };
@@ -70,7 +70,7 @@ struct Login {
 async fn login(
     State(state): State<AppState>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     request: Request,
 ) -> Result<Response, HttpError> {
     if request.headers().contains_key(header::AUTHORIZATION) {
@@ -83,7 +83,7 @@ async fn login(
         .0;
     let source = AttemptSource::parse(&address.to_string())?;
     let Json(input) = tokio::time::timeout_at(
-        budget.cutoff(),
+        budget.instant().into(),
         Json::<Login>::from_request(request, &state),
     )
     .await
@@ -96,7 +96,7 @@ async fn login(
             LoginKey::parse(&input.login).map_err(|_| UNAUTH)?,
             Password::new(input.password).map_err(|_| UNAUTH)?,
             source,
-            budget.remaining(),
+            budget,
         )
         .await?;
     let view = issued.view();
@@ -110,16 +110,16 @@ async fn login(
 async fn logout(
     State(state): State<AppState>,
     Execution(binding): Execution,
-    Extension(budget): Extension<RequestBudget>,
+    Extension(budget): Extension<Deadline>,
     headers: HeaderMap,
 ) -> Result<StatusCode, HttpError> {
     let proof = state
         .authority
-        .inspect_bearer(binding, bearer_credential(&headers)?, budget.remaining())
+        .inspect_bearer(binding, bearer_credential(&headers)?, budget)
         .await?;
     state
         .authority
-        .revoke_current_session(proof, budget.remaining())
+        .revoke_current_session(proof, budget)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

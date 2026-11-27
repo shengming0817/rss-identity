@@ -128,7 +128,7 @@ async fn actor(
     s: &Management,
     binding: ExecutionBinding,
     h: &HeaderMap,
-    b: RequestBudget,
+    b: Deadline,
     write: bool,
 ) -> Result<AuthenticatedSession> {
     let secret = cookie(h)?.ok_or(UNAUTH)?;
@@ -139,12 +139,12 @@ async fn actor(
         csrf(h, &secret)?;
     }
     Ok(s.authority
-        .inspect_session(binding, secret, b.remaining())
+        .inspect_session(binding, secret, b)
         .await?)
 }
-pub(crate) async fn body<T: DeserializeOwned>(request: Request, b: RequestBudget) -> Result<T> {
+pub(crate) async fn body<T: DeserializeOwned>(request: Request, b: Deadline) -> Result<T> {
     let bytes =
-        tokio::time::timeout_at(b.cutoff(), axum::body::to_bytes(request.into_body(), 32768))
+        tokio::time::timeout_at(b.instant().into(), axum::body::to_bytes(request.into_body(), 32768))
             .await
             .map_err(|_| HttpError::request_timeout())?
             .map_err(|_| BAD)?;
@@ -175,7 +175,7 @@ struct AccountParameters {
 async fn accounts(
     State(s): State<Management>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     h: HeaderMap,
     q: std::result::Result<Query<AccountParameters>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Response> {
@@ -191,7 +191,7 @@ async fn accounts(
     let actor = actor(&s, binding, &h, b, false).await?;
     Ok(Json(crate::dto::AccountPage::from(
         s.authority
-            .list_accounts(actor, query, page.cursor, b.remaining())
+            .list_accounts(actor, query, page.cursor, b)
             .await?,
     ))
     .into_response())
@@ -200,13 +200,13 @@ async fn read_account(
     State(s): State<Management>,
     Path((t, p)): Path<(String, String)>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     h: HeaderMap,
 ) -> Result<Response> {
     let actor = actor(&s, binding, &h, b, false).await?;
     Ok(Json(crate::dto::Account::from(
         s.authority
-            .read_account(actor, target(&t, &p)?, b.remaining())
+            .read_account(actor, target(&t, &p)?, b)
             .await?,
     ))
     .into_response())
@@ -220,7 +220,7 @@ struct CreateAccount {
 async fn create_account(
     State(s): State<Management>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     r: Request,
 ) -> Result<Response> {
     let actor = actor(&s, binding, r.headers(), b, true).await?;
@@ -229,7 +229,7 @@ async fn create_account(
     let canonical_login = name.as_str().to_owned();
     let state = s
         .authority
-        .create_local_account(actor, name, password(v.password)?, b.remaining())
+        .create_local_account(actor, name, password(v.password)?, b)
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -249,14 +249,14 @@ async fn enabled(
     State(s): State<Management>,
     Path((t, p)): Path<(String, String)>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     r: Request,
 ) -> Result<Response> {
     let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: Toggle = body(r, b).await?;
     Ok(account(
         s.authority
-            .set_account_enabled(actor, target(&t, &p)?, v.enabled, b.remaining())
+            .set_account_enabled(actor, target(&t, &p)?, v.enabled, b)
             .await?,
     ))
 }
@@ -264,14 +264,14 @@ async fn membership(
     State(s): State<Management>,
     Path((t, p)): Path<(String, String)>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     r: Request,
 ) -> Result<Response> {
     let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: Toggle = body(r, b).await?;
     Ok(account(
         s.authority
-            .set_account_membership(actor, target(&t, &p)?, v.enabled, b.remaining())
+            .set_account_membership(actor, target(&t, &p)?, v.enabled, b)
             .await?,
     ))
 }
@@ -284,14 +284,14 @@ async fn reset_password(
     State(s): State<Management>,
     Path((t, p)): Path<(String, String)>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     r: Request,
 ) -> Result<Response> {
     let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: Reset = body(r, b).await?;
     Ok(account(
         s.authority
-            .reset_local_password(actor, target(&t, &p)?, password(v.password)?, b.remaining())
+            .reset_local_password(actor, target(&t, &p)?, password(v.password)?, b)
             .await?,
     ))
 }
@@ -304,7 +304,7 @@ struct ChangePassword {
 async fn own_password(
     State(s): State<Management>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     r: Request,
 ) -> Result<Response> {
     let actor = actor(&s, binding, r.headers(), b, true).await?;
@@ -322,7 +322,7 @@ async fn own_password(
                 password(v.current_password)?,
                 password(v.password)?,
                 source,
-                b.remaining(),
+                b,
             )
             .await?,
     ))

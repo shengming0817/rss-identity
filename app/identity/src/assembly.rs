@@ -8,7 +8,7 @@ use rss_identity_postgres::{
     ManagementOperation, ManagementPolicy, ReauthenticationRequirement,
 };
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
-use rss_transactional_messaging::policy::OperationDeadline;
+use rss_request_context::SharedExecutionTimer;
 use rss_transactional_messaging_postgres::PgRuntime;
 use std::{
     path::Path,
@@ -26,10 +26,6 @@ impl ExecutionTimer for Timer {
         tokio::time::sleep(d.remaining(self.now()).unwrap_or_default()).await;
     }
 }
-pub fn deadline(cutoff: Deadline) -> OperationDeadline {
-    OperationDeadline::from_cutoff(cutoff, &Timer)
-}
-
 /// Product policy, deliberately outside the authentication component.
 pub struct BootstrapPolicy(pub Vec<AccountKey>, pub Duration);
 impl BootstrapPolicy {
@@ -94,12 +90,14 @@ pub fn authority_config(config: &RuntimeConfig) -> Result<AuthorityConfig, AppEr
             config.instance()?,
             session_policy()?,
             rss_audit_postgres::Integrity::Plain,
+            config.database.audit_budget()?,
         )?,
         config.budgets.request(),
     )
 }
 pub async fn authority(
     config: &RuntimeConfig,
+    authority_config: AuthorityConfig,
     runtime: Arc<PgRuntime>,
     kdf: Arc<rss_identity_core::account::PasswordKdf>,
     cutoff: Deadline,
@@ -107,7 +105,7 @@ pub async fn authority(
     Ok(Authority::connect_runtime(
         runtime,
         kdf,
-        authority_config(config)?,
+        authority_config,
         config.storage.binding(config.bootstrap_keys()?[0].tenant)?,
         Arc::new(BootstrapPolicy(
             config.bootstrap_keys()?,
@@ -115,7 +113,7 @@ pub async fn authority(
                 config.authority.operation_proof_seconds.get(),
             )),
         )),
-        deadline(cutoff),
+        cutoff,
     )
     .await?)
 }
@@ -129,14 +127,14 @@ struct FederationInputs {
 pub fn preflight(config: &RuntimeConfig) -> Result<(), AppError> {
     config.validate()?;
     config.database.pg()?;
-    federation_inputs(config)?;
+    federation_inputs(config, SharedExecutionTimer::new(Timer))?;
     Ok(())
 }
 pub fn federation(
     config: &RuntimeConfig,
     authority: Authority,
 ) -> Result<Option<Federation>, AppError> {
-    federation_inputs(config)?
+    federation_inputs(config, authority.execution_timer().clone())?
         .map(|inputs| {
             Ok(Federation::new(
                 inputs.group_policy,
@@ -148,7 +146,7 @@ pub fn federation(
         })
         .transpose()
 }
-fn federation_inputs(config: &RuntimeConfig) -> Result<Option<FederationInputs>, AppError> {
+fn federation_inputs(config: &RuntimeConfig, timer: SharedExecutionTimer) -> Result<Option<FederationInputs>, AppError> {
     let Some(c) = &config.oidc else {
         return Ok(None);
     };
@@ -165,6 +163,7 @@ fn federation_inputs(config: &RuntimeConfig) -> Result<Option<FederationInputs>,
         })
         .collect::<Result<Vec<_>, AppError>>()?;
     let oidc = HttpOidc::new(
+        rss_identity_oidc::ProviderClock::new(timer, std::time::SystemTime::now),
         profiles,
         c.private_access()?,
         c.transport()?,

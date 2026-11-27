@@ -11,15 +11,13 @@ use axum::{
 use rss_identity_postgres::Authority;
 use rss_identity_web_credentials::{HttpConfig, SessionActivity, authenticate_request};
 use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::OperationDeadline;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 #[derive(Clone)]
 struct Context {
     authority: Authority,
     storage: crate::config::StorageConfig,
     policy: Arc<BootstrapPolicy>,
-    timeout: Duration,
     http: HttpConfig,
 }
 pub fn router(
@@ -41,19 +39,15 @@ pub fn router(
                     config.authority.operation_proof_seconds.get(),
                 )),
             )),
-            timeout: config.budgets.request(),
             http,
         }))
 }
 async fn context(
     State(state): State<Context>,
     Path(raw): Path<String>,
-    deadline: Option<axum::Extension<rss_request_context::Deadline>>,
+    axum::Extension(deadline): axum::Extension<rss_request_context::Deadline>,
     headers: HeaderMap,
 ) -> Response {
-    let deadline = deadline
-        .map(|d| crate::assembly::deadline(d.0))
-        .unwrap_or_else(|| OperationDeadline::from_remaining(state.timeout));
     let response = match TenantId::parse(&raw) {
         Err(_) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"code":"malformed_request"}))).into_response(),
         Ok(tenant) => match state.storage.binding(tenant) {

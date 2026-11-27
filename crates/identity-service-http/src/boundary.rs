@@ -10,43 +10,18 @@ use rss_identity_postgres::AuthorityError;
 pub(crate) use rss_identity_web_credentials::{cookie, csrf, login_cookie, request_marker};
 use rss_identity_web_credentials::{cookie_presentation, same_origin};
 use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::OperationDeadline;
+pub(crate) use rss_request_context::Deadline;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy)]
-pub(crate) struct RequestBudget(rss_request_context::Deadline);
-impl RequestBudget {
-    pub(crate) fn for_request(request: &Request, timeout: Duration) -> Result<Self, HttpError> {
-        let mut budget = Self::new(timeout)?;
-        if let Some(cutoff) = request.extensions().get::<rss_request_context::Deadline>() {
-            budget.0 = budget.0.shortened_to(cutoff.instant());
-        }
-        if budget
-            .0
-            .remaining(Instant::now())
-            .unwrap_or_default()
-            .is_zero()
-        {
-            return Err(HttpError::request_timeout());
-        }
-        Ok(budget)
+pub(crate) fn request_deadline(request: &Request, timeout: Duration, now: Instant) -> Result<Deadline, HttpError> {
+    let mut deadline = Deadline::at(now.checked_add(timeout).ok_or_else(HttpError::request_timeout)?);
+    if let Some(host) = request.extensions().get::<Deadline>() {
+        deadline = deadline.shortened_to(host.instant());
     }
-
-    pub fn new(timeout: Duration) -> Result<Self, HttpError> {
-        if timeout.is_zero() {
-            return Err(HttpError::request_timeout());
-        }
-        Instant::now()
-            .checked_add(timeout)
-            .map(|at| Self(rss_request_context::Deadline::at(at)))
-            .ok_or_else(HttpError::request_timeout)
+    if deadline.is_expired(now) {
+        return Err(HttpError::request_timeout());
     }
-    pub fn cutoff(self) -> tokio::time::Instant {
-        self.0.instant().into()
-    }
-    pub fn remaining(self) -> OperationDeadline {
-        OperationDeadline::from_remaining(self.0.remaining(Instant::now()).unwrap_or_default())
-    }
+    Ok(deadline)
 }
 pub(crate) fn tenant(value: &str) -> Result<TenantId, HttpError> {
     TenantId::parse(value).map_err(|_| BAD)
@@ -57,7 +32,7 @@ pub(crate) async fn request_boundary(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let budget = match RequestBudget::for_request(&request, state.config.timeout()) {
+    let budget = match request_deadline(&request, state.config.timeout(), rss_request_context::Clock::now(state.authority.execution_timer())) {
         Ok(budget) => budget,
         Err(error) => return private_response(error.into_response()),
     };

@@ -78,11 +78,11 @@ mod budget_tests {
         for seconds in [120, 3600] {
             let duration = std::time::Duration::from_secs(seconds);
             assert!(HttpConfig::new("https://identity.example.test", duration).is_ok());
-            assert!(boundary::RequestBudget::new(duration).is_ok());
+            assert!(boundary::request_deadline(&axum::extract::Request::default(), duration, std::time::Instant::now()).is_ok());
         }
         for duration in [std::time::Duration::ZERO, std::time::Duration::MAX] {
             assert!(HttpConfig::new("https://identity.example.test", duration).is_err());
-            assert!(boundary::RequestBudget::new(duration).is_err());
+            assert!(boundary::request_deadline(&axum::extract::Request::default(), duration, std::time::Instant::now()).is_err());
         }
     }
 }

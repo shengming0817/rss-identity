@@ -32,7 +32,7 @@ pub async fn run(
         let mut tx = c.begin().await.map_err(|_| AppError::Migration)?;
         migration::watchdog(&mut tx,cutoff).await.map_err(|_|AppError::Migration)?;
         migration::verify_storage(&mut tx, &config.storage).await.map_err(|_| AppError::Migration)?;
-        let signature: Option<String> = sqlx::query_scalar(rss_identity_postgres::SCHEMA_SIGNATURE_SQL).fetch_one(&mut *tx).await.map_err(|_| AppError::Migration)?;
+        let signature: Option<String> = rss_identity_postgres::schema_signature(&mut tx).await.map_err(|_| AppError::Migration)?;
         if signature.as_deref() != Some(rss_identity_postgres::SCHEMA_SIGNATURE.trim()) { return Err(AppError::Migration); }
         let versions: Vec<i32> = sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *tx).await.map_err(|_| AppError::Migration)?;
         if versions != [rss_identity_postgres::SCHEMA_VERSION] { return Err(AppError::Migration); }

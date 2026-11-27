@@ -56,7 +56,7 @@ async fn actor(
     s: &Management,
     binding: ExecutionBinding,
     h: &HeaderMap,
-    b: RequestBudget,
+    b: Deadline,
     write: bool,
 ) -> Result<AuthenticatedSession> {
     let secret = cookie(h)?.ok_or(UNAUTH)?;
@@ -68,20 +68,20 @@ async fn actor(
     }
     Ok(s.federation
         .authority()
-        .inspect_session(binding, secret, b.remaining())
+        .inspect_session(binding, secret, b)
         .await?)
 }
 async fn providers(
     State(s): State<Management>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     h: HeaderMap,
 ) -> Result<Response> {
     let actor = actor(&s, binding, &h, b, false).await?;
     Ok(Json(dto::Providers {
         providers: s
             .federation
-            .list_providers(actor, b.remaining())
+            .list_providers(actor, b)
             .await?
             .into_iter()
             .map(Into::into)
@@ -99,7 +99,7 @@ struct CreateProvider {
 async fn create_provider(
     State(s): State<Management>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     r: Request,
 ) -> Result<Response> {
     let actor = actor(&s, binding, r.headers(), b, true).await?;
@@ -111,7 +111,7 @@ async fn create_provider(
         StatusCode::CREATED,
         Json(dto::Provider::from(
             s.federation
-                .create_provider(actor, settings, credentials, b.remaining())
+                .create_provider(actor, settings, credentials, b)
                 .await?,
         )),
     )
@@ -129,7 +129,7 @@ async fn update_provider(
     State(s): State<Management>,
     Path((_t, p)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     r: Request,
 ) -> Result<Response> {
     let actor = actor(&s, binding, r.headers(), b, true).await?;
@@ -145,7 +145,7 @@ async fn update_provider(
                 v.expected_version,
                 settings,
                 credentials,
-                b.remaining(),
+                b,
             )
             .await?,
     ))
@@ -161,14 +161,14 @@ async fn provider_enabled(
     State(s): State<Management>,
     Path((_t, p)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     r: Request,
 ) -> Result<Response> {
     let actor = actor(&s, binding, r.headers(), b, true).await?;
     let v: ProviderToggle = body(r, b).await?;
     Ok(Json(dto::Provider::from(
         s.federation
-            .enable_provider(actor, p, v.expected_version, v.enabled, b.remaining())
+            .enable_provider(actor, p, v.expected_version, v.enabled, b)
             .await?,
     ))
     .into_response())
@@ -177,11 +177,11 @@ async fn test_provider(
     State(s): State<Management>,
     Path((_t, p)): Path<(String, ProviderId)>,
     Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
+    Extension(b): Extension<Deadline>,
     h: HeaderMap,
 ) -> Result<Response> {
     let actor = actor(&s, binding, &h, b, true).await?;
-    match s.federation.test_provider(actor, p, b.remaining()).await {
+    match s.federation.test_provider(actor, p, b).await {
         Ok(report) => Ok(Json(serde_json::json!({"passed":true,"report":dto::ConnectionReport::from(report)})).into_response()),
         Err(AuthorityError::Federation(
             error @ (FederationError::Provider(_) | FederationError::Unavailable),
