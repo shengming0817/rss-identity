@@ -1,9 +1,9 @@
 //! Optional OIDC management adapter.
 use crate::{
     AppState, HttpConfig,
+    accounts::{Error, body},
     boundary::*,
     dto,
-    management::{Error, body},
 };
 use axum::{
     Extension, Json, Router,
@@ -62,7 +62,7 @@ async fn actor(
 ) -> Result<AuthenticatedSession> {
     let secret = cookie(h)?.ok_or(UNAUTH)?;
     if write {
-        if unique(h, "x-identity-request")? != Some("1") {
+        if !request_marker(h)? {
             return Err(FORBIDDEN.into());
         }
         csrf(h, &secret)?;

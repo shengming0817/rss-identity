@@ -1,3 +1,4 @@
+pub mod callback;
 mod credentials;
 mod revisions;
 pub use credentials::ProviderCredentials;

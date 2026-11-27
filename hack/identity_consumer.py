@@ -21,14 +21,14 @@ def main():
     rss=workspace['workspace']['dependencies']['rss-request-context']
     audit=workspace['workspace']['dependencies']['rss-audit-postgres']
     manifest='[package]\nname="identity-independent-consumer"\nversion="0.0.0"\nedition="2024"\n[workspace]\n[dependencies]\n'
-    for package in ['rss-identity-core','rss-identity-postgres','rss-identity-oidc','rss-identity-http-axum']:
+    for package in ['rss-identity-core','rss-identity-postgres','rss-identity-oidc','rss-identity-web-credentials']:
         manifest+=f'{package}={{git="https://dev.azure.com/shengming0923/rss/_git/rss-identity",rev="{args.revision}"}}\n'
     for package in ['rss-request-context','rss-transactional-messaging']:
         manifest+=f'{package}={{git="{rss["git"]}",rev="{rss["rev"]}"}}\n'
     manifest+=f'rss-transactional-messaging-postgres={{git="{rss["git"]}",rev="{rss["rev"]}",default-features=false,features=["integration"]}}\n'
     manifest+=f'rss-audit-postgres={{git="{audit["git"]}",rev="{audit["rev"]}",default-features=false,features=["messaging"]}}\n'
     manifest+='anyhow="1"\ntokio={version="1",features=["macros","rt-multi-thread","time"]}\nsqlx={version="=0.9.0",default-features=false,features=["runtime-tokio","tls-rustls","postgres"]}\n'
-    manifest+='serde_json="1"\nurl="2.5"\naxum={version="=0.8.9",default-features=false}\n'
+    manifest+='serde_json="1"\nurl="2.5"\nhttp="1"\n'
     with tempfile.TemporaryDirectory(prefix='identity-public-consumer-') as directory:
         directory=Path(directory);(directory/'src').mkdir()
         (directory/'Cargo.toml').write_text(manifest)
@@ -37,6 +37,14 @@ def main():
         env={**os.environ,'CARGO_TARGET_DIR':str(ROOT/'target/independent-consumer'),
              'CARGO_NET_GIT_FETCH_WITH_CLI':'true','PATH':'/usr/bin:'+os.environ.get('PATH','')}
         subprocess.run(['cargo','generate-lockfile'],cwd=directory,env=env,check=True)
+        closure = subprocess.check_output(
+            ['cargo', 'tree', '--locked', '-p', 'rss-identity-web-credentials', '-e', 'normal,build',
+             '--target', 'all', '--prefix', 'none', '--format', '{p}'],
+            cwd=directory, env=env, text=True)
+        packages = {line.split()[0] for line in closure.splitlines() if line.strip()}
+        forbidden = packages & {'axum', 'axum-core', 'rss-identity-service-http'}
+        if forbidden:
+            raise RuntimeError(f'Unexpected public credential dependencies: {sorted(forbidden)}')
         with postgres() as (_, ports):
             subprocess.run(['cargo','run','--locked'],cwd=directory,env={**env,'IDENTITY_TEST_PG_PORT':str(ports[5432])},check=True)
         print(f'Identity revision verified: {args.revision}')

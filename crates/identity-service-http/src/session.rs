@@ -2,7 +2,7 @@ use crate::{AppState, boundary::*};
 use axum::{
     Extension, Json,
     extract::{FromRequest, Query, Request, State},
-    http::{HeaderMap, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use rss_identity_core::SessionId;
@@ -22,15 +22,7 @@ struct Login {
     password: String,
 }
 pub(crate) fn issued(value: IssuedSession) -> Result<Response> {
-    let max_age = value.cookie_max_age();
-    if max_age == 0
-        || value.view().credential_kind != rss_identity_core::session::CredentialKind::Cookie
-    {
-        return Err(HttpError::from(AuthorityError::Unavailable));
-    }
-    let header = session_cookie(value.secret(), max_age)
-        .parse()
-        .map_err(|_| HttpError::from(AuthorityError::Unavailable))?;
+    let header = rss_identity_web_credentials::issued_cookie(&value)?;
     let mut response = Json(project_session(
         value.identity(),
         value.view(),
@@ -66,7 +58,7 @@ pub(crate) async fn login(
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response> {
-    if unique(request.headers(), "x-identity-request")? != Some("1") {
+    if !request_marker(request.headers())? {
         return Err(FORBIDDEN);
     }
     let peer = request
@@ -170,7 +162,14 @@ pub(crate) async fn logout(
         .authority
         .revoke_current_session(proof, budget.remaining())
         .await?;
-    Ok(clear_cookie())
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(
+            header::SET_COOKIE,
+            rss_identity_web_credentials::clear_session_cookie(),
+        )],
+    )
+        .into_response())
 }
 pub(crate) async fn logout_all(
     State(state): State<AppState>,
@@ -183,7 +182,14 @@ pub(crate) async fn logout_all(
         .authority
         .revoke_all_sessions(proof, budget.remaining())
         .await?;
-    Ok(clear_cookie())
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(
+            header::SET_COOKIE,
+            rss_identity_web_credentials::clear_session_cookie(),
+        )],
+    )
+        .into_response())
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -229,7 +235,7 @@ pub(crate) async fn reauthenticate(
     Extension(budget): Extension<RequestBudget>,
     request: Request,
 ) -> Result<Response> {
-    if unique(request.headers(), "x-identity-request")? != Some("1") {
+    if !request_marker(request.headers())? {
         return Err(FORBIDDEN);
     }
     let proof = actor(&state, binding, request.headers(), budget).await?;

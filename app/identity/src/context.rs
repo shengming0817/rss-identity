@@ -8,8 +8,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use rss_identity_http_axum::{HttpConfig, SessionActivity, authenticate_request};
 use rss_identity_postgres::Authority;
+use rss_identity_web_credentials::{HttpConfig, SessionActivity, authenticate_request};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
 use std::{sync::Arc, time::Duration};
@@ -48,14 +48,18 @@ pub fn router(
 async fn context(
     State(state): State<Context>,
     Path(raw): Path<String>,
+    deadline: Option<axum::Extension<rss_request_context::Deadline>>,
     headers: HeaderMap,
 ) -> Response {
+    let deadline = deadline
+        .map(|d| crate::assembly::deadline(d.0))
+        .unwrap_or_else(|| OperationDeadline::from_remaining(state.timeout));
     let response = match TenantId::parse(&raw) {
         Err(_) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"code":"malformed_request"}))).into_response(),
         Ok(tenant) => match state.storage.binding(tenant) {
           Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-          Ok(binding) => match authenticate_request(&state.authority, &state.http, binding, &headers, SessionActivity::Passive, OperationDeadline::from_remaining(state.timeout)).await {
-            Err(response) => response,
+          Ok(binding) => match authenticate_request(&state.authority, &state.http, binding, &headers, SessionActivity::Passive, deadline).await {
+            Err(error) => rss_identity_service_http::HttpError::from(error).into_response(),
             Ok((session, _credential)) => Json(serde_json::json!({
                 "tenantId":session.account().tenant.to_string(),
                 "principalId":session.account().principal.as_uuid().to_string(),

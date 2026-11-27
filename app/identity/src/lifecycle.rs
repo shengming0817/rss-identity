@@ -10,7 +10,8 @@ use axum::{
     routing::get,
 };
 use rss_identity_core::account::PasswordKdf;
-use rss_identity_http_axum::{HttpConfig, HttpFailure, federated_router, router};
+use rss_identity_service_http::{HttpFailure, ServiceEndpoints, protect_callback, routes};
+use rss_identity_web_credentials::HttpConfig;
 use rss_runtime::{
     AdmissionGate, AdmissionPermit, DynManagedResource, LifecycleScope, ManagedResource, ScopeExit,
     ShutdownError, TotalDrainBudget,
@@ -58,7 +59,7 @@ impl ManagedResource for KdfResource {
 }
 struct LeasedBody {
     inner: Body,
-    _permit: AdmissionPermit,
+    _permit: Arc<AdmissionPermit>,
 }
 impl http_body::Body for LeasedBody {
     type Data = Bytes;
@@ -84,13 +85,27 @@ async fn admit(
     let Some(permit) = gate.get().and_then(|g| g.try_admit().ok()) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let response = next.run(request).await;
-    response.map(|inner| {
-        Body::new(LeasedBody {
-            inner,
-            _permit: permit,
-        })
-    })
+    let mut response = next.run(request).await;
+    response.extensions_mut().insert(Arc::new(permit));
+    response
+}
+
+/// Attach the lease to the final body, including a sanitized callback redirect.
+async fn finish_response(State(oidc): State<bool>, request: Request, next: Next) -> Response {
+    let mut response = if oidc {
+        protect_callback(request, next).await
+    } else {
+        next.run(request).await
+    };
+    match response.extensions_mut().remove::<Arc<AdmissionPermit>>() {
+        Some(permit) => response.map(|inner| {
+            Body::new(LeasedBody {
+                inner,
+                _permit: permit,
+            })
+        }),
+        None => response,
+    }
 }
 // HttpFailure contains only closed, non-secret classifications. Never log the request or body.
 fn record_failure(response: &Response, mut output: impl std::io::Write) {
@@ -195,34 +210,36 @@ pub async fn serve(
                         rp,
                         origin,
                     )?;
-                    let mut app = router(authority, http.clone())?
-                        .merge(context)
-                        .merge(rss_identity_http_axum::webauthn_router(
-                            webauthn,
-                            http.clone(),
-                        )?)
-                        .route(
-                            "/identity-security",
-                            axum::routing::get(|| async {
-                                axum::response::Html(include_str!("security.html"))
-                            }),
-                        )
-                        .route(
-                            "/identity-security.js",
-                            axum::routing::get(|| async {
-                                (
-                                    [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-                                    include_str!("security.js"),
-                                )
-                            }),
-                        );
+                    let enable_oidc = federation.is_some();
+                    let app = routes(
+                        authority,
+                        http,
+                        ServiceEndpoints {
+                            federation: federation.clone(),
+                            webauthn: Some(webauthn),
+                            programmatic_bearer: false,
+                        },
+                    )?
+                    .merge(context)
+                    .route(
+                        "/identity-security",
+                        axum::routing::get(|| async {
+                            axum::response::Html(include_str!("security.html"))
+                        }),
+                    )
+                    .route(
+                        "/identity-security.js",
+                        axum::routing::get(|| async {
+                            (
+                                [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+                                include_str!("security.js"),
+                            )
+                        }),
+                    );
                     let execution = crate::execution::ExecutionState {
                         config: config.clone(),
                         federation: federation.clone(),
                     };
-                    if let Some(federation) = federation {
-                        app = app.merge(federated_router(federation, http)?);
-                    }
                     let app = app
                         .layer(middleware::from_fn_with_state(
                             execution,
@@ -236,6 +253,8 @@ pub async fn serve(
                             },
                             transport::trusted,
                         ));
+                    let app =
+                        app.layer(middleware::from_fn_with_state(enable_oidc, finish_response));
                     let health = Arc::new(Health {
                         config: config.clone(),
                         pool,
@@ -376,7 +395,7 @@ mod tests {
         let permit = gate.try_admit().unwrap();
         let body = LeasedBody {
             inner: Body::from("held"),
-            _permit: permit,
+            _permit: Arc::new(permit),
         };
         let mut drain = stack.shutdown();
         assert!(gate.try_admit().is_err());

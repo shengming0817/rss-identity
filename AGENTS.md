@@ -15,7 +15,7 @@ rss-identity 提供可嵌入的本地认证、租户联合身份与实例内会�
 
 遵循 [范围规则](docs/rules/project-scope.md)。组件拥有 AuthN、联合身份关联和实例内会话；宿主持有管理角色与防锁死；产品资源 ABAC、设备证书、posture、attestation 属于 MDM/ZT。
 
-RSS 通过同一仓库 URL 与固定完整 Git commit 消费，提交独立 Cargo.lock；不使用浮动 branch/tag、消费方跨仓 path、submodule 或旧内部包。RSS 固定 checkout 内的包间 path 依赖属于同一源码闭包。编译期消费者依赖四个公开能力包，HTTP DTO 保持在 adapter 内。不得恢复全局 diport、vocab、generated 或 provider 汇总 adapter。
+RSS 通过同一仓库 URL 与固定完整 Git commit 消费，提交独立 Cargo.lock；不使用浮动 branch/tag、消费方跨仓 path、submodule 或旧内部包。RSS 固定 checkout 内的包间 path 依赖属于同一源码闭包。编译期消费者依赖四个公开能力包，产品 HTTP DTO 归各自宿主的接口包。不得恢复全局 diport、vocab、generated 或 provider 汇总 adapter。
 
 ## 历史与上游参考
 

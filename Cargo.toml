@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/identity-core", "crates/identity-postgres", "crates/identity-oidc", "app/identity", "crates/identity-http-axum"]
+members = ["crates/identity-core", "crates/identity-postgres", "crates/identity-oidc", "app/identity", "crates/identity-service-http", "crates/identity-web-credentials"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +9,7 @@ version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
+rss-identity-web-credentials = { path = "crates/identity-web-credentials" }
 rss-audit-core = { git = "https://dev.azure.com/shengming0923/rss/_git/rss-audit", rev = "392b48fc28df6b1d290ec66727af4e632c10d090" }
 rss-audit-postgres = { git = "https://dev.azure.com/shengming0923/rss/_git/rss-audit", rev = "392b48fc28df6b1d290ec66727af4e632c10d090", features = ["messaging"] }
 tokio-util = "0.7"

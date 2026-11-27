@@ -5,7 +5,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use rss_identity_http_axum::ClientAddress;
+use rss_identity_service_http::ClientAddress;
 use std::net::{IpAddr, SocketAddr};
 #[derive(Clone)]
 pub struct Ingress {

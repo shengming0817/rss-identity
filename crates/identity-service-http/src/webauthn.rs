@@ -10,10 +10,12 @@ use rss_identity_core::step_up::StepUpContext;
 use rss_identity_postgres::{
     AuthenticatedSession, RegistrationAuthorization, RpGeneration, WebauthnAuthority,
 };
+use rss_identity_web_credentials::{
+    clear_operation_cookie, operation_cookie, read_operation_cookie,
+};
 use rss_transactional_messaging::fence::ExecutionBinding;
 use serde::Deserialize;
 use uuid::Uuid;
-const GRANT_COOKIE: &str = "__Host-identity-operation";
 #[derive(Clone)]
 struct StateData {
     webauthn: WebauthnAuthority,
@@ -95,7 +97,7 @@ async fn actor(
 ) -> Result<AuthenticatedSession, HttpError> {
     let secret = cookie(h)?.ok_or(UNAUTH)?;
     if write {
-        if unique(h, "x-identity-request")? != Some("1") {
+        if !request_marker(h)? {
             return Err(BAD);
         }
         csrf(h, &secret)?;
@@ -117,35 +119,10 @@ async fn body<T: serde::de::DeserializeOwned>(
             .map_err(|_| BAD)?;
     serde_json::from_slice(&bytes).map_err(|_| BAD)
 }
-pub(crate) fn grant_cookie(
-    grant: &rss_identity_postgres::StepUpGrant,
-) -> Result<String, HttpError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|value| i64::try_from(value.as_secs()).ok())
-        .ok_or_else(HttpError::request_timeout)?;
-    let remaining = grant
-        .expires_at
-        .checked_sub(now)
-        .filter(|age| *age > 0)
-        .ok_or_else(|| HttpError::from(AuthorityError::InteractionRequired))?;
-    Ok(format!(
-        "{GRANT_COOKIE}={}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={remaining}",
-        grant.expose()
-    ))
-}
-
-fn grant(headers: &HeaderMap) -> Result<Option<String>, HttpError> {
-    Ok(named_cookie(headers, GRANT_COOKIE)?.map(str::to_owned))
-}
 fn clear(mut response: Response) -> Response {
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        format!("{GRANT_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0")
-            .parse()
-            .expect("fixed cookie"),
-    );
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, clear_operation_cookie());
     response
 }
 async fn list(
@@ -172,7 +149,7 @@ async fn register_begin(
     request: Request,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, request.headers(), b, true).await?;
-    let token = grant(request.headers())?;
+    let token = read_operation_cookie(request.headers())?;
     let input: Register = body(request, b).await?;
     let authorization = token
         .map(RegistrationAuthorization::StepUp)
@@ -264,10 +241,9 @@ async fn auth_finish(
         )
         .await?;
     let mut response = Json(serde_json::json!({"expiresAt":grant.expires_at})).into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        grant_cookie(&grant)?.parse().map_err(|_| BAD)?,
-    );
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, operation_cookie(&grant)?);
     Ok(response)
 }
 async fn remove(
@@ -279,7 +255,7 @@ async fn remove(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, &headers, b, true).await?;
-    let token = grant(&headers)?.ok_or(UNAUTH)?;
+    let token = read_operation_cookie(&headers)?.ok_or(UNAUTH)?;
     s.webauthn
         .remove(actor, generation, id, token, b.remaining())
         .await?;
@@ -309,7 +285,7 @@ async fn cancel_operation(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, &headers, b, true).await?;
-    if let Some(handle) = grant(&headers)? {
+    if let Some(handle) = read_operation_cookie(&headers)? {
         s.webauthn
             .authority()
             .cancel_step_up(actor, handle, b.remaining())

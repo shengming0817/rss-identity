@@ -16,13 +16,14 @@ name = "identity-migrate"
 path = "src/bin/migrate.rs"
 
 [dependencies]
+rss-identity-web-credentials.workspace = true
 ring.workspace = true
 rss-audit-postgres.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true
 rss-runtime.workspace = true
 rss-axum = { workspace = true, features = ["http1"] }
-rss-identity-http-axum = { path = "../../crates/identity-http-axum" }
+rss-identity-service-http = { path = "../../crates/identity-service-http" }
 rss-identity-oidc = { path = "../../crates/identity-oidc" }
 axum = { version = "=0.8.9", default-features = false, features = ["tokio", "http1", "json"] }
 sha2.workspace = true

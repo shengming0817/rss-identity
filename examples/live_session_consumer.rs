@@ -2,7 +2,7 @@
 use rss_identity_core::{
     InstanceId, PrincipalId,
     account::{AccountKey, LoginKey, Password, PasswordKdf},
-    session::{SessionPolicy, SessionSecret},
+    session::{SessionPolicy,SessionSecret},
 };
 use rss_identity_postgres::*;
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
@@ -134,11 +134,21 @@ pub async fn run() -> anyhow::Result<()> {
     let issued = authority
         .login_local(binding(tenant), LoginKey::parse("host-user")?, Password::new("correct horse battery staple".into())?, AttemptSource::parse("consumer")?, None, deadline())
         .await?;
-    let actor = Arc::new(
-        authority
-            .inspect_session(binding(tenant), SessionSecret::parse(issued.secret().expose().into())?, deadline())
-            .await?,
-    );
+    use rss_identity_web_credentials::{HttpConfig, SessionActivity, authenticate_request, authenticate_bearer_request, issued_cookie};
+    let http = HttpConfig::new("https://identity.example.test", Duration::from_secs(30))?;
+    let header = issued_cookie(&issued)?;
+    let (presentation, _) = header.to_str()?.split_once(';').expect("session cookie attributes");
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::COOKIE, presentation.parse()?);
+    let (actor, _) = authenticate_request(&authority, &http, binding(tenant), &headers, SessionActivity::Passive, deadline()).await?;
+    assert_eq!(actor.view().id, issued.view().id);
+    let actor = Arc::new(actor);
+    let bearer = authority.login_local_bearer(binding(tenant), LoginKey::parse("host-user")?,
+        Password::new("correct horse battery staple".into())?, AttemptSource::parse("consumer")?,deadline()).await?;
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::AUTHORIZATION, format!("Bearer {}",bearer.secret().expose()).parse()?);
+    let (proof, _) = authenticate_bearer_request(&authority,&http,binding(tenant),&headers,deadline()).await?;
+    assert_eq!(proof.view().id,bearer.view().id);
     for commit in [true, false] {
         let actor = actor.clone();
         let result = runtime

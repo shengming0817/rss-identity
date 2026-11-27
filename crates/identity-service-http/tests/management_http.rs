@@ -8,8 +8,9 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, Response, StatusCode},
 };
-use rss_identity_http_axum::{HttpConfig, federated_router, router};
 use rss_identity_postgres::*;
+use rss_identity_service_http::{ServiceEndpoints, routes};
+use rss_identity_web_credentials::HttpConfig;
 use serde_json::{Value, json};
 use std::{sync::atomic::Ordering, time::Duration};
 use support::*;
@@ -29,9 +30,18 @@ fn app(
     let service = federation_support::service(f, upstream.clone());
     let config = HttpConfig::new(ORIGIN, Duration::from_secs(30)).unwrap();
     (
-        federated_router(service.clone(), config.clone())
-            .unwrap()
-            .merge(router(f.store.clone(), config).unwrap()),
+        routes(
+            f.store.clone(),
+            config,
+            ServiceEndpoints {
+                federation: Some(service.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .layer(axum::middleware::from_fn(
+            rss_identity_service_http::protect_callback,
+        )),
         service,
         upstream,
     )
@@ -51,7 +61,7 @@ fn req(method: &str, path: &str, cookie: &str, csrf: &str, value: Value) -> Requ
     }
     let mut r = r.body(Body::from(value.to_string())).unwrap();
     r.extensions_mut()
-        .insert(rss_identity_http_axum::ClientAddress(
+        .insert(rss_identity_service_http::ClientAddress(
             "127.0.0.1".parse().unwrap(),
         ));
     r

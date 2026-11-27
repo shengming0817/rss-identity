@@ -24,6 +24,10 @@ pub(crate) async fn scope(
     let Ok(cutoff) = crate::config::cutoff(state.config.budgets.request_seconds) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    let cutoff = parts
+        .extensions
+        .get::<rss_request_context::Deadline>()
+        .map_or(cutoff, |host| cutoff.shortened_to(host.instant()));
     parts.extensions.insert(cutoff);
     let params = Path::<HashMap<String, String>>::from_request_parts(&mut parts, &()).await;
     if let Ok(Path(params)) = params
@@ -52,7 +56,7 @@ pub(crate) async fn scope(
             let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
             response
                 .extensions_mut()
-                .insert(rss_identity_http_axum::HttpFailure::Authority(error));
+                .insert(rss_identity_service_http::HttpFailure::Authority(error));
             return response;
         }
     }

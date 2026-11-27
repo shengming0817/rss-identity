@@ -7,8 +7,9 @@ use axum::{
     http::{Request, StatusCode},
     response::Response,
 };
-use rss_identity_http_axum::{
-    HttpConfig, HttpFailure, SessionActivity, authenticate_request, router,
+use rss_identity_service_http::{ServiceEndpoints, routes};
+use rss_identity_web_credentials::{
+    CredentialError, HttpConfig, SessionActivity, authenticate_request,
 };
 use rss_transactional_messaging_postgres::PgTransactionFault;
 use serde_json::{Value, json};
@@ -69,10 +70,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             .await
             .err()
             .unwrap();
-            assert_eq!(error.status(), StatusCode::BAD_REQUEST);
-            assert_eq!(error.headers()["cache-control"], "no-store");
-            assert_eq!(error.headers()["referrer-policy"], "no-referrer");
-            assert!(!error.headers().contains_key("set-cookie"));
+            assert_eq!(error, CredentialError::Malformed);
         }
         let mut duplicate = active.clone();
         duplicate.append("cookie", cookie.parse()?);
@@ -87,9 +85,8 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             )
             .await
             .err()
-            .unwrap()
-            .status(),
-            StatusCode::BAD_REQUEST
+            .unwrap(),
+            CredentialError::Malformed
         );
     }
     for name in ["origin", "x-identity-request", "x-csrf-token"] {
@@ -112,11 +109,11 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             .err()
             .unwrap();
             assert_eq!(
-                error.status(),
+                error,
                 if duplicate && name != "origin" {
-                    StatusCode::BAD_REQUEST
+                    CredentialError::Malformed
                 } else {
-                    StatusCode::FORBIDDEN
+                    CredentialError::Forbidden
                 }
             );
         }
@@ -139,9 +136,8 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             )
             .await
             .err()
-            .unwrap()
-            .status(),
-            StatusCode::FORBIDDEN
+            .unwrap(),
+            CredentialError::Forbidden
         );
     }
     for mode in [SessionActivity::Passive, SessionActivity::Active] {
@@ -156,7 +152,11 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
         .await
         .err()
         .unwrap();
-        assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+        assert!(matches!(
+            error,
+            CredentialError::Invalid
+                | CredentialError::Authority(rss_identity_postgres::AuthorityError::Rejected)
+        ));
         let error = authenticate_request(
             &f.maintenance,
             &config,
@@ -168,7 +168,11 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
         .await
         .err()
         .unwrap();
-        assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+        assert!(matches!(
+            error,
+            CredentialError::Invalid
+                | CredentialError::Authority(rss_identity_postgres::AuthorityError::Rejected)
+        ));
         // Either the caller or HTTP configuration may provide the tighter budget.
         for (timeout, remaining) in [
             (Duration::from_secs(10), Duration::ZERO),
@@ -186,14 +190,16 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
             .await
             .err()
             .unwrap();
-            assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+
             assert_eq!(
-                error.extensions().get::<HttpFailure>(),
-                Some(&if remaining.is_zero() {
-                    HttpFailure::RequestTimeout
+                error,
+                if remaining.is_zero() {
+                    CredentialError::Deadline
                 } else {
-                    HttpFailure::Authority(rss_identity_postgres::AuthorityError::DeadlineElapsed)
-                })
+                    CredentialError::Authority(
+                        rss_identity_postgres::AuthorityError::DeadlineElapsed,
+                    )
+                }
             );
         }
     }
@@ -252,14 +258,12 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
     .await
     .err()
     .unwrap();
-    assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+
     assert!(matches!(
-        error.extensions().get::<HttpFailure>(),
-        Some(HttpFailure::Authority(
-            rss_identity_postgres::AuthorityError::CommitUnknown(_)
-        ))
+        error,
+        CredentialError::Authority(rss_identity_postgres::AuthorityError::CommitUnknown(_))
     ));
-    assert!(!error.headers().contains_key("set-cookie"));
+
     app.oneshot(crate::request_support::scoped(request(
         "POST",
         "session/logout",
@@ -280,7 +284,11 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
         .await
         .err()
         .unwrap();
-        assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+        assert!(matches!(
+            error,
+            CredentialError::Invalid
+                | CredentialError::Authority(rss_identity_postgres::AuthorityError::Rejected)
+        ));
     }
     f.runtime.close().await;
     let error = authenticate_request(
@@ -294,15 +302,17 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
     .await
     .err()
     .unwrap();
-    assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    assert!(matches!(error, CredentialError::Authority(_)));
     f.close().await;
     Ok(())
 }
 
 fn app(f: &Fixture) -> Router {
-    router(
+    routes(
         f.store.clone(),
         HttpConfig::new(ORIGIN, Duration::from_secs(10)).unwrap(),
+        ServiceEndpoints::default(),
     )
     .unwrap()
 }
@@ -327,7 +337,7 @@ fn request(
     }
     let mut req = req.body(Body::from(body.to_string())).unwrap();
     req.extensions_mut()
-        .insert(rss_identity_http_axum::ClientAddress(
+        .insert(rss_identity_service_http::ClientAddress(
             "127.0.0.1".parse().unwrap(),
         ));
     req
@@ -608,8 +618,8 @@ async fn session_http_settlement_never_sets_uncertain_cookie() -> anyhow::Result
     assert!(matches!(
         response
             .extensions()
-            .get::<rss_identity_http_axum::HttpFailure>(),
-        Some(rss_identity_http_axum::HttpFailure::Authority(_))
+            .get::<rss_identity_service_http::HttpFailure>(),
+        Some(rss_identity_service_http::HttpFailure::Authority(_))
     ));
     f.close().await;
     Ok(())
@@ -808,9 +818,10 @@ async fn session_http_recovery_current_logout_and_deadline() -> anyhow::Result<(
     f.bootstrap().await?;
     let app = app(&f);
     assert!(
-        router(
+        routes(
             f.maintenance.clone(),
-            HttpConfig::new(ORIGIN, Duration::from_secs(1))?
+            HttpConfig::new(ORIGIN, Duration::from_secs(1))?,
+            ServiceEndpoints::default()
         )
         .is_err()
     );
@@ -874,9 +885,10 @@ async fn session_http_recovery_current_logout_and_deadline() -> anyhow::Result<(
             .status(),
         StatusCode::OK
     );
-    let short = router(
+    let short = routes(
         f.store.clone(),
         HttpConfig::new(ORIGIN, Duration::from_millis(40))?,
+        ServiceEndpoints::default(),
     )?;
     let mut req = login_request(None, None);
     *req.body_mut() = Body::from_stream(futures::stream::pending::<
@@ -892,8 +904,8 @@ async fn session_http_recovery_current_logout_and_deadline() -> anyhow::Result<(
     assert_eq!(
         response
             .extensions()
-            .get::<rss_identity_http_axum::HttpFailure>(),
-        Some(&rss_identity_http_axum::HttpFailure::RequestTimeout)
+            .get::<rss_identity_service_http::HttpFailure>(),
+        Some(&rss_identity_service_http::HttpFailure::RequestTimeout)
     );
     f.close().await;
     Ok(())
@@ -968,14 +980,15 @@ async fn session_http_lookup_never_inserts_tenant_guard() -> anyhow::Result<()> 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn session_http_pending_commit_preserves_settlement() -> anyhow::Result<()> {
-    use rss_identity_http_axum::HttpFailure;
     use rss_identity_postgres::AuthorityError;
+    use rss_identity_service_http::HttpFailure;
     let f = Fixture::new().await?;
     f.bootstrap().await?;
     let normal = app(&f);
-    let short = router(
+    let short = routes(
         f.store.clone(),
         HttpConfig::new(ORIGIN, Duration::from_millis(200))?,
+        ServiceEndpoints::default(),
     )?;
     for (fault, committed) in [
         (PgTransactionFault::CommitPending, false),
@@ -1134,13 +1147,15 @@ async fn session_http_reauthentication_preserves_identity_and_rotates_credential
 }
 
 fn bearer_app(f: &Fixture) -> Router {
-    app(f).merge(
-        rss_identity_http_axum::bearer_router(
-            f.store.clone(),
-            HttpConfig::new(ORIGIN, Duration::from_secs(10)).unwrap(),
-        )
-        .unwrap(),
+    routes(
+        f.store.clone(),
+        HttpConfig::new(ORIGIN, Duration::from_secs(10)).unwrap(),
+        ServiceEndpoints {
+            programmatic_bearer: true,
+            ..Default::default()
+        },
     )
+    .unwrap()
 }
 fn bearer_login() -> Request<Body> {
     let mut req = request(
@@ -1173,7 +1188,7 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         axum::http::HeaderMap::new(),
         bearer_headers(&"a".repeat(64)),
     ] {
-        let error = rss_identity_http_axum::authenticate_bearer_request(
+        let error = rss_identity_web_credentials::authenticate_bearer_request(
             &f.store,
             &config,
             crate::support::binding(f.key.tenant),
@@ -1183,9 +1198,12 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         .await
         .err()
         .unwrap();
-        assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(error.headers()["www-authenticate"], "Bearer");
-        assert_eq!(error.headers()["cache-control"], "no-store");
+        assert!(matches!(
+            error,
+            CredentialError::Invalid
+                | CredentialError::Authority(rss_identity_postgres::AuthorityError::Rejected)
+        ));
+
         let mut logout = request("POST", "bearer/logout", None, None, json!(null));
         logout.headers_mut().extend(headers);
         let response = app
@@ -1210,7 +1228,7 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         issued["absoluteExpiresAt"].as_i64().unwrap() > issued["idleExpiresAt"].as_i64().unwrap()
     );
     let headers = bearer_headers(token);
-    let (proof, retained) = rss_identity_http_axum::authenticate_bearer_request(
+    let (proof, retained) = rss_identity_web_credentials::authenticate_bearer_request(
         &f.store,
         &config,
         crate::support::binding(f.key.tenant),
@@ -1228,7 +1246,7 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
     ] {
         let mut mixed = headers.clone();
         mixed.append(name, value.parse()?);
-        let error = rss_identity_http_axum::authenticate_bearer_request(
+        let error = rss_identity_web_credentials::authenticate_bearer_request(
             &f.store,
             &config,
             crate::support::binding(f.key.tenant),
@@ -1238,12 +1256,9 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         .await
         .err()
         .unwrap();
-        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(error.headers()["cache-control"], "no-store");
-        assert!(!error.headers().contains_key("www-authenticate"));
-        assert!(
-            !String::from_utf8(to_bytes(error.into_body(), 4096).await?.to_vec())?.contains(token)
-        );
+        assert_eq!(error, CredentialError::Malformed);
+
+        assert!(!format!("{error:?}").contains(token));
     }
     let mut mixed = request("GET", "session", Some(&cookie), None, json!(null));
     mixed
@@ -1271,7 +1286,7 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         StatusCode::UNAUTHORIZED
     );
     let browser_secret = cookie.split_once('=').unwrap().1;
-    let error = rss_identity_http_axum::authenticate_bearer_request(
+    let error = rss_identity_web_credentials::authenticate_bearer_request(
         &f.store,
         &config,
         crate::support::binding(f.key.tenant),
@@ -1281,7 +1296,10 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
     .await
     .err()
     .unwrap();
-    assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+    assert!(matches!(
+        error,
+        CredentialError::Authority(rss_identity_postgres::AuthorityError::Rejected)
+    ));
     let mut logout = request("POST", "bearer/logout", None, None, json!(null));
     logout.headers_mut().remove("origin");
     logout
@@ -1294,7 +1312,7 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(!response.headers().contains_key("set-cookie"));
     assert_eq!(
-        rss_identity_http_axum::authenticate_bearer_request(
+        rss_identity_web_credentials::authenticate_bearer_request(
             &f.store,
             &config,
             crate::support::binding(f.key.tenant),
@@ -1303,9 +1321,8 @@ async fn bearer_http_lifecycle_and_presentation_are_independent() -> anyhow::Res
         )
         .await
         .err()
-        .unwrap()
-        .status(),
-        StatusCode::UNAUTHORIZED
+        .unwrap(),
+        CredentialError::Authority(rss_identity_postgres::AuthorityError::Rejected)
     );
     assert_eq!(
         app.clone()
@@ -1357,7 +1374,7 @@ async fn bearer_http_admission_shared_limits_and_failed_issuance() -> anyhow::Re
     let mut missing_source = bearer_login();
     missing_source
         .extensions_mut()
-        .remove::<rss_identity_http_axum::ClientAddress>();
+        .remove::<rss_identity_service_http::ClientAddress>();
     assert_eq!(
         app.clone()
             .oneshot(crate::request_support::scoped(missing_source))

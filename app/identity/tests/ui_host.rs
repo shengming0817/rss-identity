@@ -48,24 +48,27 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
             )]),
         },
     )?;
-    let http = rss_identity_http_axum::HttpConfig::new(&origin, Duration::from_secs(30))?;
-    let app = rss_identity_http_axum::router(authority.clone(), http.clone())?
-        .merge(rss_identity_http_axum::federated_router(
-            federation,
-            http.clone(),
-        )?)
-        .merge(rss_identity_app::context::router(authority, &config, http)?)
-        .layer(axum::middleware::from_fn(
-            |request: axum::extract::Request, next: axum::middleware::Next| async move {
-                next.run(crate::request_support::scoped(request)).await
-            },
-        ))
-        .layer(axum::middleware::from_fn_with_state(
-            rss_identity_app::transport::Ingress {
-                public: config.public_gateway,
-            },
-            rss_identity_app::transport::trusted,
-        ));
+    let http = rss_identity_web_credentials::HttpConfig::new(&origin, Duration::from_secs(30))?;
+    let app = rss_identity_service_http::routes(
+        authority.clone(),
+        http.clone(),
+        rss_identity_service_http::ServiceEndpoints {
+            federation: Some(federation),
+            ..Default::default()
+        },
+    )?
+    .merge(rss_identity_app::context::router(authority, &config, http)?)
+    .layer(axum::middleware::from_fn(
+        |request: axum::extract::Request, next: axum::middleware::Next| async move {
+            next.run(crate::request_support::scoped(request)).await
+        },
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        rss_identity_app::transport::Ingress {
+            public: config.public_gateway,
+        },
+        rss_identity_app::transport::trusted,
+    ));
     let port: u16 = std::env::var("IDENTITY_TEST_UI_PORT")?.parse()?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -132,5 +135,5 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[path = "../../../crates/identity-http-axum/tests/request_support/mod.rs"]
+#[path = "../../../crates/identity-service-http/tests/request_support/mod.rs"]
 mod request_support;

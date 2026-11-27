@@ -208,7 +208,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
                 deadline(),
             )
             .await?;
-        let http = rss_identity_http_axum::HttpConfig::new(
+        let http = rss_identity_web_credentials::HttpConfig::new(
             &config.public_origin,
             config.budgets.request(),
         )?;
@@ -403,6 +403,15 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     kdf.wait_closed().await;
     assert!(kdf.hash(password()).await.is_err());
 
+    value["oidc"] = json!({
+        "requestSeconds":5, "connectSeconds":3, "maxResponseBytes":1048576, "maxJwksKeys":128,
+        "reuse": {"maxProviders":128,"maxResidentBytes":8388608,"maxRefreshes":8,"maxIdlePerHost":2,
+                 "idleSeconds":30,"discoverySeconds":300,"jwksSeconds":60,"refreshCooldownSeconds":10},
+        "groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[],
+        "stateKeyFile":root.join("old-key"),
+        "credentialKeyring":{"activeKeyId":"next","keys":[{"keyId":"next","path":root.join("new-key")}]},
+        "returnTargets":{"resume":"https://identity.example.test/auth/resume"}
+    });
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     value["listen"] = json!(occupied.local_addr()?.to_string());
     let failed = tokio::time::timeout(
@@ -459,6 +468,38 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         probe.status.success(),
         "configured loopback probe must reach real readiness"
     );
+    let callback_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let callback = format!("{url}/api/v1/identity/oidc/callback");
+    // Both the trusted-ingress rejection and the invalid provider outcome reach the same browser projection.
+    for trusted in [false, true] {
+        let mut request = callback_client.get(&callback).query(&[
+            ("code", "private-code"),
+            ("error", "private-error"),
+            ("state", "bad"),
+            ("iss", "bad"),
+        ]);
+        if trusted {
+            request = request.header("x-forwarded-for", "203.0.113.7");
+        }
+        let rejected = request.send().await?;
+        assert_eq!(rejected.status(), reqwest::StatusCode::SEE_OTHER);
+        assert_eq!(rejected.headers()["location"], "/auth/error?reason=failed");
+        assert_eq!(rejected.headers()["cache-control"], "no-store");
+        assert_eq!(rejected.headers()["referrer-policy"], "no-referrer");
+        assert!(!rejected.headers().contains_key("set-cookie"));
+        assert!(rejected.bytes().await?.is_empty());
+    }
+    assert_eq!(
+        callback_client
+            .head(&callback)
+            .header("x-forwarded-for", "203.0.113.7")
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::METHOD_NOT_ALLOWED
+    );
     let response = client
         .post(format!(
             "{url}/api/v1/identity/tenants/{}/login",
@@ -478,10 +519,69 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         .next()
         .unwrap()
         .to_owned();
+    let login: serde_json::Value = response.json().await?;
     assert_eq!(
-        response.json::<serde_json::Value>().await?["identity"]["principalId"],
+        login["identity"]["principalId"],
         keys[1].principal.as_uuid().to_string()
     );
+    let sessions = format!("{url}/api/v1/identity/tenants/{}/session", keys[1].tenant);
+    let idle = sqlx::query_scalar::<_,i64>("UPDATE identity_authority.sessions SET idle_expires_at=idle_expires_at-5 WHERE session_id=$1::uuid RETURNING idle_expires_at")
+        .bind(login["session"]["id"].as_str().unwrap()).fetch_one(&mut owner).await?;
+    let passive = client
+        .get(&sessions)
+        .header("cookie", &cookie)
+        .header("x-forwarded-for", "203.0.113.7")
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+    assert_eq!(passive["session"]["idleExpiresAt"], idle);
+    let refresh = client
+        .post(format!("{sessions}/refresh"))
+        .header("cookie", &cookie)
+        .header("x-forwarded-for", "203.0.113.7");
+    for rejected in [
+        refresh
+            .try_clone()
+            .unwrap()
+            .header("origin", "https://wrong.example.test")
+            .header("x-csrf-token", login["csrfToken"].as_str().unwrap()),
+        refresh
+            .try_clone()
+            .unwrap()
+            .header("origin", value["publicOrigin"].as_str().unwrap()),
+    ] {
+        assert_eq!(
+            rejected.send().await?.status(),
+            reqwest::StatusCode::FORBIDDEN
+        );
+    }
+    let rotated = refresh
+        .header("origin", value["publicOrigin"].as_str().unwrap())
+        .header("x-identity-request", "1")
+        .header("x-csrf-token", login["csrfToken"].as_str().unwrap())
+        .send()
+        .await?
+        .error_for_status()?;
+    let new_cookie = rotated.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert_ne!(new_cookie, cookie);
+    assert_eq!(
+        client
+            .get(&sessions)
+            .header("cookie", &cookie)
+            .header("x-forwarded-for", "203.0.113.7")
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let cookie = new_cookie;
     let resource = format!(
         "{url}/api/v1/identity-host/tenants/{}/context",
         keys[1].tenant
@@ -633,5 +733,5 @@ fn deadline() -> rss_transactional_messaging::policy::OperationDeadline {
     )
 }
 
-#[path = "../../../crates/identity-http-axum/tests/request_support/mod.rs"]
+#[path = "../../../crates/identity-service-http/tests/request_support/mod.rs"]
 mod request_support;

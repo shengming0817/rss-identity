@@ -399,7 +399,7 @@ impl RuntimeConfig {
         self.password_work.build()?;
         crate::assembly::authority_config(self)?;
         self.http.policy(self.budgets)?;
-        rss_identity_http_axum::HttpConfig::new(&self.public_origin, self.budgets.request())
+        rss_identity_web_credentials::HttpConfig::new(&self.public_origin, self.budgets.request())
             .map_err(|_| AppError::Configuration)?;
         if let Some(oidc) = &self.oidc {
             oidc.group_policy()?;

@@ -1,8 +1,8 @@
 # Instance-local HTTP v1
 
-`rss-identity-http-axum` 提供可挂载 Router。宿主提供 canonical HTTPS origin、TLS 和可信代理/连接来源；不能直接信任浏览器转发头。仅 `/api/v1/identity`，旧中央/internal/platform/CLI、HTTP V2 及历史 V1 路由不存在。应用 JSON 字段使用 camelCase，旧 snake_case 字段拒绝；OIDC callback 标准参数 `error_description` / `error_uri` / `session_state` 保留上游协议拼写。DTO 留在 HTTP adapter 内，浏览器响应不能作为宿主 Rust 认证证明。
+`rss-identity-service-http` 持有独立 Identity 服务的路由和 DTO。宿主提供 canonical HTTPS origin、TLS 和可信代理/连接来源；不能直接信任浏览器转发头。仅 `/api/v1/identity`，旧中央/internal/platform/CLI、HTTP V2 及历史 V1 路由不存在。应用 JSON 字段使用 camelCase，旧 snake_case 字段拒绝；OIDC callback 标准参数 `error_description` / `error_uri` / `session_state` 保留上游协议拼写。DTO 留在 HTTP adapter 内，浏览器响应不能作为宿主 Rust 认证证明。
 
-`router` 与 `federated_router` 保持现有公开签名，各自将相对路由挂载到固定 `/api/v1/identity`，宿主直接 merge；不得再次添加该前缀。请求边界通过 OriginalUri 检查完整路径及 8192 字节 URI 上限，callback 的 HEAD 返回 405。参考宿主资源独立使用 `/api/v1/identity-host/...`。
+独立服务通过 `routes` 按装配的能力注册 `/api/v1/identity` 路由。请求边界通过 OriginalUri 检查完整路径及 8192 字节 URI 上限，callback 的 HEAD 返回 405。参考宿主资源独立使用 `/api/v1/identity-host/...`。
 
 ## 本地会话
 
@@ -18,7 +18,7 @@
 | POST `/sessions/logout-all` | 撤销账户全部会话，清 cookie。 |
 | GET `/sessions` | 有界分页；`cursor`/`limit`。 |
 
-请求/响应 DTO 以 [HTTP adapter](../../crates/identity-http-axum/src/lib.rs) 的类型与路由为准；[会话接入测试](../../crates/identity-http-axum/tests/session_http.rs) 提供实际请求示例。
+请求/响应 DTO 以 [HTTP adapter](../../crates/identity-service-http/src/lib.rs) 的类型与路由为准；[会话接入测试](../../crates/identity-service-http/tests/session_http.rs) 提供实际请求示例。
 
 bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=...` 传递。响应 no-store。写请求检查精确 Origin；登录、重新认证和管理写入要求 `x-identity-request: 1`，已认证修改须 `x-csrf-token`。拒绝重复/畸形凭据头。日志不得记录 Cookie、Set-Cookie、密码、CSRF 或回调参数。
 
@@ -32,11 +32,11 @@ bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpO
 
 ## 可选 OIDC Router
 
-仅合并 `federated_router` 后可用。同一 tenant 前缀：GET `/login-options`；POST `/oidc/{provider}/login`（`{returnTarget}`）、`/link`（重新认证与受控目标）、`/step-up`（`{returnTarget,operation}`）；GET `/session/security`。后者提供 `authentication:{authTime,acr,amr}` 和 `eligibleStepUpProviders:[{providerId,label}]`；普通 OIDC 未提供认证时间时 `authTime:null`，不回填 iat。它只提供认证事实，不返回管理角色。
+装配 Federation 后可用。同一 tenant 前缀：GET `/login-options`；POST `/oidc/{provider}/login`（`{returnTarget}`）、`/link`（重新认证与受控目标）、`/step-up`（`{returnTarget,operation}`）；GET `/session/security`。后者提供 `authentication:{authTime,acr,amr}` 和 `eligibleStepUpProviders:[{providerId,label}]`；普通 OIDC 未提供认证时间时 `authTime:null`，不回填 iat。它只提供认证事实，不返回管理角色。
 
 唯一回调 GET `/api/v1/identity/oidc/callback`：state/code/iss 与独立 HttpOnly browser cookie 绑定；拒绝重放、过期、不匹配和不确定结算，不释放 cookie。returnTarget 是宿主白名单键，不接受任意 URL；不再接受中央 clientId。
 
-IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/providers/{provider}/enabled`、`/test`。写入使用 expectedVersion 乐观并发；创建初始配置不需要该字段。凭据只写，加密存储，不返回明文。provider 管理字段由 [provider 管理适配器](../../crates/identity-http-axum/src/provider_management.rs) 持有。部门映射须显式启用并给出有界期限，省略/null 表示禁用；旧标量字段拒绝。更新映射和期限经过同一并发版本与凭据更新流程，撤销旧会话及在途认证。完整快照只来自签名 ID Token，浏览器响应不成为部门授权证明。
+IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/providers/{provider}/enabled`、`/test`。写入使用 expectedVersion 乐观并发；创建初始配置不需要该字段。凭据只写，加密存储，不返回明文。provider 管理字段由 [provider 管理适配器](../../crates/identity-service-http/src/providers.rs) 持有。部门映射须显式启用并给出有界期限，省略/null 表示禁用；旧标量字段拒绝。更新映射和期限经过同一并发版本与凭据更新流程，撤销旧会话及在途认证。完整快照只来自签名 ID Token，浏览器响应不成为部门授权证明。
 
 
 ## 失败与可信边界
@@ -70,7 +70,7 @@ HTTP 宿主资源请求统一调用 `authenticate_request`：用户活动选择 
 
 ## WebAuthn 与操作证明
 
-显式挂载 `webauthn_router`；当前 tenant 前缀下提供 `/webauthn/credentials` 查询、`register/begin` 与 `register/finish`、`authenticate/begin` 与 `authenticate/finish`、`credentials/{id}/remove` 和 `{ceremony}/cancel`。写操作沿用 Origin、请求标记、CSRF 和当前 Cookie 检查；不接受 assurance 或 RP 配置。
+显式装配 WebauthnAuthority；当前 tenant 前缀下提供 `/webauthn/credentials` 查询、`register/begin` 与 `register/finish`、`authenticate/begin` 与 `authenticate/finish`、`credentials/{id}/remove` 和 `{ceremony}/cancel`。写操作沿用 Origin、请求标记、CSRF 和当前 Cookie 检查；不接受 assurance 或 RP 配置。
 
 `operation` 使用 `register`、`remove`（带 credential）、`recover` 或 `host` 的类型标记。前三项由服务端派生本人管理上下文；`host` 必须由可信宿主中间件注入 `StepUpContext`，不能从浏览器复制任意 context。OIDC step-up 和 WebAuthn 完成都设置短期 HttpOnly `__Host-identity-operation` Cookie，原会话保持不变。该 Cookie 不是身份凭据，消费必须匹配原会话和精确操作；产品业务使用同事务 `consume_step_up_on`，禁止验证后另起事务写业务。
 
