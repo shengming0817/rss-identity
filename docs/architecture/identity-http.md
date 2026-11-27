@@ -49,6 +49,8 @@
 
 IdP 管理：GET/POST `/providers`、PUT `/providers/{provider}`、POST `/providers/{provider}/enabled`、`/test`。写入使用 expectedVersion 乐观并发；创建初始配置不需要该字段。凭据只写，加密存储，不返回明文。provider 管理字段由 [provider 管理适配器](../../crates/identity-service-http/src/providers.rs) 持有。部门映射须显式启用并给出有界期限，省略/null 表示禁用；旧标量字段拒绝。更新映射和期限经过同一并发版本与凭据更新流程，撤销旧会话及在途认证。完整快照只来自签名 ID Token，浏览器响应不成为部门授权证明。
 
+连接测试返回成功报告，或在有明确协议阶段时返回 `passed: false` 及结构化诊断。整体不可用且无法定位阶段时，HTTP 返回 503 和 `identity_unavailable`。
+
 
 ## 失败与可信边界
 

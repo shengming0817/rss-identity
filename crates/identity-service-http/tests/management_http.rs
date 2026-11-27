@@ -695,6 +695,25 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     let v = json_body(r).await?;
     assert_eq!(v["passed"], false);
     assert_eq!(v["diagnostic"]["stage"], "jwks");
+    // An unavailable probe without an observed protocol stage gets the product availability error.
+    *upstream.hook.lock().unwrap() = Some(Box::new(|| {
+        Box::pin(async { Err(rss_identity_core::federation::FederationError::Unavailable) })
+    }));
+    let response = app
+        .clone()
+        .oneshot(crate::request_support::scoped(req(
+            "POST",
+            &format!("{url}/test"),
+            &cookie,
+            &csrf,
+            json!({}),
+        )))
+        .await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_body(response).await?,
+        json!({"code": "identity_unavailable"})
+    );
     let r = app
         .clone()
         .oneshot(crate::request_support::scoped(req(

@@ -490,7 +490,7 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     s.reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
     assert!(
-        f.store
+        s.authority()
             .inspect_session(
                 crate::support::binding(f.key.tenant),
                 secret(&original),
