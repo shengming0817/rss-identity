@@ -1,5 +1,7 @@
 //! Identity-owned event meaning; Audit only persists the exact prepared records.
 mod mapping;
+#[cfg(test)]
+mod tests;
 use crate::transaction::{MAX_MUTATION_EVENTS, SecurityEvent, corrupt};
 use rss_audit_postgres::Integrity;
 use rss_identity_core::InstanceId;

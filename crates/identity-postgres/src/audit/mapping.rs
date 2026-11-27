@@ -4,8 +4,46 @@ use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_identity_core::InstanceId;
 use rss_request_context::TenantId;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+const fn contract(id: &'static str, major: u32, digest: &'static str) -> SourceContract {
+    SourceContract::new(
+        ContractId::from_static(id),
+        ContractVersion::from_static_major(major),
+        SchemaDigest::from_static(digest),
+    )
+}
+
+static ACCOUNT: SourceContract = contract(
+    "identity.account.security",
+    3,
+    "sha256:47f5e210bc21eb91e79ad51b6edc6892caee4766c61cbb68e022fe39e8cd4c0b",
+);
+static PROVISIONING: SourceContract = contract(
+    "identity.account.provisioning",
+    1,
+    "sha256:5b6240b41bdd4b2d41f374eb9c3ab2065de4afd59a6d081d3df65f6d77e6129d",
+);
+static AUTHENTICATION: SourceContract = contract(
+    "identity.authentication.security",
+    1,
+    "sha256:05e9bfba291ff0cea88e1ac9698599f79a5496b88d253629ad06126f0bca4fa4",
+);
+static PROFILE: SourceContract = contract(
+    "identity.profile.security",
+    1,
+    "sha256:b1d85fd4945126c1d887dfd7b9166cbbfb2816ac0b3ebf3de68b3444671ec15b",
+);
+static SESSION: SourceContract = contract(
+    "identity.session.security",
+    1,
+    "sha256:a5ffc6efdd2f2c0c275555cff44e47c3e5fb395a997bedc5ee07c4ea5750070e",
+);
+static FEDERATION: SourceContract = contract(
+    "identity.federation.security",
+    2,
+    "sha256:618633921c9b816c89b0de6bd78fc1548b9288e3b8b77cd22f29269a5492579d",
+);
 
 #[derive(Debug, thiserror::Error)]
 #[error("invalid identity audit event")]
@@ -22,7 +60,7 @@ pub(super) fn map_event(
 ) -> Result<AuditEventV1, InvalidEvent> {
     let tenant = tenant_id.to_string();
     require(event.tenant() == tenant)?;
-    let (action, actor_kind, actor_id, resource_kind, resource_id, outcome, payload) = match event {
+    let mapped = match event {
         SecurityEvent::Authentication(e) => {
             require(e.tenant == tenant && !e.principal.is_nil())?;
             let action = match e.action {
@@ -32,6 +70,7 @@ pub(super) fn map_event(
                 crate::step_up::AuthenticationAction::Verified => "verified",
             };
             (
+                &AUTHENTICATION,
                 format!("identity.authentication.{action}"),
                 "principal",
                 e.principal.to_string(),
@@ -67,6 +106,7 @@ pub(super) fn map_event(
                     && (e.action == "local_updated") == e.actor.is_some(),
             )?;
             (
+                &PROFILE,
                 format!("identity.profile.{}", e.action),
                 "principal",
                 e.actor.unwrap_or(e.principal).to_string(),
@@ -90,6 +130,7 @@ pub(super) fn map_event(
             )?;
             rss_request_context::TenantId::parse(&v.actor_tenant).map_err(|_| InvalidEvent)?;
             (
+                &PROVISIONING,
                 "identity.account.provisioned".into(),
                 "principal",
                 format!("{}:{}", v.actor_tenant, actor),
@@ -123,6 +164,7 @@ pub(super) fn map_event(
                 ("principal", a.to_string())
             });
             (
+                &ACCOUNT,
                 format!("identity.account.{}", e.action),
                 kind,
                 actor,
@@ -151,6 +193,7 @@ pub(super) fn map_event(
                 ("session", e.session_id.to_string())
             };
             (
+                &SESSION,
                 format!("identity.session.{}", action),
                 "principal",
                 e.principal.to_string(),
@@ -211,6 +254,7 @@ pub(super) fn map_event(
                 )
             };
             (
+                &FEDERATION,
                 format!("identity.federation.{}", action),
                 kind,
                 actor,
@@ -225,20 +269,15 @@ pub(super) fn map_event(
             )
         }
     };
-    let (contract, version, schema) = event.contract();
-    let source_contract = SourceContract::new(
-        ContractId::parse(contract).map_err(|_| InvalidEvent)?,
-        ContractVersion::from_major(version).map_err(|_| InvalidEvent)?,
-        SchemaDigest::parse(&format!("sha256:{:x}", Sha256::digest(schema)))
-            .map_err(|_| InvalidEvent)?,
-    );
+    let (contract, action, actor_kind, actor_id, resource_kind, resource_id, outcome, payload) =
+        mapped;
     let build = || -> Result<_, rss_audit_core::Error> {
         Ok(AuditEventV1::new(
             RecordIdentity::new(
                 tenant_id,
                 SourceIdentity::new(
                     SourceId::parse(&format!("identity.{instance}"))?,
-                    source_contract,
+                    contract.clone(),
                 ),
                 EventId::parse(&id.to_string())?,
             ),
