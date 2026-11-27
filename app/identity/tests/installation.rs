@@ -82,10 +82,6 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
     migration::verify(install_config()).await?;
     sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES('55555555-5555-4555-8555-555555555555',1)").execute(&mut owner).await?;
     migration::verify(install_config()).await?;
-    let restore_version = format!(
-        "INSERT INTO identity_authority.schema_version VALUES({})",
-        rss_identity_postgres::SCHEMA_VERSION
-    );
     for (corrupt, restore) in [
         (
             "ALTER ROLE host_audit_owner CREATEDB",
@@ -97,7 +93,7 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         ),
         (
             "DELETE FROM identity_authority.schema_version",
-            restore_version.as_str(),
+            "INSERT INTO identity_authority.schema_version VALUES(21)",
         ),
         (
             "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2",
