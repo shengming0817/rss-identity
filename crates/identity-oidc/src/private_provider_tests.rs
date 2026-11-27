@@ -1,4 +1,6 @@
 //! Production transport + real HTTPS private Keycloak. No test-support or reference host.
+
+use crate::test_support::fixture_provider;
 use crate::{HttpOidc, PrivateProviderAccess};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::{Client, Url};
@@ -68,7 +70,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     controlled(&mut adapter, vec![endpoint], calls.clone());
     assert!(
         adapter
-            .test(tenant, &config, &credentials, upstream_deadline())
+            .test(fixture_provider(tenant, &config, &credentials), upstream_deadline())
             .await?
             .tls_verified
     );
@@ -81,7 +83,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     controlled(&mut denied, vec![endpoint], calls.clone());
     assert!(
         denied
-            .test(tenant, &config, &credentials, upstream_deadline())
+            .test(fixture_provider(tenant, &config, &credentials), upstream_deadline())
             .await
             .is_err()
     );
@@ -92,7 +94,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     );
     assert!(
         adapter
-            .test(tenant, &config, &credentials, upstream_deadline())
+            .test(fixture_provider(tenant, &config, &credentials), upstream_deadline())
             .await
             .is_err()
     );
@@ -100,25 +102,18 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     let other = TenantId::parse("22222222-2222-4222-8222-222222222222")?;
     assert!(
         adapter
-            .test(other, &config, &credentials, upstream_deadline())
+            .test(fixture_provider(other, &config, &credentials), upstream_deadline())
             .await
             .is_err()
     );
     let untrusted = ProviderCredentials::new("fixture-secret".into(), None)?;
     assert!(
-        matches!(adapter.test(tenant, &config, &untrusted, upstream_deadline()).await,
+        matches!(adapter.test(fixture_provider(tenant, &config, &untrusted), upstream_deadline()).await,
         Err(FederationError::Provider(ref failure)) if failure.reason == ProviderReason::TlsRejected)
     );
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let authorize = adapter
-        .prepare(
-            tenant,
-            &config,
-            &credentials,
-            &material,
-            AuthenticationMode::Login,
-            upstream_deadline(),
-        )
+        .prepare(fixture_provider(tenant, &config, &credentials), &material, AuthenticationMode::Login, upstream_deadline())
         .await?;
     let client = Client::builder()
         .no_proxy()
@@ -165,14 +160,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     assert_eq!(query["state"], material.state.as_str());
     let before_exchange = calls.load(Ordering::SeqCst);
     let claims = adapter
-        .exchange(
-            tenant,
-            &config,
-            &credentials,
-            material,
-            query["code"].clone().into(),
-            upstream_deadline(),
-        )
+        .exchange(fixture_provider(tenant, &config, &credentials), material, query["code"].clone().into(), upstream_deadline())
         .await?;
     assert!(
         calls.load(Ordering::SeqCst) > before_exchange,

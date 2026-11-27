@@ -221,7 +221,7 @@ impl Federation {
         let instance = self.authority.instance;
         let binding = actor.binding;
         let tenant = binding.tenant();
-        self.authority.write_sql(binding,deadline,move|c|Box::pin(async move {
+        let updated = self.authority.write_sql(binding,deadline,move|c|Box::pin(async move {
             let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let mut view=db::provider(c,tenant,id).await?;
             if view.version!=expected{return Err(FederationError::StaleConfiguration.into());}
@@ -240,7 +240,9 @@ impl Federation {
             view.version=view.version.checked_add(1).ok_or(FederationError::Rejected)?;
             sqlx::query("UPDATE identity_authority.providers SET settings=$3,config_version=$4,enabled=$5,revocation_epoch=$6,assurance_profile=$7,credential_version=$8 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(tenant.to_string()).bind(id.to_string()).bind(serde_json::to_value(&view.settings).map_err(|_|transaction::corrupt())?).bind(view.version).bind(view.enabled).bind(view.revocation_epoch).bind(view.assurance_profile.as_slice()).bind(view.credential_version).execute(c).await?;
             let audit=event(tenant,action,&view,Some(actor.key.principal));Ok((view,vec![audit]))
-        })).await
+        })).await?;
+        self.oidc.observe_revision(updated.revision(instance, tenant));
+        Ok(updated)
     }
     pub(crate) async fn persist_list_providers(
         &self,
@@ -282,21 +284,9 @@ impl Federation {
                     Ok(result)
                 }) }).await
     }
-    pub(crate) async fn persist_test_provider<F>(
-        &self,
-        actor: AuthenticatedSession,
-        id: ProviderId,
-        test: F,
-        deadline: OperationDeadline,
-    ) -> Result<ConnectionReport, AuthorityError>
-    where
-        F: FnOnce(
-            TenantId,
-            ProviderSettings,
-            ProviderCredentials,
-            rss_request_context::Deadline,
-        ) -> UpstreamFuture<'static, ConnectionReport>,
-    {
+    pub async fn test_provider(
+        &self, actor: AuthenticatedSession, id: ProviderId, deadline: OperationDeadline,
+    ) -> Result<ConnectionReport, AuthorityError> {
         self.authority.require_runtime()?;
         let policy = self.authority.policy.clone();
         let instance = self.authority.instance;
@@ -334,12 +324,7 @@ impl Federation {
         let upstream_deadline = budget.0.instant() - reserve;
         let result = tokio::time::timeout_at(
             upstream_deadline.into(),
-            test(
-                tenant,
-                view.settings.clone(),
-                credentials,
-                rss_request_context::Deadline::at(upstream_deadline),
-            ),
+            self.oidc.test(view.bind(instance, tenant, &credentials), rss_request_context::Deadline::at(upstream_deadline)),
         )
         .await
         .unwrap_or(Err(FederationError::Unavailable));
@@ -451,23 +436,6 @@ impl Federation {
     ) -> Result<Vec<ProviderView>, AuthorityError> {
         self.persist_list_providers(actor, deadline).await
     }
-    pub async fn test_provider(
-        &self,
-        actor: AuthenticatedSession,
-        id: ProviderId,
-        deadline: OperationDeadline,
-    ) -> Result<ConnectionReport, AuthorityError> {
-        let oidc = self.oidc.clone();
-        self.persist_test_provider(
-            actor,
-            id,
-            move |tenant, settings, credentials, cutoff| {
-                Box::pin(async move { oidc.test(tenant, &settings, &credentials, cutoff).await })
-            },
-            deadline,
-        )
-        .await
-    }
     pub async fn login_options(
         &self,
         binding: ExecutionBinding,
@@ -560,16 +528,18 @@ impl Federation {
     ) -> Result<(), AuthorityError> {
         let tenant = binding.tenant();
         let budget = Budget::new(deadline)?;
+        let instance = self.authority.instance();
         loop {
             let oidc = self.oidc.clone();
-            let more = self.authority.conditional_write_sql(binding, budget.remaining(), move |c| Box::pin(async move {
+            let (more, revisions) = self.authority.conditional_write_sql(binding, budget.remaining(), move |c| Box::pin(async move {
             let ids:Vec<Uuid> = sqlx::query_scalar("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $2")
                 .bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(&mut *c).await?;
             if ids.len() > usize::from(MAX_PROVIDERS) { return Err(reject().into()); }
             // Before the tenant is initialized there is no guard or provider to synchronize.
-            if ids.is_empty() { return Ok((false,Vec::new())); }
+            if ids.is_empty() { return Ok(((false, Vec::new()),Vec::new())); }
             lock_guard(c, tenant).await?;
             let mut events=Vec::new();
+            let mut revisions=Vec::new();
             for id in ids {
                 let id=ProviderId::parse(&id.to_string())?;
                 let mut view=db::provider(c,tenant,id).await?;
@@ -580,11 +550,13 @@ impl Federation {
                 view.assurance_profile=profile;
                 sqlx::query("UPDATE identity_authority.providers SET config_version=$3,revocation_epoch=$4,assurance_profile=$5,enabled=$6 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid")
                     .bind(tenant.to_string()).bind(id.to_string()).bind(view.version).bind(view.revocation_epoch).bind(profile.as_slice()).bind(view.enabled).execute(&mut *c).await?;
+                revisions.push(view.revision(instance, tenant));
                 events.push(event(tenant,Action::ProviderUpdated,&view,None));
-                if events.len() == crate::transaction::MAX_MUTATION_EVENTS { return Ok((true, events)); }
+                if events.len() == crate::transaction::MAX_MUTATION_EVENTS { return Ok(((true, revisions), events)); }
             }
-            Ok((false,events))
+            Ok(((false, revisions),events))
         })).await?;
+            for revision in revisions { self.oidc.observe_revision(revision); }
             if !more {
                 return Ok(());
             }

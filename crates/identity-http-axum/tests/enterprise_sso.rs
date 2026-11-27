@@ -129,9 +129,7 @@ async fn login(State(rp): State<Arc<Rp>>, Json(input): Json<Value>) -> axum::res
         rp.oidc
             .exchange_enterprise(
                 rss_identity_oidc::enterprise::EnterpriseExchange {
-                    tenant: rp.tenant,
-                    provider: &rp.provider,
-                    credentials: &rp.credentials,
+                    provider: rss_identity_oidc::test_support::fixture_provider(rp.tenant, &rp.provider, &rp.credentials),
                     target: &rp.target,
                     assertion: assertion.expose(),
                     assertion_expires_at: assertion.expires_at,
@@ -471,9 +469,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
         transport
             .exchange_enterprise(
                 rss_identity_oidc::enterprise::EnterpriseExchange {
-                    tenant: f.key.tenant,
-                    provider: &provider,
-                    credentials: &credentials,
+                    provider: rss_identity_oidc::test_support::fixture_provider(f.key.tenant, &provider, &credentials),
                     target: &target,
                     assertion: stale.assertion.as_ref().unwrap().expose(),
                     assertion_expires_at: stale.assertion.as_ref().unwrap().expires_at,
@@ -514,9 +510,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
         transport
             .exchange_enterprise(
                 rss_identity_oidc::enterprise::EnterpriseExchange {
-                    tenant: f.key.tenant,
-                    provider: &rp_settings(&targets[1], &issuer)?,
-                    credentials: &credentials,
+                    provider: rss_identity_oidc::test_support::fixture_provider(f.key.tenant, &rp_settings(&targets[1], &issuer)?, &credentials),
                     target: &targets[1],
                     assertion: signed,
                     assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
@@ -537,9 +531,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
         transport
             .exchange_enterprise(
                 rss_identity_oidc::enterprise::EnterpriseExchange {
-                    tenant: f.key.tenant,
-                    provider: &provider,
-                    credentials: &credentials,
+                    provider: rss_identity_oidc::test_support::fixture_provider(f.key.tenant, &provider, &credentials),
                     target: &different_endpoint,
                     assertion: signed,
                     assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
@@ -553,9 +545,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
     transport
         .exchange_enterprise(
             rss_identity_oidc::enterprise::EnterpriseExchange {
-                tenant: f.key.tenant,
-                provider: &provider,
-                credentials: &credentials,
+                    provider: rss_identity_oidc::test_support::fixture_provider(f.key.tenant, &provider, &credentials),
                 target: &target,
                 assertion: signed,
                 assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,
@@ -568,9 +558,7 @@ async fn real_enterprise_assertions_reach_only_the_registered_rp() -> anyhow::Re
         transport
             .exchange_enterprise(
                 rss_identity_oidc::enterprise::EnterpriseExchange {
-                    tenant: f.key.tenant,
-                    provider: &provider,
-                    credentials: &credentials,
+                    provider: rss_identity_oidc::test_support::fixture_provider(f.key.tenant, &provider, &credentials),
                     target: &target,
                     assertion: signed,
                     assertion_expires_at: fresh.assertion.as_ref().unwrap().expires_at,

@@ -1,4 +1,6 @@
 #![cfg(feature = "test-support")]
+
+use rss_identity_oidc::test_support::fixture_provider;
 use reqwest::{Client, Response, Url};
 use rss_identity_core::federation::*;
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
@@ -86,15 +88,8 @@ async fn keycloak_login(url: Url) -> anyhow::Result<Url> {
 async fn prepare(p: &HttpOidc, c: &ProviderSettings) -> anyhow::Result<(Url, ProtocolMaterial)> {
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let url = p
-        .prepare(
-            tenant(),
-            c,
-            &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
-                .unwrap(),
-            &material,
-            rss_identity_core::assurance::AuthenticationMode::Login,
-            upstream_deadline(),
-        )
+        .prepare(fixture_provider(tenant(), c, &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap()), &material, rss_identity_core::assurance::AuthenticationMode::Login, upstream_deadline())
         .await?;
     Ok((Url::parse(&url)?, material))
 }
@@ -112,15 +107,8 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
     assert_eq!(query(&cb, "state")?, material.state.as_str());
     let code = query(&cb, "code")?;
     let claims = p
-        .exchange(
-            tenant(),
-            &c,
-            &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
-                .unwrap(),
-            material,
-            Zeroizing::new(code.clone()),
-            upstream_deadline(),
-        )
+        .exchange(fixture_provider(tenant(), &c, &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap()), material, Zeroizing::new(code.clone()), upstream_deadline())
         .await?;
     assert_eq!(claims.issuer, issuer);
     assert!(claims.subject.validate().is_ok());
@@ -129,15 +117,8 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
     );
     let (_, material) = prepare(&p, &c).await?;
     assert!(
-        p.exchange(
-            tenant(),
-            &c,
-            &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
-                .unwrap(),
-            material,
-            Zeroizing::new(code),
-            upstream_deadline()
-        )
+        p.exchange(fixture_provider(tenant(), &c, &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap()), material, Zeroizing::new(code), upstream_deadline())
         .await
         .is_err()
     );
@@ -161,7 +142,7 @@ async fn flow(issuer: &str) -> anyhow::Result<()> {
             .append_pair(field, value);
         let cb = keycloak_login(url).await?;
         assert!(
-            matches!(p.exchange(tenant(), &c, &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None).unwrap(), material, Zeroizing::new(query(&cb,"code")?), upstream_deadline()).await,Err(e) if e==error)
+            matches!(p.exchange(fixture_provider(tenant(), &c, &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None).unwrap()), material, Zeroizing::new(query(&cb,"code")?), upstream_deadline()).await,Err(e) if e==error)
         );
     }
     let (mut url, _) = prepare(&p, &c).await?;
@@ -190,16 +171,11 @@ async fn real_provider_flows() -> anyhow::Result<()> {
         flow(&std::env::var("IDENTITY_TEST_KEYCLOAK_ISSUER")?).await?;
         let (p, c) = provider("http://127.0.0.1:1")?;
         assert!(
-            p.test(
-                tenant(),
-                &c,
-                &rss_identity_core::federation::ProviderCredentials::new(
+            p.test(fixture_provider(tenant(), &c, &rss_identity_core::federation::ProviderCredentials::new(
                     "fixture-secret".into(),
                     None
                 )
-                .unwrap(),
-                upstream_deadline()
-            )
+                .unwrap()), upstream_deadline())
             .await
             .is_err()
         );

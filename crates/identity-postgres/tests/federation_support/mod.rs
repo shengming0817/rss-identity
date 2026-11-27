@@ -70,11 +70,10 @@ impl UpstreamOidc for ScriptedOidc {
     ) -> Result<(), FederationError> {
         Ok(())
     }
+    fn observe_revision(&self, _: ProviderRevision) {}
     fn prepare<'a>(
         &'a self,
-        _tenant: TenantId,
-        _: &'a ProviderSettings,
-        _: &'a ProviderCredentials,
+        _: BoundProvider<'a>,
         m: &'a ProtocolMaterial,
         _: rss_identity_core::assurance::AuthenticationMode,
         _deadline: rss_request_context::Deadline,
@@ -88,14 +87,13 @@ impl UpstreamOidc for ScriptedOidc {
     }
     fn exchange<'a>(
         &'a self,
-        _tenant: TenantId,
-        c: &'a ProviderSettings,
-        _: &'a ProviderCredentials,
+        provider: BoundProvider<'a>,
         _: ProtocolMaterial,
         code: Zeroizing<String>,
         _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
+            let c = provider.settings;
             self.calls.fetch_add(1, Ordering::SeqCst);
             let gate = self.gate.lock().unwrap().clone();
             if let Some(gate) = gate {
@@ -161,9 +159,7 @@ impl UpstreamOidc for ScriptedOidc {
     }
     fn test<'a>(
         &'a self,
-        _tenant: TenantId,
-        _: &'a ProviderSettings,
-        _: &'a ProviderCredentials,
+        _: BoundProvider<'a>,
         _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {

@@ -111,10 +111,7 @@ impl Federation {
         let url = self
             .upstream(
                 &budget,
-                self.oidc.prepare(
-                    tenant,
-                    &view.settings,
-                    &credentials,
+                self.oidc.prepare(view.bind(self.authority.instance(), tenant, &credentials),
                     &material,
                     mode,
                     budget.0,
@@ -261,7 +258,7 @@ impl Federation {
             .upstream(
                 &budget,
                 self.oidc
-                    .exchange(tenant, &view.settings, &credentials, material, code, budget.0),
+                    .exchange(view.bind(self.authority.instance(), tenant, &credentials), material, code, budget.0),
             )
             .await?;
         claims.validate()?;

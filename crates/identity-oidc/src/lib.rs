@@ -6,6 +6,9 @@ mod code;
 mod discovery;
 use discovery::Metadata;
 mod egress;
+/// Protocol fixture helpers for explicitly test-enabled hosts.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 mod private_provider_tests;
 mod profile_token;
@@ -430,16 +433,16 @@ impl UpstreamOidc for HttpOidc {
         }
         Ok(())
     }
+    fn observe_revision(&self, revision: ProviderRevision) { self.resources.observe(revision); }
     fn prepare<'a>(
         &'a self,
-        tenant: TenantId,
-        c: &'a ProviderSettings,
-        credentials: &'a ProviderCredentials,
+        provider: BoundProvider<'a>,
         m: &'a ProtocolMaterial,
         mode: AuthenticationMode,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
+            let (tenant, c, credentials) = (provider.revision.tenant, provider.settings, provider.credentials);
             if !code::valid_verifier(m.verifier.as_str()) {
                 return Err(FederationError::Rejected);
             }
@@ -489,14 +492,13 @@ impl UpstreamOidc for HttpOidc {
 
     fn exchange<'a>(
         &'a self,
-        tenant: TenantId,
-        c: &'a ProviderSettings,
-        credentials: &'a ProviderCredentials,
+        provider: BoundProvider<'a>,
         m: ProtocolMaterial,
         code: Zeroizing<String>,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
+            let (tenant, c, credentials) = (provider.revision.tenant, provider.settings, provider.credentials);
             if code.is_empty() || code.len() > 4096 || !code::valid_verifier(m.verifier.as_str()) {
                 return Err(FederationError::Rejected);
             }
@@ -552,12 +554,11 @@ impl UpstreamOidc for HttpOidc {
 
     fn test<'a>(
         &'a self,
-        tenant: TenantId,
-        c: &'a ProviderSettings,
-        credentials: &'a ProviderCredentials,
+        provider: BoundProvider<'a>,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
+            let (tenant, c, credentials) = (provider.revision.tenant, provider.settings, provider.credentials);
             let (metadata, _) = self.discover(tenant, c, credentials, deadline).await?;
             if !metadata.authorization_response_iss_parameter_supported {
                 return Err(failure(

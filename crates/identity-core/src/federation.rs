@@ -229,6 +229,34 @@ pub struct ProviderView {
     pub credential_version: i64,
 }
 
+/// Authoritative identity of a provider configuration. The host advances the version
+/// whenever it replaces settings or credentials, including when restoring earlier values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderRevision {
+    pub instance: crate::InstanceId,
+    pub tenant: TenantId,
+    pub provider: ProviderId,
+    pub version: i64,
+}
+
+/// One installed configuration and its matching credentials, borrowed for one operation.
+#[derive(Clone, Copy)]
+pub struct BoundProvider<'a> {
+    pub revision: ProviderRevision,
+    pub settings: &'a ProviderSettings,
+    pub credentials: &'a ProviderCredentials,
+}
+
+impl ProviderView {
+    pub fn revision(&self, instance: crate::InstanceId, tenant: TenantId) -> ProviderRevision {
+        ProviderRevision { instance, tenant, provider: self.id, version: self.version }
+    }
+
+    pub fn bind<'a>(&'a self, instance: crate::InstanceId, tenant: TenantId, credentials: &'a ProviderCredentials) -> BoundProvider<'a> {
+        BoundProvider { revision: self.revision(instance, tenant), settings: &self.settings, credentials }
+    }
+}
+
 pub fn digest(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
 }
@@ -309,29 +337,25 @@ pub trait UpstreamOidc: Send + Sync {
         config: &ProviderSettings,
         credentials: &ProviderCredentials,
     ) -> Result<(), FederationError>;
+    /// Retire older upstream resources after observing an authoritative configuration change.
+    fn observe_revision(&self, revision: ProviderRevision);
     fn prepare<'a>(
         &'a self,
-        tenant: TenantId,
-        config: &'a ProviderSettings,
-        credentials: &'a ProviderCredentials,
+        provider: BoundProvider<'a>,
         material: &'a ProtocolMaterial,
         mode: crate::assurance::AuthenticationMode,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String>;
     fn exchange<'a>(
         &'a self,
-        tenant: TenantId,
-        config: &'a ProviderSettings,
-        credentials: &'a ProviderCredentials,
+        provider: BoundProvider<'a>,
         material: ProtocolMaterial,
         code: Zeroizing<String>,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims>;
     fn test<'a>(
         &'a self,
-        tenant: TenantId,
-        config: &'a ProviderSettings,
-        credentials: &'a ProviderCredentials,
+        provider: BoundProvider<'a>,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport>;
 }

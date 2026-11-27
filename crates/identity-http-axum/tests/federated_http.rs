@@ -1,4 +1,6 @@
 //! Real PG + HTTPS Keycloak adapter with explicit loopback fixture transport + in-process Axum. No product binary/T3 claim.
+
+use rss_identity_oidc::test_support::fixture_provider;
 use rss_identity_postgres::StateSigner;
 mod department_lifecycle;
 #[path = "../../identity-postgres/tests/federation_support/mod.rs"]
@@ -820,21 +822,11 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
 #[ignore = "requires make test-federated"]
 async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
     fixture_transport(true)?
-        .test(
-            tenant(),
-            &config()?,
-            &credentials(true)?,
-            upstream_deadline(),
-        )
+        .test(fixture_provider(tenant(), &config()?, &credentials(true)?), upstream_deadline())
         .await?;
     assert_eq!(
         fixture_transport(true)?
-            .test(
-                tenant(),
-                &config()?,
-                &credentials(false)?,
-                upstream_deadline()
-            )
+            .test(fixture_provider(tenant(), &config()?, &credentials(false)?), upstream_deadline())
             .await
             .unwrap_err(),
         FederationError::provider(ProviderStage::Discovery, ProviderReason::TlsRejected)

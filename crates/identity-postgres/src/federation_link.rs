@@ -180,10 +180,7 @@ impl Federation {
         let url = self
             .upstream(
                 &budget,
-                self.oidc.prepare(
-                    tenant,
-                    &provider.settings,
-                    &credentials,
+                self.oidc.prepare(provider.bind(self.authority.instance(), tenant, &credentials),
                     &material,
                     if purpose == Purpose::Reauthenticate {
                         AuthenticationMode::Reauthenticate
@@ -302,10 +299,7 @@ impl Federation {
         let url = self
             .upstream(
                 budget,
-                self.oidc.prepare(
-                    tenant,
-                    &target.settings,
-                    &credentials,
+                self.oidc.prepare(target.bind(self.authority.instance(), tenant, &credentials),
                     &material,
                     AuthenticationMode::Login,
                     budget.0,

@@ -68,12 +68,8 @@ struct AccessClaims {
 }
 /// Fixed backend exchange inputs. No field is taken from an untrusted browser request.
 pub struct EnterpriseExchange<'a> {
-    /// Host-admitted tenant.
-    pub tenant: rss_request_context::TenantId,
-    /// Installed provider settings.
-    pub provider: &'a rss_identity_core::federation::ProviderSettings,
-    /// Confidential client credentials.
-    pub credentials: &'a rss_identity_core::federation::ProviderCredentials,
+    /// Host-bound provider identity, settings and credentials.
+    pub provider: rss_identity_core::federation::BoundProvider<'a>,
     /// Fixed registered RP target.
     pub target: &'a rss_identity_core::enterprise::EnterpriseTarget,
     /// Authority-issued, one-use JWT assertion.
@@ -93,15 +89,14 @@ impl crate::HttpOidc {
         deadline: rss_request_context::Deadline,
     ) -> Result<EnterpriseAccess, rss_identity_core::federation::FederationError> {
         let EnterpriseExchange {
-            tenant,
-            provider,
-            credentials,
+            provider: bound,
             target,
             assertion,
             assertion_expires_at,
             expected_subject,
         } = input;
         use rss_identity_core::federation::FederationError;
+        let (tenant, provider, credentials) = (bound.revision.tenant, bound.settings, bound.credentials);
         target
             .validate()
             .map_err(|_| FederationError::Configuration)?;

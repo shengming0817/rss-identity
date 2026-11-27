@@ -1,4 +1,6 @@
 use super::*;
+use crate::test_support::fixture_provider;
+
 use serde_json::json;
 use std::{
     io::{Read, Write},
@@ -131,13 +133,8 @@ fn adapter(issuer: &str) -> HttpOidc {
 }
 fn transport(origin: &str) -> Transport {
     adapter(origin)
-        .transport(
-            tenant(),
-            &config(origin),
-            &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
-                .unwrap(),
-            upstream_deadline(),
-        )
+        .transport(fixture_provider(tenant(), &config(origin), &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap()), upstream_deadline())
         .unwrap()
 }
 async fn get(t: &Transport, url: &str) -> Result<http::Response<Vec<u8>>, FederationError> {
@@ -226,16 +223,11 @@ async fn discovery_rejects_external_authorization_and_jwks() {
             }
         });
         let result = adapter(&issuer)
-            .discover(
-                tenant(),
-                &config(&issuer),
-                &rss_identity_core::federation::ProviderCredentials::new(
+            .discover(fixture_provider(tenant(), &config(&issuer), &rss_identity_core::federation::ProviderCredentials::new(
                     "fixture-secret".into(),
                     None,
                 )
-                .unwrap(),
-                upstream_deadline(),
-            )
+                .unwrap()), upstream_deadline())
             .await;
         assert!(matches!(
             result,
@@ -260,16 +252,11 @@ async fn discovery_preserves_unavailable_and_protocol_failure() {
     ] {
         let (issuer, handle) = server(status, "", body);
         let error = adapter(&issuer)
-            .discover(
-                tenant(),
-                &config(&issuer),
-                &rss_identity_core::federation::ProviderCredentials::new(
+            .discover(fixture_provider(tenant(), &config(&issuer), &rss_identity_core::federation::ProviderCredentials::new(
                     "fixture-secret".into(),
                     None,
                 )
-                .unwrap(),
-                upstream_deadline(),
-            )
+                .unwrap()), upstream_deadline())
             .await
             .err()
             .unwrap();
@@ -349,7 +336,7 @@ async fn production_dns_denial_prevents_connecting_to_loopback() {
     assert_eq!(
         HttpOidc::new(vec![], vec![], transport_policy())
             .unwrap()
-            .test(tenant, &settings, &credentials, upstream_deadline())
+            .test(fixture_provider(tenant, &settings, &credentials), upstream_deadline())
             .await
             .unwrap_err(),
         failure(ProviderStage::Discovery, ProviderReason::EgressDenied)
@@ -585,12 +572,7 @@ async fn discovery_preserves_required_metadata_and_transport_boundaries() {
     ] {
         let (issuer, task) = discovery_server(case).await;
         let result = adapter(&issuer)
-            .test(
-                tenant(),
-                &config(&issuer),
-                &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
-                upstream_deadline(),
-            )
+            .test(fixture_provider(tenant(), &config(&issuer), &ProviderCredentials::new("fixture-secret".into(), None).unwrap()), upstream_deadline())
             .await;
         task.abort();
         let _ = task.await;
@@ -612,12 +594,7 @@ async fn advertised_token_endpoint_must_match_the_exact_enterprise_binding() {
     let (issuer, task) = discovery_server("noncanonical-token").await;
     let credentials = ProviderCredentials::new("fixture-secret".into(), None).unwrap();
     let (metadata, _) = adapter(&issuer)
-        .discover(
-            tenant(),
-            &config(&issuer),
-            &credentials,
-            upstream_deadline(),
-        )
+        .discover(fixture_provider(tenant(), &config(&issuer), &credentials), upstream_deadline())
         .await
         .unwrap();
     let canonical = format!("{}/token", issuer.trim_end_matches("/realms/host"));
@@ -724,14 +701,7 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
         AuthenticationMode::StepUp,
     ] {
         let url = adapter
-            .prepare(
-                tenant(),
-                &config(&issuer),
-                &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
-                &material,
-                mode,
-                upstream_deadline(),
-            )
+            .prepare(fixture_provider(tenant(), &config(&issuer), &ProviderCredentials::new("fixture-secret".into(), None).unwrap()), &material, mode, upstream_deadline())
             .await
             .unwrap();
         let url = Url::parse(&url).unwrap();
@@ -787,28 +757,14 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
     let credentials = ProviderCredentials::new("fixture-secret".into(), None).unwrap();
     assert!(matches!(
         adapter
-            .prepare(
-                tenant(),
-                &settings,
-                &credentials,
-                &material,
-                AuthenticationMode::Login,
-                upstream_deadline(),
-            )
+            .prepare(fixture_provider(tenant(), &settings, &credentials), &material, AuthenticationMode::Login, upstream_deadline())
             .await,
         Err(FederationError::Rejected)
     ));
     material.verifier = Zeroizing::new("!".repeat(43));
     assert!(matches!(
         adapter
-            .exchange(
-                tenant(),
-                &settings,
-                &credentials,
-                material,
-                Zeroizing::new("fixture-code".into()),
-                upstream_deadline(),
-            )
+            .exchange(fixture_provider(tenant(), &settings, &credentials), material, Zeroizing::new("fixture-code".into()), upstream_deadline())
             .await,
         Err(FederationError::Rejected)
     ));
@@ -872,13 +828,8 @@ async fn one_upstream_deadline_covers_successive_requests() {
         std::time::Instant::now() + std::time::Duration::from_millis(100),
     );
     let transport = adapter(&origin)
-        .transport(
-            tenant(),
-            &config(&origin),
-            &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
-                .unwrap(),
-            deadline,
-        )
+        .transport(fixture_provider(tenant(), &config(&origin), &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+                .unwrap()), deadline)
         .unwrap();
     assert!(get(&transport, &origin).await.is_ok());
     assert!(matches!(
