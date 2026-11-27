@@ -42,7 +42,7 @@ struct Cursor {
 
 fn column(field: Field) -> &'static str {
     match field {
-        Field::PrincipalId => "\"principalId\" COLLATE \"C\"",
+        Field::PrincipalId => "\"principalId\"",
         Field::Login => "login COLLATE \"C\"",
         Field::Enabled => "enabled",
         Field::MemberActive => "\"memberActive\"",
@@ -54,26 +54,86 @@ fn column(field: Field) -> &'static str {
         _ => unreachable!("checked scalar field"),
     }
 }
+// Cursor positions and text search use the public canonical rendering of a UUID.
+fn ordered_column(field: Field) -> &'static str {
+    if field == Field::PrincipalId {
+        "\"principalId\"::text COLLATE \"C\""
+    } else {
+        column(field)
+    }
+}
+
 fn operand(sql: &mut QueryBuilder<Postgres>, field: Field, value: &str) {
     if field.boolean() {
         sql.push_bind(value == "true");
+    } else if field == Field::PrincipalId {
+        sql.push_bind(uuid::Uuid::parse_str(value).expect("validated principal operand"));
     } else {
         sql.push_bind(value.to_owned());
     }
 }
+const ANCESTORS: &str = include_str!("department-ancestors.sql");
+
+// Fold only siblings with the same logical operator. A mixed branch must keep its
+// own subtree evaluation so that another branch can satisfy the filter first.
+fn collect_terms<'a>(
+    items: &'a [Expression],
+    any: bool,
+    other: &mut Vec<&'a Expression>,
+    departments: &mut Vec<String>,
+) {
+    for item in items {
+        match item {
+            Expression::Or(nested) if any => collect_terms(nested, any, other, departments),
+            Expression::And(nested) if !any => collect_terms(nested, any, other, departments),
+            Expression::Compare {
+                field: Field::DepartmentSubtree,
+                values,
+                ..
+            } => {
+                departments.push(values[0].clone());
+            }
+            _ => other.push(item),
+        }
+    }
+}
+
+fn subtree(sql: &mut QueryBuilder<Postgres>, targets: Vec<String>, any: bool) {
+    sql.push("\"departmentStatus\"='available' AND ");
+    if any || targets.len() == 1 {
+        sql.push("EXISTS (")
+            .push(ANCESTORS)
+            .push("SELECT FROM ancestors WHERE id=ANY(")
+            .push_bind(targets)
+            .push("))");
+    } else {
+        sql.push_bind(targets)
+            .push(" <@ ARRAY(")
+            .push(ANCESTORS)
+            .push("SELECT id FROM ancestors)");
+    }
+}
+
 fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) {
     sql.push("(");
     match expression {
         Expression::And(items) | Expression::Or(items) => {
-            for (index, item) in items.iter().enumerate() {
+            let any = matches!(expression, Expression::Or(_));
+            let separator = if any { " OR " } else { " AND " };
+            let mut other = Vec::new();
+            let mut departments = Vec::new();
+            collect_terms(items, any, &mut other, &mut departments);
+            for (index, item) in other.iter().enumerate() {
                 if index > 0 {
-                    sql.push(if matches!(expression, Expression::And(_)) {
-                        " AND "
-                    } else {
-                        " OR "
-                    });
+                    sql.push(separator);
                 }
                 filter(sql, item);
+            }
+            if !departments.is_empty() {
+                if !other.is_empty() {
+                    sql.push(separator);
+                }
+                subtree(sql, departments, any);
             }
         }
         Expression::Compare {
@@ -81,16 +141,11 @@ fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) {
             operator,
             values,
         } => {
-            if matches!(field, Field::Department | Field::DepartmentSubtree) {
-                sql.push("\"departmentStatus\"='available' AND EXISTS(WITH RECURSIVE ancestors(id) AS (SELECT jsonb_array_elements_text(\"departmentSnapshot\"->'memberships') UNION SELECT n->>'parentId' FROM ancestors x CROSS JOIN LATERAL jsonb_array_elements(\"departmentSnapshot\"->'nodes') n WHERE n->>'id'=x.id AND ");
-                sql.push(if *field == Field::DepartmentSubtree {
-                    "true"
-                } else {
-                    "false"
-                });
-                sql.push(" AND n->>'parentId' IS NOT NULL) SELECT FROM ancestors WHERE id=")
-                    .push_bind(values[0].clone())
-                    .push(")");
+            if *field == Field::Department {
+                sql.push("\"departmentStatus\"='available' AND (\"departmentSnapshot\"->'memberships') ? ")
+                    .push_bind(values[0].clone());
+            } else if *field == Field::DepartmentSubtree {
+                subtree(sql, values.clone(), true);
             } else if matches!(operator.as_str(), "=isnull=" | "=isnotnull=") {
                 sql.push(column(*field)).push(if operator == "=isnull=" {
                     " IS NULL"
@@ -99,7 +154,7 @@ fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) {
                 });
             } else if operator == "=icontains=" {
                 sql.push("strpos(lower(")
-                    .push(column(*field))
+                    .push(ordered_column(*field))
                     .push("),lower(")
                     .push_bind(values[0].clone())
                     .push("))>0");
@@ -145,7 +200,7 @@ fn after(sql: &mut QueryBuilder<Postgres>, query: &AccountQuery, values: &[Value
         }
         sql.push("(");
         for (prefix, value) in values.iter().enumerate().take(index) {
-            sql.push(column(query.sort()[prefix].field))
+            sql.push(ordered_column(query.sort()[prefix].field))
                 .push(" IS NOT DISTINCT FROM ");
             position(sql, query.sort()[prefix].field, value);
             sql.push(" AND ");
@@ -154,10 +209,12 @@ fn after(sql: &mut QueryBuilder<Postgres>, query: &AccountQuery, values: &[Value
             sql.push("false");
         } else {
             sql.push("(")
-                .push(column(sort.field))
+                .push(ordered_column(sort.field))
                 .push(if sort.descending { " < " } else { " > " });
             position(sql, sort.field, &values[index]);
-            sql.push(" OR ").push(column(sort.field)).push(" IS NULL)");
+            sql.push(" OR ")
+                .push(ordered_column(sort.field))
+                .push(" IS NULL)");
         }
         sql.push(")");
     }
@@ -236,13 +293,18 @@ impl Authority {
         self.read_sql(actor.binding, budget.remaining(), move |c| {
             Box::pin(async move {
                 let loaded = crate::session_storage::recheck(c, &actor).await?;
+                let profiles = query.needs_profiles();
+                let department_source = if query.needs_departments() {
+                    let source = query.source().ok_or_else(corrupt)?;
+                    Some(uuid::Uuid::parse_str(source).map_err(|_| corrupt())?)
+                } else {
+                    None
+                };
                 for op in [
                     Some(ManagementOperation::ListAccounts),
-                    query
-                        .needs_profiles()
-                        .then_some(ManagementOperation::ReadLatestProfile),
-                    query
-                        .needs_departments()
+                    profiles.then_some(ManagementOperation::ReadLatestProfile),
+                    department_source
+                        .is_some()
                         .then_some(ManagementOperation::ReadLatestDepartments),
                 ]
                 .into_iter()
@@ -254,8 +316,8 @@ impl Authority {
                 let window = crate::personnel::read_window(
                     c,
                     actor.key.tenant,
-                    query.needs_profiles().then_some(max_age),
-                    query.needs_departments().then(|| query.source()).flatten(),
+                    profiles.then_some(max_age),
+                    department_source,
                     budget.0.instant(),
                     Some(
                         loaded
@@ -307,19 +369,21 @@ impl Authority {
                     }
                 }
 
-                // The six prefix parameters are bound explicitly; only owner-controlled columns enter SQL.
+                // The five prefix parameters are bound explicitly; only owner-controlled columns enter SQL.
                 let mut sql = QueryBuilder::<Postgres>::with_arguments(
-                    include_str!("account-directory.sql"),
+                    concat!(
+                        include_str!("department-facts.sql"),
+                        include_str!("account-directory.sql")
+                    ),
                     {
                         use sqlx::Arguments;
                         let mut args = sqlx::postgres::PgArguments::default();
                         args.add(actor.key.tenant.to_string())
                             .map_err(|_| corrupt())?;
-                        args.add(query.source().map(str::to_owned))
-                            .map_err(|_| corrupt())?;
+                        args.add(department_source).map_err(|_| corrupt())?;
                         args.add(window.now).map_err(|_| corrupt())?;
-                        args.add(query.needs_profiles()).map_err(|_| corrupt())?;
-                        args.add(query.needs_departments()).map_err(|_| corrupt())?;
+                        args.add(query.source().filter(|_| profiles).map(str::to_owned))
+                            .map_err(|_| corrupt())?;
                         args.add(i64::from(max_age)).map_err(|_| corrupt())?;
                         args
                     },
@@ -338,11 +402,12 @@ impl Authority {
                     if index > 0 {
                         sql.push(",");
                     }
-                    sql.push(column(sort.field)).push(if sort.descending {
-                        " DESC NULLS LAST"
-                    } else {
-                        " ASC NULLS LAST"
-                    });
+                    sql.push(ordered_column(sort.field))
+                        .push(if sort.descending {
+                            " DESC NULLS LAST"
+                        } else {
+                            " ASC NULLS LAST"
+                        });
                 }
                 sql.push(" LIMIT ").push_bind(i64::from(query.limit()) + 1);
                 let values: Vec<Value> = sql.build_query_scalar().fetch_all(&mut *c).await?;
