@@ -67,14 +67,9 @@ pub async fn verify_profile(
 // These lock ports must remain callable only by the roles explicitly granted each port.
 // A SET-reachable role with delegation rights could otherwise bypass the embedded role profile.
 async fn lock_grants_are_private(c: &mut PgConnection) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT NOT EXISTS(
-        SELECT FROM pg_proc p WHERE p.oid IN ('identity_authority.share_host_tenant()'::regprocedure,'identity_authority.share_provider(uuid)'::regprocedure,
-        'identity_authority.share_subject(uuid)'::regprocedure,'identity_authority.lock_session(bytea,uuid,text,text,uuid)'::regprocedure)
-        AND (EXISTS(SELECT FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
-            WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE')
-            OR EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET')
-            AND has_function_privilege(r.oid,p.oid,'EXECUTE WITH GRANT OPTION'))))")
-        .fetch_one(c).await
+    sqlx::query_scalar(include_str!("lock-function-privileges.sql"))
+        .fetch_one(c)
+        .await
 }
 
 pub(crate) async fn probe(

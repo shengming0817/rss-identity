@@ -168,7 +168,7 @@ impl Authority {
             return Err(AuthorityError::Rejected);
         }
         self.read_sql(actor.binding, deadline, move |c| Box::pin(async move {
-            let loaded = reader.recheck_with(c,true).await?;
+            let loaded = reader.recheck_with(c,Some(crate::session_storage::SessionAccess::Inspect)).await?;
             crate::management::authorize(policy.as_ref(), instance, &loaded,
                 ManagementOperation::UpdateLocalProfile, Some(target), c).await?;
             let clock = ReceiptClock::load(c, target.tenant).await?;

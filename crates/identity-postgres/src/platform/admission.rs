@@ -27,8 +27,8 @@ impl From<sqlx::Error> for PlatformSubjectAdmissionError {
 
 /// Check Identity-owned subject state without issuing a session or reading credentials.
 /// Requires an explicit READ COMMITTED transaction scoped to the binding's tenant and instance.
-/// Call after Audit/Ledger locks and before host device/authorization/business locks. The Identity
-/// guard remains held until the caller settles its transaction. The host must check its binding,
+/// Call after Audit/Ledger locks and before host device/authorization/business locks. Shared tenant, source Provider,
+/// account and membership locks last until the caller settles its transaction. The host must check its binding,
 /// source, platform proof and authorization in that same transaction before issuing native tokens.
 /// Persist the returned version with the source; subsequent use must supply it as `expected` so
 /// disabling/re-enabling an account or membership cannot resurrect an old native registration.

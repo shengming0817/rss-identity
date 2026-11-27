@@ -1278,6 +1278,19 @@ async fn source_admission_borrows_transaction_with_no_credential_privileges() ->
         .execute(&mut *owner)
         .await?;
     grant_profile_source_admission(&mut owner, &role).await?;
+    let mut drift = owner.begin().await?;
+    let other = format!("lock_owner_{}", Uuid::new_v4().simple());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {other} NOLOGIN; ALTER FUNCTION identity_authority.share_provider(uuid) OWNER TO {other}"))).execute(&mut *drift).await?;
+    sqlx::query("SELECT set_config('role',$1,true)")
+        .bind(&role)
+        .execute(&mut *drift)
+        .await?;
+    assert!(
+        verify_profile_source_admission(&mut drift, f.instance)
+            .await
+            .is_err()
+    );
+    drift.rollback().await?;
     assert!(
         admit_profile_source_on(
             &mut owner,
@@ -2042,25 +2055,24 @@ async fn platform_subject_admission_fences_native_settlement() -> anyhow::Result
             .await
             .is_err()
     );
-    // A real account writer must wait until the host has committed its native issuance.
-    let mut writer = f.owner.begin().await?;
-    let mut guard = Box::pin(
-        sqlx::query(
-            "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR UPDATE",
-        )
-        .bind(f.key.tenant.to_string())
-        .execute(&mut *writer),
-    );
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), &mut guard)
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await?;
+    let maintenance = f.maintenance.clone();
+    let key = f.key;
+    let writer = tokio::spawn(async move {
+        maintenance
+            .recover_local_password(
+                crate::support::binding(key.tenant),
+                key,
+                password(),
+                deadline(),
+            )
             .await
-            .is_err()
-    );
+    });
+    wait_for_blocked_backend(&f, pid).await?;
     tx.commit().await?;
-    guard.await?;
-    sqlx::query("UPDATE identity_authority.accounts SET enabled=false,auth_epoch=auth_epoch+1 WHERE tenant_id=$1::uuid AND principal_id=$2")
-        .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).execute(&mut *writer).await?;
-    writer.commit().await?;
+    writer.await??;
     let mut tx = subject_transaction(&mut owner, &role, f.key.tenant).await?;
     assert!(
         admit_platform_subject_on(&mut tx, f.instance, &binding, Some(version))

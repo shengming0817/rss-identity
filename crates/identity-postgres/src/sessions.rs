@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Recheck the current credential in the host's tenant-bound READ COMMITTED transaction.
-/// Call after Audit/Ledger locks and before host authorization/business locks. Identity's
-/// guard and any platform verifier locks remain held until the host settles this transaction.
+/// Call after Audit/Ledger locks and before host authorization/business locks. Tenant admission,
+/// source, account/membership, session and platform verifier locks last until host settlement.
 /// Platform source writers must honor the verifier's authoritative locks on this same connection.
 /// On any error the host MUST roll back. The host owns fencing, budgets, resource authorization
 /// and commit/rollback outcomes; successful admission is not a successful business commit.

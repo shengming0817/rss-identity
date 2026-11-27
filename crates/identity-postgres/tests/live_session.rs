@@ -20,6 +20,9 @@ async fn transaction<'a>(
             .execute(&mut *tx)
             .await?;
     }
+    sqlx::query("SET LOCAL statement_timeout = '8s'")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("SET LOCAL ROLE identity_runtime")
         .execute(&mut *tx)
         .await?;
@@ -402,6 +405,38 @@ async fn host_admission_rechecks_federated_source() -> anyhow::Result<()> {
         );
         tx.rollback().await?;
     }
+    // A policy decision cannot authorize a provider write after the actor expires in the revision trigger.
+    let admin = f.login().await?;
+    let short = f
+        .store
+        .inspect_session(
+            binding(f.key.tenant),
+            SessionSecret::parse(admin.secret().expose().into())?,
+            rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+                Duration::from_secs(2),
+            ),
+        )
+        .await?;
+    let before = f.events().await?;
+    let mut blocked = f.owner.begin().await?;
+    let blocker:i32=sqlx::query_scalar("SELECT pg_backend_pid() FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='personnel_revision' FOR UPDATE").bind(A).fetch_one(&mut *blocked).await?;
+    let service = oidc.clone();
+    let id = provider.id;
+    let version = provider.version;
+    let update = tokio::spawn(async move {
+        service
+            .enable_provider(short, id, version, false, deadline())
+            .await
+    });
+    wait_for_blocked_backend(&f, blocker).await?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(6), update)
+            .await??
+            .is_err()
+    );
+    blocked.rollback().await?;
+    assert_eq!(f.events().await?, before);
+    assert!(accepted(&f, &proof).await?);
     let manager = f.actor().await?;
     let mut c = f.owner.acquire().await?;
     let mut tx = transaction(&mut c, A).await?;
@@ -502,6 +537,7 @@ async fn independent_subject_completes_while_host_admission_is_open() -> anyhow:
         let mut other = f.owner.acquire().await?;
         let mut tx = transaction(&mut other, A).await?;
         recheck_authenticated_session_on(&mut tx, &proof).await?;
+        f.store.current_profile(&proof, deadline()).await?;
         tx.commit().await?;
         f.store.revoke_current_session(proof, deadline()).await?;
         f.maintenance

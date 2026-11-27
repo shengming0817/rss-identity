@@ -20,9 +20,8 @@ impl From<sqlx::Error> for ProfileSourceAdmissionError {
     }
 }
 /// Call after Audit/Ledger locks and before host authorization/business locks.
-/// Requires an explicit READ COMMITTED, tenant-scoped transaction on this instance's database. The Identity
-/// guard remains locked until the caller commits/rolls back, serializing source configuration
-/// changes. No pool, credentials, sessions, profile observations or host permissions are read.
+/// Requires an explicit READ COMMITTED, tenant-scoped transaction on this instance's database. Shared tenant admission and the
+/// selected IdP's Provider lock remain held until the caller commits or rolls back. No pool, credentials, sessions, profile observations or host permissions are read.
 pub async fn admit_profile_source_on(
     c: &mut PgConnection,
     instance: InstanceId,

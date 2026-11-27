@@ -170,6 +170,8 @@ impl Federation {
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.authority.require_runtime()?;
+        let mut budget = Budget::new(deadline)?;
+        budget.0 = budget.0.shortened_to(actor.expires);
         let keys = self.credential_keys.clone();
         let capacity = self.authority.provider_capacity;
         let operation = ManagementOperation::CreateProvider;
@@ -177,13 +179,14 @@ impl Federation {
         let instance = self.authority.instance;
         let binding = actor.binding;
         let tenant = binding.tenant();
-        self.authority.write_sql(binding,deadline,move|c|Box::pin(async move {
+        self.authority.write_sql(binding,budget.remaining(),move|c|Box::pin(async move {
             let loaded=crate::session_storage::recheck_collection(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
             if count>=i64::from(capacity.get()){return Err(FederationError::ProviderLimitReached.into());}
             let view=ProviderView{id:ProviderId::generate(),version:1,enabled:false,revocation_epoch:1,settings,assurance_profile:profile,credential_version:1};
             sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) VALUES($1::uuid,$2::uuid,1,1,false,$3,$4,1)").bind(tenant.to_string()).bind(view.id.to_string()).bind(serde_json::to_value(&view.settings).map_err(|_|transaction::corrupt())?).bind(profile.as_slice()).execute(&mut *c).await?;
             crate::credentials::write_credentials(c,&keys,tenant,view.id,1,&credentials).await?;
+            if std::time::Instant::now()>=loaded.expires {return Err(reject().into());}
             let audit=event(tenant,Action::ProviderCreated,&view,Some(actor.key.principal));
             Ok((view,vec![audit]))
         })).await
@@ -209,6 +212,8 @@ impl Federation {
         deadline: OperationDeadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.authority.require_runtime()?;
+        let mut budget = Budget::new(deadline)?;
+        budget.0 = budget.0.shortened_to(actor.expires);
         let operation = enabled
             .map(|value| ManagementOperation::SetProviderEnabled(id, value))
             .unwrap_or(ManagementOperation::UpdateProvider(id));
@@ -222,7 +227,7 @@ impl Federation {
         let binding = actor.binding;
         let tenant = binding.tenant();
         let oidc = self.oidc.clone();
-        self.authority.write_sql(binding,deadline,move|c|Box::pin(async move {
+        self.authority.write_sql(binding,budget.remaining(),move|c|Box::pin(async move {
             let loaded=crate::session_storage::recheck_for(c,&actor,crate::session_storage::SessionAccess::Provider(id)).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let mut view=db::provider(c,tenant,id).await?;
             if view.version!=expected{return Err(FederationError::StaleConfiguration.into());}
@@ -241,6 +246,7 @@ impl Federation {
             }else{return Err(reject().into());};
             view.version=view.version.checked_add(1).ok_or(FederationError::Rejected)?;
             sqlx::query("UPDATE identity_authority.providers SET settings=$3,config_version=$4,enabled=$5,revocation_epoch=$6,assurance_profile=$7,credential_version=$8 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(tenant.to_string()).bind(id.to_string()).bind(serde_json::to_value(&view.settings).map_err(|_|transaction::corrupt())?).bind(view.version).bind(view.enabled).bind(view.revocation_epoch).bind(view.assurance_profile.as_slice()).bind(view.credential_version).execute(c).await?;
+            if std::time::Instant::now()>=loaded.expires {return Err(reject().into());}
             oidc.revisions().retire(previous);
             let audit=event(tenant,action,&view,Some(actor.key.principal));Ok((view,vec![audit]))
         })).await
