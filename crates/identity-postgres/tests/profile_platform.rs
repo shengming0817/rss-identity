@@ -1295,6 +1295,8 @@ async fn source_admission_borrows_transaction_with_no_credential_privileges() ->
         .execute(&mut *tx)
         .await?;
     verify_profile_source_admission(&mut tx, f.instance).await?;
+    let can_read_session_version: bool=sqlx::query_scalar("SELECT has_column_privilege(current_user,'identity_authority.sessions','provider_config_version','SELECT')").fetch_one(&mut *tx).await?;
+    assert!(!can_read_session_version);
     let can_read_cursor_key:bool=sqlx::query_scalar("SELECT has_column_privilege(current_user,'identity_authority.deployment','account_cursor_key','SELECT')").fetch_one(&mut *tx).await?;
     assert!(
         !can_read_cursor_key,

@@ -49,6 +49,18 @@ impl TimeSample {
             .and_then(|end| self.deadline(end).ok())
             .is_some_and(|deadline| now < deadline)
     }
+    fn renew(
+        &self,
+        lifetime: &mut SessionLifetime,
+        original_cutoff: Instant,
+        now: Instant,
+    ) -> Result<(), PgError> {
+        // Source verification can wait after the post-guard time sample.
+        if now >= original_cutoff {
+            return Err(reject());
+        }
+        lifetime.renew(self.seconds()).map_err(|_| reject())
+    }
     pub(crate) fn seconds(&self) -> i64 {
         self.micros / 1_000_000
     }
@@ -311,7 +323,9 @@ pub(crate) async fn recheck_locked(
     Ok(loaded)
 }
 pub(crate) async fn touch(c: &mut PgConnection, loaded: &mut Loaded) -> Result<(), PgError> {
-    loaded.lifetime.renew(loaded.now).map_err(|_| reject())?;
+    loaded
+        .sample
+        .renew(&mut loaded.lifetime, loaded.expires, Instant::now())?;
     loaded.view = SessionView::new(loaded.view.id, loaded.lifetime, loaded.view.credential_kind);
     loaded.expires = loaded.sample.deadline(loaded.lifetime.idle_expires_at())?;
     sqlx::query(concat!(
@@ -372,6 +386,23 @@ pub(crate) fn credential_kind(row: &sqlx::postgres::PgRow) -> Result<CredentialK
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_renewal_respects_the_original_monotonic_cutoff() {
+        let start = Instant::now();
+        let sample = TimeSample {
+            started: start,
+            micros: 105_000_000,
+        };
+        let policy = SessionPolicy::new(10, 90).unwrap();
+        let original = SessionLifetime::new(100, policy).unwrap();
+        let cutoff = sample.deadline(original.idle_expires_at()).unwrap();
+        let mut alive = original;
+        sample.renew(&mut alive, cutoff, start).unwrap();
+        assert_eq!(alive.idle_expires_at(), 115);
+        let mut expired = original;
+        assert!(sample.renew(&mut expired, cutoff, cutoff).is_err());
+        assert_eq!(expired, original);
+    }
     #[test]
     fn policy_wait_cannot_extend_recent_authentication() {
         let start = Instant::now();

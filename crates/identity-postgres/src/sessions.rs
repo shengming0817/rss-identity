@@ -53,6 +53,7 @@ impl SessionView {
 #[derive(Debug)]
 pub struct SessionPage {
     pub sessions: Vec<SessionView>,
+    /// Last candidate scanned when more remain. Continue until this is None, even after an empty page.
     pub next_cursor: Option<SessionId>,
 }
 
@@ -512,6 +513,9 @@ impl Authority {
             })).await
         })).await
     }
+    /// Recheck the caller and list current session summaries for the same account.
+    /// Candidates are checked for lifetime and current source. Authenticating a session
+    /// additionally validates its stored facts. Follow the cursor through short or empty pages.
     pub async fn list_sessions(
         &self,
         actor: AuthenticatedSession,
