@@ -136,7 +136,7 @@ async fn account_directory_null_and_equal_values_keep_total_order() -> anyhow::R
                     f.actor().await?,
                     state.key(),
                     ProfileChange {
-                        operation_id: uuid::Uuid::new_v4(),
+                        operation_id: rss_identity_postgres::ProfileOperationId::now(),
                         expected_revision: 0,
                         value: Some(profile),
                     },
@@ -416,7 +416,7 @@ async fn account_directory_profiles_are_source_selected_and_authorized_for_predi
             f.actor().await?,
             f.key,
             ProfileChange {
-                operation_id: uuid::Uuid::new_v4(),
+                operation_id: rss_identity_postgres::ProfileOperationId::now(),
                 expected_revision: 0,
                 value: Some(LocalProfile {
                     display_name: Some("Local Alice".into()),

@@ -19,7 +19,7 @@ rss-contract.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["v7"] }
 tokio.workspace = true
 sqlx = { workspace = true, features = ["uuid", "json"] }
 rss-request-context.workspace = true

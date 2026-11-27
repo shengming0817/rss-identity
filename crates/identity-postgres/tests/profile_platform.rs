@@ -1,4 +1,5 @@
 mod personnel_facts;
+mod profile_receipts;
 mod support;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use rss_identity_core::{assurance::Acr, profile::*, session::AuthenticationSource};
@@ -42,7 +43,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
     let initial = f.store.current_profile(&first_proof, deadline()).await?;
     let snapshot = initial.view()?.snapshot_id;
     let change = ProfileChange {
-        operation_id: Uuid::new_v4(),
+        operation_id: rss_identity_postgres::ProfileOperationId::now(),
         expected_revision: 0,
         value: Some(local("E1001")),
     };
@@ -169,7 +170,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
         before
     );
     let remove = ProfileChange {
-        operation_id: Uuid::new_v4(),
+        operation_id: rss_identity_postgres::ProfileOperationId::now(),
         expected_revision: 1,
         value: None,
     };
@@ -196,7 +197,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
             .is_none()
     );
     let unknown = ProfileChange {
-        operation_id: Uuid::new_v4(),
+        operation_id: rss_identity_postgres::ProfileOperationId::now(),
         expected_revision: 2,
         value: Some(local("E2002")),
     };
@@ -218,7 +219,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
         3
     );
     let rollback = ProfileChange {
-        operation_id: Uuid::new_v4(),
+        operation_id: rss_identity_postgres::ProfileOperationId::now(),
         expected_revision: 3,
         value: Some(local("must-rollback")),
     };
@@ -1613,149 +1614,6 @@ async fn platform_evidence_admission_preserves_authentication_time() -> anyhow::
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
-async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()> {
-    let mut f = Fixture::new().await?;
-    let selected = |capacity| {
-        f.config()
-            .with_profile_receipt_capacity(std::num::NonZeroU32::new(capacity).unwrap())
-    };
-    f.store = Authority::connect_runtime(
-        f.runtime.clone(),
-        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(
-            std::num::NonZeroUsize::new(4).unwrap(),
-            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
-        )?),
-        selected(8192),
-        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
-        f.policy.clone(),
-        deadline(),
-    )
-    .await?;
-    f.bootstrap().await?;
-    let issued = f.login().await?;
-    // Fill only the receipt resource, preserving normal account/session preparation.
-    sqlx::query("INSERT INTO identity_authority.profile_operations(tenant_id,operation_id,principal_id,actor,digest,revision) SELECT $1::uuid,gen_random_uuid(),$2,$2,decode(repeat('00',32),'hex'),n FROM generate_series(1,8191) n")
-        .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).execute(&f.owner).await?;
-    let change = ProfileChange {
-        operation_id: Uuid::new_v4(),
-        expected_revision: 0,
-        value: Some(local("last")),
-    };
-    let receipt = f
-        .store
-        .update_local_profile(
-            proof(&f.store, &f, &issued).await?,
-            f.key,
-            change.clone(),
-            deadline(),
-        )
-        .await?;
-    assert_eq!(receipt.revision, 1);
-    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_audit.records")
-        .fetch_one(&f.owner)
-        .await?;
-    let result = f
-        .store
-        .update_local_profile(
-            proof(&f.store, &f, &issued).await?,
-            f.key,
-            ProfileChange {
-                operation_id: Uuid::new_v4(),
-                expected_revision: 1,
-                value: None,
-            },
-            deadline(),
-        )
-        .await;
-    assert!(matches!(
-        result,
-        Err(AuthorityError::ProfileReceiptCapacityReached)
-    ));
-    f.store = Authority::connect_runtime(
-        f.runtime.clone(),
-        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(
-            std::num::NonZeroUsize::new(4).unwrap(),
-            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
-        )?),
-        f.config()
-            .with_profile_receipt_capacity(std::num::NonZeroU32::new(1).unwrap()),
-        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
-        f.policy.clone(),
-        deadline(),
-    )
-    .await?;
-    let actor = proof(&f.store, &f, &issued).await?;
-    let current = f
-        .store
-        .read_local_profile(&actor, f.key, deadline())
-        .await?;
-    assert_eq!(current.revision, 1);
-    assert!(current.value.is_some());
-    assert_eq!(
-        f.store
-            .local_profile_receipt(&actor, f.key, change.operation_id, deadline())
-            .await?
-            .unwrap()
-            .revision,
-        1
-    );
-    assert_eq!(
-        f.store
-            .update_local_profile(
-                proof(&f.store, &f, &issued).await?,
-                f.key,
-                change,
-                deadline()
-            )
-            .await?
-            .revision,
-        1
-    );
-    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_audit.records")
-        .fetch_one(&f.owner)
-        .await?;
-    assert_eq!(before, after);
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM identity_authority.profile_operations")
-            .fetch_one(&f.owner)
-            .await?;
-    assert_eq!(count, 8192);
-    // Raising the selected quota admits a new operation without deleting old receipts.
-    f.store = Authority::connect_runtime(
-        f.runtime.clone(),
-        std::sync::Arc::new(rss_identity_core::account::PasswordKdf::new(
-            std::num::NonZeroUsize::new(4).unwrap(),
-            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
-        )?),
-        f.config()
-            .with_profile_receipt_capacity(std::num::NonZeroU32::new(8193).unwrap()),
-        crate::support::binding(rss_request_context::TenantId::parse(crate::support::A).unwrap()),
-        f.policy.clone(),
-        deadline(),
-    )
-    .await?;
-    assert_eq!(
-        f.store
-            .update_local_profile(
-                proof(&f.store, &f, &issued).await?,
-                f.key,
-                ProfileChange {
-                    operation_id: Uuid::new_v4(),
-                    expected_revision: 1,
-                    value: None
-                },
-                deadline()
-            )
-            .await?
-            .revision,
-        2
-    );
-    f.close().await;
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires make test-pg"]
 async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     f.bootstrap().await?;
@@ -1773,7 +1631,7 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
             f.actor().await?,
             f.key,
             ProfileChange {
-                operation_id: Uuid::new_v4(),
+                operation_id: rss_identity_postgres::ProfileOperationId::now(),
                 expected_revision: 0,
                 value: Some(local("Personnel")),
             },
@@ -2036,7 +1894,7 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
             f.actor().await?,
             f.key,
             ProfileChange {
-                operation_id: Uuid::new_v4(),
+                operation_id: rss_identity_postgres::ProfileOperationId::now(),
                 expected_revision: 0,
                 value: Some(local("Profile")),
             },

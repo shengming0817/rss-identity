@@ -1,7 +1,7 @@
--- Fresh schema v20 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v21 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=20));
-INSERT INTO identity_authority.schema_version VALUES(20);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=21));
+INSERT INTO identity_authority.schema_version VALUES(21);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),
@@ -12,7 +12,7 @@ BEGIN
  RAISE EXCEPTION 'immutable authentication instance';
 END $$;
 CREATE TRIGGER protect_deployment BEFORE UPDATE OR DELETE ON identity_authority.deployment FOR EACH ROW EXECUTE FUNCTION identity_authority.protect_deployment();
-CREATE TABLE identity_authority.guard(tenant_id uuid PRIMARY KEY, profile_sequence bigint NOT NULL DEFAULT 0 CHECK(profile_sequence>=0), personnel_revision bigint NOT NULL DEFAULT 0 CHECK(personnel_revision>=0));
+CREATE TABLE identity_authority.guard(tenant_id uuid PRIMARY KEY, profile_receipt_time_ms bigint NOT NULL DEFAULT 0 CHECK(profile_receipt_time_ms>=0), profile_sequence bigint NOT NULL DEFAULT 0 CHECK(profile_sequence>=0), personnel_revision bigint NOT NULL DEFAULT 0 CHECK(personnel_revision>=0));
 CREATE TABLE identity_authority.accounts (
  tenant_id uuid NOT NULL,
  principal_id uuid NOT NULL CHECK(principal_id <> '00000000-0000-0000-0000-000000000000'),
@@ -174,6 +174,7 @@ CREATE TABLE identity_authority.platform_challenges (
 CREATE INDEX platform_challenge_expiry ON identity_authority.platform_challenges(tenant_id,expires_at);
 CREATE TABLE identity_authority.local_profiles (
  tenant_id uuid NOT NULL, principal_id uuid NOT NULL, revision bigint NOT NULL CHECK(revision>0),
+ reclaimed_through bigint NOT NULL DEFAULT 0 CHECK(reclaimed_through>=0 AND reclaimed_through<=revision),
  value jsonb CHECK(value IS NULL OR (jsonb_typeof(value)='object')),
  PRIMARY KEY(tenant_id,principal_id),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
@@ -192,9 +193,10 @@ CREATE TABLE identity_authority.profile_observations (
  FOREIGN KEY(tenant_id,provider_id) REFERENCES identity_authority.providers ON DELETE CASCADE
 );
 CREATE TABLE identity_authority.profile_operations (
- tenant_id uuid NOT NULL, operation_id uuid NOT NULL, principal_id uuid NOT NULL, actor uuid NOT NULL,
+ tenant_id uuid NOT NULL, operation_id uuid NOT NULL CHECK((get_byte(uuid_send(operation_id),6) >> 4)=7 AND (get_byte(uuid_send(operation_id),8) >> 6)=2), principal_id uuid NOT NULL, actor uuid NOT NULL,
  digest bytea NOT NULL CHECK(octet_length(digest)=32), revision bigint NOT NULL CHECK(revision>0),
- PRIMARY KEY(tenant_id,operation_id),
+ accepted_at_ms bigint NOT NULL CHECK(accepted_at_ms>=0),
+ PRIMARY KEY(tenant_id,operation_id), UNIQUE(tenant_id,principal_id,revision),
  FOREIGN KEY(tenant_id,principal_id) REFERENCES identity_authority.accounts ON DELETE CASCADE
 );
 CREATE TABLE identity_authority.webauthn_rp (
