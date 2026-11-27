@@ -139,14 +139,7 @@ async fn update_provider(
     let settings = v.settings.into_domain().map_err(AuthorityError::from)?;
     Ok(Json(dto::Provider::from(
         s.federation
-            .update_provider(
-                actor,
-                p,
-                v.expected_version,
-                settings,
-                credentials,
-                b,
-            )
+            .update_provider(actor, p, v.expected_version, settings, credentials, b)
             .await?,
     ))
     .into_response())

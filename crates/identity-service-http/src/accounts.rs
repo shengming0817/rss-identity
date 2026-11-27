@@ -138,16 +138,16 @@ async fn actor(
         }
         csrf(h, &secret)?;
     }
-    Ok(s.authority
-        .inspect_session(binding, secret, b)
-        .await?)
+    Ok(s.authority.inspect_session(binding, secret, b).await?)
 }
 pub(crate) async fn body<T: DeserializeOwned>(request: Request, b: Deadline) -> Result<T> {
-    let bytes =
-        tokio::time::timeout_at(b.instant().into(), axum::body::to_bytes(request.into_body(), 32768))
-            .await
-            .map_err(|_| HttpError::request_timeout())?
-            .map_err(|_| BAD)?;
+    let bytes = tokio::time::timeout_at(
+        b.instant().into(),
+        axum::body::to_bytes(request.into_body(), 32768),
+    )
+    .await
+    .map_err(|_| HttpError::request_timeout())?
+    .map_err(|_| BAD)?;
     serde_json::from_slice(&bytes).map_err(|_| BAD.into())
 }
 fn target(t: &str, p: &str) -> Result<AccountKey> {
@@ -205,9 +205,7 @@ async fn read_account(
 ) -> Result<Response> {
     let actor = actor(&s, binding, &h, b, false).await?;
     Ok(Json(crate::dto::Account::from(
-        s.authority
-            .read_account(actor, target(&t, &p)?, b)
-            .await?,
+        s.authority.read_account(actor, target(&t, &p)?, b).await?,
     ))
     .into_response())
 }

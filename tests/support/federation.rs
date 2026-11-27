@@ -230,19 +230,6 @@ pub async fn actor(f: &Fixture) -> anyhow::Result<AuthenticatedSession> {
 pub async fn enabled(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
     enabled_settings(f, s, settings()).await
 }
-pub async fn enabled_department(
-    f: &Fixture,
-    s: &Federation,
-    max_age: i64,
-) -> anyhow::Result<ProviderView> {
-    let mut input = settings().input();
-    input.claims.department_snapshot =
-        Some(rss_identity_core::department::DepartmentSnapshotClaim::new(
-            "organization_snapshot".into(),
-            max_age,
-        )?);
-    enabled_settings(f, s, input.try_into()?).await
-}
 async fn enabled_settings(
     f: &Fixture,
     s: &Federation,

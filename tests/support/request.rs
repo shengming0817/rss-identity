@@ -1,5 +1,8 @@
 //! The test host chooses execution coordinates before entering the public router.
 pub fn scoped<B>(mut request: axum::http::Request<B>) -> axum::http::Request<B> {
+    request
+        .extensions_mut()
+        .get_or_insert_with(crate::support::deadline);
     let segments = request.uri().path().split('/').collect::<Vec<_>>();
     let tenant = segments
         .windows(2)

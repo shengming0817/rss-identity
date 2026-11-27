@@ -100,14 +100,7 @@ pub(crate) async fn login(
     issued(
         state
             .authority
-            .login_local(
-                binding,
-                login,
-                password,
-                source,
-                replacement,
-                budget,
-            )
+            .login_local(binding, login, password, source, replacement, budget)
             .await?,
     )
 }
@@ -180,10 +173,7 @@ pub(crate) async fn logout_all(
     headers: HeaderMap,
 ) -> Result<Response> {
     let proof = actor(&state, binding, &headers, budget).await?;
-    state
-        .authority
-        .revoke_all_sessions(proof, budget)
-        .await?;
+    state.authority.revoke_all_sessions(proof, budget).await?;
     Ok((
         StatusCode::NO_CONTENT,
         [(
@@ -215,12 +205,7 @@ pub(crate) async fn list(
     Ok(Json(crate::dto::SessionPage::from(
         state
             .authority
-            .list_sessions(
-                proof,
-                page.cursor,
-                page.limit.unwrap_or(50),
-                budget,
-            )
+            .list_sessions(proof, page.cursor, page.limit.unwrap_or(50), budget)
             .await?,
     ))
     .into_response())

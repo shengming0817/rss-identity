@@ -1747,7 +1747,6 @@ def outside(args):
             "hack/deploy.py", "hack/operate.py", "hack/bounded_process.py",
             "hack/docker_network.py", "deployment/deploy.example.json",
             "deployment/keycloak-totp.json", "deployment/providers.lock.json",
-            "crates/identity-postgres/src/security-event-v3.json",
         ])
         docker("exec", operator, "mkdir", "-p", mount + "/source")
         docker(

@@ -3,13 +3,13 @@
 use rss_identity_oidc::test_support::fixture_provider;
 use rss_identity_postgres::StateSigner;
 mod department_lifecycle;
-#[path = "../../identity-postgres/tests/federation_support/mod.rs"]
+#[path = "../../../tests/support/federation.rs"]
 mod federation_support;
 #[path = "group_lifecycle/mod.rs"]
 mod group_lifecycle;
 mod keycloak_support;
 mod profile_lifecycle;
-#[path = "../../identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 use axum::{
     Router,
@@ -33,6 +33,10 @@ const CALLBACK: &str = "https://identity.example.test/api/v1/identity/oidc/callb
 const BROWSER: &str = "__Host-identity-oidc-browser=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 fn fixture_transport(keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
     Ok(HttpOidc::for_loopback_test(
+        rss_identity_oidc::ProviderClock::new(
+            rss_request_context::SharedExecutionTimer::new(crate::support::Timer),
+            std::time::SystemTime::now,
+        ),
         vec![TrustedAssuranceProfile {
             keycloak_totp,
             tenant: tenant(),
@@ -570,6 +574,10 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
     assert_eq!(rejected.headers()["location"], "/auth/error?reason=failed");
     assert!(!rejected.headers().contains_key("set-cookie"));
     let next = HttpOidc::for_loopback_test(
+        rss_identity_oidc::ProviderClock::new(
+            rss_request_context::SharedExecutionTimer::new(crate::support::Timer),
+            std::time::SystemTime::now,
+        ),
         vec![TrustedAssuranceProfile {
             tenant: f.key.tenant,
             issuer,
@@ -925,6 +933,10 @@ async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
     private.issuer = "https://127.0.0.1".into();
     assert!(
         HttpOidc::new(
+            rss_identity_oidc::ProviderClock::new(
+                rss_request_context::SharedExecutionTimer::new(crate::support::Timer),
+                std::time::SystemTime::now
+            ),
             vec![],
             vec![],
             transport_policy(),
@@ -1052,5 +1064,5 @@ fn upstream_deadline() -> rss_request_context::Deadline {
     )
 }
 
-#[path = "request_support/mod.rs"]
+#[path = "../../../tests/support/request.rs"]
 mod request_support;

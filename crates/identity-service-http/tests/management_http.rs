@@ -1,7 +1,7 @@
 //! Real PG management/router seam, independent of production assembly.
-#[path = "../../identity-postgres/tests/federation_support/mod.rs"]
+#[path = "../../../tests/support/federation.rs"]
 mod federation_support;
-#[path = "../../identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 use axum::{
     Router,
@@ -1020,5 +1020,5 @@ async fn management_rejects_password_for_federated_only_account() -> anyhow::Res
     Ok(())
 }
 
-#[path = "request_support/mod.rs"]
+#[path = "../../../tests/support/request.rs"]
 mod request_support;

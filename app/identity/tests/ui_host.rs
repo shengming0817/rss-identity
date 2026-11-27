@@ -1,7 +1,7 @@
 //! Consumer-owned production transport against public components and the reference host policy.
-#[path = "../../../crates/identity-postgres/tests/federation_support/mod.rs"]
+#[path = "../../../tests/support/federation.rs"]
 mod federation_support;
-#[path = "../../../crates/identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 use rss_identity_app::{assembly, config::RuntimeConfig};
 use rss_identity_postgres::{Federation, FederationConfig};
@@ -29,6 +29,7 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     );
     let authority = assembly::authority(
         &config,
+        assembly::authority_config(&config)?,
         f.runtime.clone(),
         kdf.clone(),
         rss_identity_app::config::cutoff(config.budgets.startup_seconds)?,
@@ -135,5 +136,5 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[path = "../../../crates/identity-service-http/tests/request_support/mod.rs"]
+#[path = "../../../tests/support/request.rs"]
 mod request_support;

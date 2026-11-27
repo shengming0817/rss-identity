@@ -112,11 +112,13 @@ async fn body<T: serde::de::DeserializeOwned>(
     request: Request,
     b: Deadline,
 ) -> Result<T, HttpError> {
-    let bytes =
-        tokio::time::timeout_at(b.instant().into(), axum::body::to_bytes(request.into_body(), 65536))
-            .await
-            .map_err(|_| HttpError::request_timeout())?
-            .map_err(|_| BAD)?;
+    let bytes = tokio::time::timeout_at(
+        b.instant().into(),
+        axum::body::to_bytes(request.into_body(), 65536),
+    )
+    .await
+    .map_err(|_| HttpError::request_timeout())?
+    .map_err(|_| BAD)?;
     serde_json::from_slice(&bytes).map_err(|_| BAD)
 }
 fn clear(mut response: Response) -> Response {
@@ -241,9 +243,10 @@ async fn auth_finish(
         )
         .await?;
     let mut response = Json(serde_json::json!({"expiresAt":grant.expires_at})).into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, operation_cookie(&grant, std::time::SystemTime::now())?);
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        operation_cookie(&grant, std::time::SystemTime::now())?,
+    );
     Ok(response)
 }
 async fn remove(
@@ -256,9 +259,7 @@ async fn remove(
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, &headers, b, true).await?;
     let token = read_operation_cookie(&headers)?.ok_or(UNAUTH)?;
-    s.webauthn
-        .remove(actor, generation, id, token, b)
-        .await?;
+    s.webauthn.remove(actor, generation, id, token, b).await?;
     Ok(clear(
         Json(serde_json::json!({"removed":true})).into_response(),
     ))
@@ -272,9 +273,7 @@ async fn cancel(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let actor = actor(&s, binding, &headers, b, true).await?;
-    s.webauthn
-        .cancel(actor, generation, id, b)
-        .await?;
+    s.webauthn.cancel(actor, generation, id, b).await?;
     Ok(Json(serde_json::json!({"cancelled":true})).into_response())
 }
 

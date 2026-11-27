@@ -7,8 +7,8 @@ use rss_identity_postgres::{
     Authority, AuthorityConfig, Federation, FederationConfig, ManagementContext, ManagementDenied,
     ManagementOperation, ManagementPolicy, ReauthenticationRequirement,
 };
-use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
 use rss_request_context::SharedExecutionTimer;
+use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
 use rss_transactional_messaging_postgres::PgRuntime;
 use std::{
     path::Path,
@@ -146,7 +146,10 @@ pub fn federation(
         })
         .transpose()
 }
-fn federation_inputs(config: &RuntimeConfig, timer: SharedExecutionTimer) -> Result<Option<FederationInputs>, AppError> {
+fn federation_inputs(
+    config: &RuntimeConfig,
+    timer: SharedExecutionTimer,
+) -> Result<Option<FederationInputs>, AppError> {
     let Some(c) = &config.oidc else {
         return Ok(None);
     };

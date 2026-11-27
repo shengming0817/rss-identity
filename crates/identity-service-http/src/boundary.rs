@@ -9,12 +9,19 @@ use axum::{
 use rss_identity_postgres::AuthorityError;
 pub(crate) use rss_identity_web_credentials::{cookie, csrf, login_cookie, request_marker};
 use rss_identity_web_credentials::{cookie_presentation, same_origin};
-use rss_request_context::TenantId;
 pub(crate) use rss_request_context::Deadline;
+use rss_request_context::TenantId;
 use std::time::{Duration, Instant};
 
-pub(crate) fn request_deadline(request: &Request, timeout: Duration, now: Instant) -> Result<Deadline, HttpError> {
-    let mut deadline = Deadline::at(now.checked_add(timeout).ok_or_else(HttpError::request_timeout)?);
+pub(crate) fn request_deadline(
+    request: &Request,
+    timeout: Duration,
+    now: Instant,
+) -> Result<Deadline, HttpError> {
+    let mut deadline = Deadline::at(
+        now.checked_add(timeout)
+            .ok_or_else(HttpError::request_timeout)?,
+    );
     if let Some(host) = request.extensions().get::<Deadline>() {
         deadline = deadline.shortened_to(host.instant());
     }
@@ -32,7 +39,11 @@ pub(crate) async fn request_boundary(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let budget = match request_deadline(&request, state.config.timeout(), rss_request_context::Clock::now(state.authority.execution_timer())) {
+    let budget = match request_deadline(
+        &request,
+        state.config.timeout(),
+        rss_request_context::Clock::now(state.authority.execution_timer()),
+    ) {
         Ok(budget) => budget,
         Err(error) => return private_response(error.into_response()),
     };

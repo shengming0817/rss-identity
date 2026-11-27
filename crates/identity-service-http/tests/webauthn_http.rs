@@ -1,5 +1,5 @@
 //! Same-origin HTTP boundary with real PG and software WebAuthn signatures.
-#[path = "../../identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 use axum::{
     body::{Body, to_bytes},
@@ -286,5 +286,5 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
     Ok(())
 }
 
-#[path = "request_support/mod.rs"]
+#[path = "../../../tests/support/request.rs"]
 mod request_support;

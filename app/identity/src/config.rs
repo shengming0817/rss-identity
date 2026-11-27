@@ -29,7 +29,9 @@ impl DatabaseConfig {
         // One maximum Identity mutation batch per concurrent database transaction.
         const ROWS: usize = 8;
         const BYTES: u32 = 1024 * 1024;
-        let total = BYTES.checked_mul(self.max_connections).ok_or(AppError::Budget)?;
+        let total = BYTES
+            .checked_mul(self.max_connections)
+            .ok_or(AppError::Budget)?;
         rss_audit_postgres::WriteBudget::new(ROWS, BYTES, total).map_err(|_| AppError::Budget)
     }
 

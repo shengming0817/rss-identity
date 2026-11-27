@@ -51,9 +51,7 @@ async fn actor(
         }
         csrf(h, &secret)?;
     }
-    Ok(s.authority
-        .inspect_session(binding, secret, b)
-        .await?)
+    Ok(s.authority.inspect_session(binding, secret, b).await?)
 }
 fn target(t: &str, p: &str) -> Result<AccountKey, Error> {
     Ok(AccountKey {

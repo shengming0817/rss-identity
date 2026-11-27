@@ -1,5 +1,5 @@
 //! Real PG + in-process Router seam (T2), without claiming product binary/TLS T3.
-#[path = "../../identity-postgres/tests/support/mod.rs"]
+#[path = "../../../tests/support/postgres.rs"]
 mod support;
 use axum::{
     Router,
@@ -185,7 +185,7 @@ async fn public_host_requests_enforce_activity_and_revocation() -> anyhow::Resul
                 crate::support::binding(f.key.tenant),
                 &active,
                 mode,
-                rss_transactional_messaging::policy::OperationDeadline::from_remaining(remaining),
+                rss_request_context::Deadline::from_timeout(f.store.execution_timer(), remaining)?,
             )
             .await
             .err()
@@ -1754,5 +1754,5 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     Ok(())
 }
 
-#[path = "request_support/mod.rs"]
+#[path = "../../../tests/support/request.rs"]
 mod request_support;

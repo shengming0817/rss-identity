@@ -46,7 +46,11 @@ fn secure(mut response: Response) -> Response {
     response
 }
 async fn boundary(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let budget = match request_deadline(&request, state.config.timeout(), rss_request_context::Clock::now(state.authority.execution_timer())) {
+    let budget = match request_deadline(
+        &request,
+        state.config.timeout(),
+        rss_request_context::Clock::now(state.authority.execution_timer()),
+    ) {
         Ok(budget) => budget,
         Err(error) => return secure(error.into_response()),
     };

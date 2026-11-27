@@ -39,7 +39,7 @@ pub(super) async fn verify(
                         binding,
                         &headers,
                         SessionActivity::Active,
-                        assembly::deadline(deadline),
+                        deadline,
                     )
                     .await
                     .map_err(HttpError::from)?;

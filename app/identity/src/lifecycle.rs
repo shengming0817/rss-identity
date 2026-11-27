@@ -152,8 +152,14 @@ async fn ready(State(h): State<Arc<Health>>) -> StatusCode {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
     let result = tokio::time::timeout_at(cutoff.instant().into(), async {
-        if let Err(error) =
-            assembly::authority(&h.config, h.authority_config.clone(), h.pool.clone(), h.kdf.clone(), cutoff).await
+        if let Err(error) = assembly::authority(
+            &h.config,
+            h.authority_config.clone(),
+            h.pool.clone(),
+            h.kdf.clone(),
+            cutoff,
+        )
+        .await
         {
             eprintln!("component=postgres readiness=failed reason={error}");
             return Err(error);
@@ -237,8 +243,14 @@ pub async fn serve(
                         timeout: per,
                     }));
                     let authority_config = assembly::authority_config(&config)?;
-                    let authority =
-                        assembly::authority(&config, authority_config.clone(), pool.clone(), kdf.clone(), cutoff).await?;
+                    let authority = assembly::authority(
+                        &config,
+                        authority_config.clone(),
+                        pool.clone(),
+                        kdf.clone(),
+                        cutoff,
+                    )
+                    .await?;
                     let federation = assembly::federation(&config, authority.clone())?;
                     let http = HttpConfig::new(&config.public_origin, config.budgets.request())
                         .map_err(|_| AppError::Configuration)?;

@@ -308,11 +308,13 @@ async fn link(
 
     let source = source(&request)?;
 
-    let Json(input) =
-        tokio::time::timeout_at(budget.instant().into(), Json::<Link>::from_request(request, &state))
-            .await
-            .map_err(|_| HttpError::request_timeout())?
-            .map_err(|_| BAD)?;
+    let Json(input) = tokio::time::timeout_at(
+        budget.instant().into(),
+        Json::<Link>::from_request(request, &state),
+    )
+    .await
+    .map_err(|_| HttpError::request_timeout())?
+    .map_err(|_| BAD)?;
 
     let password = input
         .password
@@ -443,9 +445,10 @@ async fn callback_result(
 
     let (location, cookie) = match outcome {
         FederatedOutcome::Redirect(redirect) => (redirect.url, None),
-        FederatedOutcome::StepUp { grant, return_url } => {
-            (return_url, Some(operation_cookie(&grant, std::time::SystemTime::now())?))
-        }
+        FederatedOutcome::StepUp { grant, return_url } => (
+            return_url,
+            Some(operation_cookie(&grant, std::time::SystemTime::now())?),
+        ),
         FederatedOutcome::Session {
             issued,
             return_url,
