@@ -128,7 +128,7 @@ impl crate::HttpOidc {
             .header("content-type", "application/x-www-form-urlencoded")
             .body(form.into_bytes())
             .map_err(|_| FederationError::Configuration)?;
-        let response = transport.call(request).await?;
+        let response = transport.call(rss_identity_core::federation::ProviderStage::Exchange, request).await?;
         if !response.status().is_success() {
             return Err(FederationError::Rejected);
         }
