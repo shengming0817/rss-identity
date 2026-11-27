@@ -407,7 +407,7 @@ REVOKE ALL ON FUNCTION identity_authority.advance_directory_revision() FROM PUBL
 
 -- Each entry declares the facts observed by one revision family. UPDATE OF skips unrelated
 -- writes and WHEN skips assignments which preserve the value. INSERT/DELETE also track presence.
-DO $$ DECLARE item record; old_values text; new_values text; cols text; pred text; trg text;
+DO $$ DECLARE item record; cols text; pred text; trg text;
 BEGIN
  FOR item IN SELECT * FROM (VALUES
   ('accounts','rows','global','principal_id'),
@@ -427,14 +427,14 @@ BEGIN
  ) AS rules(tab,kind,scope,observed)
  LOOP
   trg := 'revision_' || item.kind;
-  SELECT string_agg('OLD.'||term,',' ORDER BY pos),string_agg('NEW.'||term,',' ORDER BY pos),
+  -- Flat predicates round-trip through pg_dump/pg_restore structural attestation.
+  SELECT string_agg(format('(OLD.%s IS DISTINCT FROM NEW.%s)',term,term),' OR ' ORDER BY pos),
    string_agg(DISTINCT split_part(term,'->',1) COLLATE "C",',')
-  INTO old_values,new_values,cols
+  INTO pred,cols
   FROM unnest(string_to_array('tenant_id,'||item.observed,',')) WITH ORDINALITY terms(term,pos);
-  pred := format('ROW(%s) IS DISTINCT FROM ROW(%s)',old_values,new_values);
   -- Pure renewal preserves the validity already promised to a reference cursor.
   IF item.kind='reference' THEN
-   pred := '('||pred||' OR NEW.idle_expires_at < OLD.idle_expires_at)';
+   pred := pred||' OR NEW.idle_expires_at < OLD.idle_expires_at';
    cols := cols||',idle_expires_at';
   END IF;
   EXECUTE format('CREATE TRIGGER %I AFTER INSERT OR DELETE ON identity_authority.%I FOR EACH ROW EXECUTE FUNCTION identity_authority.advance_directory_revision(%L,%L)',trg,item.tab,item.kind,item.scope);

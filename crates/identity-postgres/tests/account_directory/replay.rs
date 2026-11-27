@@ -130,7 +130,7 @@ pub(super) async fn replay_writes() -> anyhow::Result<Vec<Vec<bool>>> {
                 Err(e) => return Err(e.into()),
             }
         }
-        println!("directory replay {event}: {invalid:?}");
+        eprintln!("directory replay {event}: {invalid:?}");
         results.push(invalid);
     }
     f.close().await;
