@@ -1,5 +1,5 @@
 //! Profile management shares the cookie/CSRF and transaction policy owners.
-use crate::{AppState, boundary::*, management::Error};
+use crate::{AppState, accounts::Error, boundary::*};
 use axum::{
     Extension, Json, Router,
     extract::{Path, Request, State},
@@ -46,7 +46,7 @@ async fn actor(
 ) -> Result<rss_identity_postgres::AuthenticatedSession, Error> {
     let secret = cookie(h)?.ok_or(UNAUTH)?;
     if write {
-        if unique(h, "x-identity-request")? != Some("1") {
+        if !request_marker(h)? {
             return Err(FORBIDDEN.into());
         }
         csrf(h, &secret)?;

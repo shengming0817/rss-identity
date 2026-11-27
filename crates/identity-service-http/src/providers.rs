@@ -1,9 +1,9 @@
 //! Optional OIDC management adapter.
 use crate::{
     AppState, HttpConfig,
+    accounts::{Error, body},
     boundary::*,
     dto,
-    management::{Error, body},
 };
 use axum::{
     Extension, Json, Router,
@@ -29,7 +29,6 @@ pub(crate) fn router(
     let authority = federation.authority();
     authority.require_runtime()?;
     Ok(Router::new()
-        .route("/tenants/{tenant}/login-options", get(options))
         .route(
             "/tenants/{tenant}/providers",
             get(providers).post(create_provider),
@@ -62,7 +61,7 @@ async fn actor(
 ) -> Result<AuthenticatedSession> {
     let secret = cookie(h)?.ok_or(UNAUTH)?;
     if write {
-        if unique(h, "x-identity-request")? != Some("1") {
+        if !request_marker(h)? {
             return Err(FORBIDDEN.into());
         }
         csrf(h, &secret)?;
@@ -71,22 +70,6 @@ async fn actor(
         .authority()
         .inspect_session(binding, secret, b.remaining())
         .await?)
-}
-async fn options(
-    State(s): State<Management>,
-    Execution(binding): Execution,
-    Extension(b): Extension<RequestBudget>,
-) -> Result<Response> {
-    Ok(Json(dto::LoginOptions {
-        providers: s
-            .federation
-            .login_options(binding, b.remaining())
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-    })
-    .into_response())
 }
 async fn providers(
     State(s): State<Management>,

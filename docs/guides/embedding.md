@@ -45,7 +45,14 @@ HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` �
 
 ## 请求与管理授权
 
-浏览器 HTTP 宿主通过 `authenticate_request` 取得当前请求的 AuthenticatedSession，再执行产品资源授权。Active 请求检查 cookie、同源、请求标记和 CSRF 后续期；Passive 只读验证，不延长 idle。会话保留签发时的 idle/absolute 策略，宿主配置变更只影响新会话；refresh 旋转凭据但不延长绝对期限，重新认证只能绑定当前主体。不要跨请求缓存成功身份、组或部门事实。
+浏览器 HTTP 宿主通过公共 Rust 包 `rss-identity-web-credentials` 的 `authenticate_request` 取得当前请求的 AuthenticatedSession，再执行产品资源授权。Active 请求检查 cookie、同源、请求标记和 CSRF 后续期；Passive 只读验证，不延长 idle。会话保留签发时的 idle/absolute 策略，宿主配置变更只影响新会话；refresh 旋转凭据但不延长绝对期限，重新认证只能绑定当前主体。不要跨请求缓存成功身份、组或部门事实。
+
+```rust,ignore
+let (proof, _) = rss_identity_web_credentials::authenticate_request(
+    &authority, &http, binding, &headers,
+    rss_identity_web_credentials::SessionActivity::Passive, deadline,
+).await?;
+```
 
 每次管理事务重新核对实例、租户、账户、成员、会话和失效代际后调用宿主 ManagementPolicy。策略是有界异步回调，借用当前事务连接读取宿主权威规则，不另开连接、不提交或修改租户作用域；组件落实策略要求的重新认证/MFA。宿主持有管理角色、防锁死和并发一致性，Identity 不保存 administrator/emergency/platform 角色。
 
@@ -73,13 +80,11 @@ HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` �
 
 ## 可选程序化 Bearer
 
-宿主显式挂载 `bearer_router(authority, http)`，并在其外层及选定业务 API 统一执行产品 IP 准入。浏览器 router 不自动开启程序化路由。宿主仍负责 HTTPS、真实 peer/受信代理来源、租户路由、资源授权和秘密脱敏；API Key 属于消费产品，不进入 Identity。
+嵌入宿主定义登录和注销入口并执行网络来源准入。密码登录调用 `Authority::login_local_bearer`，以产品契约交付一次性令牌。后续请求通过 `authenticate_bearer_request` 验证已有 Authorization 头，获得本次请求的身份与凭据。活动认证更新空闲期限，`inspect_bearer` 仅复核；注销以同一会话证明调用 `Authority::revoke_current_session`。账户全注销、重置密码、停用账户和撤销成员资格均按原有会话代际生效。
 
-`POST /api/v1/identity/tenants/{tenant}/bearer/login` 使用 JSON 账号密码，返回一次性 `accessToken`、`tokenType`、`sessionId`、`principalId`、`idleExpiresAt` 和 `absoluteExpiresAt`。随后使用 `Authorization: Bearer`，通过 `authenticate_bearer_request` 获取真实身份和仅限当前请求的凭据。每次有效认证包括 GET 都续空闲期限，不延长绝对期限；宿主续查使用 `inspect_bearer`，不续空闲。不存在 refresh token；绝对到期后重新密码登录。
+凭据处理拒绝身份 Cookie、API Key 和重复 Authorization 混用。宿主负责 TLS、可信 peer、操作时限、资源授权及响应 `no-store`；凭据只通过凭据通道交付。密码登录的 assurance 仅表示密码认证。
 
-两种呈现共用账户、密码限流及签发时会话策略；数据库持久化用途，Cookie/Bearer 双向串用均拒绝。Bearer 路由不需要浏览器 Origin/CSRF，不设置或清除 Cookie，拒绝身份 Cookie、API Key、重复 Authorization 和 URL 查询参数。不得将凭据放入 URL、日志、审计或浏览器持久存储。响应为 `no-store`；没有凭据回查入口。
-
-`POST /api/v1/identity/tenants/{tenant}/bearer/logout` 只撤销当前 Bearer；浏览器当前注销不影响其它会话。账户全注销、密码重置、账户停用及成员撤销按既有 epoch/state 合同同时约束两种呈现。密码登录只证明密码认证，不产生 MFA；产品授权仍消费当前账户与可信 assurance。当前 schema 为全新安装，旧 schema 和旧引用结构不兼容。
+独立服务可选的固定路径、JSON 字段和 HTTP 状态归 `rss-identity-service-http`。[程序化 Bearer 接口](../architecture/identity-http.md#程序化-bearer-接口) 描述其路径、响应和启用条件。参考宿主默认关闭程序化端点。
 
 ## 组与可选可信部门树快照
 
@@ -108,10 +113,7 @@ Keycloak 使用内置 JSON UserAttributeMapper，把管理员维护的单个完�
 
 Federation 接收 Authority、上游适配器、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。Authority 不保存租户名单；无认证证明的操作接收 `ExecutionBinding`，已认证操作沿用证明的原 binding。连接固定 storage，每次事务核对 tenant/epoch，不从数据库自动更新代际。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
 
-```rust,ignore
-let routes = rss_identity_http_axum::router(authority, http.clone())?
-    .merge(rss_identity_http_axum::federated_router(federation, http)?);
-```
+宿主登录入口用 `BrowserBinding::start` 获取关联值及首次签发的 Cookie，将关联值和可信执行绑定传给 `Federation::begin_login`。回调用 `BrowserBinding::require` 取回关联值，经 `CallbackOutcome::from_parts` 判定结果后调用 `Federation::complete` 或 `cancel`。独立服务的示例见[OIDC 路由](../../crates/identity-service-http/src/oidc.rs)。
 
 OIDC 使用 Code/PKCE、state/nonce 和浏览器绑定，登录事务原子单次消费；邮箱不是自动关联依据。显式关联与 step-up 绑定当前主体，provider 配置变化使旧流程失效。唯一 callback 是宿主 origin 下的 `/api/v1/identity/oidc/callback`，回跳只接受宿主白名单键。
 
@@ -123,22 +125,11 @@ OIDC 使用 Code/PKCE、state/nonce 和浏览器绑定，登录事务原子单�
 
 登录准备只获取 Discovery。回调按签名算法读取密钥，JWKS 故障可能在完成上游登录后才报告，失败后须重新登录。每次 token 交换仅提交一次；管理员连接测试始终新建连接并读取两份文档。复用、冷却与在途撤权均以适配器实例为界，PostgreSQL Federation 在变更事务内先退役旧快照，再结算并按权威数据库版本复核。提交结果不明或回滚后，新的权威读取可取得当前配置；已经退役的在途操作须重试。撤权会取消本地 HTTP 等待，已经发送到上游的请求可能已产生效果。直接调用企业交换的宿主须在交付或使用返回的凭据前自行复核权威版本。
 
-宿主持有 TLS、listener、可信代理、日志脱敏和有界关闭，必须注入 `ClientAddress`；仅有 ConnectInfo 不会自动转换，缺失来源时登录拒绝。直连中间件可从真实 peer 注入：
+宿主持有 TLS、listener、可信代理、日志脱敏和有界关闭。从已核实的连接取得客户端地址，并在密码登录等操作中显式传入 `AttemptSource`。独立 Identity 宿主将验证后的地址通过产品 HTTP 扩展注入。
 
-```rust,ignore
-async fn client_address(
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    mut request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    request.extensions_mut().insert(rss_identity_http_axum::ClientAddress(peer.ip()));
-    next.run(request).await
-}
-```
+使用 Axum ConnectInfo 的直连 listener 通过 `into_make_service_with_connect_info::<SocketAddr>()` 提供 peer。RSS listener 的参考宿主使用 AcceptedConnectionInfo；反代须先验证真实 peer 是可信网关，再读取它覆盖的来源头。不能直接信任浏览器 forwarded headers。
 
-直连 listener 还须通过 `into_make_service_with_connect_info::<SocketAddr>()` 提供 peer。RSS listener 的参考宿主使用 AcceptedConnectionInfo；反代须先验证真实 peer 是可信网关，再读取它覆盖的来源头。不能直接信任浏览器 forwarded headers。
-
-不要用通用 timeout 丢弃数据库写 future。组件/RSS 持有有界事务结算；CommitUnknown、RollbackFailed 等内部结果保留在 HttpFailure 中，不能据 503 推断可安全重试。对外错误、cookie 与 CSRF 规则见 [HTTP 接入](../architecture/identity-http.md)。安全事件 schema 由 postgres 持有，不含凭据或上游 token。
+不要用通用 timeout 丢弃数据库写 future。组件/RSS 持有有界事务结算；CommitUnknown、RollbackFailed 等内部结果保留在公共凭据错误的 Authority 分类中，不能据 503 推断可安全重试。对外错误、cookie 与 CSRF 规则见 [HTTP 接入](../architecture/identity-http.md)。安全事件 schema 由 postgres 持有，不含凭据或上游 token。
 
 `Federation::check_credential_keys(binding, deadline)` 只检查一个明确目标，宿主持有分页与全库覆盖结论。密钥重加密复用组件的租户事务接口与既有 storage fence，宿主最终提交或回滚；维护角色不因此扩权。参考部署的操作顺序见[恢复与轮换](../deployment/recovery.md)。
 
@@ -239,7 +230,7 @@ HTTP 本地资料位于 `/api/v1/identity/tenants/{tenant}/accounts/{principal}/
 不接受 principal 或 assurance DTO。`verify` 在事务外验证来源、平台签名、用途、nonce 和用户证据，
 最终签发事务重新检查账户／成员、外部关联和宿主绑定，消费挑战并提交会话及安全事件。
 
-平台仅签发 Cookie；`issued_session_response` 复用现有 Set-Cookie／CSRF 与 no-store 响应格式。
+平台仅签发 Cookie；宿主通过 `rss_identity_web_credentials::issued_cookie(&issued)` 取得同一次签发的 Set-Cookie 和 CSRF 值，按产品契约投影响应，并添加 no-store。
 未知提交绝不返回秘密，不能通过重放挑战取回可能已经提交的凭据。
 verifier 随 Authority 持续存在，会话请求、refresh、管理和后台 session reference 都重新执行绑定复核；缺少 verifier 时拒绝。
 硬件持有、用户在场和用户验证不自动映射为 MFA；缺少真实用户认证时间时 assurance.auth_time 为 None。

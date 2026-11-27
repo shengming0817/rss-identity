@@ -70,6 +70,18 @@ def check(metadata, manifest):
     check_features(actual, 'test')
     return {"sources":source_pins,"packages":found}
 
+def check_public_closure(directory, env=None):
+    public = ('rss-identity-core', 'rss-identity-postgres', 'rss-identity-oidc',
+              'rss-identity-web-credentials')
+    command = ['cargo', 'tree', '--locked', '-e', 'normal,build', '--target', 'all',
+               '--prefix', 'none', '--format', '{p}']
+    for package in public:
+        command.extend(['-p', package])
+    tree = subprocess.check_output(command, cwd=directory, env=env, text=True)
+    names = {line.split()[0] for line in tree.splitlines() if line.strip()}
+    forbidden = names & {'axum', 'axum-core', 'rss-axum', 'rss-identity-service-http', 'rss-identity-app'}
+    require(not forbidden, f'product HTTP leaked into public dependencies: {sorted(forbidden)}')
+
 def check_artifacts(data, output):
     # Use the actual release/check compiler artifacts, including cached artifacts.
     packages = {p['id']: p for p in data['packages']}
@@ -97,6 +109,8 @@ if __name__ == "__main__":
     manifest = tomllib.loads((ROOT/"Cargo.toml").read_text())
     check_advisory_policy(tomllib.loads((ROOT / "deny.toml").read_text()))
     result = check(data, manifest)
+    if not args.metadata:
+        check_public_closure(ROOT)
     output = args.artifacts.read_text() if args.artifacts else subprocess.check_output(['cargo', 'check', '--locked', '--workspace', '--lib', '--bins', '--message-format=json'], cwd=ROOT, text=True)
     check_artifacts(data, output)
     print(json.dumps(result, sort_keys=True))

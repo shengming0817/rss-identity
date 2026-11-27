@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import ssl
+import socket
 import subprocess
 import sys
 import time
@@ -45,7 +46,8 @@ def verify_rows(rows, source):
     )
 
 
-def gateway():
+@contextlib.contextmanager
+def gateway_server(native_listener=False):
     name = "identity-gateway-t2-" + uuid.uuid4().hex
     try:
         subnet = ipaddress.ip_network(
@@ -55,6 +57,12 @@ def gateway():
             source, backend = str(subnet[2]), str(subnet[3])
             data["backendSubnet"] = str(subnet)
             data["runtime"]["publicGateway"] = source
+            if native_listener:
+                data["runtime"]["oidc"] = {
+                    "stateKeyFile": str(root / "runtime"),
+                    "credentialKeyring": {"activeKeyId": "a", "keys": [{"keyId": "a", "path": str(root / "owner")}]},
+                    "returnTargets": {"resume": data["runtime"]["publicOrigin"] + "/auth/resume"},
+                }
             subprocess.run(
                 [
                     "openssl",
@@ -85,20 +93,6 @@ def gateway():
                 patch.object(deploy, "preflight"),
             ):
                 deploy.render(data, root / "gateway", images)
-            probe = root / "probe.conf"
-            probe.write_text("""pid /tmp/nginx.pid;
-error_log stderr crit;
-events {}
-http {
- access_log off;
- client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi;
- server { listen 8080;
-  location / { default_type application/json;
-   return 200 '{"connection":"$connection","requests":"$connection_requests","source":"$remote_addr","xff":"$http_x_forwarded_for","host":"$http_host","cookie":"$http_cookie","forwarded":"$http_forwarded","real":"$http_x_real_ip","xfh":"$http_x_forwarded_host","xfp":"$http_x_forwarded_proto","connectionHeader":"$http_connection"}';
-  }
- }
-}
-""")
             user = f"{os.getuid()}:{os.getgid()}"
             args = [
                 "nginx",
@@ -109,19 +103,51 @@ http {
                 "-g",
                 "daemon off;",
             ]
-            _, backend_ports = stack.enter_context(
-                container(
-                    IMAGES["nginx"],
-                    [8080],
-                    args=args,
-                    user=user,
-                    network=name,
-                    address=backend,
-                    mounts=[f"{probe}:/etc/nginx/nginx.conf:ro"],
+            listen = None
+            if native_listener:
+                # The Rust service runs alongside Cargo. Use only loopback or the local Docker bridge.
+                if sys.platform == "linux":
+                    host = docker("network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}")
+                    upstream = str(ipaddress.IPv4Address(host))
+                else:
+                    host, upstream = "127.0.0.1", "host.docker.internal"
+                with socket.socket() as reservation:
+                    reservation.bind((host, 0))
+                    port = reservation.getsockname()[1]
+                listen = f"{host}:{port}"
+                conf = root / "gateway" / "gateway.conf"
+                rendered = conf.read_text()
+                old = f"server {backend}:8080;"
+                deploy.require(rendered.count(old) == 1, "gateway upstream")
+                conf.write_text(rendered.replace(old, f"server {upstream}:{port};"))
+            else:
+                probe = root / "probe.conf"
+                probe.write_text("""pid /tmp/nginx.pid;
+error_log stderr crit;
+events {}
+http {
+ access_log off;
+ client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy; fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi;
+ server { listen 8080;
+  location / { default_type application/json;
+   return 200 '{"uri":"$request_uri","connection":"$connection","requests":"$connection_requests","source":"$remote_addr","xff":"$http_x_forwarded_for","host":"$http_host","cookie":"$http_cookie","forwarded":"$http_forwarded","real":"$http_x_real_ip","xfh":"$http_x_forwarded_host","xfp":"$http_x_forwarded_proto","connectionHeader":"$http_connection"}';
+  }
+ }
+}
+""")
+                _, backend_ports = stack.enter_context(
+                    container(
+                        IMAGES["nginx"],
+                        [8080],
+                        args=args,
+                        user=user,
+                        network=name,
+                        address=backend,
+                        mounts=[f"{probe}:/etc/nginx/nginx.conf:ro"],
+                    )
                 )
-            )
-            wait(f"http://127.0.0.1:{backend_ports[8080]}/ready")
-            _, ports = stack.enter_context(
+                wait(f"http://127.0.0.1:{backend_ports[8080]}/ready")
+            proxy_id, ports = stack.enter_context(
                 container(
                     IMAGES["nginx"],
                     [8443],
@@ -150,47 +176,45 @@ http {
                     if time.monotonic() >= deadline:
                         raise
                     time.sleep(0.1)
-            rows = []
-            paths = [
-                "/api/v1/identity/probe",
-                "/api/v1/identity-host/tenants/00000000-0000-0000-0000-000000000001/context",
-            ]
-            for i in range(64):
-                client.request(
-                    "GET",
-                    paths[i % 2],
-                    headers={
-                        "Host": "identity.example.test",
-                        "Cookie": f"probe={i}",
-                        "X-Forwarded-For": "spoof",
-                        "Forwarded": "spoof",
-                        "X-Real-IP": "spoof",
-                        "X-Forwarded-Host": "spoof",
-                        "X-Forwarded-Proto": "spoof",
-                        "Connection": "close",
-                    },
-                )
-                response = client.getresponse()
-                body = response.read()
-                deploy.require(
-                    response.status == 200, f"gateway returned HTTP {response.status}"
-                )
-                rows.append(json.loads(body))
-            verify_rows(rows, source)
-            for path in [
-                "/api/v2/probe",
-                "/api/v2/oidc/callback",
-                "/api/v1/tenants/00000000-0000-0000-0000-000000000001/session",
-                "/api/identity-host/v1/config.json",
-                "/api/identity-host/v1/tenants/00000000-0000-0000-0000-000000000001/context",
-            ]:
-                client.request("GET", path, headers={"Host": "identity.example.test"})
-                response = client.getresponse()
-                response.read()
-                deploy.require(response.status == 404, f"retired route reachable: {path}")
-            print(
-                "gateway T2: 64 requests across both routes reuse one upstream connection; headers isolated; retired routes return 404"
-            )
+            if native_listener:
+                # The native listener has not started yet. Only this canonical GET has
+                # the OIDC browser contract when the gateway cannot reach the service.
+                client.request("GET", "/api/v1/identity/oidc/callback?state=private")
+                unavailable = client.getresponse()
+                unavailable.read()
+                deploy.require(unavailable.status == 303 and
+                               unavailable.getheader("location") == "/auth/error?reason=unavailable" and
+                               unavailable.getheader("set-cookie") is None, "gateway callback outage")
+                # Only the closed fault classification should appear, never the original query.
+                logs = subprocess.check_output(["docker", "logs", proxy_id], stderr=subprocess.STDOUT, text=True, timeout=10)
+                deploy.require("component=identity-gateway classification=upstream_unavailable" in logs
+                               and "state=private" not in logs, "gateway redacted diagnosis")
+            for path in ["/api/v1/identity/oidc/callback", "/api/v1/identity/probe"]:
+                for method, target, headers, original in [
+                    ("GET", path + "?state=" + "a"*17000, {}, 414),
+                    ("GET", path, {"X-Fixture-Padding": "a"*17000}, 400),
+                    ("HEAD", path, {"X-Fixture-Padding": "a"*17000}, 400),
+                    ("GET", path, {"Content-Length": str(97 * 1024)}, 413),
+                    ("HEAD", path, {"Content-Length": str(97 * 1024)}, 413),
+                ]:
+                    payload = b"x" * int(headers["Content-Length"]) if "Content-Length" in headers else None
+                    client.request(method, target, body=payload, headers=headers)
+                    rejected = client.getresponse()
+                    body = rejected.read()
+                    project = native_listener and method == "GET" and path.endswith("/oidc/callback")
+                    deploy.require(rejected.status == (303 if project else original), "gateway parser status")
+                    if project:
+                        deploy.require(rejected.getheader("Location") == "/auth/error?reason=failed"
+                                       and rejected.getheader("Set-Cookie") is None
+                                       and rejected.getheader("Cache-Control") == "no-store"
+                                       and rejected.getheader("Referrer-Policy") == "no-referrer"
+                                       and b"state=" not in body, "gateway parser projection")
+            yield client, source, {
+                "IDENTITY_TEST_GATEWAY_URL": f"https://127.0.0.1:{ports[8443]}",
+                "IDENTITY_TEST_GATEWAY_CA": str(root / "cert"),
+                "IDENTITY_TEST_GATEWAY_BACKEND": listen,
+                "IDENTITY_TEST_GATEWAY_PEER": source if sys.platform == "linux" else "127.0.0.1",
+            }
     finally:
         failed = sys.exception() is not None
         try:
@@ -211,6 +235,58 @@ http {
             if not failed:
                 raise
             print("gateway network cleanup also failed", file=sys.stderr)
+
+
+def gateway():
+    with gateway_server() as (client, source, _):
+        rows = []
+        paths = [
+            "/api/v1/identity/probe",
+            "/api/v1/identity-host/tenants/00000000-0000-0000-0000-000000000001/context",
+        ]
+        for i in range(64):
+            client.request(
+                "GET",
+                paths[i % 2],
+                headers={
+                    "Host": "identity.example.test",
+                    "Cookie": f"probe={i}",
+                    "X-Forwarded-For": "spoof",
+                    "Forwarded": "spoof",
+                    "X-Real-IP": "spoof",
+                    "X-Forwarded-Host": "spoof",
+                    "X-Forwarded-Proto": "spoof",
+                    "Connection": "close",
+                },
+            )
+            response = client.getresponse()
+            body = response.read()
+            deploy.require(
+                response.status == 200, f"gateway returned HTTP {response.status}"
+            )
+            rows.append(json.loads(body))
+        verify_rows(rows, source)
+        # The canonical OIDC callback is forwarded with its parameters intact.
+        # The production-handler responses to these inputs are checked in test-assembly.
+        client.request("GET", "/api/v1/identity/oidc/callback?state=fixture",
+                       headers={"Host": "identity.example.test"})
+        callback = client.getresponse()
+        deploy.require(callback.status == 200 and json.loads(callback.read())["uri"] ==
+                       "/api/v1/identity/oidc/callback?state=fixture", "gateway callback target")
+        for path in [
+            "/api/v2/probe",
+            "/api/v2/oidc/callback",
+            "/api/v1/tenants/00000000-0000-0000-0000-000000000001/session",
+            "/api/identity-host/v1/config.json",
+            "/api/identity-host/v1/tenants/00000000-0000-0000-0000-000000000001/context",
+        ]:
+            client.request("GET", path, headers={"Host": "identity.example.test"})
+            response = client.getresponse()
+            response.read()
+            deploy.require(response.status == 404, f"retired route reachable: {path}")
+        print(
+            "gateway T2: 64 requests across both routes reuse one upstream connection; headers isolated; retired routes return 404"
+        )
 
 
 if __name__ == "__main__":

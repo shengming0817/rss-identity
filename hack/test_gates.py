@@ -19,7 +19,7 @@ class Gates(unittest.TestCase):
 
     def test_workspace_identity_and_binary(self):
         members = [p for p in self.metadata['packages'] if p['id'] in self.metadata['workspace_members']]
-        self.assertEqual({p['name'] for p in members}, {'rss-identity-core', 'rss-identity-postgres', 'rss-identity-oidc', 'rss-identity-app', 'rss-identity-http-axum'})
+        self.assertEqual({p['name'] for p in members}, {'rss-identity-core', 'rss-identity-postgres', 'rss-identity-oidc', 'rss-identity-app', 'rss-identity-service-http', 'rss-identity-web-credentials'})
         binaries = [t['name'] for p in members for t in p['targets'] if 'bin' in t['kind']]
         self.assertEqual(set(binaries), {'identity-admin','identity-server','identity-migrate'})
 

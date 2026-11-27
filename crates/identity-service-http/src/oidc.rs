@@ -12,7 +12,7 @@ use axum::{
 
 use rss_identity_core::{
     account::Password,
-    federation::{ProviderId, random_secret},
+    federation::{ProviderId, callback::CallbackOutcome},
     session::SessionSecret,
 };
 
@@ -22,9 +22,7 @@ use rss_identity_postgres::{
 
 use serde::Deserialize;
 
-use zeroize::Zeroizing;
-
-const BROWSER: &str = "__Host-identity-oidc-browser";
+use rss_identity_web_credentials::{BrowserBinding, issued_cookie, operation_cookie};
 
 #[derive(Clone)]
 struct FederationState {
@@ -39,22 +37,25 @@ pub fn federated_router(
 ) -> Result<Router, AuthorityError> {
     let authority = federation.authority();
 
-    let management = crate::provider_management::router(federation.clone(), config.clone())?;
+    let management = crate::providers::router(federation.clone(), config.clone())?;
     let local = AppState {
         authority: authority.clone(),
         config: config.clone(),
     };
 
+    let reconcile = middleware::from_fn_with_state(federation.clone(), reconcile_profiles);
     let state = FederationState {
         federation,
         local: local.clone(),
     };
 
     let routes = Router::new()
+        .route("/tenants/{tenant}/login-options", get(options))
         .route("/tenants/{tenant}/session/security", get(security))
         .route("/tenants/{tenant}/oidc/{provider}/login", post(begin))
         .route("/tenants/{tenant}/oidc/{provider}/link", post(link))
         .route("/tenants/{tenant}/oidc/{provider}/step-up", post(step_up))
+        .route_layer(reconcile)
         .route(
             "/oidc/callback",
             get(callback).head(|| async { StatusCode::METHOD_NOT_ALLOWED }),
@@ -69,6 +70,42 @@ pub fn federated_router(
     Ok(crate::mount(routes.merge(management)))
 }
 
+async fn reconcile_profiles(
+    State(federation): State<Federation>,
+    Execution(binding): Execution,
+    Extension(budget): Extension<RequestBudget>,
+    request: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Err(error) = federation
+        .reconcile_assurance_profiles(binding, budget.remaining())
+        .await
+    {
+        let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
+        response
+            .extensions_mut()
+            .insert(HttpFailure::Authority(error));
+        return response;
+    }
+    next.run(request).await
+}
+
+async fn options(
+    State(s): State<FederationState>,
+    Execution(binding): Execution,
+    Extension(b): Extension<RequestBudget>,
+) -> Result<Response, crate::accounts::Error> {
+    Ok(Json(dto::LoginOptions {
+        providers: s
+            .federation
+            .login_options(binding, b.remaining())
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    })
+    .into_response())
+}
 async fn security(
     State(state): State<FederationState>,
     Execution(binding): Execution,
@@ -108,26 +145,6 @@ struct Link {
     password: Option<String>,
 }
 
-fn browser(headers: &HeaderMap, create: bool) -> Result<(String, bool), HttpError> {
-    match named_cookie(headers, BROWSER)? {
-        Some(v)
-            if v.len() == 43
-                && v.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') =>
-        {
-            Ok((v.into(), false))
-        }
-
-        None if create => Ok((
-            random_secret()
-                .map_err(|e| HttpError::from(AuthorityError::from(e)))?
-                .to_string(),
-            true,
-        )),
-        _ => Err(UNAUTH),
-    }
-}
-
 fn source(request: &Request) -> Result<AttemptSource, HttpError> {
     let peer = request
         .extensions()
@@ -145,7 +162,7 @@ async fn actor(
     budget: RequestBudget,
     required: bool,
 ) -> Result<Option<AuthenticatedSession>, HttpError> {
-    if unique(headers, "x-identity-request")? != Some("1") {
+    if !request_marker(headers)? {
         return Err(FORBIDDEN);
     }
 
@@ -177,21 +194,15 @@ async fn actor(
 
 fn redirect_response(
     redirect: FederatedRedirect,
-    browser: &str,
-    created: bool,
+    set_cookie: Option<header::HeaderValue>,
 ) -> Result<Response, HttpError> {
     let mut response = Json(serde_json::json!({
     "authorizationUrl":redirect.url}
     ))
     .into_response();
 
-    if created {
-        response.headers_mut().insert(
-            header::SET_COOKIE,
-            format!("{BROWSER}={browser}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=3600")
-                .parse()
-                .map_err(|_| BAD)?,
-        );
+    if let Some(header) = set_cookie {
+        response.headers_mut().insert(header::SET_COOKIE, header);
     }
 
     Ok(response)
@@ -206,7 +217,7 @@ async fn begin(
 ) -> Result<Response, HttpError> {
     let actor = actor(&state, binding, request.headers(), budget, false).await?;
 
-    let (browser, created) = browser(request.headers(), true)?;
+    let browser = BrowserBinding::start(request.headers())?;
 
     let source = source(&request)?;
 
@@ -224,7 +235,7 @@ async fn begin(
             rss_identity_postgres::LoginRequest {
                 binding,
                 provider,
-                browser: browser.clone(),
+                browser: browser.value,
                 target: input.return_target,
                 replacement: actor,
                 source,
@@ -233,7 +244,7 @@ async fn begin(
         )
         .await?;
 
-    redirect_response(redirect, &browser, created)
+    redirect_response(redirect, browser.set_cookie)
 }
 
 async fn step_up(
@@ -245,7 +256,7 @@ async fn step_up(
 ) -> Result<Response, HttpError> {
     let actor = actor(&state, binding, request.headers(), budget, true).await?;
 
-    let (browser, created) = browser(request.headers(), true)?;
+    let browser = BrowserBinding::start(request.headers())?;
 
     let source = source(&request)?;
 
@@ -269,7 +280,7 @@ async fn step_up(
             rss_identity_postgres::LoginRequest {
                 binding,
                 provider,
-                browser: browser.clone(),
+                browser: browser.value,
                 target: input.return_target,
                 replacement: Some(actor),
                 source,
@@ -279,7 +290,7 @@ async fn step_up(
         )
         .await?;
 
-    redirect_response(redirect, &browser, created)
+    redirect_response(redirect, browser.set_cookie)
 }
 
 async fn link(
@@ -293,7 +304,7 @@ async fn link(
         .await?
         .ok_or(UNAUTH)?;
 
-    let (browser, created) = browser(request.headers(), true)?;
+    let browser = BrowserBinding::start(request.headers())?;
 
     let source = source(&request)?;
 
@@ -316,7 +327,7 @@ async fn link(
                 actor,
                 target_provider: provider,
                 password,
-                browser: browser.clone(),
+                browser: browser.value,
                 target: input.return_target,
                 source,
             },
@@ -324,7 +335,7 @@ async fn link(
         )
         .await?;
 
-    redirect_response(redirect, &browser, created)
+    redirect_response(redirect, browser.set_cookie)
 }
 
 #[derive(Deserialize)]
@@ -350,7 +361,7 @@ async fn callback(
 ) -> Response {
     match callback_result(state, budget, headers, query).await {
         Ok(response) => response,
-        Err(error) => callback_error_response(error.into_response()),
+        Err(error) => error.into_response(),
     }
 }
 pub(crate) fn callback_failure(reason: &str) -> Response {
@@ -359,6 +370,16 @@ pub(crate) fn callback_failure(reason: &str) -> Response {
 }
 
 /// Keep host diagnostics in response parts while replacing the browser projection.
+pub async fn protect_callback(request: Request, next: axum::middleware::Next) -> Response {
+    let callback = request.method() == axum::http::Method::GET
+        && request.uri().path() == "/api/v1/identity/oidc/callback";
+    let response = next.run(request).await;
+    if callback && (response.status().is_client_error() || response.status().is_server_error()) {
+        return callback_error_response(response);
+    }
+    response
+}
+
 pub(crate) fn callback_error_response(response: Response) -> Response {
     let (parts, _) = response.into_parts();
     let reason = if parts.status == StatusCode::SERVICE_UNAVAILABLE {
@@ -366,7 +387,15 @@ pub(crate) fn callback_error_response(response: Response) -> Response {
     } else {
         "failed"
     };
-    (parts.extensions, callback_failure(reason)).into_response()
+    (
+        parts.extensions,
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        callback_failure(reason),
+    )
+        .into_response()
 }
 
 async fn callback_result(
@@ -376,35 +405,36 @@ async fn callback_result(
     query: Result<Query<Callback>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Response, HttpError> {
     let Query(query) = query.map_err(|_| BAD)?;
-    if query.code.is_some() == query.error.is_some() {
-        return Err(BAD);
-    }
+    let outcome = CallbackOutcome::from_parts(query.code, query.error).map_err(|_| BAD)?;
 
-    let (browser, _) = browser(&headers, false)?;
+    let browser = BrowserBinding::require(&headers)?;
 
-    if let Some(error) = query.error {
-        state
-            .federation
-            .cancel(
-                query.state,
-                browser,
-                query.iss,
-                login_cookie(&headers)?,
-                budget.remaining(),
-            )
-            .await?;
-        return Ok(callback_failure(if error == "access_denied" {
-            "cancelled"
-        } else {
-            "failed"
-        }));
-    }
+    let code = match outcome {
+        CallbackOutcome::Code(code) => code,
+        CallbackOutcome::Denied { cancelled } => {
+            state
+                .federation
+                .cancel(
+                    query.state,
+                    browser,
+                    query.iss,
+                    login_cookie(&headers)?,
+                    budget.remaining(),
+                )
+                .await?;
+            return Ok(callback_failure(if cancelled {
+                "cancelled"
+            } else {
+                "failed"
+            }));
+        }
+    };
     let outcome = state
         .federation
         .complete(
             query.state,
             browser,
-            Zeroizing::new(query.code.ok_or(BAD)?),
+            code,
             query.iss,
             login_cookie(&headers)?,
             budget.remaining(),
@@ -414,19 +444,13 @@ async fn callback_result(
     let (location, cookie) = match outcome {
         FederatedOutcome::Redirect(redirect) => (redirect.url, None),
         FederatedOutcome::StepUp { grant, return_url } => {
-            (return_url, Some(crate::webauthn::grant_cookie(&grant)?))
+            (return_url, Some(operation_cookie(&grant)?))
         }
         FederatedOutcome::Session {
             issued,
             return_url,
             link_result,
         } => {
-            let age = issued.cookie_max_age();
-
-            if age == 0 {
-                return Err(AuthorityError::Unavailable.into());
-            }
-
             let location = if let Some(result) = link_result {
                 let mut url = url::Url::parse(&return_url).map_err(|_| BAD)?;
                 url.query_pairs_mut()
@@ -435,7 +459,7 @@ async fn callback_result(
             } else {
                 return_url
             };
-            (location, Some(session_cookie(issued.secret(), age)))
+            (location, Some(issued_cookie(&issued)?.header))
         }
     };
 
@@ -447,9 +471,7 @@ async fn callback_result(
         .map_err(|_| BAD)?;
 
     if let Some(cookie) = cookie {
-        response
-            .headers_mut()
-            .insert(header::SET_COOKIE, cookie.parse().map_err(|_| BAD)?);
+        response.headers_mut().insert(header::SET_COOKIE, cookie);
     }
 
     Ok(response)

@@ -24,6 +24,11 @@ struct Management {
     authority: Authority,
 }
 pub(crate) struct Error(HttpError);
+impl From<rss_identity_web_credentials::CredentialError> for Error {
+    fn from(e: rss_identity_web_credentials::CredentialError) -> Self {
+        Self(e.into())
+    }
+}
 impl From<HttpError> for Error {
     fn from(e: HttpError) -> Self {
         Self(e)
@@ -128,7 +133,7 @@ async fn actor(
 ) -> Result<AuthenticatedSession> {
     let secret = cookie(h)?.ok_or(UNAUTH)?;
     if write {
-        if unique(h, "x-identity-request")? != Some("1") {
+        if !request_marker(h)? {
             return Err(FORBIDDEN.into());
         }
         csrf(h, &secret)?;

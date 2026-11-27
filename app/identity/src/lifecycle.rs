@@ -10,7 +10,8 @@ use axum::{
     routing::get,
 };
 use rss_identity_core::account::PasswordKdf;
-use rss_identity_http_axum::{HttpConfig, HttpFailure, federated_router, router};
+use rss_identity_service_http::{HttpFailure, ServiceEndpoints, protect_callback, routes};
+use rss_identity_web_credentials::HttpConfig;
 use rss_runtime::{
     AdmissionGate, AdmissionPermit, DynManagedResource, LifecycleScope, ManagedResource, ScopeExit,
     ShutdownError, TotalDrainBudget,
@@ -58,7 +59,7 @@ impl ManagedResource for KdfResource {
 }
 struct LeasedBody {
     inner: Body,
-    _permit: AdmissionPermit,
+    _permit: Arc<AdmissionPermit>,
 }
 impl http_body::Body for LeasedBody {
     type Data = Bytes;
@@ -84,24 +85,53 @@ async fn admit(
     let Some(permit) = gate.get().and_then(|g| g.try_admit().ok()) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let response = next.run(request).await;
-    response.map(|inner| {
-        Body::new(LeasedBody {
-            inner,
-            _permit: permit,
-        })
-    })
+    let mut response = next.run(request).await;
+    response.extensions_mut().insert(Arc::new(permit));
+    response
+}
+
+/// Attach the lease to the final body, including a sanitized callback redirect.
+async fn finish_response(
+    State((oidc, seconds)): State<(bool, u64)>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let Ok(cutoff) = crate::config::cutoff(seconds) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let cutoff = request
+        .extensions()
+        .get::<rss_request_context::Deadline>()
+        .map_or(cutoff, |host| cutoff.shortened_to(host.instant()));
+    request.extensions_mut().insert(cutoff);
+    let mut response = if oidc {
+        protect_callback(request, next).await
+    } else {
+        next.run(request).await
+    };
+    record_failure(&response, std::io::stderr().lock());
+    match response.extensions_mut().remove::<Arc<AdmissionPermit>>() {
+        Some(permit) => response.map(|inner| {
+            Body::new(LeasedBody {
+                inner,
+                _permit: permit,
+            })
+        }),
+        None => response,
+    }
 }
 // HttpFailure contains only closed, non-secret classifications. Never log the request or body.
 fn record_failure(response: &Response, mut output: impl std::io::Write) {
+    if response
+        .extensions()
+        .get::<transport::IngressRejected>()
+        .is_some()
+    {
+        let _ = writeln!(output, "component=identity-http failure=UntrustedIngress");
+    }
     if let Some(failure) = response.extensions().get::<HttpFailure>() {
         let _ = writeln!(output, "component=identity-http failure={failure:?}");
     }
-}
-async fn diagnose(request: Request, next: Next) -> Response {
-    let response = next.run(request).await;
-    record_failure(&response, std::io::stderr().lock());
-    response
 }
 struct Health {
     config: Arc<RuntimeConfig>,
@@ -139,6 +169,31 @@ async fn ready(State(h): State<Arc<Health>>) -> StatusCode {
         StatusCode::SERVICE_UNAVAILABLE
     }
 }
+/// Bind product routes to the accepted peer, local admission, tenant execution and one request deadline.
+/// Health probes are mounted separately by the reference host.
+pub fn protected_routes(
+    routes: Router,
+    config: Arc<RuntimeConfig>,
+    gate: Arc<OnceLock<AdmissionGate>>,
+) -> Router {
+    let app = routes
+        .layer(middleware::from_fn_with_state(
+            config.clone(),
+            crate::execution::scope,
+        ))
+        .layer(middleware::from_fn_with_state(gate.clone(), admit))
+        .layer(middleware::from_fn_with_state(
+            transport::Ingress {
+                public: config.public_gateway,
+            },
+            transport::trusted,
+        ));
+    app.layer(middleware::from_fn_with_state(
+        (config.oidc.is_some(), config.budgets.request_seconds),
+        finish_response,
+    ))
+}
+
 pub async fn serve(
     config: RuntimeConfig,
     stop: impl std::future::Future<Output = Result<(), std::io::Error>>,
@@ -195,47 +250,32 @@ pub async fn serve(
                         rp,
                         origin,
                     )?;
-                    let mut app = router(authority, http.clone())?
-                        .merge(context)
-                        .merge(rss_identity_http_axum::webauthn_router(
-                            webauthn,
-                            http.clone(),
-                        )?)
-                        .route(
-                            "/identity-security",
-                            axum::routing::get(|| async {
-                                axum::response::Html(include_str!("security.html"))
-                            }),
-                        )
-                        .route(
-                            "/identity-security.js",
-                            axum::routing::get(|| async {
-                                (
-                                    [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-                                    include_str!("security.js"),
-                                )
-                            }),
-                        );
-                    let execution = crate::execution::ExecutionState {
-                        config: config.clone(),
-                        federation: federation.clone(),
-                    };
-                    if let Some(federation) = federation {
-                        app = app.merge(federated_router(federation, http)?);
-                    }
-                    let app = app
-                        .layer(middleware::from_fn_with_state(
-                            execution,
-                            crate::execution::scope,
-                        ))
-                        .layer(middleware::from_fn(diagnose))
-                        .layer(middleware::from_fn_with_state(gate.clone(), admit))
-                        .layer(middleware::from_fn_with_state(
-                            transport::Ingress {
-                                public: config.public_gateway,
-                            },
-                            transport::trusted,
-                        ));
+                    let app = routes(
+                        authority,
+                        http,
+                        ServiceEndpoints {
+                            federation,
+                            webauthn: Some(webauthn),
+                            programmatic_bearer: false,
+                        },
+                    )?
+                    .merge(context)
+                    .route(
+                        "/identity-security",
+                        axum::routing::get(|| async {
+                            axum::response::Html(include_str!("security.html"))
+                        }),
+                    )
+                    .route(
+                        "/identity-security.js",
+                        axum::routing::get(|| async {
+                            (
+                                [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+                                include_str!("security.js"),
+                            )
+                        }),
+                    );
+                    let app = protected_routes(app, config.clone(), gate.clone());
                     let health = Arc::new(Health {
                         config: config.clone(),
                         pool,
@@ -376,7 +416,7 @@ mod tests {
         let permit = gate.try_admit().unwrap();
         let body = LeasedBody {
             inner: Body::from("held"),
-            _permit: permit,
+            _permit: Arc::new(permit),
         };
         let mut drain = stack.shutdown();
         assert!(gate.try_admit().is_err());

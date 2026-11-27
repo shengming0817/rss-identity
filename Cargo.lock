@@ -1926,9 +1926,10 @@ dependencies = [
  "rss-audit-postgres",
  "rss-axum",
  "rss-identity-core",
- "rss-identity-http-axum",
  "rss-identity-oidc",
  "rss-identity-postgres",
+ "rss-identity-service-http",
+ "rss-identity-web-credentials",
  "rss-request-context",
  "rss-runtime",
  "rss-transactional-messaging",
@@ -1943,6 +1944,7 @@ dependencies = [
  "tower",
  "url",
  "uuid",
+ "webauthn-authenticator-rs",
  "zeroize",
 ]
 
@@ -1963,42 +1965,6 @@ dependencies = [
  "tokio-util",
  "url",
  "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "rss-identity-http-axum"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "futures",
- "hmac 0.13.0",
- "openssl",
- "reqwest",
- "ring",
- "rss-audit-core",
- "rss-audit-postgres",
- "rss-identity-core",
- "rss-identity-oidc",
- "rss-identity-postgres",
- "rss-request-context",
- "rss-transactional-messaging",
- "rss-transactional-messaging-postgres",
- "scraper",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "sqlx",
- "subtle",
- "thiserror 2.0.20",
- "tokio",
- "tower",
- "url",
- "uuid",
- "webauthn-authenticator-rs",
  "zeroize",
 ]
 
@@ -2061,6 +2027,51 @@ dependencies = [
  "webauthn-authenticator-rs",
  "webauthn-rs",
  "zeroize",
+]
+
+[[package]]
+name = "rss-identity-service-http"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures",
+ "hmac 0.13.0",
+ "openssl",
+ "reqwest",
+ "ring",
+ "rss-audit-core",
+ "rss-audit-postgres",
+ "rss-identity-core",
+ "rss-identity-oidc",
+ "rss-identity-postgres",
+ "rss-identity-web-credentials",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "scraper",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sqlx",
+ "tokio",
+ "tower",
+ "url",
+ "uuid",
+ "webauthn-authenticator-rs",
+ "zeroize",
+]
+
+[[package]]
+name = "rss-identity-web-credentials"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "rss-identity-core",
+ "rss-identity-postgres",
+ "rss-transactional-messaging",
+ "thiserror 2.0.20",
+ "url",
 ]
 
 [[package]]

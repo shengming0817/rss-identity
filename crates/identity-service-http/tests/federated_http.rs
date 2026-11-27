@@ -18,9 +18,10 @@ use axum::{
     response::Response,
 };
 use rss_identity_core::{federation::*, session::SessionSecret};
-use rss_identity_http_axum::{HttpConfig, federated_router, router};
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
 use rss_identity_postgres::*;
+use rss_identity_service_http::{ServiceEndpoints, routes};
+use rss_identity_web_credentials::HttpConfig;
 use rss_transactional_messaging_postgres::PgTransactionFault;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -92,18 +93,15 @@ fn service(f: &Fixture, upstream: Arc<dyn UpstreamOidc>) -> Federation {
     .unwrap()
 }
 fn app(s: &Federation) -> Router {
-    federated_router(
-        s.clone(),
+    routes(
+        s.authority(),
         HttpConfig::new(ORIGIN, Duration::from_secs(30)).unwrap(),
+        ServiceEndpoints {
+            federation: Some(s.clone()),
+            ..Default::default()
+        },
     )
     .unwrap()
-    .merge(
-        router(
-            s.authority(),
-            HttpConfig::new(ORIGIN, Duration::from_secs(30)).unwrap(),
-        )
-        .unwrap(),
-    )
 }
 async fn provider(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
     let p = s
@@ -148,7 +146,7 @@ fn request(
     let mut request = request.body(Body::from(body.to_string())).unwrap();
     request
         .extensions_mut()
-        .insert(rss_identity_http_axum::ClientAddress(
+        .insert(rss_identity_service_http::ClientAddress(
             "127.0.0.1".parse().unwrap(),
         ));
     request
@@ -232,6 +230,85 @@ async fn successful(app: &Router, p: &ProviderView, user: &str) -> anyhow::Resul
     Ok(cookie(&response))
 }
 
+/// Drive an actual provider authorization code through the rendered TLS gateway and service routes.
+async fn gateway_login(app: &Router, provider: &ProviderView) -> anyhow::Result<String> {
+    let listener =
+        tokio::net::TcpListener::bind(std::env::var("IDENTITY_TEST_GATEWAY_BACKEND")?).await?;
+    let server = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let gateway = std::env::var("IDENTITY_TEST_GATEWAY_URL")?;
+    let ca = std::fs::read(std::env::var("IDENTITY_TEST_GATEWAY_CA")?)?;
+    let client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(&ca)?)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let url = begin(app, provider, BROWSER, None, None, false).await?;
+    let path = authorize(&url, "alice").await?;
+    let target = format!("{gateway}{path}");
+    let unrelated = "__Host-identity-oidc-browser=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    for request in [
+        client.get(&target).header("cookie", unrelated),
+        client
+            .get(&target)
+            .header("cookie", BROWSER)
+            .header("authorization", "unsupported"),
+        client
+            .get(&target)
+            .header("cookie", BROWSER)
+            .query(&[("error", "private-upstream-detail")]),
+    ] {
+        let denied = request.send().await.map_err(reqwest::Error::without_url)?;
+        assert_eq!(denied.status(), StatusCode::SEE_OTHER);
+        assert_eq!(denied.headers()["location"], "/auth/error?reason=failed");
+        assert_eq!(denied.headers()["cache-control"], "no-store");
+        assert_eq!(denied.headers()["referrer-policy"], "no-referrer");
+        assert!(!denied.headers().contains_key("set-cookie"));
+        assert!(denied.bytes().await?.is_empty());
+    }
+    let issued = client
+        .get(&target)
+        .header("cookie", BROWSER)
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?;
+    assert_eq!(issued.status(), StatusCode::SEE_OTHER);
+    assert_eq!(issued.headers()["location"], format!("{ORIGIN}/done"));
+    let credential = issued.headers()["set-cookie"]
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    // Cancellation consumes a new attempt; the returned error description never reaches Location.
+    let url = begin(app, provider, BROWSER, None, None, false).await?;
+    let authorize = reqwest::Url::parse(&url)?;
+    let state = authorize
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .unwrap()
+        .1;
+    let denied = client
+        .get(format!("{gateway}/api/v1/identity/oidc/callback"))
+        .header("cookie", BROWSER)
+        .query(&[
+            ("state", state.as_ref()),
+            ("iss", provider.settings.issuer().as_str()),
+            ("error", "access_denied"),
+            ("error_description", "private-upstream-detail"),
+            ("error_uri", "https://untrusted.invalid/message"),
+        ])
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?;
+    assert_eq!(denied.status(), StatusCode::SEE_OTHER);
+    assert_eq!(denied.headers()["location"], "/auth/error?reason=cancelled");
+    assert!(!denied.headers().contains_key("set-cookie"));
+    assert_eq!(denied.headers()["cache-control"], "no-store");
+    assert_eq!(denied.headers()["referrer-policy"], "no-referrer");
+    assert!(denied.bytes().await?.is_empty());
+    server.abort();
+    Ok(credential)
+}
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
@@ -539,7 +616,7 @@ async fn real_federated_login_and_linking() -> anyhow::Result<()> {
             deadline(),
         )
         .await?;
-    let alice = successful(&app, &p, "alice").await?;
+    let alice = gateway_login(&app, &p).await?;
     let bob = successful(&app, &p, "bob").await?;
     let a = f
         .store
@@ -784,9 +861,13 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
     mocked
         .reconcile_assurance_profiles(crate::support::binding(f.key.tenant), deadline())
         .await?;
-    let mock_app = federated_router(
-        mocked.clone(),
+    let mock_app = routes(
+        mocked.authority(),
         HttpConfig::new(ORIGIN, Duration::from_secs(30))?,
+        ServiceEndpoints {
+            federation: Some(mocked.clone()),
+            ..Default::default()
+        },
     )?;
     let url = begin(&mock_app, &p, BROWSER, None, None, false).await?;
     let state = reqwest::Url::parse(&url)?
@@ -913,7 +994,7 @@ async fn real_invalid_department_preserves_authenticated_identity() -> anyhow::R
     assert!(
         response
             .extensions()
-            .get::<rss_identity_http_axum::HttpFailure>()
+            .get::<rss_identity_service_http::HttpFailure>()
             .is_none()
     );
     f.close().await;

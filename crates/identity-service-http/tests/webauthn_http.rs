@@ -5,8 +5,9 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use rss_identity_http_axum::{HttpConfig, webauthn_router};
 use rss_identity_postgres::*;
+use rss_identity_service_http::{ServiceEndpoints, routes};
+use rss_identity_web_credentials::HttpConfig;
 use serde_json::{Value, json};
 use std::time::Duration;
 use support::*;
@@ -55,12 +56,14 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
         "identity.example.test".into(),
         url::Url::parse(ORIGIN)?,
     )?;
-    let app = webauthn_router(w, HttpConfig::new(ORIGIN, Duration::from_secs(30))?)?.merge(
-        rss_identity_http_axum::router(
-            f.store.clone(),
-            HttpConfig::new(ORIGIN, Duration::from_secs(30))?,
-        )?,
-    );
+    let app = routes(
+        f.store.clone(),
+        HttpConfig::new(ORIGIN, Duration::from_secs(30))?,
+        ServiceEndpoints {
+            webauthn: Some(w),
+            ..Default::default()
+        },
+    )?;
     // The HTTP router, verifier and shared runtime already exist when the host registers C.
     f.key.tenant = rss_request_context::TenantId::parse(C)?;
     f.policy.allow(f.key);
@@ -75,7 +78,9 @@ async fn webauthn_http_csrf_lifecycle_and_one_use_proof() -> anyhow::Result<()> 
         .header("origin", ORIGIN)
         .header("content-type", "application/json")
         .header("x-identity-request", "1")
-        .extension(rss_identity_http_axum::ClientAddress("127.0.0.1".parse()?))
+        .extension(rss_identity_service_http::ClientAddress(
+            "127.0.0.1".parse()?,
+        ))
         .body(Body::from(
             json!({"login":"admin","password":PASSWORD}).to_string(),
         ))?;

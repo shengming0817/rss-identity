@@ -8,13 +8,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
-use rss_identity_core::{
-    account::{LoginKey, Password},
-    session::BearerSecret,
-};
-use rss_identity_postgres::{AttemptSource, AuthenticatedSession, Authority, AuthorityError};
-use rss_transactional_messaging::fence::ExecutionBinding;
-use rss_transactional_messaging::policy::OperationDeadline;
+use rss_identity_core::account::{LoginKey, Password};
+use rss_identity_postgres::{AttemptSource, Authority, AuthorityError};
+use rss_identity_web_credentials::{bearer_credential, bearer_presentation};
 use serde::Deserialize;
 
 /// Opt-in: mount only after applying the product's programmatic network admission.
@@ -50,7 +46,7 @@ fn secure(mut response: Response) -> Response {
     response
 }
 async fn boundary(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let budget = match RequestBudget::for_request(&request, state.config.timeout) {
+    let budget = match RequestBudget::for_request(&request, state.config.timeout()) {
         Ok(budget) => budget,
         Err(error) => return secure(error.into_response()),
     };
@@ -58,44 +54,12 @@ async fn boundary(State(state): State<AppState>, mut request: Request, next: Nex
     let admitted = if request.uri().to_string().len() > 8192 || request.uri().query().is_some() {
         Err(BAD)
     } else {
-        bearer_presentation(request.headers())
+        bearer_presentation(request.headers()).map_err(HttpError::from)
     };
     secure(match admitted {
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     })
-}
-fn credential(headers: &HeaderMap) -> Result<BearerSecret, HttpError> {
-    bearer_presentation(headers)?;
-    let value = unique(headers, "authorization")?.ok_or(UNAUTH)?;
-    let (scheme, secret) = value.split_once(' ').ok_or(UNAUTH)?;
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return Err(UNAUTH);
-    }
-    BearerSecret::parse(secret.into()).map_err(|_| UNAUTH)
-}
-/// A successful call is API activity and renews idle within the original absolute deadline.
-/// It never accepts Cookie/API Key fallback or performs product authorization.
-/// The second result is request-local only, for bounded product revalidation.
-pub async fn authenticate_bearer_request(
-    authority: &Authority,
-    config: &HttpConfig,
-    binding: ExecutionBinding,
-    headers: &HeaderMap,
-    deadline: OperationDeadline,
-) -> Result<(AuthenticatedSession, BearerSecret), Response> {
-    let budget = RequestBudget::new(deadline.timeout().min(config.timeout))
-        .map_err(|e| secure(e.into_response()))?;
-    let result = async {
-        let retained = credential(headers)?;
-        let secret = BearerSecret::parse(retained.expose().into()).map_err(|_| UNAUTH)?;
-        let proof = authority
-            .authenticate_bearer(binding, secret, budget.remaining())
-            .await?;
-        Ok((proof, retained))
-    }
-    .await;
-    result.map_err(|e: HttpError| secure(e.into_response()))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,43 +115,11 @@ async fn logout(
 ) -> Result<StatusCode, HttpError> {
     let proof = state
         .authority
-        .inspect_bearer(binding, credential(&headers)?, budget.remaining())
+        .inspect_bearer(binding, bearer_credential(&headers)?, budget.remaining())
         .await?;
     state
         .authority
         .revoke_current_session(proof, budget.remaining())
         .await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn bearer_presentation_rejects_duplicates_mixed_and_malformed_credentials() {
-        let token = "a".repeat(64);
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
-        assert_eq!(credential(&headers).unwrap().expose(), token);
-        for (name, value) in [
-            ("authorization", format!("Bearer {token}")),
-            ("x-api-key", "key".into()),
-            ("cookie", "__Host-identity-session=broken".into()),
-        ] {
-            let mut mixed = headers.clone();
-            mixed.append(name, value.parse().unwrap());
-            assert!(credential(&mixed).is_err());
-        }
-        for value in [
-            "Basic secret",
-            "Bearer ",
-            "Bearer abc",
-            "Bearer  ",
-            "Bearer a,b",
-        ] {
-            headers.insert("authorization", value.parse().unwrap());
-            assert!(credential(&headers).is_err());
-        }
-        assert!(!format!("{:?}", BearerSecret::parse(token.clone()).unwrap()).contains(&token));
-    }
 }
