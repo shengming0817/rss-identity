@@ -19,17 +19,19 @@ fn settings_wire(v: &rss_identity_core::federation::ProviderSettingsInput) -> Va
     json!({"issuer":v.issuer,"clientId":v.client_id,"redirectUri":v.redirect_uri,"scopes":v.scopes,"claims":{"subject":v.claims.subject,"profile":v.claims.profile,"groups":v.claims.groups},"jit":v.jit})
 }
 const ORIGIN: &str = "https://identity.example.test";
-fn app(
-    f: &Fixture,
-) -> (
+async fn app(
+    f: &mut Fixture,
+) -> anyhow::Result<(
     Router,
     Federation,
     std::sync::Arc<federation_support::ScriptedOidc>,
-) {
+)> {
     let upstream = federation_support::ScriptedOidc::new();
-    let service = federation_support::service(f, upstream.clone());
+    f.configure_runtime(f.config().with_oidc(upstream.clone()))
+        .await?;
+    let service = federation_support::service(f);
     let config = HttpConfig::new(ORIGIN, Duration::from_secs(30)).unwrap();
-    (
+    Ok((
         routes(
             f.store.clone(),
             config,
@@ -41,7 +43,7 @@ fn app(
         .unwrap(),
         service,
         upstream,
-    )
+    ))
 }
 fn req(method: &str, path: &str, cookie: &str, csrf: &str, value: Value) -> Request<Body> {
     let mut r = Request::builder()
@@ -94,9 +96,9 @@ async fn login_as(app: &Router, name: &str, pw: &str) -> anyhow::Result<(String,
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn account_query_projection_detail_and_cursor_context() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
-    let (app, _, _) = app(&f);
+    let (app, _, _) = app(&mut f).await?;
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let base = format!("/api/v1/identity/tenants/{A}/accounts");
     for name in ["alpha", "beta", "gamma"] {
@@ -216,10 +218,10 @@ async fn account_query_projection_detail_and_cursor_context() -> anyhow::Result<
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
     f.policy.protect(f.key);
-    let (app, _, _) = app(&f);
+    let (app, _, _) = app(&mut f).await?;
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let base = format!("/api/v1/identity/tenants/{A}");
     let security = app
@@ -538,9 +540,9 @@ async fn management_accounts_sessions_and_boundaries() -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
-    let (app, _, upstream) = app(&f);
+    let (app, _, upstream) = app(&mut f).await?;
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let base = format!("/api/v1/identity/tenants/{A}");
     let r = app
@@ -710,9 +712,9 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
-    let (app, s, upstream) = app(&f);
+    let (app, s, upstream) = app(&mut f).await?;
     for path in [
         "/api/v2/oidc/callback".to_owned(),
         "/oidc/callback".to_owned(),
@@ -809,9 +811,9 @@ async fn callback_cancellation_consumes_only_bound_attempts() -> anyhow::Result<
 #[ignore = "requires make test-pg"]
 async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()> {
     for revoke in [false, true] {
-        let f = Fixture::new().await?;
+        let mut f = Fixture::new().await?;
         f.bootstrap().await?;
-        let (app, s, upstream) = app(&f);
+        let (app, s, upstream) = app(&mut f).await?;
         let p = federation_support::enabled(&f, &s).await?;
         let second = f
             .store
@@ -908,9 +910,9 @@ async fn management_rechecks_inflight_provider_authority() -> anyhow::Result<()>
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
-    let (app, _, _) = app(&f);
+    let (app, _, _) = app(&mut f).await?;
     let (cookie, csrf) = login_as(&app, "admin", PASSWORD).await?;
     let settings = serde_json::to_value(federation_support::settings().input())?;
     sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) SELECT $1::uuid,gen_random_uuid(),1,1,false,$2,decode(repeat('00',32),'hex'),1 FROM generate_series(1,1023)")
@@ -963,9 +965,9 @@ async fn provider_capacity_is_atomic_and_keeps_management_available() -> anyhow:
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn management_rejects_password_for_federated_only_account() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
-    let (app, s, upstream) = app(&f);
+    let (app, s, upstream) = app(&mut f).await?;
     *upstream.assurance.lock().unwrap() = Some(rss_identity_core::assurance::Assurance::new(
         None,
         rss_identity_core::assurance::Acr::Unspecified,

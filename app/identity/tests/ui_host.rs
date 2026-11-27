@@ -29,7 +29,7 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     );
     let authority = assembly::authority(
         &config,
-        assembly::authority_config(&config)?,
+        assembly::authority_config(&config)?.with_oidc(federation_support::ScriptedOidc::new()),
         f.runtime.clone(),
         kdf.clone(),
         rss_identity_app::config::cutoff(config.budgets.startup_seconds)?,
@@ -38,7 +38,6 @@ async fn ui_host_public_components() -> anyhow::Result<()> {
     let federation = Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
         authority.clone(),
-        federation_support::ScriptedOidc::new(),
         rss_identity_postgres::StateSigner::new([7; 32], &origin)?,
         FederationConfig {
             callback: format!("{origin}/api/v1/identity/oidc/callback"),

@@ -211,19 +211,18 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
         )
         .await?,
     );
+    let upstream = federation_support::ScriptedOidc::new();
     let authority = assembly::authority(
         &config,
-        assembly::authority_config(&config)?,
+        assembly::authority_config(&config)?.with_oidc(upstream.clone()),
         runtime.clone(),
         kdf.clone(),
         rss_identity_app::config::cutoff(config.budgets.startup_seconds)?,
     )
     .await?;
-    let upstream = federation_support::ScriptedOidc::new();
     let federation = Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300)?,
         authority.clone(),
-        upstream.clone(),
         rss_identity_postgres::StateSigner::new([7; 32], &config.public_origin)?,
         FederationConfig {
             callback: format!("{}/api/v1/identity/oidc/callback", config.public_origin),

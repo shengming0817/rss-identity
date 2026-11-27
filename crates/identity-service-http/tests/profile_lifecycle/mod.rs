@@ -37,9 +37,9 @@ async fn real_profile_login_updates_and_removes_values() -> anyhow::Result<()> {
     let admin = keycloak_support::StaffMembership::load().await?;
     let original = admin.user_profile().await?;
     let result = AssertUnwindSafe(async {
-        let f = Fixture::new().await?;
+        let mut f = Fixture::new().await?;
         f.bootstrap().await?;
-        let service = service(&f, Arc::new(fixture_transport(false)?));
+        let service = service(&mut f, Arc::new(fixture_transport(false)?)).await?;
         let provider = provider(&f, &service).await?;
         let mut settings = provider.settings.input();
         settings.claims.profile.extensions_claim = Some("attributes".into());

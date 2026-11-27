@@ -33,9 +33,9 @@ async fn administrator_snapshot_moves_members_and_keeps_old_observations() -> an
     let original = admin.organization().await?;
     let result = AssertUnwindSafe(async {
         admin.reject_user_organization_edit().await?;
-        let f = Fixture::new().await?;
+        let mut f = Fixture::new().await?;
         f.bootstrap().await?;
-        let s = service(&f, Arc::new(fixture_transport(true)?));
+        let s = service(&mut f, Arc::new(fixture_transport(true)?)).await?;
         let p = provider(&f, &s).await?;
         let app = app(&s);
         let old = inspect(&f, &app, &p, 'j').await?;

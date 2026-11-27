@@ -4,8 +4,8 @@ use rss_identity_core::{account::AccountKey, session::SessionPolicy};
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
 use rss_identity_postgres::StateSigner;
 use rss_identity_postgres::{
-    Authority, AuthorityConfig, Federation, FederationConfig, ManagementContext, ManagementDenied,
-    ManagementOperation, ManagementPolicy, ReauthenticationRequirement,
+    Authority, AuthorityConfig, AuthorityError, Federation, FederationConfig, ManagementContext,
+    ManagementDenied, ManagementOperation, ManagementPolicy, ReauthenticationRequirement,
 };
 use rss_request_context::SharedExecutionTimer;
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
@@ -117,8 +117,7 @@ pub async fn authority(
     )
     .await?)
 }
-struct FederationInputs {
-    oidc: HttpOidc,
+pub(crate) struct FederationInputs {
     signer: StateSigner,
     options: FederationConfig,
     group_policy: rss_identity_core::groups::GroupFactsMaxAge,
@@ -127,31 +126,22 @@ struct FederationInputs {
 pub fn preflight(config: &RuntimeConfig) -> Result<(), AppError> {
     config.validate()?;
     config.database.pg()?;
-    federation_inputs(config, SharedExecutionTimer::new(Timer))?;
+    runtime_inputs(config, SharedExecutionTimer::new(Timer))?;
     Ok(())
 }
-pub fn federation(
-    config: &RuntimeConfig,
-    authority: Authority,
-) -> Result<Option<Federation>, AppError> {
-    federation_inputs(config, authority.execution_timer().clone())?
-        .map(|inputs| {
-            Ok(Federation::new(
-                inputs.group_policy,
-                authority,
-                Arc::new(inputs.oidc),
-                inputs.signer,
-                inputs.options,
-            )?)
-        })
-        .transpose()
+impl FederationInputs {
+    pub(crate) fn connect(self, authority: Authority) -> Result<Federation, AuthorityError> {
+        Federation::new(self.group_policy, authority, self.signer, self.options)
+    }
 }
-fn federation_inputs(
+
+pub(crate) fn runtime_inputs(
     config: &RuntimeConfig,
     timer: SharedExecutionTimer,
-) -> Result<Option<FederationInputs>, AppError> {
+) -> Result<(AuthorityConfig, Option<FederationInputs>), AppError> {
+    let authority = authority_config(config)?;
     let Some(c) = &config.oidc else {
-        return Ok(None);
+        return Ok((authority, None));
     };
     let profiles = c
         .assurance_profiles
@@ -192,10 +182,12 @@ fn federation_inputs(
         },
     };
     options.validate()?;
-    Ok(Some(FederationInputs {
-        oidc,
-        signer,
-        options,
-        group_policy: c.group_policy()?,
-    }))
+    Ok((
+        authority.with_oidc(Arc::new(oidc)),
+        Some(FederationInputs {
+            signer,
+            options,
+            group_policy: c.group_policy()?,
+        }),
+    ))
 }

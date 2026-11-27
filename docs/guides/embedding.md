@@ -9,7 +9,7 @@
 `connect_runtime/connect_maintenance` 以宿主提供的一次性 probe binding 验证 schema、数据库角色、Audit 与 instance，之后丢弃 probe，不将其作为服务租户名单。宿主登记新 tenant fence 后，已有 Authority 和 router 可立即接收该租户的明确 scope。普通 HTTP 请求必须由可信宿主注入 RSS `ExecutionBinding` extension；组件核对路径 tenant，登录后生成的不可构造证明保存完整原 scope。借用连接的证明复核同样比较 storage、lineage、tenant 和 epoch。
 
 `StateSigner` 由 `rss_identity_postgres` 导出。OIDC state v2 签名绑定 instance 和完整执行坐标；callback 从验签结果继续原 scope，旧 epoch/lineage 不能用新配置重认。state 不是当前用户或资源授权证明。
-2. 在全新 PostgreSQL 17 数据库中，数据库 owner 先安装所选 RSS 版本的完整消息 migration，再以独立受限 owner 安装 Audit schema，安装 Identity schema 并授予 runtime/maintenance profile。仅接受当前全新安装；在提交安装事务前，以实际目标角色验证有效权限和结构。入口见 [schema owner](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-postgres/src/schema.rs&version=GCc3e0fd4d1288d513a1f1c73cf57c103bdc4843b7)；生产迁移执行属于宿主。
+2. 在全新 PostgreSQL 17 数据库中，数据库 owner 先安装所选 RSS 版本的完整消息 migration，再以独立受限 owner 安装 Audit schema，安装 Identity schema 并授予 runtime/maintenance profile。仅接受当前全新安装；在提交安装事务前，以实际目标角色验证有效权限和结构。入口见 [schema owner](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-postgres/src/schema.rs&version=GC023deeac41dd2c02a764b95c1fe8a44bb2faa86f)；生产迁移执行属于宿主。
 3. 维护身份只用于初始化和本地密码恢复，凭据不注入日常服务。恢复推进失效代际，保留账户/成员启停状态，不授予宿主角色。
 4. runtime Authority 必须接收宿主 ManagementPolicy。密码校验和凭据签发经单一登录入口完成；浏览器 JSON、普通账户快照或上游结构值不能构造可信会话。
 
@@ -88,7 +88,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 
 ## 组与可选可信部门树快照
 
-组与部门是带来源和固定期限的认证事实，不是资源权限。缺失、空值、非法断言与过期不同；宿主应显式处理不可用状态。当前模型、受控构造和边界见 [组](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/groups.rs&version=GCc3e0fd4d1288d513a1f1c73cf57c103bdc4843b7) 与 [部门](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/department.rs&version=GCc3e0fd4d1288d513a1f1c73cf57c103bdc4843b7)。
+组与部门是带来源和固定期限的认证事实，不是资源权限。缺失、空值、非法断言与过期不同；宿主应显式处理不可用状态。当前模型、受控构造和边界见 [组](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/groups.rs&version=GC023deeac41dd2c02a764b95c1fe8a44bb2faa86f) 与 [部门](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/department.rs&version=GC023deeac41dd2c02a764b95c1fe8a44bb2faa86f)。
 
 组 Available 视图只能借自本次可信认证结果，每次读取 `values()` 都检查请求证明和快照截止；部门通过 `snapshot()` 做同样检查。请求证明到期使读取失败，事实独立到期不自动否定基础身份。未来观察在下次权威请求前保持不可用。已经复制的值、借出的引用和已经产生的业务效果由宿主负责。宿主需维持可信数据库时钟；请求内单调期限不能修正数据库墙钟偏差。
 
@@ -101,7 +101,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 ],"memberships":["engineering"]}
 ```
 
-树必须完整、单根、有界；稳定标识精确匹配，显示名不提供身份。空成员表示未分配，缺失不是未分配声明。配置与输入结构由 [OIDC 适配器](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-oidc/src/lib.rs&version=GCc3e0fd4d1288d513a1f1c73cf57c103bdc4843b7) 和 core 模型持有。
+树必须完整、单根、有界；稳定标识精确匹配，显示名不提供身份。空成员表示未分配，缺失不是未分配声明。配置与输入结构由 [OIDC 适配器](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-oidc/src/lib.rs&version=GC023deeac41dd2c02a764b95c1fe8a44bb2faa86f) 和 core 模型持有。
 
 instance、tenant、principal、provider 和配置版本由权威会话绑定；观察来自 signed iat，期限为 signed iat 加显式配置的有界 TTL，且不超过 token exp。refresh、活动请求和组件重建不延长快照。provider 更新/禁用及主体/session 撤销作用于旧会话和在途流程；link target 不覆盖当前 source 快照。sourceRevision 是上游不透明版本，不表示 Identity 全局最新目录。
 
@@ -111,7 +111,7 @@ Keycloak 使用内置 JSON UserAttributeMapper，把管理员维护的单个完�
 
 ## 可选 OIDC 与 HTTP 装配
 
-HttpOidc 和 HttpEntra 构造时接收 `ProviderClock::new(runtime.execution_timer().clone(), SystemTime::now)`，以宿主执行时钟处理绝对截止，以 UTC 墙钟检查协议时间。Federation 接收 Authority、上游适配器、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。Authority 不保存租户名单；无认证证明的操作接收 `ExecutionBinding`，已认证操作沿用证明的原 binding。连接固定 storage，每次事务核对 tenant/epoch，不从数据库自动更新代际。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
+HttpOidc 和 HttpEntra 构造时接收 `ProviderClock::new(runtime.execution_timer().clone(), SystemTime::now)`，以宿主执行时钟处理绝对截止，以 UTC 墙钟检查协议时间。宿主通过 `AuthorityConfig::with_oidc` 安装上游适配器，登录、会话复核和管理授权复用此配置。Federation 接收该 Authority、状态签名、凭据密钥、事实期限、固定 HTTPS callback 与 return-target 白名单。Authority 不保存租户名单；无认证证明的操作接收 `ExecutionBinding`，已认证操作沿用证明的原 binding。连接固定 storage，每次事务核对 tenant/epoch，不从数据库自动更新代际。本地模式不要求这些依赖。HttpOidc 的私网访问必须由宿主按 tenant/issuer/client 明确授权，网络授权与 MFA 解释相互独立，部署配置见[操作指南](../deployment/operations.md)。
 
 宿主登录入口用 `BrowserBinding::start` 获取关联值及首次签发的 Cookie，将关联值和可信执行绑定传给 `Federation::begin_login`。回调用 `BrowserBinding::require` 取回关联值，经 `CallbackOutcome::from_parts` 判定结果后调用 `Federation::complete` 或 `cancel`。独立服务的示例见[OIDC 路由](../../crates/identity-service-http/src/oidc.rs)。
 

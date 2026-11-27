@@ -131,12 +131,13 @@ impl Drop for Paused {
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn real_group_snapshot_lifecycle() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.bootstrap().await?;
+    f.configure_runtime(f.config().with_oidc(Arc::new(fixture_transport(true)?)))
+        .await?;
     let s = Federation::new(
         GroupFactsMaxAge::new(30)?,
         f.store.clone(),
-        Arc::new(fixture_transport(true)?),
         StateSigner::new([7; 32], ORIGIN)?,
         FederationConfig {
             callback: CALLBACK.into(),

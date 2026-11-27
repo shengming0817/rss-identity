@@ -242,7 +242,8 @@ pub async fn serve(
                         kdf: kdf.clone(),
                         timeout: per,
                     }));
-                    let authority_config = assembly::authority_config(&config)?;
+                    let (authority_config, federation) =
+                        assembly::runtime_inputs(&config, pool.execution_timer().clone())?;
                     let authority = assembly::authority(
                         &config,
                         authority_config.clone(),
@@ -251,7 +252,9 @@ pub async fn serve(
                         cutoff,
                     )
                     .await?;
-                    let federation = assembly::federation(&config, authority.clone())?;
+                    let federation = federation
+                        .map(|inputs| inputs.connect(authority.clone()))
+                        .transpose()?;
                     let http = HttpConfig::new(&config.public_origin, config.budgets.request())
                         .map_err(|_| AppError::Configuration)?;
                     let gate = Arc::new(OnceLock::new());

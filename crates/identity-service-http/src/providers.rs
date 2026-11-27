@@ -175,13 +175,14 @@ async fn test_provider(
 ) -> Result<Response> {
     let actor = actor(&s, binding, &h, b, true).await?;
     match s.federation.test_provider(actor, p, b).await {
-        Ok(report) => Ok(Json(serde_json::json!({"passed":true,"report":dto::ConnectionReport::from(report)})).into_response()),
-        Err(AuthorityError::Federation(
-            error @ (FederationError::Provider(_) | FederationError::Unavailable),
-        )) => Ok(
-            Json(serde_json::json!({"passed":false,"diagnostic":dto::ProviderDiagnostic::from(error.diagnostic())}))
-                .into_response(),
-        ),
+        Ok(report) => Ok(Json(
+            serde_json::json!({"passed":true,"report":dto::ConnectionReport::from(report)}),
+        )
+        .into_response()),
+        Err(AuthorityError::Federation(FederationError::Provider(failure))) => Ok(Json(
+            serde_json::json!({"passed":false,"diagnostic":dto::ProviderDiagnostic::from(failure)}),
+        )
+        .into_response()),
         Err(error) => Err(error.into()),
     }
 }

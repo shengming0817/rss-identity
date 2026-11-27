@@ -176,11 +176,10 @@ impl UpstreamOidc for ScriptedOidc {
         })
     }
 }
-pub fn service(f: &Fixture, oidc: Arc<dyn UpstreamOidc>) -> Federation {
+pub fn service(f: &Fixture) -> Federation {
     Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
         f.store.clone(),
-        oidc,
         StateSigner::new([7; 32], "https://identity.example.test").unwrap(),
         FederationConfig {
             callback: "https://identity.example.test/api/v1/identity/oidc/callback".into(),

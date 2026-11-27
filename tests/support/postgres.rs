@@ -97,6 +97,7 @@ pub struct Fixture {
     pub admin: PgPool,
     pub database: String,
     config: AuthorityConfig,
+    kdf: Arc<rss_identity_core::account::PasswordKdf>,
     pub runtime: Arc<PgRuntime>,
     pub maintenance_runtime: Arc<PgRuntime>,
     pub store: Authority,
@@ -176,15 +177,13 @@ impl Fixture {
             recent: RwLock::new(ReauthenticationRequirement::None),
         });
         let config = config(instance);
+        let kdf = Arc::new(rss_identity_core::account::PasswordKdf::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+        )?);
         let store = Authority::connect_runtime(
             runtime.clone(),
-            Arc::new(
-                rss_identity_core::account::PasswordKdf::new(
-                    std::num::NonZeroUsize::new(4).unwrap(),
-                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
-                )
-                .unwrap(),
-            ),
+            kdf.clone(),
             config.clone(),
             crate::support::binding(
                 rss_request_context::TenantId::parse(crate::support::A).unwrap(),
@@ -195,13 +194,7 @@ impl Fixture {
         .await?;
         let maintenance = Authority::connect_maintenance(
             maintenance_runtime.clone(),
-            Arc::new(
-                rss_identity_core::account::PasswordKdf::new(
-                    std::num::NonZeroUsize::new(4).unwrap(),
-                    std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
-                )
-                .unwrap(),
-            ),
+            kdf.clone(),
             config.clone(),
             crate::support::binding(
                 rss_request_context::TenantId::parse(crate::support::A).unwrap(),
@@ -214,6 +207,7 @@ impl Fixture {
             admin,
             database,
             config,
+            kdf,
             runtime,
             maintenance_runtime,
             store,
@@ -224,6 +218,19 @@ impl Fixture {
             policy,
             management_cookie: tokio::sync::Mutex::new(None),
         })
+    }
+    pub async fn configure_runtime(&mut self, config: AuthorityConfig) -> anyhow::Result<()> {
+        self.store = Authority::connect_runtime(
+            self.runtime.clone(),
+            self.kdf.clone(),
+            config.clone(),
+            binding(self.key.tenant),
+            self.policy.clone(),
+            deadline(),
+        )
+        .await?;
+        self.config = config;
+        Ok(())
     }
     pub fn config(&self) -> AuthorityConfig {
         self.config.clone()
