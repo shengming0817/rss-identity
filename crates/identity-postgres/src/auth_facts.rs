@@ -12,9 +12,10 @@ use rss_identity_core::{
 };
 use rss_transactional_messaging_postgres::PgError;
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use uuid::Uuid;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AuthenticationFacts {
     format_version: u32,
@@ -23,7 +24,7 @@ pub(crate) struct AuthenticationFacts {
     groups: Snapshot,
     pub(crate) department_snapshot: Box<DepartmentObservation>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum Snapshot {
     Unavailable {
@@ -36,7 +37,7 @@ enum Snapshot {
         values: Vec<String>,
     },
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum DepartmentObservation {
     Unavailable {
@@ -51,12 +52,14 @@ pub(crate) enum DepartmentObservation {
 }
 impl DepartmentObservation {
     fn collect(
-        claims: &UpstreamClaims,
+        upstream: UpstreamDepartmentSnapshot,
+        issued_at: i64,
+        token_expiry: i64,
         mapping: Option<&DepartmentSnapshotClaim>,
         now: i64,
         future_skew_seconds: u32,
     ) -> Result<Self, FederationError> {
-        let (mapping, snapshot) = match (&claims.department_snapshot, mapping) {
+        let (mapping, snapshot) = match (upstream, mapping) {
             (UpstreamDepartmentSnapshot::NotConfigured, None) => {
                 return Ok(Self::Unavailable {
                     reason: DepartmentUnavailableReason::NotConfigured,
@@ -72,20 +75,13 @@ impl DepartmentObservation {
                     reason: DepartmentUnavailableReason::InvalidClaim,
                 });
             }
-            (UpstreamDepartmentSnapshot::Present(snapshot), Some(mapping)) => {
-                (mapping, snapshot.clone())
-            }
+            (UpstreamDepartmentSnapshot::Present(snapshot), Some(mapping)) => (mapping, snapshot),
             _ => return Err(FederationError::Claims),
         };
         Ok(Self::Available {
             snapshot_id: Uuid::new_v4(),
-            observed_at: claims.issued_at,
-            expires_at: mapping.expires_at(
-                claims.issued_at,
-                claims.expires_at,
-                now,
-                future_skew_seconds,
-            )?,
+            observed_at: issued_at,
+            expires_at: mapping.expires_at(issued_at, token_expiry, now, future_skew_seconds)?,
             snapshot,
         })
     }
@@ -112,7 +108,7 @@ impl DepartmentObservation {
 
 impl AuthenticationFacts {
     pub fn collect(
-        claims: &UpstreamClaims,
+        claims: UpstreamClaims,
         version: i64,
         policy: GroupFactsMaxAge,
         department_snapshot: Option<&DepartmentSnapshotClaim>,
@@ -129,7 +125,7 @@ impl AuthenticationFacts {
         if version < 1 {
             return Err(FederationError::Claims);
         }
-        let groups = match &claims.groups {
+        let groups = match claims.groups {
             UpstreamGroups::NotConfigured => Snapshot::Unavailable {
                 reason: FactUnavailableReason::NotConfigured,
             },
@@ -140,29 +136,36 @@ impl AuthenticationFacts {
                 snapshot_id: Uuid::new_v4(),
                 observed_at: claims.issued_at,
                 expires_at,
-                values: values.clone(),
+                values,
             },
         };
         Ok(Self {
             format_version: 3,
             department_snapshot: Box::new(DepartmentObservation::collect(
-                claims,
+                claims.department_snapshot,
+                claims.issued_at,
+                claims.expires_at,
                 department_snapshot,
                 now,
                 future_skew_seconds,
             )?),
             provider_config_version: version,
-            assurance: claims.assurance.clone(),
+            assurance: claims.assurance,
             groups,
         })
     }
-    pub fn decode(value: serde_json::Value) -> Result<Self, PgError> {
-        let facts: Self = serde_json::from_value(value).map_err(|_| corrupt())?;
-        if facts.format_version != 3 || facts.provider_config_version < 1 {
+    pub fn read(row: &sqlx::postgres::PgRow) -> Result<Option<Self>, PgError> {
+        let facts: Option<sqlx::types::Json<Self>> =
+            row.try_get("auth_facts").map_err(|_| corrupt())?;
+        facts.map(|facts| facts.0.checked()).transpose()
+    }
+
+    fn checked(self) -> Result<Self, PgError> {
+        if self.format_version != 3 || self.provider_config_version < 1 {
             return Err(corrupt());
         }
-        facts.department_snapshot.validate()?;
-        match &facts.groups {
+        self.department_snapshot.validate()?;
+        match &self.groups {
             Snapshot::Unavailable {
                 reason: FactUnavailableReason::LocalIdentity | FactUnavailableReason::NotYetValid,
             } => return Err(corrupt()),
@@ -181,70 +184,53 @@ impl AuthenticationFacts {
             }
             Snapshot::Unavailable { .. } => {}
         }
-        Ok(facts)
+        Ok(self)
     }
-    /// PostgreSQL jsonb::text is the storage constraint's exact representation,
-    /// including JSON escaping and whitespace. Apply it to sessions, intents and grants.
-    pub async fn encode(
-        &self,
-        c: &mut sqlx::PgConnection,
-        budget: std::num::NonZeroU32,
-    ) -> Result<serde_json::Value, PgError> {
-        let mut value = serde_json::to_value(self).map_err(|_| corrupt())?;
-        let size: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
-            .bind(&value)
-            .fetch_one(&mut *c)
-            .await?;
-        if i64::from(size) > i64::from(budget.get()) {
-            if !matches!(
-                &*self.department_snapshot,
-                DepartmentObservation::Available { .. }
-            ) {
-                return Err(reject());
-            }
-            // An oversized optional assertion cannot suppress independent identity/groups.
-            // Recheck the exact total budget after withholding the entire department fact.
-            value["department_snapshot"] =
-                serde_json::to_value(DepartmentObservation::Unavailable {
-                    reason: DepartmentUnavailableReason::InvalidClaim,
-                })
-                .map_err(|_| corrupt())?;
-            let remaining: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
-                .bind(&value)
-                .fetch_one(&mut *c)
-                .await?;
-            if i64::from(remaining) > i64::from(budget.get()) {
-                return Err(reject());
-            }
-        }
-        Ok(value)
+    pub fn into_views(
+        self,
+        source: FactSource,
+        sample: &crate::session_storage::TimeSample,
+    ) -> Result<(Assurance, Groups, crate::department::DepartmentFacts), PgError> {
+        let department = crate::department::DepartmentFacts::new(
+            *self.department_snapshot,
+            source.clone(),
+            self.provider_config_version,
+            sample,
+        )?;
+        let groups = self
+            .groups
+            .project(source, self.provider_config_version, sample.seconds())?;
+        Ok((self.assurance, groups, department))
     }
-    pub fn project(&self, source: FactSource, now: i64) -> Result<Groups, PgError> {
-        match &self.groups {
-            Snapshot::Unavailable { reason } => Ok(Groups::unavailable(*reason)),
+}
+
+impl Snapshot {
+    fn project(self, source: FactSource, version: i64, now: i64) -> Result<Groups, PgError> {
+        match self {
+            Snapshot::Unavailable { reason } => Ok(Groups::unavailable(reason)),
             Snapshot::Available {
                 snapshot_id,
                 observed_at,
                 expires_at,
                 values,
             } => {
-                if *observed_at <= 0 || now <= 0 {
+                if observed_at <= 0 || now <= 0 {
                     return Err(reject());
                 }
-                if now < *observed_at {
+                if now < observed_at {
                     return Ok(Groups::unavailable(FactUnavailableReason::NotYetValid));
                 }
-                if now >= *expires_at {
+                if now >= expires_at {
                     return Ok(Groups::Expired { version: VERSION });
                 }
                 Ok(Groups::Available {
                     version: VERSION,
                     source,
-                    snapshot_id: *snapshot_id,
-                    provider_config_version: self.provider_config_version,
-                    observed_at: *observed_at,
-                    expires_at: *expires_at,
-                    values: values.clone(),
+                    snapshot_id,
+                    provider_config_version: version,
+                    observed_at,
+                    expires_at,
+                    values,
                 })
             }
         }
@@ -268,13 +254,25 @@ mod tests {
             assurance: Assurance::password(1000).unwrap(),
         }
     }
+    fn decode(value: serde_json::Value) -> Result<AuthenticationFacts, PgError> {
+        serde_json::from_value::<AuthenticationFacts>(value)
+            .map_err(|_| corrupt())?
+            .checked()
+    }
+    fn projected(value: &serde_json::Value, now: i64) -> Groups {
+        let facts = decode(value.clone()).unwrap();
+        facts
+            .groups
+            .project(source(), facts.provider_config_version, now)
+            .unwrap()
+    }
     fn source() -> FactSource {
         FactSource::new(Uuid::new_v4(), "https://idp.test".into()).unwrap()
     }
     #[test]
     fn department_format_is_explicit_and_legacy_is_rejected() {
         let facts = AuthenticationFacts::collect(
-            &claims(UpstreamGroups::NotConfigured),
+            claims(UpstreamGroups::NotConfigured),
             1,
             GroupFactsMaxAge::new(300).unwrap(),
             None,
@@ -293,11 +291,11 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("department_snapshot");
-        assert!(AuthenticationFacts::decode(missing).is_err());
+        assert!(decode(missing).is_err());
         for version in [1, 2, 4] {
             let mut legacy = value.clone();
             legacy["format_version"] = serde_json::json!(version);
-            assert!(AuthenticationFacts::decode(legacy).is_err());
+            assert!(decode(legacy).is_err());
         }
     }
 
@@ -313,7 +311,7 @@ mod tests {
             let mut claims = claims(UpstreamGroups::present(vec!["staff".into()]).unwrap());
             claims.department_snapshot = department;
             let facts = AuthenticationFacts::collect(
-                &claims,
+                claims.clone(),
                 1,
                 GroupFactsMaxAge::new(300).unwrap(),
                 Some(&mapping),
@@ -346,14 +344,14 @@ mod tests {
                 ] {
                     let mut corrupted = value.clone();
                     corrupted["department_snapshot"][key] = bad;
-                    assert!(AuthenticationFacts::decode(corrupted).is_err());
+                    assert!(decode(corrupted).is_err());
                 }
             }
-            let restored = AuthenticationFacts::decode(value.clone()).unwrap();
+            let restored = decode(value.clone()).unwrap();
             assert_eq!(serde_json::to_value(restored).unwrap(), value);
             assert!(
                 AuthenticationFacts::collect(
-                    &claims,
+                    claims,
                     1,
                     GroupFactsMaxAge::new(300).unwrap(),
                     None,
@@ -366,7 +364,7 @@ mod tests {
         let claims = claims(UpstreamGroups::NotConfigured);
         assert!(
             AuthenticationFacts::collect(
-                &claims,
+                claims,
                 1,
                 GroupFactsMaxAge::new(300).unwrap(),
                 Some(&mapping),
@@ -380,7 +378,7 @@ mod tests {
     #[test]
     fn snapshot_is_fixed_and_only_available_contains_values() {
         let facts = AuthenticationFacts::collect(
-            &claims(UpstreamGroups::present(vec![]).unwrap()),
+            claims(UpstreamGroups::present(vec![]).unwrap()),
             2,
             GroupFactsMaxAge::new(300).unwrap(),
             None,
@@ -389,10 +387,10 @@ mod tests {
         )
         .unwrap();
         let value = serde_json::to_value(&facts).unwrap();
-        let restored = AuthenticationFacts::decode(value.clone()).unwrap();
+        let restored = decode(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(&restored).unwrap(), value);
         assert!(matches!(
-            restored.project(source(), 1299).unwrap(),
+            projected(&value, 1299),
             Groups::Available {
                 expires_at: 1300,
                 observed_at: 1000,
@@ -401,12 +399,12 @@ mod tests {
         ));
         for now in [1300, 1500] {
             assert_eq!(
-                serde_json::to_value(restored.project(source(), now).unwrap()).unwrap(),
+                serde_json::to_value(projected(&value, now)).unwrap(),
                 serde_json::json!({"version":1,"status":"expired"})
             );
         }
         assert!(matches!(
-            restored.project(source(), 969).unwrap(),
+            projected(&value, 969),
             Groups::Unavailable {
                 reason: FactUnavailableReason::NotYetValid,
                 ..
@@ -420,7 +418,7 @@ mod tests {
             (UpstreamGroups::Missing, FactUnavailableReason::ClaimMissing),
         ] {
             let facts = AuthenticationFacts::collect(
-                &claims(groups),
+                claims(groups),
                 2,
                 GroupFactsMaxAge::new(1).unwrap(),
                 None,
@@ -429,7 +427,10 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                facts.project(source(), 1600).unwrap(),
+                facts
+                    .groups
+                    .project(source(), facts.provider_config_version, 1600)
+                    .unwrap(),
                 Groups::unavailable(reason)
             );
         }
@@ -437,7 +438,7 @@ mod tests {
     #[test]
     fn storage_rejects_old_or_malformed_formats() {
         let facts = AuthenticationFacts::collect(
-            &claims(UpstreamGroups::present(vec![]).unwrap()),
+            claims(UpstreamGroups::present(vec![]).unwrap()),
             2,
             GroupFactsMaxAge::new(300).unwrap(),
             None,
@@ -453,7 +454,7 @@ mod tests {
         ] {
             let mut input = base.clone();
             input[key] = value;
-            assert!(AuthenticationFacts::decode(input).is_err());
+            assert!(decode(input).is_err());
         }
         for (key, value) in [
             ("status", serde_json::json!("expired")),
@@ -463,17 +464,14 @@ mod tests {
         ] {
             let mut input = base.clone();
             input["groups"][key] = value;
-            assert!(AuthenticationFacts::decode(input).is_err());
+            assert!(decode(input).is_err());
         }
         for reason in ["local_identity", "not_yet_valid"] {
             let mut input = base.clone();
             input["groups"] = serde_json::json!({"status":"unavailable","reason":reason});
-            assert!(AuthenticationFacts::decode(input).is_err());
+            assert!(decode(input).is_err());
         }
-        assert!(
-            AuthenticationFacts::decode(serde_json::json!({"groups":[],"mapping_version":2}))
-                .is_err()
-        );
+        assert!(decode(serde_json::json!({"groups":[],"mapping_version":2})).is_err());
     }
 
     #[test]
@@ -487,7 +485,7 @@ mod tests {
             claims.issued_at = 1030;
             claims.assurance = Assurance::password(1030).unwrap();
             let facts = AuthenticationFacts::collect(
-                &claims,
+                claims.clone(),
                 1,
                 GroupFactsMaxAge::new(1).unwrap(),
                 None,
@@ -496,28 +494,25 @@ mod tests {
             )
             .unwrap();
             let encoded = serde_json::to_value(&facts).unwrap();
-            let restored = AuthenticationFacts::decode(encoded.clone()).unwrap();
-            let before = serde_json::to_value(restored.project(source(), 1029).unwrap()).unwrap();
+            let restored = decode(encoded.clone()).unwrap();
+            let before = serde_json::to_value(projected(&encoded, 1029)).unwrap();
             assert_eq!(before["status"], "unavailable");
             assert!(before.get("values").is_none());
             if claims.groups.values().is_some() {
                 assert_eq!(before["reason"], "not_yet_valid");
                 assert!(matches!(
-                    restored.project(source(), 1030).unwrap(),
+                    projected(&encoded, 1030),
                     Groups::Available {
                         expires_at: 1031,
                         ..
                     }
                 ));
-                assert!(matches!(
-                    restored.project(source(), 1031).unwrap(),
-                    Groups::Expired { .. }
-                ));
+                assert!(matches!(projected(&encoded, 1031), Groups::Expired { .. }));
             }
             assert_eq!(serde_json::to_value(&restored).unwrap(), encoded);
             assert!(
                 AuthenticationFacts::collect(
-                    &claims,
+                    claims,
                     1,
                     GroupFactsMaxAge::new(1).unwrap(),
                     None,

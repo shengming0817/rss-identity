@@ -95,7 +95,7 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 }
 
 pub(crate) struct Loaded {
-    pub origin: Option<Box<crate::federation_storage::Origin>>,
+    pub source_identity: Option<uuid::Uuid>,
     /// Qualified on this transaction's connection, with the host's binding locks held.
     pub verified_platform: Option<Box<crate::platform::PlatformBinding>>,
     pub source: rss_identity_core::session::AuthenticationSource,
@@ -251,7 +251,7 @@ async fn restore(
     }
     let origin = crate::federation_storage::decode_origin(row)?;
     let source = match &origin {
-        Some(origin) => Some(crate::federation_storage::check_origin(c, key, origin).await?),
+        Some((origin, _)) => Some(crate::federation_storage::check_origin(c, key, origin).await?),
         None => None,
     };
     let lifetime = lifetime(row)?;
@@ -262,32 +262,17 @@ async fn restore(
     }
     let fact_sample = sample.for_facts(session_checks);
     let source_kind: String = row.try_get("authentication_source")?;
-    let department = match (&origin, &source) {
-        (Some(origin), Some(source)) => crate::department::DepartmentFacts::new(
-            *origin.facts.department_snapshot.clone(),
-            source.clone(),
-            origin.facts.provider_config_version,
-            &fact_sample,
-        )?,
-        (None, None) => {
-            crate::department::DepartmentFacts::Unavailable(if source_kind == "platform" {
-                rss_identity_core::department::DepartmentUnavailableReason::NotConfigured
-            } else {
-                rss_identity_core::department::DepartmentUnavailableReason::LocalIdentity
-            })
-        }
-        _ => return Err(corrupt()),
-    };
+    let source_identity = origin.as_ref().map(|(origin, _)| origin.identity);
     let mut verified_platform = None;
-    let (assurance, groups) = match (source_kind.as_str(), &origin, source) {
-        ("oidc", Some(origin), Some(source)) => (
-            origin.facts.assurance.clone(),
-            origin.facts.project(source, fact_sample.seconds())?,
-        ),
+    let (assurance, groups, department) = match (source_kind.as_str(), origin, source) {
+        ("oidc", Some((_, facts)), Some(source)) => facts.into_views(source, &fact_sample)?,
         ("local_password", None, None) => (
             Assurance::password(row.try_get("local_authenticated_at")?).map_err(|_| corrupt())?,
             rss_identity_core::groups::Groups::unavailable(
                 rss_identity_core::facts::FactUnavailableReason::LocalIdentity,
+            ),
+            crate::department::DepartmentFacts::Unavailable(
+                rss_identity_core::department::DepartmentUnavailableReason::LocalIdentity,
             ),
         ),
         ("platform", None, None) => {
@@ -303,6 +288,9 @@ async fn restore(
                 rss_identity_core::groups::Groups::unavailable(
                     rss_identity_core::facts::FactUnavailableReason::NotConfigured,
                 ),
+                crate::department::DepartmentFacts::Unavailable(
+                    rss_identity_core::department::DepartmentUnavailableReason::NotConfigured,
+                ),
             )
         }
         _ => return Err(corrupt()),
@@ -316,7 +304,7 @@ async fn restore(
     // Signed-time skew was checked at issuance. Restoration retains frozen expiry
     // instead of applying a new deployment policy to an already accepted fact.
     Ok(Loaded {
-        origin: origin.map(Box::new),
+        source_identity,
         verified_platform,
         source,
         assurance,
@@ -525,5 +513,59 @@ mod tests {
             micros: 100_999_999,
         };
         assert_eq!(edge.deadline(101).unwrap(), start);
+    }
+}
+
+#[cfg(test)]
+mod fact_ownership_tests {
+    use super::*;
+    use rss_identity_core::{
+        department::{DepartmentSnapshotClaim, UpstreamDepartmentSnapshot},
+        facts::FactSource,
+        federation::UpstreamClaims,
+        groups::{GroupFactsMaxAge, Groups, UpstreamGroups},
+    };
+    #[test]
+    fn collection_and_projection_transfer_group_and_department_storage() {
+        let groups = vec!["engineering".to_owned()];
+        let department = crate::federation_support::department_snapshot(Some("dept"));
+        let group_buffer = groups.as_ptr();
+        let nodes = department.nodes().as_ptr();
+        let memberships = department.memberships().as_ptr();
+        let claims = UpstreamClaims {
+            issuer: "https://idp.test".into(),
+            subject: rss_identity_core::entra::ExternalSubject::Oidc("subject".into()),
+            profile: rss_identity_core::profile::Profile::missing(),
+            groups: UpstreamGroups::Present(groups),
+            department_snapshot: UpstreamDepartmentSnapshot::Present(department),
+            assurance: Assurance::password(1000).unwrap(),
+            issued_at: 1000,
+            expires_at: 1600,
+        };
+        let facts = crate::auth_facts::AuthenticationFacts::collect(
+            claims,
+            1,
+            GroupFactsMaxAge::new(300).unwrap(),
+            Some(&DepartmentSnapshotClaim::new("department".into(), 60).unwrap()),
+            1000,
+            0,
+        )
+        .unwrap();
+        let source = FactSource::new(uuid::Uuid::new_v4(), "https://idp.test".into()).unwrap();
+        let sample = TimeSample {
+            started: Instant::now(),
+            micros: 1_000_000_000,
+        };
+        let (
+            _,
+            Groups::Available { values, .. },
+            crate::department::DepartmentFacts::Available { snapshot, .. },
+        ) = facts.into_views(source, &sample).unwrap()
+        else {
+            panic!("expected live facts")
+        };
+        assert_eq!(values.as_ptr(), group_buffer);
+        assert_eq!(snapshot.nodes().as_ptr(), nodes);
+        assert_eq!(snapshot.memberships().as_ptr(), memberships);
     }
 }

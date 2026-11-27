@@ -87,36 +87,6 @@ impl SecurityEvent {
             Self::Federation(v) => &v.tenant,
         }
     }
-    pub(crate) fn contract(&self) -> (&'static str, u32, &'static str) {
-        match self {
-            Self::Authentication(_) => (
-                "identity.authentication.security",
-                1,
-                include_str!("authentication-security-event-v1.json"),
-            ),
-            Self::Profile(_) => (
-                "identity.profile.security",
-                1,
-                include_str!("profile-security-event-v1.json"),
-            ),
-            Self::Provisioned(_) => (
-                "identity.account.provisioning",
-                1,
-                include_str!("account-provisioning-v1.json"),
-            ),
-            Self::Account(_) => ("identity.account.security", 3, EVENT_SCHEMA),
-            Self::Federation(_) => (
-                "identity.federation.security",
-                2,
-                include_str!("federation-security-event-v2.json"),
-            ),
-            Self::Session(_) => (
-                "identity.session.security",
-                1,
-                include_str!("session-security-event-v1.json"),
-            ),
-        }
-    }
 }
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MutationError {
@@ -143,7 +113,6 @@ impl From<sqlx::Error> for MutationError {
     }
 }
 pub(crate) const MAX_MUTATION_EVENTS: usize = 8;
-const EVENT_SCHEMA: &str = include_str!("security-event-v3.json");
 pub(crate) fn reject() -> PgError {
     MessagingError::new(
         MessagingErrorKind::Conflict,

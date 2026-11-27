@@ -32,26 +32,20 @@ pub(crate) async fn intent(
     tenant: TenantId,
     id: Uuid,
 ) -> Result<Intent, rss_transactional_messaging_postgres::PgError> {
-    let r = sqlx::query(concat!(
-        "SELECT * FROM identity_authority.link_intents WHERE tenant_id=$1::uuid AND inten",
-        "t_id=$2 FOR UPDATE"
-    ))
+    let r = sqlx::query(
+        "SELECT source_identity AS external_identity_id, source_epoch AS provider_epoch,
+                source_facts AS auth_facts, browser_hash, principal_id, session_id, auth_epoch,
+                membership_epoch, local_authenticated_at, target_provider, target_version, stage,
+                created_at, expires_at FROM identity_authority.link_intents
+         WHERE tenant_id=$1::uuid AND intent_id=$2 FOR UPDATE",
+    )
     .bind(tenant.to_string())
     .bind(id)
     .fetch_optional(c)
     .await?
     .ok_or_else(reject)?;
-    let origin = r
-        .try_get::<Option<Uuid>, _>("source_identity")?
-        .map(|identity| {
-            Ok::<_, rss_transactional_messaging_postgres::PgError>(db::Origin {
-                identity,
-                epoch: r.try_get("source_epoch")?,
-                facts_sequence: r.try_get("source_facts_sequence")?,
-                facts: crate::auth_facts::AuthenticationFacts::decode(r.try_get("source_facts")?)?,
-            })
-        })
-        .transpose()?;
+    // Strictly validate the locked source before a later INSERT SELECT can forward it.
+    let origin = db::decode_origin(&r)?.map(|(origin, _)| origin);
     Ok(Intent {
         browser: r.try_get("browser_hash")?,
         id,
@@ -96,9 +90,8 @@ impl Federation {
         budget.0 = budget.0.shortened_to(actor.expires);
         let return_url = self.target(&target)?;
         let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
-        let (actor,account,origin,login)=self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
+        let (actor,account,source_identity,login)=self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
                     let loaded = session_storage::recheck_collection(c, &actor).await?;
-                    let origin = loaded.origin.map(|origin| *origin);
                     let login: Option<String> = sqlx::query_scalar(concat!(
                         "SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::u",
                         "uid AND principal_id=$2::uuid"
@@ -107,7 +100,7 @@ impl Federation {
                     .bind(actor.key.principal.as_uuid().to_string())
                     .fetch_optional(c)
                     .await?;
-                    Ok((actor, loaded.state, origin, login))
+                    Ok((actor, loaded.state, loaded.source_identity, login))
                 }) }).await?;
         let candidate = if let Some(login) = login {
             let candidate = self
@@ -151,11 +144,11 @@ impl Federation {
         let (provider, purpose) = if candidate.is_some() {
             (target.clone(), Purpose::Link)
         } else {
-            let origin = origin.as_ref().ok_or(AuthorityError::Rejected)?.clone();
+            let identity = source_identity.ok_or(AuthorityError::Rejected)?;
             let id = self
                 .authority
                 .read_sql(binding, budget.remaining(), move |c| {
-                    Box::pin(async move { Ok(db::identity(c, tenant, origin.identity).await?.0) })
+                    Box::pin(async move { Ok(db::identity(c, tenant, identity).await?.0) })
                 })
                 .await?;
             (
@@ -195,42 +188,40 @@ impl Federation {
                     let target_now = db::provider(c, tenant, target.id).await?;
                     db::exact(&target_now, target.version)?;
                     let local_authenticated_at = candidate.as_ref().map(|c| c.authenticated_at);
-                    let origin = if let Some(candidate) = candidate {
+                    if let Some(candidate) = candidate {
                         current(c, &candidate).await?;
-                        None
-                    } else {
-                        origin
-                    };
+                    } else if loaded.source_identity != source_identity {
+                        return Err(reject().into());
+                    }
                     let now = session_storage::now(c).await?;
                     let id = Uuid::new_v4();
                     let expiry = now + 300;
-                    sqlx::query(concat!(
-                        "INSERT INTO identity_authority.link_intents(tenant_id,intent_id,principal_id,session_id,auth_epoch,membership_epoch,source_identity,source_epoch,source_facts,target_provider,target_version,browser_hash,stage,created_at,expires_at,local_authenticated_at,source_facts_sequence) VALUES($1::uuid,$2,$3,$4::uuid,$5,$6",
-                        ",$7,$8,$9,$10::uuid,$11,$12,$13,$14,$15,$16,$17)"
+                    let written = sqlx::query(concat!(
+                        "WITH candidate(identity, epoch, sequence, facts, budget) AS (
+                            SELECT NULL::uuid, NULL::bigint, NULL::bigint, NULL::jsonb, $14::bigint
+                            WHERE $13::bigint IS NOT NULL
+                            UNION ALL
+                            SELECT external_identity_id, provider_epoch, facts_sequence, auth_facts, $14
+                            FROM identity_authority.sessions
+                            WHERE tenant_id=$1::uuid AND principal_id=$3 AND session_id=$4
+                              AND external_identity_id IS NOT NULL AND $13 IS NULL
+                         )",
+                        include_str!("admit-auth-facts.sql"),
+                        "INSERT INTO identity_authority.link_intents (
+                            tenant_id,intent_id,principal_id,session_id,auth_epoch,membership_epoch,
+                            source_identity,source_epoch,source_facts,source_facts_sequence,
+                            target_provider,target_version,browser_hash,stage,created_at,expires_at,local_authenticated_at)
+                         SELECT $1::uuid,$2,$3,$4,$5,$6,identity,epoch,accepted_facts,sequence,
+                                $7::uuid,$8,$9,$10,$11,$12,$13 FROM admitted"
                     ))
-                    .bind(tenant.to_string())
-                    .bind(id)
-                    .bind(account.key().principal.as_uuid())
-                    .bind(actor.view.id.to_string())
-                    .bind(account.epoch())
-                    .bind(account.membership_epoch())
-                    .bind(origin.as_ref().map(|o| o.identity))
-                    .bind(origin.as_ref().map(|o| o.epoch))
-                    .bind(match &origin { Some(o) => Some(o.facts.encode(c, max_auth_facts_bytes).await?), None => None })
-                    .bind(target.id.to_string())
-                    .bind(target.version)
-                    .bind(digest(&browser).as_slice())
-                    .bind(if purpose == Purpose::Link {
-                        LinkStage::TargetReady.code()
-                    } else {
-                        LinkStage::ReauthenticationRequired.code()
-                    })
-                    .bind(now)
-                    .bind(expiry)
-                    .bind(local_authenticated_at)
-                    .bind(origin.as_ref().map(|o| o.facts_sequence))
-                    .execute(&mut *c)
-                    .await?;
+                    .bind(tenant.to_string()).bind(id).bind(account.key().principal.as_uuid())
+                    .bind(actor.view.id.as_uuid()).bind(account.epoch()).bind(account.membership_epoch())
+                    .bind(target.id.to_string()).bind(target.version).bind(digest(&browser).as_slice())
+                    .bind(if purpose == Purpose::Link { LinkStage::TargetReady.code() } else { LinkStage::ReauthenticationRequired.code() })
+                    .bind(now).bind(expiry).bind(local_authenticated_at)
+                    .bind(i64::from(max_auth_facts_bytes.get()))
+                    .execute(&mut *c).await?;
+                    if written.rows_affected() != 1 { return Err(reject().into()); }
                     db::insert_attempt(
                         c,
                         db::NewAttempt {
@@ -305,8 +296,9 @@ impl Federation {
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
                     let current_source = db::provider(c, tenant, source.id).await?;
                     db::exact(&current_source, source.version)?;
-                    check_actor(c, tenant, instance, &attempt, session).await?;
-                    let i = intent(c, tenant, intent_id).await?;
+                    let (_, checked_intent) =
+                        check_actor(c, tenant, instance, &attempt, session).await?;
+                    let i = checked_intent.ok_or_else(reject)?;
                     let origin = i.origin.as_ref().ok_or_else(reject)?;
                     db::check_origin(
                         c,
@@ -325,34 +317,45 @@ impl Federation {
                         || subject != claims.subject.storage_key()
                         || claims
                             .assurance
-                            .check(AuthenticationMode::Reauthenticate, attempt.created, now, future_skew_seconds)
+                            .check(
+                                AuthenticationMode::Reauthenticate,
+                                attempt.created,
+                                now,
+                                future_skew_seconds,
+                            )
                             .is_err()
                     {
                         return Err(FederationError::Claims.into());
                     }
-                    sqlx::query(concat!(
-                        "UPDATE identity_authority.link_intents SET source_facts=$3,source_facts_sequence=$4 WHERE tenant_",
-                        "id=$1::uuid AND intent_id=$2"
+                    let facts = crate::auth_facts::AuthenticationFacts::collect(
+                        claims,
+                        source.version,
+                        group_policy,
+                        current_source
+                            .settings
+                            .claims()
+                            .department_snapshot
+                            .as_ref(),
+                        now,
+                        future_skew_seconds,
+                    )?;
+                    let written = sqlx::query(concat!(
+                        "WITH candidate(facts, budget) AS (VALUES ($3::jsonb, $5::bigint))",
+                        include_str!("admit-auth-facts.sql"),
+                        "UPDATE identity_authority.link_intents
+                         SET source_facts=admitted.accepted_facts, source_facts_sequence=$4
+                         FROM admitted WHERE tenant_id=$1::uuid AND intent_id=$2"
                     ))
                     .bind(tenant.to_string())
                     .bind(intent_id)
-                    .bind(
-                        crate::auth_facts::AuthenticationFacts::collect(
-                            &claims,
-                            source.version,
-                            group_policy,
-                            current_source
-                                .settings
-                                .claims()
-                                .department_snapshot
-                                .as_ref(),
-                            now, future_skew_seconds)?
-                        .encode(c, max_auth_facts_bytes)
-                        .await?,
-                    )
+                    .bind(sqlx::types::Json(facts))
                     .bind(crate::profiles::sequence(c, tenant).await?)
+                    .bind(i64::from(max_auth_facts_bytes.get()))
                     .execute(&mut *c)
                     .await?;
+                    if written.rows_affected() != 1 {
+                        return Err(reject().into());
+                    }
                     advance(c, tenant, intent_id, LinkStage::ReauthenticationRequired).await?;
                     db::consume(c, &locator).await?;
                     db::insert_attempt(
@@ -410,7 +413,7 @@ impl LinkStage {
             _ => Err(corrupt()),
         }
     }
-    fn code(self) -> i16 {
+    pub(crate) fn code(self) -> i16 {
         match self {
             Self::ReauthenticationRequired => 0,
             Self::TargetReady => 1,
