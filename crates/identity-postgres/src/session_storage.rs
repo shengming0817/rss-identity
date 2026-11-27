@@ -110,6 +110,19 @@ pub(crate) struct Loaded {
     pub now: i64,
 }
 impl Loaded {
+    /// Recheck the original cutoff even when the stored idle deadline is already sufficient.
+    pub(crate) fn renew_idle(&mut self) -> Result<bool, PgError> {
+        self.sample
+            .renew(&mut self.lifetime, self.expires, Instant::now())?;
+        let idle = self.lifetime.idle_expires_at();
+        if idle == self.view.idle_expires_at {
+            return Ok(false);
+        }
+        self.expires = self.sample.deadline(idle)?;
+        self.view.idle_expires_at = idle;
+        Ok(true)
+    }
+
     /// The post-lock sample includes all time spent awaiting the host policy.
     pub(crate) fn recently_authenticated(&self, max_age: Duration) -> bool {
         self.assurance.auth_time().is_some_and(|authenticated| {
@@ -397,18 +410,16 @@ pub(crate) async fn recheck_locked(
     Ok(loaded)
 }
 pub(crate) async fn touch(c: &mut PgConnection, loaded: &mut Loaded) -> Result<(), PgError> {
-    loaded
-        .sample
-        .renew(&mut loaded.lifetime, loaded.expires, Instant::now())?;
-    loaded.view = SessionView::new(loaded.view.id, loaded.lifetime, loaded.view.credential_kind);
-    loaded.expires = loaded.sample.deadline(loaded.lifetime.idle_expires_at())?;
-    sqlx::query(concat!(
-        "UPDATE identity_authority.sessions SET idle_expires_at=$3 WHERE tenant_id=$1::uu",
-        "id AND session_id=$2::uuid"
-    ))
+    if !loaded.renew_idle()? {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE identity_authority.sessions SET idle_expires_at=$3
+         WHERE tenant_id=$1::uuid AND session_id=$2",
+    )
     .bind(loaded.state.key().tenant.to_string())
-    .bind(loaded.view.id.to_string())
-    .bind(loaded.lifetime.idle_expires_at())
+    .bind(loaded.view.id.as_uuid())
+    .bind(loaded.view.idle_expires_at)
     .execute(c)
     .await?;
     Ok(())

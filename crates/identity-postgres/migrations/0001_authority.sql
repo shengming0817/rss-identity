@@ -1,7 +1,7 @@
--- Fresh schema v22 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v23 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=22));
-INSERT INTO identity_authority.schema_version VALUES(22);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=23));
+INSERT INTO identity_authority.schema_version VALUES(23);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),
@@ -133,7 +133,6 @@ CREATE TABLE identity_authority.sessions (
  CONSTRAINT session_revocation CHECK(revoked_at IS NULL OR revoked_at >= issued_at)
 );
 CREATE INDEX sessions_accepted_facts ON identity_authority.sessions(tenant_id,principal_id,facts_sequence DESC) WHERE external_identity_id IS NOT NULL;
-CREATE INDEX sessions_principal ON identity_authority.sessions(tenant_id,principal_id,session_id);
 CREATE TABLE identity_authority.link_intents (
  tenant_id uuid NOT NULL, intent_id uuid NOT NULL, principal_id uuid NOT NULL, session_id uuid NOT NULL,
  auth_epoch bigint NOT NULL CHECK(auth_epoch>0), membership_epoch bigint NOT NULL CHECK(membership_epoch>0),

@@ -478,18 +478,43 @@ impl Authority {
         let secret = SessionSecret::generate().map_err(|_| AuthorityError::Unavailable)?;
         let session_checks = self.session_checks.clone();
         let instance = self.instance.as_uuid();
-        self.mutate(binding,budget.remaining(),move|tx|Box::pin(async move {
-            connection(tx,move|c|Box::pin(async move {
-                db::lock_session(c,Some(&old.digest()),None,CredentialKind::Cookie,db::SessionAccess::Rotate).await?;
-                let mut loaded = db::lookup_locked(c,tenant,&old.digest(), CredentialKind::Cookie, instance, &session_checks).await?;
-                db::touch(c,&mut loaded).await?;
-                sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
-                    .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;
-                checked_expiry(&loaded, budget.0.instant())?;
-                let fact = event(SessionAction::Refreshed,loaded.state,loaded.view.id,None,loaded.source);
-                Ok((IssuedSession::new(secret,loaded.view,loaded.now,loaded.state),fact))
-            })).await
-        })).await
+        self.mutate(binding, budget.remaining(), move |tx| {
+            Box::pin(async move {
+                connection(tx, move |c| {
+                    Box::pin(async move {
+                        db::lock_session(c, Some(&old.digest()), None, CredentialKind::Cookie, db::SessionAccess::Rotate).await?;
+                        let mut loaded = db::lookup_locked(
+                            c,
+                            tenant,
+                            &old.digest(),
+                            CredentialKind::Cookie,
+                            instance,
+                            &session_checks,
+                        )
+                        .await?;
+                        loaded.renew_idle()?;
+                        sqlx::query(
+                            "UPDATE identity_authority.sessions SET idle_expires_at=$3, token_hash=$4
+                             WHERE tenant_id=$1::uuid AND session_id=$2",
+                        )
+                        .bind(tenant.to_string())
+                        .bind(loaded.view.id.as_uuid())
+                        .bind(loaded.view.idle_expires_at)
+                        .bind(secret.digest().as_slice())
+                        .execute(c)
+                        .await?;
+                        checked_expiry(&loaded, budget.0.instant())?;
+                        let fact = event(
+                            SessionAction::Refreshed, loaded.state, loaded.view.id, None, loaded.source,
+                        );
+                        let issued = IssuedSession::new(secret, loaded.view, loaded.now, loaded.state);
+                        Ok((issued, fact))
+                    })
+                })
+                .await
+            })
+        })
+        .await
     }
     pub async fn revoke_current_session(
         &self,

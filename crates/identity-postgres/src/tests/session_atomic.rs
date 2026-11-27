@@ -93,6 +93,96 @@ async fn proof(f: &Fixture, s: &IssuedSession) -> anyhow::Result<AuthenticatedSe
         .await?)
 }
 
+async fn set_test_idle(f: &Fixture, session: &IssuedSession, idle: i64) -> anyhow::Result<()> {
+    sqlx::query("UPDATE identity_authority.sessions SET idle_expires_at=$2 WHERE session_id=$1")
+        .bind(session.view().id.as_uuid())
+        .bind(idle)
+        .execute(&f.owner)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn session_updates_match_activity_and_rotation() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    sqlx::raw_sql(
+        "CREATE TABLE public.session_updates (session_id uuid NOT NULL);
+         GRANT INSERT ON public.session_updates TO identity_runtime;
+         CREATE FUNCTION public.record_session_update() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN INSERT INTO public.session_updates VALUES (NEW.session_id); RETURN NULL; END $$;
+         CREATE TRIGGER count_session_updates AFTER UPDATE ON identity_authority.sessions
+             FOR EACH ROW EXECUTE FUNCTION public.record_session_update();",
+    )
+    .execute(&f.owner)
+    .await?;
+    for capped in [false, true] {
+        let session = issue(&f).await?;
+        let view = session.view();
+        let idle = if capped {
+            view.absolute_expires_at
+        } else {
+            view.issued_at + 300
+        };
+        let expected_order = if capped {
+            std::cmp::Ordering::Equal
+        } else {
+            std::cmp::Ordering::Greater
+        };
+        set_test_idle(&f, &session, idle).await?;
+
+        // Include persisted idle and the revision alongside the committed row-trigger count.
+        let state = || {
+            sqlx::query_as::<_, (i64, i64, i64)>(
+                "SELECT (SELECT count(*) FROM public.session_updates WHERE session_id=$1),
+                    g.value, s.idle_expires_at
+             FROM identity_authority.sessions s JOIN identity_authority.tenant_state g ON g.tenant_id=s.tenant_id AND g.kind='personnel_revision'
+             WHERE s.session_id=$1 AND s.tenant_id=$2::uuid",
+            )
+            .bind(view.id.as_uuid())
+            .bind(A)
+            .fetch_one(&f.owner)
+        };
+        let (writes, revision, _) = state().await?;
+        assert_eq!(proof(&f, &session).await?.view().idle_expires_at, idle);
+        assert_eq!(state().await?, (writes, revision, idle));
+        let actor = f
+            .store
+            .authenticate_session(binding(f.key.tenant), secret(&session), deadline())
+            .await?;
+        let renewed = actor.view().idle_expires_at;
+        assert_eq!(renewed.cmp(&idle), expected_order);
+        assert_eq!(
+            state().await?,
+            (writes + i64::from(!capped), revision, renewed)
+        );
+
+        set_test_idle(&f, &session, idle).await?;
+        let (writes, _, _) = state().await?;
+        let events = f.events().await?;
+        let rotated = f
+            .store
+            .refresh_session(binding(f.key.tenant), secret(&session), deadline())
+            .await?;
+        let renewed = rotated.view().idle_expires_at;
+        assert_eq!(renewed.cmp(&idle), expected_order);
+        assert_eq!(state().await?, (writes + 1, revision, renewed));
+        assert_eq!(rotated.view().absolute_expires_at, view.absolute_expires_at);
+        assert_eq!(f.events().await?, events + 1);
+        expect_session_event(&f, "refreshed", view.id, None, 1).await?;
+        assert!(matches!(
+            f.store
+                .inspect_session(binding(f.key.tenant), secret(&session), deadline())
+                .await,
+            Err(AuthorityError::Rejected)
+        ));
+        assert_eq!(proof(&f, &rotated).await?.view().id, view.id);
+    }
+    f.close().await;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires make test-pg"]
 async fn session_isolation_replacement_and_restart() -> anyhow::Result<()> {
@@ -411,6 +501,8 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
         f.store.create_session(candidate, None, deadline()).await,
         Err(AuthorityError::RolledBack(_))
     ));
+    let original_idle = live.view().issued_at + 300;
+    set_test_idle(&f, &live, original_idle).await?;
     let failure = f
         .store
         .refresh_session(
@@ -420,6 +512,10 @@ async fn session_settlement_and_event_failure_are_atomic() -> anyhow::Result<()>
         )
         .await;
     assert!(matches!(failure, Err(AuthorityError::RolledBack(_))));
+    assert_eq!(
+        proof(&f, &live).await?.view().idle_expires_at,
+        original_idle
+    );
     assert!(!format!("{failure:?}").contains("session secret marker"));
     assert!(
         f.store
