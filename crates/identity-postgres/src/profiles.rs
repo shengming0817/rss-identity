@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};
 use std::time::Instant;
 use uuid::Uuid;
+mod operation_id;
+pub use operation_id::ProfileOperationId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -81,7 +83,7 @@ pub struct LocalProfileView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProfileChange {
-    pub operation_id: Uuid,
+    pub operation_id: ProfileOperationId,
     pub expected_revision: i64,
     #[serde(deserialize_with = "Option::deserialize")]
     pub value: Option<LocalProfile>,
@@ -89,7 +91,7 @@ pub struct ProfileChange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProfileReceipt {
-    pub operation_id: Uuid,
+    pub operation_id: ProfileOperationId,
     pub revision: i64,
 }
 #[derive(Serialize)]
@@ -492,7 +494,6 @@ impl Authority {
     ) -> Result<ProfileReceipt, AuthorityError> {
         self.require_runtime()?;
         if target.tenant != actor.key.tenant
-            || change.operation_id.is_nil()
             || change.expected_revision < 0
             || change
                 .value
@@ -512,7 +513,7 @@ impl Authority {
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::UpdateLocalProfile,Some(target),c).await?;
             if !load(c,target).await?.state.active(){return Err(reject().into());}
             if let Some(row)=sqlx::query("SELECT principal_id,actor,digest,revision FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND operation_id=$2")
-                .bind(target.tenant.to_string()).bind(change.operation_id).fetch_optional(&mut *c).await? {
+                .bind(target.tenant.to_string()).bind(change.operation_id.as_uuid()).fetch_optional(&mut *c).await? {
                 if row.try_get::<Uuid,_>("principal_id")?!=target.principal.as_uuid() || row.try_get::<Uuid,_>("actor")?!=actor.key.principal.as_uuid() || row.try_get::<Vec<u8>,_>("digest")?!=digest {return Err(transaction::MutationError::OperationConflict);}
                 return Ok((ProfileReceipt{operation_id:change.operation_id,revision:row.try_get("revision")?},vec![]));
             }
@@ -531,7 +532,7 @@ impl Authority {
             sqlx::query("INSERT INTO identity_authority.local_profiles(tenant_id,principal_id,revision,value) VALUES($1::uuid,$2,$3,$4) ON CONFLICT(tenant_id,principal_id) DO UPDATE SET revision=excluded.revision,value=excluded.value")
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(revision).bind(value).execute(&mut *c).await?;
             sqlx::query("INSERT INTO identity_authority.profile_operations(tenant_id,operation_id,principal_id,actor,digest,revision) VALUES($1::uuid,$2,$3,$4,$5,$6)")
-                .bind(target.tenant.to_string()).bind(change.operation_id).bind(target.principal.as_uuid()).bind(actor.key.principal.as_uuid()).bind(digest.as_slice()).bind(revision).execute(c).await?;
+                .bind(target.tenant.to_string()).bind(change.operation_id.as_uuid()).bind(target.principal.as_uuid()).bind(actor.key.principal.as_uuid()).bind(digest.as_slice()).bind(revision).execute(c).await?;
             Ok((ProfileReceipt{operation_id:change.operation_id,revision},vec![event(target,Some(actor.key),"local_updated",ProfileSource::IdentityLocal,None,Some(revision),changed_fields)]))
         })).await
     }
@@ -539,7 +540,7 @@ impl Authority {
         &self,
         actor: &AuthenticatedSession,
         target: AccountKey,
-        operation: Uuid,
+        operation: ProfileOperationId,
         deadline: OperationDeadline,
     ) -> Result<Option<ProfileReceipt>, AuthorityError> {
         self.require_runtime()?;
@@ -553,7 +554,7 @@ impl Authority {
             let loaded=reader.recheck(c).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::UpdateLocalProfile,Some(target),c).await?;
             let revision:Option<i64>=sqlx::query_scalar("SELECT revision FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND principal_id=$2 AND actor=$3 AND operation_id=$4")
-                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(reader.key.principal.as_uuid()).bind(operation).fetch_optional(c).await?;
+                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(reader.key.principal.as_uuid()).bind(operation.as_uuid()).fetch_optional(c).await?;
             Ok(revision.map(|revision|ProfileReceipt{operation_id:operation,revision}))
         })).await
     }

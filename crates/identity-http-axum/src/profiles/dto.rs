@@ -8,7 +8,7 @@ use uuid::Uuid;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Change {
-    operation_id: Uuid,
+    operation_id: pg::ProfileOperationId,
     expected_revision: i64,
     #[serde(deserialize_with = "Option::deserialize")]
     value: Option<LocalValue>,
@@ -71,7 +71,7 @@ impl From<pg::LocalProfileView> for Local {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Receipt {
-    operation_id: Uuid,
+    operation_id: pg::ProfileOperationId,
     revision: i64,
 }
 impl From<pg::ProfileReceipt> for Receipt {

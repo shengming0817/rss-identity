@@ -29,7 +29,7 @@ pub mod platform;
 mod profiles;
 pub use personnel::{PersonnelProfileScope, PersonnelRead, PersonnelRevision};
 pub use profiles::{
-    LocalProfileView, ProfileChange, ProfileReceipt, ProfileSource, ProfileSourcePage,
+    LocalProfileView, ProfileChange, ProfileOperationId, ProfileReceipt, ProfileSource, ProfileSourcePage,
     ProfileSourceView, ProfileStatus, ProfileView, TrustedProfile,
 };
 mod runtime;

@@ -1446,7 +1446,7 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     let app = app(&f);
     let (cookie, csrf, _) = successful_login(&app).await?;
     let path = format!("accounts/{}/profile", f.key.principal.as_uuid());
-    let operation = uuid::Uuid::new_v4();
+    let operation = uuid::Uuid::now_v7();
     let mut extensions = serde_json::Map::new();
     extensions.insert("remote".into(), json!(false));
     for i in 0..1022 {
@@ -1498,7 +1498,7 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
         body(saved).await?,
         json!({"revision":1,"value":input["value"]})
     );
-    let missing = json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":1});
+    let missing = json!({"operationId":uuid::Uuid::now_v7(),"expectedRevision":1});
     assert_eq!(
         app.clone()
             .oneshot(crate::request_support::scoped(request(
@@ -1567,7 +1567,7 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
     assert_eq!(result.status(), StatusCode::CONFLICT);
     assert_eq!(body(result).await?["code"], "operation_conflict");
     let mut conflict = input.clone();
-    conflict["operationId"] = json!(uuid::Uuid::new_v4());
+    conflict["operationId"] = json!(uuid::Uuid::now_v7());
     let result = app
         .clone()
         .oneshot(crate::request_support::scoped(request(
@@ -1580,7 +1580,7 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
         .await?;
     assert_eq!(result.status(), StatusCode::CONFLICT);
     assert_eq!(body(result).await?["code"], "revision_conflict");
-    let deletion = json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":1,"value":null});
+    let deletion = json!({"operationId":uuid::Uuid::now_v7(),"expectedRevision":1,"value":null});
     assert_eq!(
         app.clone()
             .oneshot(crate::request_support::scoped(request(
@@ -1618,7 +1618,7 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
             &path,
             Some(&cookie),
             Some(&csrf),
-            json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":2,"value":value}),
+            json!({"operationId":uuid::Uuid::now_v7(),"expectedRevision":2,"value":value}),
         )))
         .await?;
     assert_eq!(write.status(), StatusCode::OK);

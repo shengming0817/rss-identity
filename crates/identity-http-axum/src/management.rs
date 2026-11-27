@@ -38,6 +38,7 @@ impl From<AuthorityError> for Error {
             AuthorityError::ProfileReceiptCapacityReached => {
                 (StatusCode::CONFLICT, "profile_receipt_capacity_reached")
             }
+            AuthorityError::ProfileOperationExpired => (StatusCode::GONE, "profile_operation_expired"),
             AuthorityError::RevisionConflict => (StatusCode::CONFLICT, "revision_conflict"),
             AuthorityError::OperationConflict => (StatusCode::CONFLICT, "operation_conflict"),
             AuthorityError::Rejected => (StatusCode::UNAUTHORIZED, "invalid_credential"),

@@ -118,7 +118,7 @@ async fn receipt(
     h: HeaderMap,
 ) -> Result<Response, Error> {
     let actor = actor(&s, binding, &h, b, false).await?;
-    let operation = Uuid::parse_str(&o).map_err(|_| BAD)?;
+    let operation = Uuid::parse_str(&o).map_err(|_| BAD)?.try_into().map_err(|_| BAD)?;
     Ok(Json(
         s.authority
             .local_profile_receipt(&actor, target(&t, &p)?, operation, b.remaining())

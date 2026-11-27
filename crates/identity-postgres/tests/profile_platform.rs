@@ -42,7 +42,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
     let initial = f.store.current_profile(&first_proof, deadline()).await?;
     let snapshot = initial.view()?.snapshot_id;
     let change = ProfileChange {
-        operation_id: Uuid::new_v4(),
+        operation_id: rss_identity_postgres::ProfileOperationId::now(),
         expected_revision: 0,
         value: Some(local("E1001")),
     };
@@ -169,7 +169,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
         before
     );
     let remove = ProfileChange {
-        operation_id: Uuid::new_v4(),
+        operation_id: rss_identity_postgres::ProfileOperationId::now(),
         expected_revision: 1,
         value: None,
     };
@@ -196,7 +196,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
             .is_none()
     );
     let unknown = ProfileChange {
-        operation_id: Uuid::new_v4(),
+        operation_id: rss_identity_postgres::ProfileOperationId::now(),
         expected_revision: 2,
         value: Some(local("E2002")),
     };
@@ -218,7 +218,7 @@ async fn local_profile_observation_receipts_and_revocation() -> anyhow::Result<(
         3
     );
     let rollback = ProfileChange {
-        operation_id: Uuid::new_v4(),
+        operation_id: rss_identity_postgres::ProfileOperationId::now(),
         expected_revision: 3,
         value: Some(local("must-rollback")),
     };
@@ -1509,7 +1509,7 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
     sqlx::query("INSERT INTO identity_authority.profile_operations(tenant_id,operation_id,principal_id,actor,digest,revision) SELECT $1::uuid,gen_random_uuid(),$2,$2,decode(repeat('00',32),'hex'),n FROM generate_series(1,8191) n")
         .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).execute(&f.owner).await?;
     let change = ProfileChange {
-        operation_id: Uuid::new_v4(),
+        operation_id: rss_identity_postgres::ProfileOperationId::now(),
         expected_revision: 0,
         value: Some(local("last")),
     };
@@ -1532,7 +1532,7 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
             proof(&f.store, &f, &issued).await?,
             f.key,
             ProfileChange {
-                operation_id: Uuid::new_v4(),
+                operation_id: rss_identity_postgres::ProfileOperationId::now(),
                 expected_revision: 1,
                 value: None,
             },
@@ -1612,7 +1612,7 @@ async fn local_profile_receipt_capacity_preserves_replay() -> anyhow::Result<()>
                 proof(&f.store, &f, &issued).await?,
                 f.key,
                 ProfileChange {
-                    operation_id: Uuid::new_v4(),
+                    operation_id: rss_identity_postgres::ProfileOperationId::now(),
                     expected_revision: 1,
                     value: None
                 },
@@ -1645,7 +1645,7 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
             f.actor().await?,
             f.key,
             ProfileChange {
-                operation_id: Uuid::new_v4(),
+                operation_id: rss_identity_postgres::ProfileOperationId::now(),
                 expected_revision: 0,
                 value: Some(local("Personnel")),
             },
@@ -1908,7 +1908,7 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
             f.actor().await?,
             f.key,
             ProfileChange {
-                operation_id: Uuid::new_v4(),
+                operation_id: rss_identity_postgres::ProfileOperationId::now(),
                 expected_revision: 0,
                 value: Some(local("Profile")),
             },

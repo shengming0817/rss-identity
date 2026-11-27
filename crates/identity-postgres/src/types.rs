@@ -52,6 +52,8 @@ pub enum AuthorityError {
     Configuration,
     #[error("profile receipt capacity reached")]
     ProfileReceiptCapacityReached,
+    #[error("profile operation expired")]
+    ProfileOperationExpired,
     #[error("profile revision conflict")]
     RevisionConflict,
     #[error("operation identifier reused with different input")]
