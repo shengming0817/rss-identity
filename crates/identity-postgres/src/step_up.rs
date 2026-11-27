@@ -133,7 +133,7 @@ pub async fn consume_step_up_on(
     let source: GrantSource =
         serde_json::from_value(row.try_get("source")?).map_err(|_| corrupt())?;
     validate_source(c, actor.key, &source).await?;
-    session_storage::recheck(c, actor).await?;
+    session_storage::recheck_locked(c, actor).await?;
     if session_storage::now(c).await? >= row.try_get::<i64, _>("expires_at")? {
         return Err(reject());
     }
@@ -179,7 +179,7 @@ impl Authority {
             return Err(AuthorityError::InvalidInput);
         }
         self.read_sql(actor.binding,deadline,move|c|Box::pin(async move{
-            session_storage::recheck(c,&actor).await?;
+            session_storage::recheck_collection(c,&actor).await?;
             sqlx::query("DELETE FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND principal_id=$2 AND session_id=$3 AND token_hash=$4")
                 .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(actor.view.id.as_uuid()).bind(digest(&handle).as_slice()).execute(c).await?;
             Ok(())

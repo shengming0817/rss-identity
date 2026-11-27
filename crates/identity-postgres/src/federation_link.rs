@@ -97,7 +97,7 @@ impl Federation {
         let return_url = self.target(&target)?;
         let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
         let (actor,account,origin,login)=self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
-                    let loaded = session_storage::recheck(c, &actor).await?;
+                    let loaded = session_storage::recheck_collection(c, &actor).await?;
                     let origin = loaded.origin.map(|origin| *origin);
                     let login: Option<String> = sqlx::query_scalar(concat!(
                         "SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::u",
@@ -188,7 +188,7 @@ impl Federation {
             )
             .await?;
         self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
-                    let loaded = session_storage::recheck(c, &actor).await?;
+                    let loaded = session_storage::recheck_collection(c, &actor).await?;
                     if !loaded.state.matches_verification(account) {
                         return Err(reject().into());
                     }
@@ -301,7 +301,7 @@ impl Federation {
         self.authority
             .write_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
-                    lock_guard(c, tenant).await?;
+                    lock_tenant_collection(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
                     let current_source = db::provider(c, tenant, source.id).await?;
                     db::exact(&current_source, source.version)?;

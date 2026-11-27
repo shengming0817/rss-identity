@@ -1,7 +1,7 @@
--- Fresh schema v21 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v22 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=21));
-INSERT INTO identity_authority.schema_version VALUES(21);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=22));
+INSERT INTO identity_authority.schema_version VALUES(22);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),
@@ -12,7 +12,21 @@ BEGIN
  RAISE EXCEPTION 'immutable authentication instance';
 END $$;
 CREATE TRIGGER protect_deployment BEFORE UPDATE OR DELETE ON identity_authority.deployment FOR EACH ROW EXECUTE FUNCTION identity_authority.protect_deployment();
-CREATE TABLE identity_authority.guard(tenant_id uuid PRIMARY KEY, profile_receipt_time_ms bigint NOT NULL DEFAULT 0 CHECK(profile_receipt_time_ms>=0), profile_sequence bigint NOT NULL DEFAULT 0 CHECK(profile_sequence>=0), personnel_revision bigint NOT NULL DEFAULT 0 CHECK(personnel_revision>=0));
+CREATE TABLE identity_authority.tenants(tenant_id uuid PRIMARY KEY);
+CREATE TABLE identity_authority.tenant_state (
+ tenant_id uuid NOT NULL REFERENCES identity_authority.tenants,
+ kind text NOT NULL CHECK(kind IN ('profile_sequence','personnel_revision','receipt_clock','attempt_capacity')),
+ value bigint NOT NULL DEFAULT 0 CHECK(value>=0),
+ PRIMARY KEY(tenant_id,kind)
+);
+CREATE FUNCTION identity_authority.initialize_tenant_state() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ INSERT INTO identity_authority.tenant_state(tenant_id,kind) VALUES
+  (NEW.tenant_id,'profile_sequence'),(NEW.tenant_id,'personnel_revision'),(NEW.tenant_id,'receipt_clock'),(NEW.tenant_id,'attempt_capacity');
+ RETURN NEW;
+END $$;
+CREATE TRIGGER initialize_state AFTER INSERT ON identity_authority.tenants
+ FOR EACH ROW EXECUTE FUNCTION identity_authority.initialize_tenant_state();
 CREATE TABLE identity_authority.accounts (
  tenant_id uuid NOT NULL,
  principal_id uuid NOT NULL CHECK(principal_id <> '00000000-0000-0000-0000-000000000000'),
@@ -53,7 +67,7 @@ CREATE TABLE identity_authority.password_attempts (
 );
 CREATE INDEX password_attempts_expiry ON identity_authority.password_attempts(tenant_id,window_until,claim_until);
 CREATE TABLE identity_authority.providers (
- tenant_id uuid NOT NULL REFERENCES identity_authority.guard,
+ tenant_id uuid NOT NULL REFERENCES identity_authority.tenants,
  provider_id uuid NOT NULL CHECK(provider_id <> '00000000-0000-0000-0000-000000000000'),
  config_version bigint NOT NULL CHECK(config_version>0),
  revocation_epoch bigint NOT NULL CHECK(revocation_epoch>0),
@@ -241,7 +255,7 @@ CREATE INDEX webauthn_ceremony_subject ON identity_authority.webauthn_ceremonies
 CREATE INDEX step_up_expiry ON identity_authority.step_up_grants(tenant_id,expires_at);
 CREATE INDEX webauthn_account_credentials ON identity_authority.webauthn_credentials(tenant_id,principal_id);
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['webauthn_rp','webauthn_accounts','webauthn_credentials','webauthn_ceremonies','step_up_grants','platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','guard','local_credentials','accounts','memberships','password_attempts','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
+ FOREACH t IN ARRAY ARRAY['webauthn_rp','webauthn_accounts','webauthn_credentials','webauthn_ceremonies','step_up_grants','platform_challenges','local_profiles','profile_observations','profile_operations','provider_credentials','tenants','tenant_state','local_credentials','accounts','memberships','password_attempts','attempts','sessions','providers','external_identities','link_intents','oidc_transactions'] LOOP
  EXECUTE format('ALTER TABLE identity_authority.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE identity_authority.%I FORCE ROW LEVEL SECURITY',t);
  EXECUTE format('CREATE POLICY tenant ON identity_authority.%I USING (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',t);
@@ -251,10 +265,111 @@ REVOKE ALL ON SCHEMA identity_authority FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA identity_authority FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA identity_authority FROM PUBLIC;
 
+-- Narrow lock-only ports for the host admission roles. Tenant comes from the fenced transaction.
+CREATE FUNCTION identity_authority.share_provider(id uuid) RETURNS boolean
+LANGUAGE sql VOLATILE STRICT SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+ SELECT EXISTS(SELECT FROM identity_authority.providers
+  WHERE tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid AND provider_id=id FOR SHARE)
+$$;
+CREATE FUNCTION identity_authority.share_subject(id uuid) RETURNS boolean
+LANGUAGE plpgsql VOLATILE STRICT SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+DECLARE tenant uuid := nullif(current_setting('rss.tenant_id',true),'')::uuid;
+BEGIN
+ PERFORM FROM identity_authority.accounts WHERE tenant_id=tenant AND principal_id=id FOR SHARE;
+ IF NOT FOUND THEN RETURN false; END IF;
+ PERFORM FROM identity_authority.memberships WHERE tenant_id=tenant AND principal_id=id FOR SHARE;
+ RETURN FOUND;
+END $$;
+REVOKE ALL ON FUNCTION identity_authority.share_provider(uuid),identity_authority.share_subject(uuid) FROM PUBLIC;
+
+-- REF: PostgreSQL REL_17_6 src/backend/access/heap/heapam.c, tupleLockExtraInfo.
+-- Credentials only locate rows. After waiting, lock the exact original credential/source
+-- and let the caller restore the facts in a fresh READ COMMITTED statement.
+CREATE FUNCTION identity_authority.lock_session(
+ digest bytea, reference_id uuid, presentation text, intent text, target uuid
+) RETURNS boolean LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog,pg_temp AS $$
+DECLARE
+ tenant uuid := nullif(current_setting('rss.tenant_id',true),'')::uuid;
+ candidate record;
+ source_id uuid;
+ write_provider uuid;
+ write_account uuid;
+ other_account uuid;
+ id uuid;
+BEGIN
+ IF num_nonnulls(digest,reference_id)<>1 OR intent NOT IN
+  ('inspect','activity','rotate','revoke','all','host','account','provider','profile_read','profile_write') THEN
+  RETURN false;
+ END IF;
+ SELECT s.session_id,s.principal_id,s.source_provider_id,s.authentication_source,s.platform_authentication
+ INTO candidate FROM identity_authority.sessions s
+ WHERE s.tenant_id=tenant AND s.credential_kind=presentation
+ AND (s.token_hash=digest OR s.session_id=reference_id);
+ IF NOT FOUND THEN RETURN false; END IF;
+
+ IF intent IN ('account','provider') OR
+    (intent='all' AND candidate.authentication_source='platform') THEN
+  PERFORM FROM identity_authority.tenants WHERE tenant_id=tenant FOR NO KEY UPDATE;
+ ELSIF intent='host' OR candidate.authentication_source='platform' THEN
+  PERFORM FROM identity_authority.tenants WHERE tenant_id=tenant FOR SHARE;
+ ELSE
+  PERFORM FROM identity_authority.tenants WHERE tenant_id=tenant FOR KEY SHARE;
+ END IF;
+ IF NOT FOUND THEN RETURN false; END IF;
+
+ source_id := coalesce(candidate.source_provider_id,
+  (candidate.platform_authentication #>> '{binding,externalIdentity,provider}')::uuid);
+ IF intent='provider' THEN write_provider:=target; END IF;
+ FOR id IN SELECT DISTINCT k FROM unnest(ARRAY[source_id,write_provider]) k WHERE k IS NOT NULL ORDER BY k LOOP
+  IF id=write_provider THEN
+   PERFORM FROM identity_authority.providers WHERE tenant_id=tenant AND provider_id=id FOR UPDATE;
+  ELSE
+   PERFORM FROM identity_authority.providers WHERE tenant_id=tenant AND provider_id=id FOR SHARE;
+  END IF;
+  IF NOT FOUND THEN RETURN false; END IF;
+ END LOOP;
+
+ IF intent IN ('account','profile_write','profile_read') THEN other_account:=target; END IF;
+ IF intent='account' THEN write_account:=target;
+ ELSIF intent='all' THEN write_account:=candidate.principal_id; END IF;
+ FOR id IN SELECT DISTINCT k FROM unnest(ARRAY[candidate.principal_id,other_account]) k WHERE k IS NOT NULL ORDER BY k LOOP
+  IF id=write_account THEN
+   PERFORM FROM identity_authority.accounts WHERE tenant_id=tenant AND principal_id=id FOR UPDATE;
+  ELSE
+   PERFORM FROM identity_authority.accounts WHERE tenant_id=tenant AND principal_id=id FOR SHARE;
+  END IF;
+  IF NOT FOUND THEN RETURN false; END IF;
+  -- All component membership mutations acquire the account first.
+  IF intent='account' AND id=target THEN
+   PERFORM FROM identity_authority.memberships WHERE tenant_id=tenant AND principal_id=id FOR UPDATE;
+  ELSE
+   PERFORM FROM identity_authority.memberships WHERE tenant_id=tenant AND principal_id=id FOR SHARE;
+  END IF;
+  IF NOT FOUND THEN RETURN false; END IF;
+ END LOOP;
+
+ IF intent='rotate' THEN
+  PERFORM FROM identity_authority.sessions WHERE tenant_id=tenant AND session_id=candidate.session_id FOR UPDATE;
+ ELSIF intent IN ('activity','revoke') THEN
+  PERFORM FROM identity_authority.sessions WHERE tenant_id=tenant AND session_id=candidate.session_id FOR NO KEY UPDATE;
+ ELSE
+  PERFORM FROM identity_authority.sessions WHERE tenant_id=tenant AND session_id=candidate.session_id FOR SHARE;
+ END IF;
+ IF NOT FOUND THEN RETURN false; END IF;
+ RETURN EXISTS(SELECT FROM identity_authority.sessions s WHERE s.tenant_id=tenant AND s.session_id=candidate.session_id
+  AND s.credential_kind=presentation AND (digest IS NULL OR s.token_hash=digest)
+  AND s.principal_id=candidate.principal_id AND s.authentication_source=candidate.authentication_source
+  AND s.source_provider_id IS NOT DISTINCT FROM candidate.source_provider_id
+  AND s.platform_authentication IS NOT DISTINCT FROM candidate.platform_authentication);
+END $$;
+REVOKE ALL ON FUNCTION identity_authority.lock_session(bytea,uuid,text,text,uuid) FROM PUBLIC;
+
 -- Cursor generation follows every personnel/session-visible mutation, including maintenance.
 CREATE FUNCTION identity_authority.advance_personnel_revision() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
- UPDATE identity_authority.guard SET personnel_revision=personnel_revision+1 WHERE tenant_id=COALESCE(NEW.tenant_id,OLD.tenant_id);
+ UPDATE identity_authority.tenant_state SET value=value+1
+ WHERE tenant_id=COALESCE(NEW.tenant_id,OLD.tenant_id) AND kind='personnel_revision';
+ IF NOT FOUND THEN RAISE EXCEPTION 'missing personnel revision'; END IF;
  IF TG_OP='DELETE' THEN RETURN OLD; END IF;
  RETURN NEW;
 END $$;
@@ -304,9 +419,9 @@ CREATE FUNCTION identity_authority.personnel_facts(
  observed_at bigint, expires_at bigint, value jsonb
 ) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
  WITH admitted AS MATERIALIZED (
-  SELECT g.personnel_revision, floor(extract(epoch FROM statement_timestamp()))::bigint AS now_at
-  FROM identity_authority.guard g
-  WHERE g.tenant_id=tenant AND tenant::text=current_setting('rss.tenant_id',true)
+  SELECT g.value AS personnel_revision, floor(extract(epoch FROM statement_timestamp()))::bigint AS now_at
+  FROM identity_authority.tenant_state g
+  WHERE g.kind='personnel_revision' AND g.tenant_id=tenant AND tenant::text=current_setting('rss.tenant_id',true)
     AND EXISTS (SELECT FROM identity_authority.deployment WHERE authority_id=instance_id)
     AND subjects IS NOT NULL AND cardinality(subjects)<=64
     AND NOT EXISTS (SELECT FROM unnest(subjects) s WHERE s IS NULL OR s='00000000-0000-0000-0000-000000000000')

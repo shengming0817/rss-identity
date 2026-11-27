@@ -65,11 +65,11 @@ impl Federation {
             self.authority
                 .read_sql(binding, budget.remaining(), move |c| {
                     Box::pin(async move {
-                        lock_guard(c, tenant).await?;
+                        lock_tenant_collection(c, tenant).await?;
                         if actor.key.tenant != tenant {
                             return Err(reject().into());
                         }
-                        session_storage::recheck(c, &actor).await?;
+                        session_storage::recheck_collection(c, &actor).await?;
                         let view = db::provider(c, tenant, provider).await?;
                         crate::federation::check_step_up(c, actor.key, &view, oidc.as_ref())
                             .await?;
@@ -113,13 +113,13 @@ impl Federation {
         self.authority
             .read_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
-                    lock_guard(c, tenant).await?;
+                    lock_tenant_collection(c, tenant).await?;
                     let replacement = match replacement {
                         Some(proof) => {
                             if proof.key.tenant != tenant {
                                 return Err(reject().into());
                             }
-                            let loaded = session_storage::recheck(c, &proof).await?;
+                            let loaded = session_storage::recheck_collection(c, &proof).await?;
                             if mode == AuthenticationMode::StepUp {
                                 let current = db::provider(c, tenant, provider).await?;
                                 db::exact(&current, view.version)?;
@@ -174,7 +174,7 @@ impl Federation {
         self.authority
             .read_sql(binding, deadline, move |c| {
                 Box::pin(async move {
-                    lock_guard(c, tenant).await?;
+                    lock_tenant_collection(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, false).await?;
                     let view = db::provider(c, tenant, attempt.provider).await?;
                     db::exact(&view, attempt.version)?;
@@ -212,7 +212,7 @@ impl Federation {
         let claim_oidc = self.oidc.clone();
         let instance = self.authority.instance.as_uuid();
         let (attempt,view,material)=self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
-                    lock_guard(c, tenant).await?;
+                    lock_tenant_collection(c, tenant).await?;
                     let (attempt, secrets) = db::attempt(c, &locator, &claim_state, &claim_browser, false).await?;
                     let view = db::provider(c, tenant, attempt.provider).await?;
                     db::exact(&view, attempt.version)?;
@@ -284,7 +284,7 @@ impl Federation {
         let limits = self.authority.profile_limits;
         let instance = self.authority.instance.as_uuid();
         self.authority.write_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
-                    lock_guard(c, tenant).await?;
+                    lock_tenant_collection(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
                     let view = db::provider(c, tenant, attempt.provider).await?;
                     db::exact(&view, attempt.version)?;

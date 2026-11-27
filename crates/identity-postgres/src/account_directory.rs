@@ -262,7 +262,7 @@ impl Authority {
         let policy = self.policy.clone();
         let instance = self.instance;
         self.read_sql(actor.binding,budget.remaining(),move |c|Box::pin(async move {
-            let loaded=crate::session_storage::recheck(c,&actor).await?;
+            let loaded=crate::session_storage::recheck_collection(c,&actor).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadAccount,Some(target),c).await?;
             let expires=crate::sessions::checked_expiry(&loaded,budget.0.instant())?;
             let state=crate::storage::account_state_locked(c,target).await?;
@@ -292,7 +292,7 @@ impl Authority {
         let max_age = self.profile_limits.max_age_seconds();
         self.read_sql(actor.binding, budget.remaining(), move |c| {
             Box::pin(async move {
-                let loaded = crate::session_storage::recheck(c, &actor).await?;
+                let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
                 let profiles = query.needs_profiles();
                 let department_source = if query.needs_departments() {
                     let source = query.source().ok_or_else(corrupt)?;

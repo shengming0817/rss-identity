@@ -1,7 +1,8 @@
 GRANT USAGE ON SCHEMA identity_authority TO {role};
 GRANT SELECT ON identity_authority.schema_version TO {role};
 GRANT SELECT ON identity_authority.deployment TO {role};
-GRANT SELECT,UPDATE ON identity_authority.guard TO {role};
+GRANT SELECT,UPDATE ON identity_authority.tenants TO {role};
+GRANT SELECT,UPDATE ON identity_authority.tenant_state TO {role};
 GRANT SELECT,INSERT,UPDATE ON identity_authority.accounts TO {role};
 GRANT SELECT,INSERT,UPDATE ON identity_authority.memberships TO {role};
 GRANT SELECT,INSERT,UPDATE ON identity_authority.local_credentials TO {role};
@@ -32,3 +33,5 @@ GRANT SELECT,INSERT ON identity_authority.webauthn_rp TO {role};
 GRANT USAGE ON SCHEMA rss_audit TO {role};
 GRANT SELECT ON rss_audit.records TO {role};
 GRANT EXECUTE ON FUNCTION rss_audit.append_batch(uuid,text[],text[],bigint[],bytea[],bigint[]) TO {role};
+GRANT EXECUTE ON FUNCTION identity_authority.share_subject(uuid), identity_authority.share_provider(uuid) TO {role};
+GRANT EXECUTE ON FUNCTION identity_authority.lock_session(bytea,uuid,text,text,uuid) TO {role};

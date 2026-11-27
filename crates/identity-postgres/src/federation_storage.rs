@@ -62,7 +62,7 @@ pub(crate) async fn read_provider(
     authority
         .read_sql(binding, d, move |c| {
             Box::pin(async move {
-                lock_guard(c, tenant).await?;
+                lock_tenant_collection(c, tenant).await?;
                 Ok(provider(c, tenant, id).await?)
             })
         })

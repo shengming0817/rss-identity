@@ -55,12 +55,16 @@ impl Authority {
         let budget = Budget::new(deadline)?;
         let authority = self.instance.as_uuid();
         let snapshot = self.read_sql(binding, budget.remaining(), move |c| Box::pin(async move {
-            lock_guard(c, tenant).await?;
-            let credential: Option<(uuid::Uuid, String)> = sqlx::query_as(
-                "SELECT principal_id,password_hash FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND login_key=$2")
+            lock_tenant_scope(c, tenant).await?;
+            let id: Option<uuid::Uuid> = sqlx::query_scalar(
+                "SELECT principal_id FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND login_key=$2")
                 .bind(tenant.to_string()).bind(login.as_str()).fetch_optional(&mut *c).await?;
-            let Some((id, encoding)) = credential else { return Ok(None) };
+            let Some(id) = id else { return Ok(None) };
             let key = AccountKey {tenant, principal: principal(&id.to_string())?};
+            lock_account(c,key,false).await?;
+            let encoding: String = sqlx::query_scalar(
+                "SELECT password_hash FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2 AND login_key=$3")
+                .bind(tenant.to_string()).bind(id).bind(login.as_str()).fetch_one(&mut *c).await?;
             let hash = rss_identity_core::account::PasswordEncoding::from_storage(encoding)
                 .map_err(|_| crate::transaction::corrupt())?;
             Ok(Some((account_state_locked(c,key).await?, hash, crate::session_storage::now(c).await?)))
@@ -115,7 +119,7 @@ impl Authority {
         let instance = self.instance;
         self.write_sql(actor.binding, budget.remaining(), move |c| {
             Box::pin(async move {
-                let loaded = crate::session_storage::recheck(c, &actor).await?;
+                let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
                 crate::management::authorize(
                     policy.as_ref(),
                     instance,
@@ -259,7 +263,7 @@ impl Authority {
     ) -> Result<(AuthenticatedSession, LoginKey), AuthorityError> {
         let key = actor.key;
         let (actor, name) = self.read_sql(actor.binding, deadline, move |c|Box::pin(async move {
-            crate::session_storage::recheck(c,&actor).await?;
+            crate::session_storage::recheck_for(c,&actor,crate::session_storage::SessionAccess::Inspect).await?;
             let name:Option<String> = sqlx::query_scalar("SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2")
                 .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_optional(c).await?;
             Ok((actor,name))
@@ -303,12 +307,13 @@ impl Authority {
             LocalChange::Membership(v) => ManagementOperation::SetMembership(v),
         };
         self.write_sql(actor.binding, budget.remaining(), move |c| Box::pin(async move {
-            let loaded = crate::session_storage::recheck(c, &actor).await?;
+            let loaded = crate::session_storage::recheck_for(c, &actor, crate::session_storage::SessionAccess::Account(target)).await?;
             if let Some(proof) = reauthentication {
                 if proof.account() != actor.key || target != actor.key { return Err(crate::transaction::reject().into()); }
                 current(c, &proof).await?;
             }
             crate::management::authorize(policy.as_ref(),instance,&loaded,operation,Some(target), c).await?;
+            if hash.is_some() { lock_attempt_capacity(c,target.tenant).await?; }
             let old = account_state_locked(c, target).await?;
             let (next, action) = old.change(change)?;
             sqlx::query("UPDATE identity_authority.accounts SET enabled=$3,auth_epoch=$4 WHERE tenant_id=$1::uuid AND principal_id=$2::uuid")

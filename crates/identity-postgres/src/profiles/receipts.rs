@@ -9,11 +9,13 @@ const RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 struct ReceiptClock(i64);
 
 impl ReceiptClock {
-    // The session recheck already owns the tenant guard. Sample after that lock.
+    // A lookup may commit a time floor too. Sample only after obtaining its final lock.
     async fn load(c: &mut PgConnection, tenant: TenantId) -> Result<Self, MutationError> {
+        sqlx::query("SELECT value FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='receipt_clock' FOR UPDATE")
+            .bind(tenant.to_string()).fetch_one(&mut *c).await?;
         Ok(Self(sqlx::query_scalar(
-            "SELECT greatest(profile_receipt_time_ms, floor(extract(epoch FROM clock_timestamp())*1000)::bigint)
-             FROM identity_authority.guard WHERE tenant_id=$1::uuid",
+            "SELECT greatest(value, floor(extract(epoch FROM clock_timestamp())*1000)::bigint)
+             FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='receipt_clock'",
         ).bind(tenant.to_string()).fetch_one(c).await?))
     }
 
@@ -31,8 +33,8 @@ impl ReceiptClock {
 
     async fn persist(&self, c: &mut PgConnection, tenant: TenantId) -> Result<(), MutationError> {
         sqlx::query(
-            "UPDATE identity_authority.guard SET profile_receipt_time_ms=$2
-                     WHERE tenant_id=$1::uuid AND profile_receipt_time_ms<$2",
+            "UPDATE identity_authority.tenant_state SET value=$2
+                     WHERE tenant_id=$1::uuid AND kind='receipt_clock' AND value<$2",
         )
         .bind(tenant.to_string())
         .bind(self.0)
@@ -93,13 +95,14 @@ impl Authority {
         let policy = self.policy.clone();
         let instance = self.instance;
         self.conditional_write_sql(actor.binding, deadline, move |c| Box::pin(async move {
-            let loaded = crate::session_storage::recheck(c, &actor).await?;
+            let loaded = crate::session_storage::recheck_for(c, &actor, crate::session_storage::SessionAccess::ProfileWrite(target)).await?;
             crate::management::authorize(policy.as_ref(), instance, &loaded,
                 ManagementOperation::UpdateLocalProfile, Some(target), c).await?;
             if !account_state_locked(c, target).await?.active() {
                 return Err(reject().into());
             }
             let clock = ReceiptClock::load(c, target.tenant).await?;
+            if Instant::now() >= loaded.expires { return Err(reject().into()); }
             let id = change.operation_id;
             if let Some(row) = sqlx::query(
                 include_str!("replay_receipt.sql"),
@@ -162,10 +165,11 @@ impl Authority {
             return Err(AuthorityError::Rejected);
         }
         self.read_sql(actor.binding, deadline, move |c| Box::pin(async move {
-            let loaded = reader.recheck(c).await?;
+            let loaded = reader.recheck_with(c,Some(target)).await?;
             crate::management::authorize(policy.as_ref(), instance, &loaded,
                 ManagementOperation::UpdateLocalProfile, Some(target), c).await?;
             let clock = ReceiptClock::load(c, target.tenant).await?;
+            if Instant::now() >= loaded.expires { return Err(reject().into()); }
             let revision: Option<i64> = sqlx::query_scalar("SELECT revision FROM identity_authority.profile_operations
                 WHERE tenant_id=$1::uuid AND principal_id=$2 AND actor=$3 AND operation_id=$4 AND accepted_at_ms>$5")
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(reader.key.principal.as_uuid())

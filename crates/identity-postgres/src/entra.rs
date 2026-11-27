@@ -123,7 +123,7 @@ impl EntraAuthority {
             .authority
             .read_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
-                    storage::lock_guard(c, tenant).await?;
+                    storage::lock_tenant_collection(c, tenant).await?;
                     let view = db::provider(c, tenant, provider).await?;
                     check_provider(&view, &profile)?;
                     Ok(view)
@@ -185,7 +185,7 @@ impl EntraAuthority {
         let tenant = self.tenant;
         let result = self.authority.conditional_write_sql(binding, budget.remaining(), move |c| Box::pin(async move {
             subject.check_live().map_err(|_| reject())?;
-            storage::lock_guard(c, tenant).await?;
+            storage::lock_tenant_collection(c, tenant).await?;
             let view = db::provider(c, tenant, subject.provider).await?;
             check_current(&subject, &view)?;
             let key = subject.claims.subject().storage_key();
@@ -224,7 +224,7 @@ impl EntraAuthority {
         let tenant = self.tenant;
         let result = self.authority.read_sql(binding, deadline, move |c| Box::pin(async move {
             proof.check_live().map_err(|_| reject())?;
-            storage::lock_guard(c, tenant).await?;
+            storage::lock_tenant_collection(c, tenant).await?;
             let view = db::provider(c, tenant, proof.subject.provider).await?;
             check_current(&proof.subject, &view)?;
             let linked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM identity_authority.external_identities WHERE tenant_id=$1::uuid AND identity_id=$2 AND principal_id=$3 AND provider_id=$4::uuid AND issuer=$5 AND subject=$6)")

@@ -49,7 +49,7 @@ pub async fn admit_profile_source_on(
         return Err(Error::Rejected);
     }
     let guard: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+        "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR SHARE",
     )
     .bind(tenant.to_string())
     .fetch_optional(&mut *c)
@@ -66,6 +66,14 @@ pub async fn admit_profile_source_on(
             },
         ),
         ProfileSource::Idp { provider } => {
+            let locked: bool =
+                sqlx::query_scalar("SELECT identity_authority.share_provider($1::uuid)")
+                    .bind(provider.to_string())
+                    .fetch_one(&mut *c)
+                    .await?;
+            if !locked {
+                return Err(Error::Rejected);
+            }
             let row=sqlx::query("SELECT config_version,settings FROM identity_authority.providers WHERE tenant_id=$1::uuid AND provider_id=$2::uuid AND enabled")
                 .bind(tenant.to_string()).bind(provider.to_string()).fetch_optional(c).await?.ok_or(Error::Rejected)?;
             let settings: rss_identity_core::federation::ProviderSettings =

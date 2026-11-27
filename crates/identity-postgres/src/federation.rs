@@ -178,7 +178,7 @@ impl Federation {
         let binding = actor.binding;
         let tenant = binding.tenant();
         self.authority.write_sql(binding,deadline,move|c|Box::pin(async move {
-            let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
+            let loaded=crate::session_storage::recheck_collection(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
             if count>=i64::from(capacity.get()){return Err(FederationError::ProviderLimitReached.into());}
             let view=ProviderView{id:ProviderId::generate(),version:1,enabled:false,revocation_epoch:1,settings,assurance_profile:profile,credential_version:1};
@@ -223,7 +223,7 @@ impl Federation {
         let tenant = binding.tenant();
         let oidc = self.oidc.clone();
         self.authority.write_sql(binding,deadline,move|c|Box::pin(async move {
-            let loaded=crate::session_storage::recheck(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
+            let loaded=crate::session_storage::recheck_for(c,&actor,crate::session_storage::SessionAccess::Provider(id)).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let mut view=db::provider(c,tenant,id).await?;
             if view.version!=expected{return Err(FederationError::StaleConfiguration.into());}
             let previous = view.revision(instance,tenant);
@@ -258,8 +258,8 @@ impl Federation {
         let mut budget = Budget::new(deadline)?;
         budget.0 = budget.0.shortened_to(actor.expires);
         self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
-                    lock_guard(c, tenant).await?;
-                    let loaded = crate::session_storage::recheck(c, &actor).await?;
+                    lock_tenant_collection(c, tenant).await?;
+                    let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
                     crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListProviders,None, c).await?;
                     let ids: Vec<Uuid> = sqlx::query_scalar(concat!(
                         "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid OR",
@@ -303,8 +303,8 @@ impl Federation {
             .authority
             .read_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
-                    lock_guard(c, tenant).await?;
-                    let loaded = crate::session_storage::recheck(c, &actor).await?;
+                    lock_tenant_collection(c, tenant).await?;
+                    let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
                     crate::management::authorize(
                         read_policy.as_ref(),
                         instance,
@@ -340,8 +340,8 @@ impl Federation {
         self.authority
             .write_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
-                    lock_guard(c, tenant).await?;
-                    let loaded = crate::session_storage::recheck(c, &actor).await?;
+                    lock_tenant_collection(c, tenant).await?;
+                    let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
                     crate::management::authorize(
                         policy.as_ref(),
                         instance,
@@ -474,7 +474,7 @@ impl Federation {
     ) -> Result<SessionSecurity, AuthorityError> {
         let oidc = self.oidc.clone();
         self.authority.read_sql(actor.binding, deadline, move |c| Box::pin(async move {
-            let loaded = crate::session_storage::recheck(c, &actor).await?;
+            let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
             // A persisted authentication fact must still match this process's approved interpretation.
             if let Some(origin) = loaded.origin.as_deref() {
                 let (provider, _, _) = db::identity(c, actor.key.tenant, origin.identity).await?;
@@ -543,7 +543,7 @@ impl Federation {
             if ids.len() > usize::from(MAX_PROVIDERS) { return Err(reject().into()); }
             // Before the tenant is initialized there is no guard or provider to synchronize.
             if ids.is_empty() { return Ok((false,Vec::new())); }
-            lock_guard(c, tenant).await?;
+            lock_tenant_collection(c, tenant).await?;
             let mut events=Vec::new();
 
             for id in ids {

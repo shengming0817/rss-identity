@@ -167,7 +167,7 @@ pub(crate) async fn sequence(
     c: &mut PgConnection,
     tenant: TenantId,
 ) -> Result<i64, transaction::MutationError> {
-    Ok(sqlx::query_scalar("UPDATE identity_authority.guard SET profile_sequence=profile_sequence+1 WHERE tenant_id=$1::uuid RETURNING profile_sequence")
+    Ok(sqlx::query_scalar("UPDATE identity_authority.tenant_state SET value=value+1 WHERE tenant_id=$1::uuid AND kind='profile_sequence' RETURNING value")
         .bind(tenant.to_string()).fetch_one(c).await?)
 }
 pub(crate) async fn local_observation(
@@ -175,6 +175,7 @@ pub(crate) async fn local_observation(
     key: AccountKey,
     now: i64,
 ) -> Result<Observation, transaction::MutationError> {
+    let observation_sequence = sequence(c, key.tenant).await?;
     let row=sqlx::query("SELECT revision,value FROM identity_authority.local_profiles WHERE tenant_id=$1::uuid AND principal_id=$2")
         .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_optional(&mut *c).await?;
     let (profile, max_age, revision) = match row {
@@ -202,7 +203,7 @@ pub(crate) async fn local_observation(
         source_time: now,
         source_expiry: i64::MAX,
         max_age,
-        sequence: sequence(c, key.tenant).await?,
+        sequence: observation_sequence,
         config_version: None,
         source_epoch: None,
         revision,
@@ -322,11 +323,29 @@ impl Reader {
         &self,
         c: &mut PgConnection,
     ) -> Result<crate::session_storage::Loaded, transaction::MutationError> {
+        self.recheck_with(c, None).await
+    }
+    async fn recheck_with(
+        &self,
+        c: &mut PgConnection,
+        target: Option<AccountKey>,
+    ) -> Result<crate::session_storage::Loaded, transaction::MutationError> {
         if Instant::now() >= self.expires || authority_id(c).await? != self.instance {
             return Err(reject().into());
         }
         crate::transaction::check_binding(c, self.binding).await?;
-        lock_guard(c, self.key.tenant).await?;
+        if let Some(target) = target {
+            crate::session_storage::lock_session(
+                c,
+                Some(&self.digest),
+                None,
+                self.kind,
+                crate::session_storage::SessionAccess::ProfileRead(target),
+            )
+            .await?;
+        } else {
+            lock_tenant_collection(c, self.key.tenant).await?;
+        }
         let mut loaded = crate::session_storage::lookup_locked(
             c,
             self.key.tenant,

@@ -1,4 +1,4 @@
-//! All session paths share guard → account/membership → session and a post-lock clock.
+//! Session reads restore current facts after all required authority locks have been acquired.
 use crate::{
     AccountKey, AccountState,
     groups::GroupFacts,
@@ -120,7 +120,7 @@ impl Loaded {
         })
     }
 }
-// Each entry point acquires the tenant guard before this statement starts its READ COMMITTED snapshot.
+// Restore in a new statement after the scoped or collection lock has been acquired.
 macro_rules! session_row {
     ($predicate:literal) => {
         sqlx::query(concat!(
@@ -130,6 +130,55 @@ macro_rules! session_row {
              provider_epoch,auth_facts,facts_sequence FROM identity_authority.sessions
              WHERE tenant_id=$1::uuid AND ", $predicate))
     };
+}
+
+pub(crate) enum SessionAccess {
+    Inspect,
+    Activity,
+    Rotate,
+    Revoke,
+    RevokeAll,
+    Host,
+    Account(AccountKey),
+    Provider(rss_identity_core::federation::ProviderId),
+    ProfileRead(AccountKey),
+    ProfileWrite(AccountKey),
+}
+
+pub(crate) async fn lock_session(
+    c: &mut PgConnection,
+    digest: Option<&[u8; 32]>,
+    reference: Option<SessionId>,
+    kind: CredentialKind,
+    access: SessionAccess,
+) -> Result<(), PgError> {
+    let (intent, target) = match access {
+        SessionAccess::Inspect => ("inspect", None),
+        SessionAccess::Activity => ("activity", None),
+        SessionAccess::Rotate => ("rotate", None),
+        SessionAccess::Revoke => ("revoke", None),
+        SessionAccess::RevokeAll => ("all", None),
+        SessionAccess::Host => ("host", None),
+        SessionAccess::Account(key) => ("account", Some(key.principal.as_uuid())),
+        SessionAccess::Provider(id) => (
+            "provider",
+            Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|_| corrupt())?),
+        ),
+        SessionAccess::ProfileRead(key) => ("profile_read", Some(key.principal.as_uuid())),
+        SessionAccess::ProfileWrite(key) => ("profile_write", Some(key.principal.as_uuid())),
+    };
+    let found: bool = sqlx::query_scalar("SELECT identity_authority.lock_session($1,$2,$3,$4,$5)")
+        .bind(digest.map(|d| d.as_slice()))
+        .bind(reference.map(|id| id.as_uuid()))
+        .bind(kind.as_str())
+        .bind(intent)
+        .bind(target)
+        .fetch_one(c)
+        .await?;
+    if !found {
+        return Err(reject());
+    }
+    Ok(())
 }
 
 pub(crate) async fn lookup_locked(
@@ -290,18 +339,39 @@ pub(crate) async fn recheck_on(
     {
         return Err(reject());
     }
-    recheck(c, actor).await
+    recheck_for(c, actor, SessionAccess::Host).await
 }
 
-pub(crate) async fn recheck(
+pub(crate) async fn recheck_collection(
     c: &mut PgConnection,
     proof: &AuthenticatedSession,
 ) -> Result<Loaded, PgError> {
+    validate_proof(c, proof).await?;
+    lock_tenant_collection(c, proof.key.tenant).await?;
+    recheck_locked(c, proof).await
+}
+
+async fn validate_proof(c: &mut PgConnection, proof: &AuthenticatedSession) -> Result<(), PgError> {
     if std::time::Instant::now() >= proof.expires || authority_id(c).await? != proof.authority {
         return Err(reject());
     }
     crate::transaction::check_binding(c, proof.binding).await?;
-    lock_guard(c, proof.key.tenant).await?;
+    Ok(())
+}
+pub(crate) async fn recheck_for(
+    c: &mut PgConnection,
+    proof: &AuthenticatedSession,
+    access: SessionAccess,
+) -> Result<Loaded, PgError> {
+    validate_proof(c, proof).await?;
+    lock_session(
+        c,
+        Some(&proof.digest),
+        None,
+        proof.view.credential_kind,
+        access,
+    )
+    .await?;
     recheck_locked(c, proof).await
 }
 

@@ -55,12 +55,28 @@ pub async fn admit_platform_subject_on(
         return Err(Rejected);
     }
     let guard: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+        "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR SHARE",
     )
     .bind(binding.account.tenant.to_string())
     .fetch_optional(&mut *c)
     .await?;
     if guard.is_none() {
+        return Err(Rejected);
+    }
+    if let Some(source) = &binding.external_identity {
+        let locked: bool = sqlx::query_scalar("SELECT identity_authority.share_provider($1::uuid)")
+            .bind(source.provider.to_string())
+            .fetch_one(&mut *c)
+            .await?;
+        if !locked {
+            return Err(Rejected);
+        }
+    }
+    let locked: bool = sqlx::query_scalar("SELECT identity_authority.share_subject($1)")
+        .bind(binding.account.principal.as_uuid())
+        .fetch_one(&mut *c)
+        .await?;
+    if !locked {
         return Err(Rejected);
     }
     let epochs: Option<(i64, i64)> = sqlx::query_as(

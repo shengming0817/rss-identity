@@ -9,9 +9,12 @@ use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 /// Lock a provisioned tenant without attempting INSERT, even on a missing credential.
-pub(crate) async fn lock_guard(c: &mut PgConnection, tenant: TenantId) -> Result<(), PgError> {
+pub(crate) async fn lock_tenant_collection(
+    c: &mut PgConnection,
+    tenant: TenantId,
+) -> Result<(), PgError> {
     sqlx::query(
-        "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+        "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR UPDATE",
     )
     .bind(tenant.to_string())
     .fetch_optional(c)
@@ -19,7 +22,50 @@ pub(crate) async fn lock_guard(c: &mut PgConnection, tenant: TenantId) -> Result
     .ok_or_else(reject)?;
     Ok(())
 }
-/// Read current account/membership state while the caller holds the tenant guard.
+/// One known subject or session. Collection readers exclude this entire transaction.
+pub(crate) async fn lock_tenant_scope(
+    c: &mut PgConnection,
+    tenant: TenantId,
+) -> Result<(), PgError> {
+    sqlx::query(
+        "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR KEY SHARE",
+    )
+    .bind(tenant.to_string())
+    .fetch_optional(c)
+    .await?
+    .ok_or_else(reject)?;
+    Ok(())
+}
+
+pub(crate) async fn lock_attempt_capacity(
+    c: &mut PgConnection,
+    tenant: TenantId,
+) -> Result<(), PgError> {
+    sqlx::query("SELECT value FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='attempt_capacity' FOR UPDATE")
+        .bind(tenant.to_string()).fetch_optional(c).await?.ok_or_else(reject)?;
+    Ok(())
+}
+
+pub(crate) async fn lock_account(
+    c: &mut PgConnection,
+    key: AccountKey,
+    write: bool,
+) -> Result<(), PgError> {
+    let sql = if write {
+        "SELECT principal_id FROM identity_authority.accounts WHERE tenant_id=$1::uuid AND principal_id=$2 FOR UPDATE"
+    } else {
+        "SELECT principal_id FROM identity_authority.accounts WHERE tenant_id=$1::uuid AND principal_id=$2 FOR SHARE"
+    };
+    sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(key.tenant.to_string())
+        .bind(key.principal.as_uuid())
+        .fetch_optional(&mut *c)
+        .await?
+        .ok_or_else(reject)?;
+    Ok(())
+}
+
+/// All Identity membership and credential writers acquire the parent account before mutation.
 pub(crate) async fn account_state_locked(
     c: &mut PgConnection,
     key: AccountKey,
@@ -60,7 +106,8 @@ pub(crate) async fn current(
     {
         return Err(reject());
     }
-    lock_guard(c, candidate.state.key().tenant).await?;
+    lock_tenant_scope(c, candidate.state.key().tenant).await?;
+    lock_account(c, candidate.state.key(), false).await?;
     let now = account_state_locked(c, candidate.state.key()).await?;
     if !now.matches_verification(candidate.state) {
         return Err(reject());
