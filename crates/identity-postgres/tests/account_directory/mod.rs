@@ -637,9 +637,10 @@ async fn department_directory_uses_latest_accepted_fact_without_resurrecting_old
         .list_accounts(f.actor().await?, all()?, None, deadline())
         .await?;
     assert_eq!(tied.accounts[0].department_status, expected);
-    // Higher epoch wins before session ID, even when that fact is no longer current.
+    // Raise the UUID runner-up above the original winner by epoch alone.
+    let runner_up = old.view().id.as_uuid().max(newer.view().id.as_uuid());
     sqlx::query("UPDATE identity_authority.sessions SET membership_epoch=membership_epoch+1 WHERE session_id=$1")
-        .bind(old.view().id.as_uuid()).execute(&f.owner).await?;
+        .bind(runner_up).execute(&f.owner).await?;
     let stale = f
         .store
         .list_accounts(f.actor().await?, all()?, None, deadline())
@@ -688,12 +689,23 @@ async fn department_directory_uses_latest_accepted_fact_without_resurrecting_old
         .list_accounts(f.actor().await?, all()?, None, deadline())
         .await?;
     assert_eq!(future.accounts[0].department_status, "not_yet_valid");
-    let query = AccountQuery::parse(None, None, Some("departmentStatus"), Some(&provider_id), 1)?;
+    let query = AccountQuery::parse(
+        None,
+        Some("departmentStatus"),
+        Some("departmentStatus"),
+        Some(&provider_id),
+        1,
+    )?;
     let page = f
         .store
         .list_accounts(f.actor().await?, query, None, deadline())
         .await?;
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    assert_eq!(
+        page.accounts[0].principal_id,
+        f.key.principal.as_uuid().to_string()
+    );
+    assert_eq!(page.accounts[0].department_status, "missing");
     let bytes = URL_SAFE_NO_PAD.decode(page.next_cursor.unwrap())?;
     let payload: serde_json::Value = serde_json::from_slice(&bytes[32..])?;
     assert_eq!(payload["expires"], now + 30);

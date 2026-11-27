@@ -42,7 +42,7 @@ struct Cursor {
 
 fn column(field: Field) -> &'static str {
     match field {
-        Field::PrincipalId => "\"principalId\" COLLATE \"C\"",
+        Field::PrincipalId => "\"principalId\"",
         Field::Login => "login COLLATE \"C\"",
         Field::Enabled => "enabled",
         Field::MemberActive => "\"memberActive\"",
@@ -54,9 +54,20 @@ fn column(field: Field) -> &'static str {
         _ => unreachable!("checked scalar field"),
     }
 }
+// Cursor positions and text search use the public canonical rendering of a UUID.
+fn ordered_column(field: Field) -> &'static str {
+    if field == Field::PrincipalId {
+        "\"principalId\"::text COLLATE \"C\""
+    } else {
+        column(field)
+    }
+}
+
 fn operand(sql: &mut QueryBuilder<Postgres>, field: Field, value: &str) {
     if field.boolean() {
         sql.push_bind(value == "true");
+    } else if field == Field::PrincipalId {
+        sql.push_bind(uuid::Uuid::parse_str(value).expect("validated principal operand"));
     } else {
         sql.push_bind(value.to_owned());
     }
@@ -105,7 +116,7 @@ fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression, shared_ance
                 });
             } else if operator == "=icontains=" {
                 sql.push("strpos(lower(")
-                    .push(column(*field))
+                    .push(ordered_column(*field))
                     .push("),lower(")
                     .push_bind(values[0].clone())
                     .push("))>0");
@@ -151,7 +162,7 @@ fn after(sql: &mut QueryBuilder<Postgres>, query: &AccountQuery, values: &[Value
         }
         sql.push("(");
         for (prefix, value) in values.iter().enumerate().take(index) {
-            sql.push(column(query.sort()[prefix].field))
+            sql.push(ordered_column(query.sort()[prefix].field))
                 .push(" IS NOT DISTINCT FROM ");
             position(sql, query.sort()[prefix].field, value);
             sql.push(" AND ");
@@ -160,10 +171,12 @@ fn after(sql: &mut QueryBuilder<Postgres>, query: &AccountQuery, values: &[Value
             sql.push("false");
         } else {
             sql.push("(")
-                .push(column(sort.field))
+                .push(ordered_column(sort.field))
                 .push(if sort.descending { " < " } else { " > " });
             position(sql, sort.field, &values[index]);
-            sql.push(" OR ").push(column(sort.field)).push(" IS NULL)");
+            sql.push(" OR ")
+                .push(ordered_column(sort.field))
+                .push(" IS NULL)");
         }
         sql.push(")");
     }
@@ -320,16 +333,19 @@ impl Authority {
 
                 // The five prefix parameters are bound explicitly; only owner-controlled columns enter SQL.
                 let mut sql = QueryBuilder::<Postgres>::with_arguments(
-                    include_str!("account-directory.sql"),
+                    concat!(
+                        include_str!("department-facts.sql"),
+                        include_str!("account-directory.sql")
+                    ),
                     {
                         use sqlx::Arguments;
                         let mut args = sqlx::postgres::PgArguments::default();
                         args.add(actor.key.tenant.to_string())
                             .map_err(|_| corrupt())?;
+                        args.add(department_source).map_err(|_| corrupt())?;
+                        args.add(window.now).map_err(|_| corrupt())?;
                         args.add(query.source().filter(|_| profiles).map(str::to_owned))
                             .map_err(|_| corrupt())?;
-                        args.add(window.now).map_err(|_| corrupt())?;
-                        args.add(department_source).map_err(|_| corrupt())?;
                         args.add(i64::from(max_age)).map_err(|_| corrupt())?;
                         args
                     },
@@ -361,11 +377,12 @@ impl Authority {
                     if index > 0 {
                         sql.push(",");
                     }
-                    sql.push(column(sort.field)).push(if sort.descending {
-                        " DESC NULLS LAST"
-                    } else {
-                        " ASC NULLS LAST"
-                    });
+                    sql.push(ordered_column(sort.field))
+                        .push(if sort.descending {
+                            " DESC NULLS LAST"
+                        } else {
+                            " ASC NULLS LAST"
+                        });
                 }
                 sql.push(" LIMIT ").push_bind(i64::from(query.limit()) + 1);
                 let values: Vec<Value> = sql.build_query_scalar().fetch_all(&mut *c).await?;
