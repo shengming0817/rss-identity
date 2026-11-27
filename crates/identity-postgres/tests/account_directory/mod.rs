@@ -552,6 +552,20 @@ async fn department_directory_uses_latest_accepted_fact_without_resurrecting_old
         ("department==dept-01;departmentSubtree==root", 1),
         ("departmentSubtree==dept-01;departmentSubtree==root", 1),
         ("departmentSubtree==absent,departmentSubtree==dept-01", 1),
+        (
+            "(departmentSubtree==absent,departmentSubtree==root),departmentSubtree==dept-01",
+            1,
+        ),
+        ("departmentSubtree==root;departmentSubtree==absent", 0),
+        ("departmentSubtree==root;departmentSubtree==root", 1),
+        (
+            "login==admin,(departmentSubtree==root;departmentSubtree==absent)",
+            1,
+        ),
+        (
+            "login==admin,departmentSubtree==absent,departmentSubtree==root",
+            2,
+        ),
         ("department==Dept-01", 0),
     ] {
         let query = AccountQuery::parse(

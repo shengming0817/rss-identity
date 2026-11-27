@@ -74,19 +74,66 @@ fn operand(sql: &mut QueryBuilder<Postgres>, field: Field, value: &str) {
 }
 const ANCESTORS: &str = include_str!("department-ancestors.sql");
 
-fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression, shared_ancestors: bool) {
+// Fold only siblings with the same logical operator. A mixed branch must keep its
+// own subtree evaluation so that another branch can satisfy the filter first.
+fn collect_terms<'a>(
+    items: &'a [Expression],
+    any: bool,
+    other: &mut Vec<&'a Expression>,
+    departments: &mut Vec<String>,
+) {
+    for item in items {
+        match item {
+            Expression::Or(nested) if any => collect_terms(nested, any, other, departments),
+            Expression::And(nested) if !any => collect_terms(nested, any, other, departments),
+            Expression::Compare {
+                field: Field::DepartmentSubtree,
+                values,
+                ..
+            } => {
+                departments.push(values[0].clone());
+            }
+            _ => other.push(item),
+        }
+    }
+}
+
+fn subtree(sql: &mut QueryBuilder<Postgres>, targets: Vec<String>, any: bool) {
+    sql.push("\"departmentStatus\"='available' AND ");
+    if any || targets.len() == 1 {
+        sql.push("EXISTS (")
+            .push(ANCESTORS)
+            .push("SELECT FROM ancestors WHERE id=ANY(")
+            .push_bind(targets)
+            .push("))");
+    } else {
+        sql.push_bind(targets)
+            .push(" <@ ARRAY(")
+            .push(ANCESTORS)
+            .push("SELECT id FROM ancestors)");
+    }
+}
+
+fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) {
     sql.push("(");
     match expression {
         Expression::And(items) | Expression::Or(items) => {
-            for (index, item) in items.iter().enumerate() {
+            let any = matches!(expression, Expression::Or(_));
+            let separator = if any { " OR " } else { " AND " };
+            let mut other = Vec::new();
+            let mut departments = Vec::new();
+            collect_terms(items, any, &mut other, &mut departments);
+            for (index, item) in other.iter().enumerate() {
                 if index > 0 {
-                    sql.push(if matches!(expression, Expression::And(_)) {
-                        " AND "
-                    } else {
-                        " OR "
-                    });
+                    sql.push(separator);
                 }
-                filter(sql, item, shared_ancestors);
+                filter(sql, item);
+            }
+            if !departments.is_empty() {
+                if !other.is_empty() {
+                    sql.push(separator);
+                }
+                subtree(sql, departments, any);
             }
         }
         Expression::Compare {
@@ -98,16 +145,7 @@ fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression, shared_ance
                 sql.push("\"departmentStatus\"='available' AND (\"departmentSnapshot\"->'memberships') ? ")
                     .push_bind(values[0].clone());
             } else if *field == Field::DepartmentSubtree {
-                sql.push("\"departmentStatus\"='available' AND ");
-                if shared_ancestors {
-                    sql.push_bind(values[0].clone()).push(" = ANY(tree.ids)");
-                } else {
-                    sql.push("EXISTS (")
-                        .push(ANCESTORS)
-                        .push("SELECT FROM ancestors WHERE id=")
-                        .push_bind(values[0].clone())
-                        .push(")");
-                }
+                subtree(sql, values.clone(), true);
             } else if matches!(operator.as_str(), "=isnull=" | "=isnotnull=") {
                 sql.push(column(*field)).push(if operator == "=isnull=" {
                     " IS NULL"
@@ -350,24 +388,11 @@ impl Authority {
                         args
                     },
                 );
-                sql.push("SELECT to_jsonb(r) FROM account_rows r");
+                sql.push("SELECT to_jsonb(r) FROM account_rows r WHERE ");
                 if let Some(expression) = query.filter() {
-                    let mut fields = Vec::new();
-                    expression.fields(&mut fields);
-                    let shared = fields
-                        .iter()
-                        .filter(|&&field| field == Field::DepartmentSubtree)
-                        .count()
-                        > 1;
-                    if shared {
-                        sql.push(" CROSS JOIN LATERAL (")
-                            .push(ANCESTORS)
-                            .push("SELECT array_agg(id) AS ids FROM ancestors) tree");
-                    }
-                    sql.push(" WHERE ");
-                    filter(&mut sql, expression, shared);
+                    filter(&mut sql, expression);
                 } else {
-                    sql.push(" WHERE true");
+                    sql.push("true");
                 }
                 if let Some(seek) = &seek {
                     after(&mut sql, &query, &seek.position);
