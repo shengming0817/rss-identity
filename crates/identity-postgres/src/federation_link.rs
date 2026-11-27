@@ -413,7 +413,7 @@ impl LinkStage {
             _ => Err(corrupt()),
         }
     }
-    fn code(self) -> i16 {
+    pub(crate) fn code(self) -> i16 {
         match self {
             Self::ReauthenticationRequired => 0,
             Self::TargetReady => 1,

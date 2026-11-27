@@ -276,7 +276,7 @@ pub(crate) async fn insert(
             SELECT source_identity, source_epoch, source_facts_sequence, source_facts, $21
             FROM identity_authority.link_intents
             WHERE tenant_id=$1::uuid AND principal_id=$2 AND session_id=$22 AND intent_id=$20
-              AND source_identity IS NOT NULL AND stage=2
+              AND source_identity IS NOT NULL AND stage=$23
         )",
         include_str!("admit-auth-facts.sql"),
         "INSERT INTO identity_authority.sessions (
@@ -312,6 +312,7 @@ pub(crate) async fn insert(
     .bind(intent)
     .bind(i64::from(max_auth_facts_bytes.get()))
     .bind(replaced.map(SessionId::as_uuid))
+    .bind(crate::federation_link::LinkStage::Completed.code())
     .execute(c)
     .await?;
     if result.rows_affected() != 1 {
