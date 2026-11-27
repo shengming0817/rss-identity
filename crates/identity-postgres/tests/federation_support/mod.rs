@@ -17,6 +17,7 @@ pub const BROWSER: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 pub const RETURN: &str = "https://identity.example.test/done";
 type Hook = Box<dyn FnOnce() -> UpstreamFuture<'static, ()> + Send>;
 pub struct ScriptedOidc {
+    revisions: ProviderRevisions,
     pub fail: AtomicBool,
     pub trusted_assurance: AtomicBool,
     pub step_up_disabled: AtomicBool,
@@ -34,6 +35,7 @@ pub struct ScriptedOidc {
 impl ScriptedOidc {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            revisions: ProviderRevisions::new(1024),
             fail: AtomicBool::new(false),
             trusted_assurance: AtomicBool::new(true),
             step_up_disabled: AtomicBool::new(false),
@@ -70,11 +72,12 @@ impl UpstreamOidc for ScriptedOidc {
     ) -> Result<(), FederationError> {
         Ok(())
     }
+    fn revisions(&self) -> &ProviderRevisions {
+        &self.revisions
+    }
     fn prepare<'a>(
         &'a self,
-        _tenant: TenantId,
-        _: &'a ProviderSettings,
-        _: &'a ProviderCredentials,
+        _: BoundProvider,
         m: &'a ProtocolMaterial,
         _: rss_identity_core::assurance::AuthenticationMode,
         _deadline: rss_request_context::Deadline,
@@ -88,14 +91,13 @@ impl UpstreamOidc for ScriptedOidc {
     }
     fn exchange<'a>(
         &'a self,
-        _tenant: TenantId,
-        c: &'a ProviderSettings,
-        _: &'a ProviderCredentials,
+        provider: BoundProvider,
         _: ProtocolMaterial,
         code: Zeroizing<String>,
         _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
+            let c = provider.settings();
             self.calls.fetch_add(1, Ordering::SeqCst);
             let gate = self.gate.lock().unwrap().clone();
             if let Some(gate) = gate {
@@ -161,9 +163,7 @@ impl UpstreamOidc for ScriptedOidc {
     }
     fn test<'a>(
         &'a self,
-        _tenant: TenantId,
-        _: &'a ProviderSettings,
-        _: &'a ProviderCredentials,
+        _: BoundProvider,
         _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {

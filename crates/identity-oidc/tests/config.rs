@@ -1,4 +1,7 @@
+#[path = "support/policy.rs"]
+mod policy;
 use rss_identity_core::federation::*;
+use rss_identity_oidc::ReusePolicy;
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
 use rss_request_context::TenantId;
 fn tenant() -> TenantId {
@@ -24,7 +27,8 @@ fn credentials() -> ProviderCredentials {
 }
 #[test]
 fn self_service_rejects_special_network_destinations() {
-    let adapter = HttpOidc::new(vec![], vec![], transport_policy()).unwrap();
+    let adapter =
+        HttpOidc::new(vec![], vec![], transport_policy(), policy::reuse_policy()).unwrap();
     for issuer in ["https://idp.example.test", "https://8.8.8.8"] {
         let mut c = input();
         c.issuer = issuer.into();
@@ -72,7 +76,7 @@ fn self_service_rejects_special_network_destinations() {
 #[test]
 fn trusted_assurance_is_independent_and_exactly_scoped() {
     let c: ProviderSettings = input().try_into().unwrap();
-    let weak = HttpOidc::new(vec![], vec![], transport_policy()).unwrap();
+    let weak = HttpOidc::new(vec![], vec![], transport_policy(), policy::reuse_policy()).unwrap();
     let trusted = HttpOidc::new(
         vec![TrustedAssuranceProfile {
             tenant: tenant(),
@@ -82,6 +86,7 @@ fn trusted_assurance_is_independent_and_exactly_scoped() {
         }],
         vec![],
         transport_policy(),
+        policy::reuse_policy(),
     )
     .unwrap();
     let approved = trusted.assurance_profile(tenant(), &c);

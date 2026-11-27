@@ -65,7 +65,7 @@ fn candidate_binaries_preflight_closed_nested_contracts_offline() {
     runtime["database"]["passwordFile"] = json!(root.join("password"));
     runtime["database"]["caFile"] = json!(cert);
     runtime["database"]["port"] = json!(1);
-    runtime["oidc"] = json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[{"tenantId":runtime["bootstrapAccounts"][0]["tenantId"],"issuer":"https://idp.example.test","clientId":"fixture","keycloakTotp":false}],"stateKeyFile":root.join("state"),"credentialKeyring":{"activeKeyId":"active","keys":[{"keyId":"active","path":root.join("key")}]},"returnTargets":{"resume":"https://identity.example.test/auth/resume"}});
+    runtime["oidc"] = json!({"requestSeconds":5,"connectSeconds":3,"maxResponseBytes":1048576,"maxJwksKeys":128,"reuse":{"maxProviders":128,"maxResidentBytes":8388608,"maxRefreshes":8,"maxIdlePerHost":2,"idleSeconds":30,"discoverySeconds":300,"jwksSeconds":60,"refreshCooldownSeconds":10},"groupFactsMaxAgeSeconds":300,"privateProviders":[],"assuranceProfiles":[{"tenantId":runtime["bootstrapAccounts"][0]["tenantId"],"issuer":"https://idp.example.test","clientId":"fixture","keycloakTotp":false}],"stateKeyFile":root.join("state"),"credentialKeyring":{"activeKeyId":"active","keys":[{"keyId":"active","path":root.join("key")}]},"returnTargets":{"resume":"https://identity.example.test/auth/resume"}});
     let path = root.join("config.json");
     let server = env!("CARGO_BIN_EXE_identity-server");
     check(server, &path, &runtime, true);

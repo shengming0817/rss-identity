@@ -268,22 +268,30 @@ impl crate::Federation {
             })).await?;
         Ok(())
     }
-    pub(crate) async fn provider_credentials(
+    pub(crate) async fn installed_provider(
         &self,
         binding: ExecutionBinding,
-        provider: ProviderId,
-        version: i64,
+        view: &rss_identity_core::federation::ProviderView,
         deadline: OperationDeadline,
-    ) -> Result<ProviderCredentials, AuthorityError> {
+    ) -> Result<rss_identity_core::federation::BoundProvider, AuthorityError> {
         let tenant = binding.tenant();
+        let revision = view.revision(self.authority.instance(), tenant);
+        let credential_version = view.credential_version;
+        let settings = view.settings.clone();
         let keys = self.credential_keys.clone();
-        self.authority.read_sql(binding,deadline,move|c|Box::pin(async move {
-            let authority=authority_id(c).await?;
-            let row:Option<(i64,serde_json::Value)>=sqlx::query_as("SELECT credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(tenant.to_string()).bind(provider.to_string()).fetch_optional(c).await?;
-            let (current,sealed)=row.ok_or(FederationError::Rejected)?;
-            if current!=version{return Err(FederationError::StaleConfiguration.into());}
-            let sealed:Sealed=serde_json::from_value(sealed).map_err(|_|corrupt())?;
-            keys.open(authority,tenant,provider,version,&sealed).map_err(|_|MutationError::Storage(corrupt()))
+        let oidc = self.oidc.clone();
+        self.authority.read_sql(binding,deadline,move |c| Box::pin(async move {
+            let authority = authority_id(c).await?;
+            // Serialize snapshot admission with configuration changes, before releasing this
+            // transaction. No database lock or secret is retained by the HTTP cache.
+            let row: Option<(i64, i64, serde_json::Value)> = sqlx::query_as(
+                "SELECT p.config_version,k.credential_version,k.sealed FROM identity_authority.providers p JOIN identity_authority.provider_credentials k USING(tenant_id,provider_id) WHERE p.tenant_id=$1::uuid AND p.provider_id=$2::uuid AND p.credential_version=k.credential_version FOR SHARE OF p"
+            ).bind(tenant.to_string()).bind(revision.provider.to_string()).fetch_optional(&mut *c).await?;
+            let (version, current, sealed) = row.ok_or(FederationError::Rejected)?;
+            if version != revision.version || current != credential_version { return Err(FederationError::StaleConfiguration.into()); }
+            let sealed: Sealed = serde_json::from_value(sealed).map_err(|_| corrupt())?;
+            let credentials = keys.open(authority, tenant, revision.provider, current, &sealed).map_err(|_| MutationError::Storage(corrupt()))?;
+            Ok(oidc.revisions().install(revision,settings,credentials)?)
         })).await
     }
 }

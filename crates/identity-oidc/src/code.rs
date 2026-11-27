@@ -75,7 +75,7 @@ pub(super) async fn exchange(
         .header(header::AUTHORIZATION, authorization)
         .body(body.into_bytes())
         .map_err(|_| invalid_response())?;
-    parse_token(transport.call(request).await?)
+    parse_token(transport.call(ProviderStage::Exchange, request).await?)
 }
 
 fn invalid_response() -> FederationError {

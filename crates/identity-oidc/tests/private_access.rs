@@ -1,4 +1,7 @@
+#[path = "support/policy.rs"]
+mod policy;
 use rss_identity_core::federation::*;
+use rss_identity_oidc::ReusePolicy;
 use rss_identity_oidc::{HttpOidc, PrivateProviderAccess};
 use rss_request_context::TenantId;
 
@@ -37,6 +40,7 @@ fn private_grants_are_exact_and_do_not_grant_mfa() {
         vec![],
         vec![grant(issuer, &["10.42.0.9/32"])],
         transport_policy(),
+        policy::reuse_policy(),
     )
     .unwrap();
     let credentials = ProviderCredentials::new("private-test-secret".into(), None).unwrap();
@@ -84,7 +88,8 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
             HttpOidc::new(
                 vec![],
                 vec![grant("https://idp.example.test/realm", &cidrs)],
-                transport_policy()
+                transport_policy(),
+                policy::reuse_policy()
             )
             .is_err(),
             "{cidrs:?}"
@@ -95,20 +100,30 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
             HttpOidc::new(
                 vec![],
                 vec![grant("https://idp.example.test/realm", &[cidr])],
-                transport_policy()
+                transport_policy(),
+                policy::reuse_policy()
             )
             .is_ok()
         );
     }
     let duplicate = || grant("https://idp.example.test/realm", &["10.0.0.0/8"]);
-    assert!(HttpOidc::new(vec![], vec![duplicate(), duplicate()], transport_policy()).is_err());
+    assert!(
+        HttpOidc::new(
+            vec![],
+            vec![duplicate(), duplicate()],
+            transport_policy(),
+            policy::reuse_policy()
+        )
+        .is_err()
+    );
     assert!(
         HttpOidc::new(
             vec![],
             (0..1025)
                 .map(|i| grant(&format!("https://idp{i}.example.test"), &["10.0.0.0/8"]))
                 .collect(),
-            transport_policy()
+            transport_policy(),
+            policy::reuse_policy()
         )
         .is_err()
     );
@@ -116,7 +131,8 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
         HttpOidc::new(
             vec![],
             vec![grant("http://idp.example.test", &["10.0.0.0/8"])],
-            transport_policy()
+            transport_policy(),
+            policy::reuse_policy()
         )
         .is_err()
     );

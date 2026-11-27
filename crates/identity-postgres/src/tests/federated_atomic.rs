@@ -815,6 +815,15 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
         .await?;
     assert_ne!(unverified_proof.account(), fed_proof.account());
     let pending = begin(&f, &s, &p).await?;
+    let snapshot = s
+        .installed_provider(crate::support::binding(f.key.tenant), &p, deadline())
+        .await?;
+    assert!(
+        s.enable_provider(actor(&f).await?, p.id, p.version - 1, false, deadline())
+            .await
+            .is_err()
+    );
+    snapshot.check()?;
     let edited = s
         .update_provider(
             actor(&f).await?,
@@ -826,6 +835,7 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
             deadline(),
         )
         .await?;
+    assert_eq!(snapshot.check(), Err(FederationError::StaleConfiguration));
     assert!(matches!(
         finish(&s, pending, "alice").await,
         Err(AuthorityError::Federation(
@@ -931,6 +941,22 @@ async fn federation_config_races_and_provider_revocation() -> anyhow::Result<()>
             .await
             .is_ok()
     );
+    let held = s
+        .installed_provider(
+            crate::support::binding(f.key.tenant),
+            &reenabled,
+            deadline(),
+        )
+        .await?;
+    let manager = actor(&f).await?;
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    assert!(matches!(
+        s.enable_provider(manager, p.id, reenabled.version, false, deadline())
+            .await,
+        Err(AuthorityError::CommitUnknown(_))
+    ));
+    assert_eq!(held.check(), Err(FederationError::StaleConfiguration));
     f.close().await;
     Ok(())
 }

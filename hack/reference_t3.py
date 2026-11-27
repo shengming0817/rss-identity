@@ -51,7 +51,7 @@ ORIGIN = "https://identity.example.test"
 
 def oidc_settings(issuer, address, state, key):
     return {
-        "requestSeconds": 5, "connectSeconds": 3, "maxResponseBytes": 1048576, "maxJwksKeys": 128,
+        "requestSeconds": 5, "connectSeconds": 3, "maxResponseBytes": 1048576, "maxJwksKeys": 128,"reuse":{"maxProviders":128,"maxResidentBytes":8388608,"maxRefreshes":8,"maxIdlePerHost":2,"idleSeconds":30,"discoverySeconds":300,"jwksSeconds":60,"refreshCooldownSeconds":10},
         "groupFactsMaxAgeSeconds": 300,
         "stateKeyFile": state,
         "credentialKeyring": {

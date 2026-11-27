@@ -169,21 +169,14 @@ impl Federation {
         let locator = self.signer.verify(self.authority.instance(), &state)?;
         let material = ProtocolMaterial::new(state)?;
         self.check_assurance_profile(tenant, &provider)?;
-        let credentials = self
-            .provider_credentials(
-                binding,
-                provider.id,
-                provider.credential_version,
-                budget.remaining(),
-            )
+        let installed = self
+            .installed_provider(binding, &provider, budget.remaining())
             .await?;
         let url = self
             .upstream(
                 &budget,
                 self.oidc.prepare(
-                    tenant,
-                    &provider.settings,
-                    &credentials,
+                    installed,
                     &material,
                     if purpose == Purpose::Reauthenticate {
                         AuthenticationMode::Reauthenticate
@@ -291,25 +284,14 @@ impl Federation {
         let new_locator = self.signer.verify(self.authority.instance(), &new_state)?;
         let material = ProtocolMaterial::new(new_state)?;
         self.check_assurance_profile(tenant, &target)?;
-        let credentials = self
-            .provider_credentials(
-                binding,
-                target.id,
-                target.credential_version,
-                budget.remaining(),
-            )
+        let installed = self
+            .installed_provider(binding, &target, budget.remaining())
             .await?;
         let url = self
             .upstream(
                 budget,
-                self.oidc.prepare(
-                    tenant,
-                    &target.settings,
-                    &credentials,
-                    &material,
-                    AuthenticationMode::Login,
-                    budget.0,
-                ),
+                self.oidc
+                    .prepare(installed, &material, AuthenticationMode::Login, budget.0),
             )
             .await?;
         let group_policy = self.group_policy;

@@ -1,14 +1,28 @@
 use super::*;
+use crate::test_support::fixture_provider;
+
 use serde_json::json;
 use std::{
     io::{Read, Write},
     net::TcpListener,
 };
 
-fn token_metadata() -> Metadata {
-    let mut metadata:Metadata=serde_json::from_value(json!({"issuer":"https://issuer.test","authorization_endpoint":"https://issuer.test/auth","jwks_uri":"https://issuer.test/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})).unwrap();
-    metadata.jwks = serde_json::from_value(json!({"keys":[serde_json::from_str::<serde_json::Value>(include_str!("../tests/fixtures/entra-a.json")).unwrap()]})).unwrap();
-    metadata
+fn token_metadata() -> (Metadata, discovery::Jwks) {
+    let metadata = serde_json::from_value(json!({"issuer":"https://issuer.test","authorization_endpoint":"https://issuer.test/auth","jwks_uri":"https://issuer.test/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})).unwrap();
+    let jwks = serde_json::from_value(json!({"keys":[serde_json::from_str::<serde_json::Value>(include_str!("../tests/fixtures/entra-a.json")).unwrap()]})).unwrap();
+    (metadata, jwks)
+}
+fn verify(
+    raw: &str,
+    fixture: &(Metadata, discovery::Jwks),
+    nonce: &str,
+    client: &str,
+    secret: &str,
+    skew: u32,
+) -> Result<profile_token::Claims, FederationError> {
+    let header = profile_token::approved_header(raw, &fixture.0)?;
+    let key = profile_token::signing_key(&header, Some(&fixture.1), secret)?;
+    profile_token::verify(raw, header.alg, &key, &fixture.0, nonce, client, skew)
 }
 fn signed_token(claims: &serde_json::Value, valid_key: bool) -> String {
     let key = if valid_key {
@@ -43,7 +57,7 @@ fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
         claims[field] = value;
         for key in [true, false] {
             assert_eq!(
-                profile_token::verify(
+                verify(
                     &signed_token(&claims, key),
                     &metadata,
                     "nonce",
@@ -126,23 +140,35 @@ fn adapter(issuer: &str) -> HttpOidc {
             client_id: "client".into(),
         }],
         transport_policy(),
+        crate::test_support::reuse_policy(),
     )
     .unwrap()
 }
 fn transport(origin: &str) -> Transport {
-    adapter(origin)
+    let adapter = adapter(origin);
+    adapter
         .transport(
-            tenant(),
-            &config(origin),
-            &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+            fixture_provider(
+                &adapter,
+                tenant(),
+                &config(origin),
+                &rss_identity_core::federation::ProviderCredentials::new(
+                    "fixture-secret".into(),
+                    None,
+                )
                 .unwrap(),
+            ),
             upstream_deadline(),
+            false,
         )
         .unwrap()
 }
 async fn get(t: &Transport, url: &str) -> Result<http::Response<Vec<u8>>, FederationError> {
-    t.call(http::Request::builder().uri(url).body(vec![]).unwrap())
-        .await
+    t.call(
+        ProviderStage::Discovery,
+        http::Request::builder().uri(url).body(vec![]).unwrap(),
+    )
+    .await
 }
 #[tokio::test]
 async fn outbound_origin_redirect_and_size_are_enforced() {
@@ -196,44 +222,42 @@ async fn discovery_rejects_external_authorization_and_jwks() {
             "id_token_signing_alg_values_supported": ["RS256"]
         });
         let handle = std::thread::spawn(move || {
-            let responses = if external_jwks {
-                vec![metadata]
-            } else {
-                vec![metadata, json!({"keys":[]})]
-            };
-            for body in responses {
-                let start = std::time::Instant::now();
-                let mut socket = loop {
-                    match listener.accept() {
-                        Ok((socket, _)) => break socket,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(start.elapsed() < Duration::from_secs(5));
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(e) => panic!("{e}"),
+            let body = metadata;
+            let start = std::time::Instant::now();
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(start.elapsed() < Duration::from_secs(5));
+                        std::thread::sleep(Duration::from_millis(5));
                     }
-                };
-                socket.set_nonblocking(false).unwrap();
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
-                socket
-                    .set_write_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
-                assert!(socket.read(&mut [0; 8192]).unwrap() > 0);
-                let body = body.to_string();
-                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-            }
+                    Err(e) => panic!("{e}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            assert!(socket.read(&mut [0; 8192]).unwrap() > 0);
+            let body = body.to_string();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         });
-        let result = adapter(&issuer)
+        let adapter = adapter(&issuer);
+        let result = adapter
             .discover(
-                tenant(),
-                &config(&issuer),
-                &rss_identity_core::federation::ProviderCredentials::new(
-                    "fixture-secret".into(),
-                    None,
-                )
-                .unwrap(),
+                fixture_provider(
+                    &adapter,
+                    tenant(),
+                    &config(&issuer),
+                    &rss_identity_core::federation::ProviderCredentials::new(
+                        "fixture-secret".into(),
+                        None,
+                    )
+                    .unwrap(),
+                ),
                 upstream_deadline(),
             )
             .await;
@@ -259,15 +283,19 @@ async fn discovery_preserves_unavailable_and_protocol_failure() {
         ("200 OK", b"invalid json".to_vec(), false),
     ] {
         let (issuer, handle) = server(status, "", body);
-        let error = adapter(&issuer)
+        let adapter = adapter(&issuer);
+        let error = adapter
             .discover(
-                tenant(),
-                &config(&issuer),
-                &rss_identity_core::federation::ProviderCredentials::new(
-                    "fixture-secret".into(),
-                    None,
-                )
-                .unwrap(),
+                fixture_provider(
+                    &adapter,
+                    tenant(),
+                    &config(&issuer),
+                    &rss_identity_core::federation::ProviderCredentials::new(
+                        "fixture-secret".into(),
+                        None,
+                    )
+                    .unwrap(),
+                ),
                 upstream_deadline(),
             )
             .await
@@ -346,10 +374,19 @@ async fn production_dns_denial_prevents_connecting_to_loopback() {
     .unwrap();
     let tenant = TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap();
     let credentials = ProviderCredentials::new("private-fixture".into(), None).unwrap();
+    let adapter = HttpOidc::new(
+        vec![],
+        vec![],
+        transport_policy(),
+        crate::test_support::reuse_policy(),
+    )
+    .unwrap();
     assert_eq!(
-        HttpOidc::new(vec![], vec![], transport_policy())
-            .unwrap()
-            .test(tenant, &settings, &credentials, upstream_deadline())
+        adapter
+            .test(
+                fixture_provider(&adapter, tenant, &settings, &credentials),
+                upstream_deadline()
+            )
             .await
             .unwrap_err(),
         failure(ProviderStage::Discovery, ProviderReason::EgressDenied)
@@ -412,7 +449,7 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
             let mut raw = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce","organization_snapshot":value});
             raw[field] = bad;
             for key in [true, false] {
-                let verified = profile_token::verify(
+                let verified = verify(
                     &signed_token(&raw, key),
                     &metadata,
                     "nonce",
@@ -441,7 +478,7 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
 fn malformed_profile_is_independent_of_verified_security_claims() {
     let metadata = token_metadata();
     let raw = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce","email":42,"name":false,"email_verified":"true","attributes":{"mfa":true,"number":0,"remote":false}});
-    let claims = profile_token::verify(
+    let claims = verify(
         &signed_token(&raw, true),
         &metadata,
         "nonce",
@@ -468,7 +505,7 @@ fn malformed_profile_is_independent_of_verified_security_claims() {
         false
     );
     assert!(
-        profile_token::verify(
+        verify(
             &signed_token(&raw, false),
             &metadata,
             "nonce",
@@ -584,11 +621,15 @@ async fn discovery_preserves_required_metadata_and_transport_boundaries() {
         ("no-token", false),
     ] {
         let (issuer, task) = discovery_server(case).await;
-        let result = adapter(&issuer)
+        let adapter = adapter(&issuer);
+        let result = adapter
             .test(
-                tenant(),
-                &config(&issuer),
-                &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
+                fixture_provider(
+                    &adapter,
+                    tenant(),
+                    &config(&issuer),
+                    &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
+                ),
                 upstream_deadline(),
             )
             .await;
@@ -611,11 +652,10 @@ async fn discovery_preserves_required_metadata_and_transport_boundaries() {
 async fn advertised_token_endpoint_must_match_the_exact_enterprise_binding() {
     let (issuer, task) = discovery_server("noncanonical-token").await;
     let credentials = ProviderCredentials::new("fixture-secret".into(), None).unwrap();
-    let (metadata, _) = adapter(&issuer)
+    let adapter = adapter(&issuer);
+    let (metadata, _, _) = adapter
         .discover(
-            tenant(),
-            &config(&issuer),
-            &credentials,
+            fixture_provider(&adapter, tenant(), &config(&issuer), &credentials),
             upstream_deadline(),
         )
         .await
@@ -714,6 +754,7 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
             keycloak_totp: true,
         }],
         transport_policy(),
+        crate::test_support::reuse_policy(),
     )
     .unwrap();
     let mut material = ProtocolMaterial::new(random_secret().unwrap().to_string()).unwrap();
@@ -725,9 +766,12 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
     ] {
         let url = adapter
             .prepare(
-                tenant(),
-                &config(&issuer),
-                &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
+                fixture_provider(
+                    &adapter,
+                    tenant(),
+                    &config(&issuer),
+                    &ProviderCredentials::new("fixture-secret".into(), None).unwrap(),
+                ),
                 &material,
                 mode,
                 upstream_deadline(),
@@ -788,12 +832,10 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
     assert!(matches!(
         adapter
             .prepare(
-                tenant(),
-                &settings,
-                &credentials,
+                fixture_provider(&adapter, tenant(), &settings, &credentials),
                 &material,
                 AuthenticationMode::Login,
-                upstream_deadline(),
+                upstream_deadline()
             )
             .await,
         Err(FederationError::Rejected)
@@ -802,12 +844,10 @@ async fn oauth_authorization_preserves_oidc_nonce_pkce_and_step_up() {
     assert!(matches!(
         adapter
             .exchange(
-                tenant(),
-                &settings,
-                &credentials,
+                fixture_provider(&adapter, tenant(), &settings, &credentials),
                 material,
                 Zeroizing::new("fixture-code".into()),
-                upstream_deadline(),
+                upstream_deadline()
             )
             .await,
         Err(FederationError::Rejected)
@@ -821,15 +861,11 @@ fn id_token_rejects_unadvertised_algorithm_and_ambiguous_key() {
     let claims = json!({"iss":"https://issuer.test","sub":"subject","aud":"client","iat":1,"exp":4102444800_i64,"nonce":"nonce"});
     let raw = signed_token(&claims, true);
     let mut metadata = token_metadata();
-    metadata.id_token_signing_alg_values_supported = vec!["HS256".into()];
-    assert!(
-        profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err()
-    );
+    metadata.0.id_token_signing_alg_values_supported = vec!["HS256".into()];
+    assert!(verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err());
     let mut metadata = token_metadata();
-    metadata.jwks.keys.push(metadata.jwks.keys[0].clone());
-    assert!(
-        profile_token::verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err()
-    );
+    metadata.1.keys.push(metadata.1.keys[0].clone());
+    assert!(verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err());
 }
 
 fn transport_policy() -> crate::TransportPolicy {
@@ -871,13 +907,21 @@ async fn one_upstream_deadline_covers_successive_requests() {
     let deadline = rss_request_context::Deadline::at(
         std::time::Instant::now() + std::time::Duration::from_millis(100),
     );
-    let transport = adapter(&origin)
+    let adapter = adapter(&origin);
+    let transport = adapter
         .transport(
-            tenant(),
-            &config(&origin),
-            &rss_identity_core::federation::ProviderCredentials::new("fixture-secret".into(), None)
+            fixture_provider(
+                &adapter,
+                tenant(),
+                &config(&origin),
+                &rss_identity_core::federation::ProviderCredentials::new(
+                    "fixture-secret".into(),
+                    None,
+                )
                 .unwrap(),
+            ),
             deadline,
+            false,
         )
         .unwrap();
     assert!(get(&transport, &origin).await.is_ok());
@@ -890,3 +934,6 @@ async fn one_upstream_deadline_covers_successive_requests() {
     ));
     worker.join().unwrap();
 }
+
+mod reuse;
+mod upstream;

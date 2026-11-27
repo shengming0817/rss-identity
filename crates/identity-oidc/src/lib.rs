@@ -4,11 +4,19 @@
 mod assurance;
 mod code;
 mod discovery;
+mod freshness;
 use discovery::Metadata;
 mod egress;
+mod resources;
+pub use resources::ReusePolicy;
+use resources::{ClientPool, ProviderResources, Resources};
+use std::{collections::HashMap, sync::Arc};
 #[cfg(test)]
 mod private_provider_tests;
 mod profile_token;
+/// Protocol fixture helpers for explicitly test-enabled hosts.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub use ipnet::IpNet;
 pub mod entra;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -55,10 +63,16 @@ impl TransportPolicy {
     }
 }
 fn remaining(deadline: rss_request_context::Deadline) -> Result<Duration, FederationError> {
+    left(deadline, ProviderStage::Exchange)
+}
+fn left(
+    deadline: rss_request_context::Deadline,
+    stage: ProviderStage,
+) -> Result<Duration, FederationError> {
     deadline
         .remaining(std::time::Instant::now())
         .filter(|d| !d.is_zero())
-        .ok_or_else(|| failure(ProviderStage::Exchange, ProviderReason::Timeout))
+        .ok_or_else(|| failure(stage, ProviderReason::Timeout))
 }
 /// Host-approved interpretation of verified authentication facts. Not IdP admission.
 #[derive(Clone)]
@@ -95,12 +109,20 @@ struct EgressDenied;
 pub struct HttpOidc {
     future_skew_seconds: u32,
     policy: TransportPolicy,
-    profiles: Vec<TrustedAssuranceProfile>,
-    private_access: Vec<PrivateProviderAccess>,
+    bindings: Bindings,
+    resources: Arc<Resources>,
+    revisions: ProviderRevisions,
     loopback: bool,
     #[cfg(test)]
     lookup: Option<std::sync::Arc<dyn reqwest::dns::Resolve>>,
 }
+#[derive(Default)]
+struct Grant {
+    cidrs: Vec<IpNet>,
+    assurance: Option<bool>,
+}
+type Bindings = HashMap<TenantId, HashMap<String, HashMap<String, Grant>>>;
+
 impl HttpOidc {
     /// Select the accepted signed-time skew; it never extends token expiry.
     pub fn with_future_skew(mut self, seconds: u32) -> Self {
@@ -114,40 +136,36 @@ impl HttpOidc {
         profiles: Vec<TrustedAssuranceProfile>,
         private_access: Vec<PrivateProviderAccess>,
         policy: TransportPolicy,
+        reuse: ReusePolicy,
     ) -> Result<Self, FederationError> {
-        Self::build(profiles, private_access, false, policy)
+        Self::build(profiles, private_access, false, policy, reuse)
     }
-    /// Explicit loopback fixture (HTTP or HTTPS). Never enabled by production configuration.
+    /// Explicit loopback protocol fixture.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_loopback_test(
         profiles: Vec<TrustedAssuranceProfile>,
         policy: TransportPolicy,
+        reuse: ReusePolicy,
     ) -> Result<Self, FederationError> {
-        Self::build(profiles, vec![], true, policy)
+        Self::build(profiles, vec![], true, policy, reuse)
     }
     fn build(
         profiles: Vec<TrustedAssuranceProfile>,
         private_access: Vec<PrivateProviderAccess>,
         loopback: bool,
         policy: TransportPolicy,
+        reuse: ReusePolicy,
     ) -> Result<Self, FederationError> {
         if profiles.len() > 1024 || private_access.len() > 1024 {
             return Err(FederationError::Configuration);
         }
-        let mut grants = std::collections::BTreeSet::new();
-        for grant in &private_access {
-            let mut networks = std::collections::BTreeSet::new();
+        let mut bindings = Bindings::new();
+        for mut grant in private_access {
+            grant.cidrs.sort_unstable();
             if grant.cidrs.is_empty()
                 || grant.cidrs.len() > 16
-                || grant
-                    .cidrs
-                    .iter()
-                    .any(|n| !egress::private_network(*n) || !networks.insert(*n))
-                || !grants.insert((
-                    grant.tenant.to_string(),
-                    grant.issuer.clone(),
-                    grant.client_id.clone(),
-                ))
+                || grant.cidrs.iter().any(|n| !egress::private_network(*n))
+                || grant.cidrs.windows(2).any(|pair| pair[0] == pair[1])
             {
                 return Err(FederationError::Configuration);
             }
@@ -156,58 +174,62 @@ impl HttpOidc {
             rss_identity_core::ClientId::parse(&grant.client_id)
                 .map_err(|_| FederationError::Configuration)?;
             parse_url(&grant.issuer, false, &grant.cidrs)?;
+            let entry = bindings
+                .entry(grant.tenant)
+                .or_default()
+                .entry(grant.issuer)
+                .or_default()
+                .entry(grant.client_id)
+                .or_default();
+            if !entry.cidrs.is_empty() {
+                return Err(FederationError::Configuration);
+            }
+            entry.cidrs = grant.cidrs;
         }
-        let result = Self {
-            future_skew_seconds: 30,
-            policy,
-            profiles,
-            private_access,
-            loopback,
-            #[cfg(test)]
-            lookup: None,
-        };
-        let mut seen = std::collections::BTreeSet::new();
-        for p in &result.profiles {
-            parse_url(
-                &p.issuer,
-                loopback,
-                result.private_for(p.tenant, &p.issuer, &p.client_id),
-            )?;
-            if p.client_id.is_empty()
-                || p.client_id.len() > 256
-                || !seen.insert((p.tenant.to_string(), p.issuer.clone(), p.client_id.clone()))
-            {
+        for profile in profiles {
+            if profile.client_id.is_empty() || profile.client_id.len() > 256 {
+                return Err(FederationError::Configuration);
+            }
+            let clients = bindings
+                .entry(profile.tenant)
+                .or_default()
+                .entry(profile.issuer.clone())
+                .or_default();
+            let entry = clients.entry(profile.client_id).or_default();
+            parse_url(&profile.issuer, loopback, &entry.cidrs)?;
+            if entry.assurance.replace(profile.keycloak_totp).is_some() {
                 return Err(FederationError::Configuration);
             }
         }
-        Ok(result)
-    }
-    fn private_for(&self, tenant: TenantId, issuer: &str, client_id: &str) -> &[IpNet] {
-        self.private_access
-            .iter()
-            .find(|g| g.tenant == tenant && g.issuer == issuer && g.client_id == client_id)
-            .map_or(&[], |g| g.cidrs.as_slice())
-    }
-    fn trusted(&self, tenant: TenantId, c: &ProviderSettings) -> bool {
-        self.profiles.iter().any(|p| {
-            p.tenant == tenant
-                && p.issuer == c.issuer().as_str()
-                && p.client_id == c.client_id().as_str()
-                && p.keycloak_totp
+        Ok(Self {
+            bindings,
+            resources: Resources::new(reuse)?,
+            revisions: ProviderRevisions::new(
+                reuse.max_providers.saturating_add(reuse.max_refreshes),
+            ),
+            policy,
+            loopback,
+            future_skew_seconds: 30,
+            #[cfg(test)]
+            lookup: None,
         })
     }
-    fn transport(
+    fn grant(&self, tenant: TenantId, issuer: &str, client: &str) -> Option<&Grant> {
+        self.bindings.get(&tenant)?.get(issuer)?.get(client)
+    }
+    fn private_for(&self, tenant: TenantId, issuer: &str, client: &str) -> &[IpNet] {
+        self.grant(tenant, issuer, client).map_or(&[], |g| &g.cidrs)
+    }
+    fn trusted(&self, tenant: TenantId, c: &ProviderSettings) -> bool {
+        self.grant(tenant, c.issuer().as_str(), c.client_id().as_str())
+            .and_then(|g| g.assurance)
+            == Some(true)
+    }
+    fn build_client(
         &self,
-        tenant: TenantId,
-        c: &ProviderSettings,
         credentials: &ProviderCredentials,
-        deadline: rss_request_context::Deadline,
-    ) -> Result<Transport, FederationError> {
-        self.validate(tenant, c, credentials)?;
-        let cidrs = self.private_for(tenant, c.issuer().as_str(), c.client_id().as_str());
-        let origin = parse_url(c.issuer().as_str(), self.loopback, cidrs)?
-            .origin()
-            .ascii_serialization();
+        cidrs: &[IpNet],
+    ) -> Result<reqwest::Client, FederationError> {
         let resolver = egress::VettedResolver::new(self.loopback, cidrs.to_vec());
         #[cfg(test)]
         let resolver = match &self.lookup {
@@ -216,49 +238,118 @@ impl HttpOidc {
         };
         let mut builder = reqwest::Client::builder()
             .no_proxy()
-            .dns_resolver(std::sync::Arc::new(resolver))
+            .dns_resolver(Arc::new(resolver))
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .pool_max_idle_per_host(self.resources.policy.max_idle_per_host)
+            .pool_idle_timeout(self.resources.policy.idle_timeout)
             .timeout(self.policy.request_timeout)
             .connect_timeout(self.policy.connect_timeout);
         for root in certificates(credentials)? {
             builder = builder.add_root_certificate(root);
         }
-        remaining(deadline)?;
+        builder
+            .build()
+            .map_err(|_| failure(ProviderStage::Binding, ProviderReason::InvalidTrustAnchor))
+    }
+    fn transport(
+        &self,
+        provider: BoundProvider,
+        deadline: rss_request_context::Deadline,
+        probe: bool,
+    ) -> Result<Transport, FederationError> {
+        left(deadline, ProviderStage::Binding)?;
+        let c = provider.settings();
+        let cidrs = self.private_for(
+            provider.revision().tenant,
+            c.issuer().as_str(),
+            c.client_id().as_str(),
+        );
+        let origin = parse_url(c.issuer().as_str(), self.loopback, cidrs)?
+            .origin()
+            .ascii_serialization();
+        parse_url(c.redirect_uri(), self.loopback, &[])?;
+        self.revisions.check(&provider)?;
+        let slot = if probe {
+            None
+        } else {
+            Some(self.resources.bind(&provider)?)
+        };
+        let http = if probe {
+            Arc::new(ClientPool {
+                http: self.build_client(provider.credentials(), cidrs)?,
+                _permit: None,
+            })
+        } else {
+            let mut pooled = slot.as_ref().unwrap().client.lock().unwrap();
+            if pooled.is_none() {
+                let permit = self.resources.client_permit()?;
+                *pooled = Some(Arc::new(ClientPool {
+                    http: self.build_client(provider.credentials(), cidrs)?,
+                    _permit: Some(permit),
+                }));
+            }
+            pooled.as_ref().unwrap().clone()
+        };
         Ok(Transport {
-            policy: self.policy,
+            channel: Channel {
+                policy: self.policy,
+                http,
+                origin,
+                installed: provider.installed().clone(),
+            },
+            slot,
             deadline,
-            origin,
-            http: builder
-                .build()
-                .map_err(|_| failure(ProviderStage::Binding, ProviderReason::InvalidResponse))?,
             requests: AtomicU8::new(0),
-            phase: AtomicU8::new(0),
         })
     }
     async fn discover(
         &self,
-        tenant: TenantId,
-        c: &ProviderSettings,
-        credentials: &ProviderCredentials,
+        provider: BoundProvider,
         deadline: rss_request_context::Deadline,
-    ) -> Result<(Metadata, Transport), FederationError> {
-        let transport = self.transport(tenant, c, credentials, deadline)?;
-        let metadata = discovery::discover(&transport, c.issuer().as_str()).await?;
-        if metadata
-            .authorization_endpoint
-            .origin()
-            .ascii_serialization()
-            != transport.origin
-            || metadata.token_endpoint.as_ref().is_none_or(|endpoint| {
-                endpoint.url.origin().ascii_serialization() != transport.origin
+    ) -> Result<(Metadata, Arc<discovery::Representation>, Transport), FederationError> {
+        let t = self.transport(provider.clone(), deadline, false)?;
+        let kind = discovery::Kind::Discovery {
+            issuer: provider.settings().issuer().as_str().into(),
+        };
+        let (doc, _) = t
+            .slot
+            .as_ref()
+            .unwrap()
+            .discovery
+            .read(&self.resources, &t, kind, None)
+            .await?;
+        Ok((doc.metadata()?, doc, t))
+    }
+
+    async fn signing_keys(
+        &self,
+        doc: &discovery::Representation,
+        t: &Transport,
+        kid: Option<&str>,
+    ) -> Result<discovery::Jwks, FederationError> {
+        let (uri, slot) = doc.keys()?;
+        let kind = || discovery::Kind::Keys { uri: uri.clone() };
+        let (first, cached) = slot.read(&self.resources, t, kind(), None).await?;
+        let keys = first.jwks()?;
+        if cached
+            && kid.is_some_and(|id| {
+                !id.is_empty()
+                    && !keys
+                        .keys
+                        .iter()
+                        .any(|v| v.get("kid").and_then(|v| v.as_str()) == Some(id))
             })
         {
-            return Err(failure(
-                ProviderStage::Discovery,
-                ProviderReason::EgressDenied,
-            ));
+            let identity = first.identity.clone();
+            drop(first);
+            return slot
+                .read(&self.resources, t, kind(), Some(&identity))
+                .await?
+                .0
+                .jwks();
         }
-        Ok((metadata, transport))
+        Ok(keys)
     }
 }
 fn certificates(
@@ -307,29 +398,51 @@ fn parse_url(value: &str, loopback: bool, cidrs: &[IpNet]) -> Result<Url, Federa
     Ok(u)
 }
 struct Transport {
-    policy: TransportPolicy,
+    channel: Channel,
+    slot: Option<Arc<ProviderResources>>,
     deadline: rss_request_context::Deadline,
-    http: reqwest::Client,
-    origin: String,
     requests: AtomicU8,
-    phase: AtomicU8,
 }
 impl Transport {
-    fn stage(&self) -> ProviderStage {
-        match self.phase.load(Ordering::Relaxed) {
-            0 => ProviderStage::Discovery,
-            1 => ProviderStage::Jwks,
-            _ => ProviderStage::Exchange,
-        }
+    fn charge(&self, stage: ProviderStage) -> Result<(), FederationError> {
+        self.channel.check()?;
+        left(self.deadline, stage)?;
+        // Discovery, token POST, JWKS, and one directed key refresh.
+        self.requests
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < 4).then(|| n + 1)
+            })
+            .map_err(|_| failure(stage, ProviderReason::Unavailable))?;
+        Ok(())
     }
-    fn request_error(&self, error: reqwest::Error) -> FederationError {
+    async fn call(
+        &self,
+        stage: ProviderStage,
+        request: http::Request<Vec<u8>>,
+    ) -> Result<http::Response<Vec<u8>>, FederationError> {
+        self.charge(stage)?;
+        self.channel.call(stage, self.deadline, request).await
+    }
+}
+#[derive(Clone)]
+struct Channel {
+    policy: TransportPolicy,
+    http: Arc<ClientPool>,
+    origin: String,
+    installed: InstalledRevision,
+}
+impl Channel {
+    fn check(&self) -> Result<(), FederationError> {
+        self.installed.check()
+    }
+    fn request_error(&self, stage: ProviderStage, error: reqwest::Error) -> FederationError {
         let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
         while let Some(value) = cause {
             if value.is::<EgressDenied>() {
-                return failure(self.stage(), ProviderReason::EgressDenied);
+                return failure(stage, ProviderReason::EgressDenied);
             }
             if value.is::<rustls::Error>() {
-                return failure(self.stage(), ProviderReason::TlsRejected);
+                return failure(stage, ProviderReason::TlsRejected);
             }
             cause = if let Some(io) = value.downcast_ref::<std::io::Error>() {
                 io.get_ref()
@@ -340,7 +453,7 @@ impl Transport {
             };
         }
         failure(
-            self.stage(),
+            stage,
             if error.is_timeout() {
                 ProviderReason::Timeout
             } else {
@@ -350,45 +463,54 @@ impl Transport {
     }
     async fn call(
         &self,
+        stage: ProviderStage,
+        deadline: rss_request_context::Deadline,
         request: http::Request<Vec<u8>>,
     ) -> Result<http::Response<Vec<u8>>, FederationError> {
-        let previous = self.requests.fetch_add(1, Ordering::Relaxed);
-        self.phase.store(
-            if request.method() == http::Method::POST {
-                2
-            } else if previous == 0 {
-                0
-            } else {
-                1
-            },
-            Ordering::Relaxed,
-        );
+        tokio::select! {
+            biased;
+            _ = self.installed.retired() => Err(FederationError::StaleConfiguration),
+            result = self.execute(stage, deadline, request) => result,
+        }
+    }
+    async fn execute(
+        &self,
+        stage: ProviderStage,
+        deadline: rss_request_context::Deadline,
+        request: http::Request<Vec<u8>>,
+    ) -> Result<http::Response<Vec<u8>>, FederationError> {
+        self.check()?;
         let u = Url::parse(&request.uri().to_string())
-            .map_err(|_| failure(self.stage(), ProviderReason::InvalidResponse))?;
+            .map_err(|_| failure(stage, ProviderReason::InvalidResponse))?;
         if u.origin().ascii_serialization() != self.origin
             || !u.username().is_empty()
             || u.password().is_some()
         {
-            return Err(failure(self.stage(), ProviderReason::EgressDenied));
+            return Err(failure(stage, ProviderReason::EgressDenied));
         }
         let mut request: reqwest::Request = request
             .try_into()
-            .map_err(|_| failure(self.stage(), ProviderReason::InvalidResponse))?;
-        *request.timeout_mut() = Some(remaining(self.deadline)?.min(self.policy.request_timeout));
+            .map_err(|_| failure(stage, ProviderReason::InvalidResponse))?;
+        *request.timeout_mut() = Some(left(deadline, stage)?.min(self.policy.request_timeout));
         let mut response = self
+            .http
             .http
             .execute(request)
             .await
-            .map_err(|e| self.request_error(e))?;
+            .map_err(|e| self.request_error(stage, e))?;
         let status = response.status();
         if status.is_server_error() || status.as_u16() == 429 {
-            return Err(failure(self.stage(), ProviderReason::Unavailable));
+            return Err(failure(stage, ProviderReason::Unavailable));
         }
         let headers = response.headers().clone();
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|e| self.request_error(e))? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| self.request_error(stage, e))?
+        {
             if bytes.len().saturating_add(chunk.len()) > self.policy.max_response_bytes {
-                return Err(failure(self.stage(), ProviderReason::InvalidResponse));
+                return Err(failure(stage, ProviderReason::InvalidResponse));
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -430,16 +552,18 @@ impl UpstreamOidc for HttpOidc {
         }
         Ok(())
     }
+    fn revisions(&self) -> &ProviderRevisions {
+        &self.revisions
+    }
     fn prepare<'a>(
         &'a self,
-        tenant: TenantId,
-        c: &'a ProviderSettings,
-        credentials: &'a ProviderCredentials,
+        provider: BoundProvider,
         m: &'a ProtocolMaterial,
         mode: AuthenticationMode,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
+            let (tenant, c) = (provider.revision().tenant, provider.settings());
             if !code::valid_verifier(m.verifier.as_str()) {
                 return Err(FederationError::Rejected);
             }
@@ -448,7 +572,7 @@ impl UpstreamOidc for HttpOidc {
             {
                 return Err(FederationError::Configuration);
             }
-            let (metadata, _) = self.discover(tenant, c, credentials, deadline).await?;
+            let (metadata, _, transport) = self.discover(provider.clone(), deadline).await?;
 
             let scope = std::iter::once("openid")
                 .chain(
@@ -482,6 +606,7 @@ impl UpstreamOidc for HttpOidc {
                 }
             }
             let url = url.into();
+            transport.channel.check()?;
             remaining(deadline)?;
             Ok(url)
         })
@@ -489,19 +614,22 @@ impl UpstreamOidc for HttpOidc {
 
     fn exchange<'a>(
         &'a self,
-        tenant: TenantId,
-        c: &'a ProviderSettings,
-        credentials: &'a ProviderCredentials,
+        provider: BoundProvider,
         m: ProtocolMaterial,
         code: Zeroizing<String>,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
+            let (tenant, c, credentials) = (
+                provider.revision().tenant,
+                provider.settings(),
+                provider.credentials(),
+            );
             if code.is_empty() || code.len() > 4096 || !code::valid_verifier(m.verifier.as_str()) {
                 return Err(FederationError::Rejected);
             }
 
-            let (metadata, transport) = self.discover(tenant, c, credentials, deadline).await?;
+            let (metadata, doc, transport) = self.discover(provider.clone(), deadline).await?;
 
             let endpoint = metadata
                 .token_endpoint
@@ -509,12 +637,24 @@ impl UpstreamOidc for HttpOidc {
                 .ok_or(FederationError::Configuration)?;
             let id_token =
                 code::exchange(&transport, &endpoint.url, c, credentials, &m, &code).await?;
+            let header = profile_token::approved_header(&id_token, &metadata)?;
+            let keys = if profile_token::symmetric(header.alg) {
+                None
+            } else {
+                Some(
+                    self.signing_keys(&doc, &transport, header.kid.as_deref())
+                        .await?,
+                )
+            };
+            let key =
+                profile_token::signing_key(&header, keys.as_ref(), credentials.client_secret())?;
             let claims = profile_token::verify(
-                id_token.as_str(),
+                &id_token,
+                header.alg,
+                &key,
                 &metadata,
-                m.nonce.as_str(),
+                &m.nonce,
                 c.client_id().as_str(),
-                credentials.client_secret(),
                 self.future_skew_seconds,
             )?;
             let all = serde_json::to_value(&claims).map_err(|_| FederationError::Claims)?;
@@ -544,6 +684,7 @@ impl UpstreamOidc for HttpOidc {
             };
 
             value.validate()?;
+            transport.channel.check()?;
 
             remaining(deadline)?;
             Ok(value)
@@ -552,13 +693,25 @@ impl UpstreamOidc for HttpOidc {
 
     fn test<'a>(
         &'a self,
-        tenant: TenantId,
-        c: &'a ProviderSettings,
-        credentials: &'a ProviderCredentials,
+        provider: BoundProvider,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
-            let (metadata, _) = self.discover(tenant, c, credentials, deadline).await?;
+            let c = provider.settings();
+            let t = self.transport(provider.clone(), deadline, true)?;
+            let bytes = discovery::Kind::Discovery {
+                issuer: c.issuer().as_str().into(),
+            }
+            .probe(&t, &self.resources)
+            .await?;
+            let metadata: Metadata = serde_json::from_slice(&bytes)
+                .map_err(|_| failure(ProviderStage::Discovery, ProviderReason::InvalidResponse))?;
+            discovery::Kind::Keys {
+                uri: metadata.jwks_uri.clone(),
+            }
+            .probe(&t, &self.resources)
+            .await?;
+            t.channel.check()?;
             if !metadata.authorization_response_iss_parameter_supported {
                 return Err(failure(
                     ProviderStage::Discovery,

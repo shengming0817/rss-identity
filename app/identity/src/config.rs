@@ -128,7 +128,36 @@ pub struct PrivateProviderConfig {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OidcReuseConfig {
+    pub max_providers: usize,
+    pub max_resident_bytes: usize,
+    pub max_refreshes: usize,
+    pub max_idle_per_host: usize,
+    pub idle_seconds: u64,
+    pub discovery_seconds: u64,
+    pub jwks_seconds: u64,
+    pub refresh_cooldown_seconds: u64,
+}
+impl OidcReuseConfig {
+    pub fn policy(&self) -> Result<rss_identity_oidc::ReusePolicy, AppError> {
+        rss_identity_oidc::ReusePolicy {
+            max_providers: self.max_providers,
+            max_resident_bytes: self.max_resident_bytes,
+            max_refreshes: self.max_refreshes,
+            max_idle_per_host: self.max_idle_per_host,
+            idle_timeout: finite_seconds(self.idle_seconds)?,
+            discovery_ttl: finite_seconds(self.discovery_seconds)?,
+            jwks_ttl: finite_seconds(self.jwks_seconds)?,
+            refresh_cooldown: finite_seconds(self.refresh_cooldown_seconds)?,
+        }
+        .validate()
+        .map_err(|_| AppError::Configuration)
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OidcConfig {
+    pub reuse: OidcReuseConfig,
     pub request_seconds: u64,
     pub connect_seconds: u64,
     pub max_response_bytes: usize,
@@ -375,6 +404,7 @@ impl RuntimeConfig {
         if let Some(oidc) = &self.oidc {
             oidc.group_policy()?;
             oidc.transport()?;
+            oidc.reuse.policy()?;
             if oidc.assurance_profiles.len() > 1024 {
                 return Err(AppError::Configuration);
             }

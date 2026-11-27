@@ -68,12 +68,8 @@ struct AccessClaims {
 }
 /// Fixed backend exchange inputs. No field is taken from an untrusted browser request.
 pub struct EnterpriseExchange<'a> {
-    /// Host-admitted tenant.
-    pub tenant: rss_request_context::TenantId,
-    /// Installed provider settings.
-    pub provider: &'a rss_identity_core::federation::ProviderSettings,
-    /// Confidential client credentials.
-    pub credentials: &'a rss_identity_core::federation::ProviderCredentials,
+    /// Host-bound provider identity, settings and credentials.
+    pub provider: rss_identity_core::federation::BoundProvider,
     /// Fixed registered RP target.
     pub target: &'a rss_identity_core::enterprise::EnterpriseTarget,
     /// Authority-issued, one-use JWT assertion.
@@ -86,6 +82,7 @@ pub struct EnterpriseExchange<'a> {
 impl crate::HttpOidc {
     /// Exchange a one-use backend assertion through the existing bounded, vetted transport.
     /// `expected_subject` comes from the host's provisioned stable IdP mapping, never browser JSON.
+    /// Register the snapshot at authoritative installation; the host rechecks the current version before using the result.
     /// No retries: a network failure may follow successful upstream assertion consumption.
     pub async fn exchange_enterprise(
         &self,
@@ -93,15 +90,14 @@ impl crate::HttpOidc {
         deadline: rss_request_context::Deadline,
     ) -> Result<EnterpriseAccess, rss_identity_core::federation::FederationError> {
         let EnterpriseExchange {
-            tenant,
-            provider,
-            credentials,
+            provider: bound,
             target,
             assertion,
             assertion_expires_at,
             expected_subject,
         } = input;
         use rss_identity_core::federation::FederationError;
+        let (provider, credentials) = (bound.settings(), bound.credentials());
         target
             .validate()
             .map_err(|_| FederationError::Configuration)?;
@@ -113,9 +109,7 @@ impl crate::HttpOidc {
         {
             return Err(FederationError::Configuration);
         }
-        let (metadata, transport) = self
-            .discover(tenant, provider, credentials, deadline)
-            .await?;
+        let (metadata, doc, transport) = self.discover(bound.clone(), deadline).await?;
         let endpoint = metadata.bound_token_endpoint(&target.token_endpoint)?;
         let form = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
@@ -133,7 +127,12 @@ impl crate::HttpOidc {
             .header("content-type", "application/x-www-form-urlencoded")
             .body(form.into_bytes())
             .map_err(|_| FederationError::Configuration)?;
-        let response = transport.call(request).await?;
+        let response = transport
+            .call(
+                rss_identity_core::federation::ProviderStage::Exchange,
+                request,
+            )
+            .await?;
         if !response.status().is_success() {
             return Err(FederationError::Rejected);
         }
@@ -150,14 +149,14 @@ impl crate::HttpOidc {
         if header.alg != Algorithm::RS256 {
             return Err(FederationError::Claims);
         }
-        let kid = header.kid.ok_or(FederationError::Claims)?;
-        let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_value(
-            serde_json::to_value(&metadata.jwks).map_err(|_| FederationError::Claims)?,
-        )
-        .map_err(|_| FederationError::Claims)?;
+        let kid = header
+            .kid
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or(FederationError::Claims)?;
+        let keys = self.signing_keys(&doc, &transport, Some(kid)).await?;
         let key =
-            jsonwebtoken::DecodingKey::from_jwk(jwks.find(&kid).ok_or(FederationError::Claims)?)
-                .map_err(|_| FederationError::Claims)?;
+            crate::profile_token::signing_key(&header, Some(&keys), credentials.client_secret())?;
         let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
         validation.set_audience(&[&target.client_id]);
         validation.set_issuer(&[provider.issuer().as_str()]);
@@ -177,6 +176,8 @@ impl crate::HttpOidc {
         {
             return Err(FederationError::Claims);
         }
+        transport.channel.check()?;
+        crate::remaining(deadline)?;
         Ok(EnterpriseAccess {
             token: Zeroizing::new(token.access_token),
             subject: claims.sub,

@@ -1,4 +1,6 @@
 //! Production transport + real HTTPS private Keycloak. No test-support or reference host.
+
+use crate::test_support::fixture_provider;
 use crate::{HttpOidc, PrivateProviderAccess};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::{Client, Url};
@@ -64,11 +66,15 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
             cidrs: vec![format!("{address}/32").parse()?],
         }],
         transport_policy(),
+        crate::test_support::reuse_policy(),
     )?;
     controlled(&mut adapter, vec![endpoint], calls.clone());
     assert!(
         adapter
-            .test(tenant, &config, &credentials, upstream_deadline())
+            .test(
+                fixture_provider(&adapter, tenant, &config, &credentials),
+                upstream_deadline()
+            )
             .await?
             .tls_verified
     );
@@ -77,11 +83,19 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
         discovery_calls > 0,
         "real discovery must traverse the production resolver"
     );
-    let mut denied = HttpOidc::new(vec![], vec![], transport_policy())?;
+    let mut denied = HttpOidc::new(
+        vec![],
+        vec![],
+        transport_policy(),
+        crate::test_support::reuse_policy(),
+    )?;
     controlled(&mut denied, vec![endpoint], calls.clone());
     assert!(
         denied
-            .test(tenant, &config, &credentials, upstream_deadline())
+            .test(
+                fixture_provider(&denied, tenant, &config, &credentials),
+                upstream_deadline()
+            )
             .await
             .is_err()
     );
@@ -92,7 +106,10 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     );
     assert!(
         adapter
-            .test(tenant, &config, &credentials, upstream_deadline())
+            .test(
+                fixture_provider(&adapter, tenant, &config, &credentials),
+                upstream_deadline()
+            )
             .await
             .is_err()
     );
@@ -100,21 +117,36 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     let other = TenantId::parse("22222222-2222-4222-8222-222222222222")?;
     assert!(
         adapter
-            .test(other, &config, &credentials, upstream_deadline())
+            .test(
+                fixture_provider(&adapter, other, &config, &credentials),
+                upstream_deadline()
+            )
             .await
             .is_err()
     );
     let untrusted = ProviderCredentials::new("fixture-secret".into(), None)?;
+    let template = fixture_provider(&adapter, tenant, &config, &credentials);
+    let revision = template.revision();
+    let next = |version, credentials: &ProviderCredentials| {
+        crate::test_support::fixture_install(
+            &adapter,
+            ProviderRevision {
+                version,
+                ..revision
+            },
+            &config,
+            credentials,
+        )
+    };
     assert!(
-        matches!(adapter.test(tenant, &config, &untrusted, upstream_deadline()).await,
+        matches!(adapter.test(next(2,&untrusted)?, upstream_deadline()).await,
         Err(FederationError::Provider(ref failure)) if failure.reason == ProviderReason::TlsRejected)
     );
+    let bound = next(3, &credentials)?;
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let authorize = adapter
         .prepare(
-            tenant,
-            &config,
-            &credentials,
+            bound,
             &material,
             AuthenticationMode::Login,
             upstream_deadline(),
@@ -163,12 +195,12 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     let query: std::collections::BTreeMap<String, String> =
         callback.query_pairs().into_owned().collect();
     assert_eq!(query["state"], material.state.as_str());
+    // Force the next operation onto a new pool and a new DNS resolution.
+    let bound = next(4, &credentials)?;
     let before_exchange = calls.load(Ordering::SeqCst);
     let claims = adapter
         .exchange(
-            tenant,
-            &config,
-            &credentials,
+            bound,
             material,
             query["code"].clone().into(),
             upstream_deadline(),

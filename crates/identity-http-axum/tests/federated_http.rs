@@ -1,4 +1,6 @@
 //! Real PG + HTTPS Keycloak adapter with explicit loopback fixture transport + in-process Axum. No product binary/T3 claim.
+
+use rss_identity_oidc::test_support::fixture_provider;
 use rss_identity_postgres::StateSigner;
 mod department_lifecycle;
 #[path = "../../identity-postgres/tests/federation_support/mod.rs"]
@@ -37,6 +39,7 @@ fn fixture_transport(keycloak_totp: bool) -> anyhow::Result<HttpOidc> {
             client_id: "identity-test".into(),
         }],
         transport_policy(),
+        rss_identity_oidc::test_support::reuse_policy(),
     )?)
 }
 fn credentials(ca: bool) -> anyhow::Result<ProviderCredentials> {
@@ -497,6 +500,7 @@ async fn real_upstream_client_secret_rotation() -> anyhow::Result<()> {
             keycloak_totp: true,
         }],
         transport_policy(),
+        rss_identity_oidc::test_support::reuse_policy(),
     )?;
     let next = service(&f, Arc::new(next));
     let settings = p.settings.input();
@@ -819,20 +823,17 @@ async fn federated_http_rejects_mismatch_and_uncertain_commit() -> anyhow::Resul
 #[tokio::test]
 #[ignore = "requires make test-federated"]
 async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
-    fixture_transport(true)?
+    let transport = fixture_transport(true)?;
+    transport
         .test(
-            tenant(),
-            &config()?,
-            &credentials(true)?,
+            fixture_provider(&transport, tenant(), &config()?, &credentials(true)?),
             upstream_deadline(),
         )
         .await?;
     assert_eq!(
-        fixture_transport(true)?
+        transport
             .test(
-                tenant(),
-                &config()?,
-                &credentials(false)?,
+                fixture_provider(&transport, tenant(), &config()?, &credentials(false)?),
                 upstream_deadline()
             )
             .await
@@ -842,9 +843,14 @@ async fn federated_tls_and_self_service_policy() -> anyhow::Result<()> {
     let mut private = config()?.input();
     private.issuer = "https://127.0.0.1".into();
     assert!(
-        HttpOidc::new(vec![], vec![], transport_policy())?
-            .validate(tenant(), &private.try_into()?, &credentials(false)?)
-            .is_err()
+        HttpOidc::new(
+            vec![],
+            vec![],
+            transport_policy(),
+            rss_identity_oidc::test_support::reuse_policy()
+        )?
+        .validate(tenant(), &private.try_into()?, &credentials(false)?)
+        .is_err()
     );
     Ok(())
 }

@@ -101,6 +101,14 @@ let routes = rss_identity_http_axum::router(authority, http.clone())?
 
 OIDC 使用 Code/PKCE、state/nonce 和浏览器绑定，登录事务原子单次消费；邮箱不是自动关联依据。显式关联与 step-up 绑定当前主体，provider 配置变化使旧流程失效。唯一 callback 是宿主 origin 下的 `/api/v1/identity/oidc/callback`，回跳只接受宿主白名单键。
 
+通用 OIDC 宿主在构造 `HttpOidc` 时显式提供 `TransportPolicy` 和 `ReusePolicy`。运行入口使用 `BoundProvider` 绑定实例、租户、Provider ID、单调配置版本与本次凭据。宿主在权威配置读取锁内或串行安装配置时以 `oidc.revisions().install(revision, settings, credentials)` 一次安装版本、设置与凭据。运行入口接收该不可重绑的快照；共享公开数据的缓存仅保留非秘密代际标记。配置变更提交后向使用该配置的每个活跃适配器调用 `revisions().observe(new_revision)`。适配器按活跃快照跟踪代际，缓存淘汰不会恢复旧快照。池条目持有非秘密退役信号，直到条目被淘汰。操作结束或宿主卸载配置后释放快照及其 clone；长期持有会占用版本登记容量（每实例上限为 maxProviders 加 maxRefreshes），即使连接池可被淘汰。参考宿主的 `oidc.reuse` 必填，例如：
+
+```json
+{"maxProviders":128,"maxResidentBytes":8388608,"maxRefreshes":8,"maxIdlePerHost":2,"idleSeconds":30,"discoverySeconds":300,"jwksSeconds":60,"refreshCooldownSeconds":10}
+```
+
+登录准备只获取 Discovery。回调按签名算法读取密钥，JWKS 故障可能在完成上游登录后才报告，失败后须重新登录。每次 token 交换仅提交一次；管理员连接测试始终新建连接并读取两份文档。复用、冷却与在途撤权均以适配器实例为界，PostgreSQL Federation 在变更事务内先退役旧快照，再结算并按权威数据库版本复核。提交结果不明或回滚后，新的权威读取可取得当前配置；已经退役的在途操作须重试。撤权会取消本地 HTTP 等待，已经发送到上游的请求可能已产生效果。直接调用企业交换的宿主须在交付或使用返回的凭据前自行复核权威版本。
+
 宿主持有 TLS、listener、可信代理、日志脱敏和有界关闭，必须注入 `ClientAddress`；仅有 ConnectInfo 不会自动转换，缺失来源时登录拒绝。直连中间件可从真实 peer 注入：
 
 ```rust,ignore
