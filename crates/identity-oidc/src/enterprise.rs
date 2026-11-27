@@ -96,7 +96,7 @@ impl crate::HttpOidc {
             expected_subject,
         } = input;
         use rss_identity_core::federation::FederationError;
-        let (tenant, provider, credentials) = (bound.revision.tenant, bound.settings, bound.credentials);
+        let (provider, credentials) = (bound.settings, bound.credentials);
         target
             .validate()
             .map_err(|_| FederationError::Configuration)?;
@@ -108,8 +108,8 @@ impl crate::HttpOidc {
         {
             return Err(FederationError::Configuration);
         }
-        let (metadata, transport) = self
-            .discover(tenant, provider, credentials, deadline)
+        let (metadata, doc, transport) = self
+            .discover(bound, deadline)
             .await?;
         let endpoint = metadata.bound_token_endpoint(&target.token_endpoint)?;
         let form = url::form_urlencoded::Serializer::new(String::new())
@@ -145,14 +145,9 @@ impl crate::HttpOidc {
         if header.alg != Algorithm::RS256 {
             return Err(FederationError::Claims);
         }
-        let kid = header.kid.ok_or(FederationError::Claims)?;
-        let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_value(
-            serde_json::to_value(&metadata.jwks).map_err(|_| FederationError::Claims)?,
-        )
-        .map_err(|_| FederationError::Claims)?;
-        let key =
-            jsonwebtoken::DecodingKey::from_jwk(jwks.find(&kid).ok_or(FederationError::Claims)?)
-                .map_err(|_| FederationError::Claims)?;
+        let kid = header.kid.as_deref().filter(|v| !v.is_empty()).ok_or(FederationError::Claims)?;
+        let keys = self.signing_keys(&doc, &transport, Some(kid)).await?;
+        let key = crate::profile_token::signing_key(&header, Some(&keys), credentials.client_secret())?;
         let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
         validation.set_audience(&[&target.client_id]);
         validation.set_issuer(&[provider.issuer().as_str()]);
@@ -172,6 +167,8 @@ impl crate::HttpOidc {
         {
             return Err(FederationError::Claims);
         }
+        transport.channel.check()?;
+        crate::remaining(deadline)?;
         Ok(EnterpriseAccess {
             token: Zeroizing::new(token.access_token),
             subject: claims.sub,

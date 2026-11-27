@@ -27,14 +27,7 @@ pub(super) enum Audiences {
     Many(Vec<String>),
 }
 
-pub(super) fn verify(
-    raw: &str,
-    metadata: &super::Metadata,
-    nonce: &str,
-    client: &str,
-    client_secret: &str,
-    future_skew_seconds: u32,
-) -> Result<Claims, FederationError> {
+pub(super) fn approved_header(raw: &str, metadata: &super::Metadata) -> Result<jsonwebtoken::Header, FederationError> {
     if raw.is_empty() {
         return Err(FederationError::Claims);
     }
@@ -56,17 +49,17 @@ pub(super) fn verify(
     {
         return Err(FederationError::Claims);
     }
-    let key = if matches!(
-        header.alg,
-        Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512
-    ) {
+    Ok(header)
+}
+pub(super) fn symmetric(alg: Algorithm) -> bool {
+    matches!(alg, Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512)
+}
+pub(super) fn signing_key(header: &jsonwebtoken::Header, keys: Option<&super::discovery::Jwks>, client_secret: &str) -> Result<DecodingKey, FederationError> {
+    let algorithm = serde_json::to_value(header.alg).map_err(|_| FederationError::Claims)?;
+    let key = if symmetric(header.alg) {
         DecodingKey::from_secret(client_secret.as_bytes())
     } else {
-        let keys = serde_json::to_value(&metadata.jwks).map_err(|_| FederationError::Claims)?;
-        let keys = keys
-            .get("keys")
-            .and_then(|v| v.as_array())
-            .ok_or(FederationError::Claims)?;
+        let keys = &keys.ok_or(FederationError::Claims)?.keys;
         let key_type = match header.alg {
             Algorithm::RS256
             | Algorithm::RS384
@@ -101,14 +94,18 @@ pub(super) fn verify(
             serde_json::from_value(candidates[0].clone()).map_err(|_| FederationError::Claims)?;
         DecodingKey::from_jwk(&jwk).map_err(|_| FederationError::Claims)?
     };
-    let mut validation = Validation::new(header.alg);
+    Ok(key)
+}
+pub(super) fn verify(raw: &str, alg: Algorithm, key: &DecodingKey, metadata: &super::Metadata,
+    nonce: &str, client: &str, future_skew_seconds: u32) -> Result<Claims, FederationError> {
+    let mut validation = Validation::new(alg);
 
     validation.set_required_spec_claims(&["iss", "sub", "aud", "exp"]);
     validation.set_audience(&[client]);
     validation.set_issuer(&[metadata.issuer.as_str()]);
     validation.leeway = 0;
     validation.validate_nbf = true;
-    let claims = decode::<Claims>(raw, &key, &validation)
+    let claims = decode::<Claims>(raw, key, &validation)
         .map_err(|_| FederationError::Claims)?
         .claims;
     let now = i64::try_from(

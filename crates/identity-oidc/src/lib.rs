@@ -193,30 +193,24 @@ impl HttpOidc {
         Ok(Transport { channel: Channel { policy: self.policy, http, origin, current: slot.current.clone() },
             slot, deadline, requests: AtomicU8::new(0) })
     }
-    async fn discover(
-        &self,
-        tenant: TenantId,
-        c: &ProviderSettings,
-        credentials: &ProviderCredentials,
-        deadline: rss_request_context::Deadline,
-    ) -> Result<(Metadata, Transport), FederationError> {
-        let transport = self.transport(tenant, c, credentials, deadline)?;
-        let metadata = discovery::discover(&transport, c.issuer().as_str()).await?;
-        if metadata
-            .authorization_endpoint
-            .origin()
-            .ascii_serialization()
-            != transport.origin
-            || metadata.token_endpoint.as_ref().is_none_or(|endpoint| {
-                endpoint.url.origin().ascii_serialization() != transport.origin
-            })
-        {
-            return Err(failure(
-                ProviderStage::Discovery,
-                ProviderReason::EgressDenied,
-            ));
+    async fn discover(&self, provider: BoundProvider<'_>, deadline: rss_request_context::Deadline)
+        -> Result<(Metadata, Arc<discovery::Representation>, Transport), FederationError> {
+        let t = self.transport(provider, deadline, false)?;
+        let kind = discovery::Kind::Discovery { issuer: provider.settings.issuer().as_str().into() };
+        let doc = t.slot.discovery.read(&self.resources, &t, kind, None).await?;
+        Ok((doc.metadata()?, doc, t))
+    }
+
+    async fn signing_keys(&self, doc: &discovery::Representation, t: &Transport, kid: Option<&str>)
+        -> Result<discovery::Jwks, FederationError> {
+        let (uri, slot) = doc.keys()?;
+        let kind = || discovery::Kind::Keys { uri: uri.clone() };
+        let first = slot.read(&self.resources, t, kind(), None).await?;
+        let keys = first.jwks()?;
+        if kid.is_some_and(|id| !id.is_empty() && !keys.keys.iter().any(|v| v.get("kid").and_then(|v| v.as_str()) == Some(id))) {
+            return slot.read(&self.resources, t, kind(), Some(&first)).await?.jwks();
         }
-        Ok((metadata, transport))
+        Ok(keys)
     }
 }
 fn certificates(
@@ -399,7 +393,7 @@ impl UpstreamOidc for HttpOidc {
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
-            let (tenant, c, credentials) = (provider.revision.tenant, provider.settings, provider.credentials);
+            let (tenant, c) = (provider.revision.tenant, provider.settings);
             if !code::valid_verifier(m.verifier.as_str()) {
                 return Err(FederationError::Rejected);
             }
@@ -408,7 +402,7 @@ impl UpstreamOidc for HttpOidc {
             {
                 return Err(FederationError::Configuration);
             }
-            let (metadata, _) = self.discover(tenant, c, credentials, deadline).await?;
+            let (metadata, _, _) = self.discover(provider, deadline).await?;
 
             let scope = std::iter::once("openid")
                 .chain(
@@ -460,7 +454,7 @@ impl UpstreamOidc for HttpOidc {
                 return Err(FederationError::Rejected);
             }
 
-            let (metadata, transport) = self.discover(tenant, c, credentials, deadline).await?;
+            let (metadata, doc, transport) = self.discover(provider, deadline).await?;
 
             let endpoint = metadata
                 .token_endpoint
@@ -468,14 +462,12 @@ impl UpstreamOidc for HttpOidc {
                 .ok_or(FederationError::Configuration)?;
             let id_token =
                 code::exchange(&transport, &endpoint.url, c, credentials, &m, &code).await?;
-            let claims = profile_token::verify(
-                id_token.as_str(),
-                &metadata,
-                m.nonce.as_str(),
-                c.client_id().as_str(),
-                credentials.client_secret(),
-                self.future_skew_seconds,
-            )?;
+            let header = profile_token::approved_header(&id_token, &metadata)?;
+            let keys = if profile_token::symmetric(header.alg) { None } else {
+                Some(self.signing_keys(&doc, &transport, header.kid.as_deref()).await?)
+            };
+            let key = profile_token::signing_key(&header, keys.as_ref(), credentials.client_secret())?;
+            let claims = profile_token::verify(&id_token, header.alg, &key, &metadata, &m.nonce, c.client_id().as_str(), self.future_skew_seconds)?;
             let all = serde_json::to_value(&claims).map_err(|_| FederationError::Claims)?;
 
             let groups = mapped_groups(c.claims().groups.as_deref(), &all)?;
@@ -515,8 +507,12 @@ impl UpstreamOidc for HttpOidc {
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
-            let (tenant, c, credentials) = (provider.revision.tenant, provider.settings, provider.credentials);
-            let (metadata, _) = self.discover(tenant, c, credentials, deadline).await?;
+            let c = provider.settings;
+            let t = self.transport(provider, deadline, true)?;
+            let bytes = discovery::Kind::Discovery { issuer: c.issuer().as_str().into() }.probe(&t, &self.resources).await?;
+            let metadata: Metadata = serde_json::from_slice(&bytes).map_err(|_| failure(ProviderStage::Discovery, ProviderReason::InvalidResponse))?;
+            discovery::Kind::Keys { uri: metadata.jwks_uri.clone() }.probe(&t, &self.resources).await?;
+            t.channel.check()?;
             if !metadata.authorization_response_iss_parameter_supported {
                 return Err(failure(
                     ProviderStage::Discovery,
