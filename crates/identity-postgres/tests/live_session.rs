@@ -54,17 +54,6 @@ async fn marker_count(f: &Fixture) -> anyhow::Result<i64> {
             .await?,
     )
 }
-// Observe a real backend waiting on the exact owner, rather than infer a lock from elapsed time.
-async fn waiting(f: &Fixture, blocker: i32) -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%identity_authority.guard%')").bind(blocker).fetch_one(&f.owner).await?;
-            if blocked { return Ok::<_, anyhow::Error>(()); }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await??;
-    Ok(())
-}
 
 #[tokio::test]
 #[ignore = "requires make test-pg"]
@@ -195,7 +184,7 @@ async fn host_admission_serializes_commit_rollback_and_revocation() -> anyhow::R
             tokio::spawn(
                 async move { store.revoke_current_session(revoke_actor, deadline()).await },
             );
-        waiting(&f, pid).await?;
+        wait_for_guard(&f, pid).await?;
         if commit {
             tx.commit().await?;
         } else {
@@ -237,7 +226,7 @@ async fn host_admission_serializes_commit_rollback_and_revocation() -> anyhow::R
             }
             Ok::<_, anyhow::Error>(admitted)
         });
-        waiting(&f, pid).await?;
+        wait_for_guard(&f, pid).await?;
         if commit {
             writer.commit().await?;
         } else {
@@ -442,7 +431,7 @@ async fn host_admission_checks_expiry_after_guard_wait() -> anyhow::Result<()> {
         tx.rollback().await?;
         Ok::<_, anyhow::Error>(result.is_err())
     });
-    waiting(&f, pid).await?;
+    wait_for_guard(&f, pid).await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     writer.rollback().await?;
     assert!(reader.await??);

@@ -745,3 +745,24 @@ async fn refresh_rejects_expiry_during_writes_without_rotating_or_emitting() -> 
     f.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn session_reads_only_require_password_presence() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let issued = f.login().await?;
+    sqlx::raw_sql("REVOKE SELECT ON identity_authority.local_credentials FROM identity_runtime;
+        GRANT SELECT(tenant_id,principal_id,login_key) ON identity_authority.local_credentials TO identity_runtime")
+        .execute(&f.owner).await?;
+    let actor = f
+        .store
+        .inspect_session(binding(f.key.tenant), secret(&issued), deadline())
+        .await?;
+    assert!(actor.identity().has_local_password);
+    let page = f.store.list_sessions(actor, None, 2, deadline()).await?;
+    assert_eq!(page.sessions[0].id, issued.view().id);
+    assert!(f.login().await.is_err());
+    f.close().await;
+    Ok(())
+}

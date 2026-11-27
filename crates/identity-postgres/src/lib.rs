@@ -29,11 +29,12 @@ pub mod platform;
 mod profiles;
 pub use personnel::{PersonnelProfileScope, PersonnelRead, PersonnelRevision};
 pub use profiles::{
-    LocalProfileView, ProfileChange, ProfileReceipt, ProfileSource, ProfileSourcePage,
-    ProfileSourceView, ProfileStatus, ProfileView, TrustedProfile,
+    LocalProfileView, ProfileChange, ProfileOperationId, ProfileReceipt, ProfileSource,
+    ProfileSourcePage, ProfileSourceView, ProfileStatus, ProfileView, TrustedProfile,
 };
 mod runtime;
 mod schema;
+mod session_page;
 mod session_reference;
 mod session_storage;
 mod sessions;

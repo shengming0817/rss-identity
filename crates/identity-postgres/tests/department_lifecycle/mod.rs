@@ -363,6 +363,15 @@ async fn department_configuration_revokes_sessions_and_pending_attempts() -> any
     };
     assert_eq!(d.expires_at() - d.observed_at(), 30);
     assert_eq!(d.provider_config_version(), next.version);
+    // Isolate the config-version check: both sessions now have the current revocation epoch.
+    sqlx::query("UPDATE identity_authority.sessions SET provider_epoch=$2 WHERE session_id=$1")
+        .bind(old.view().id.as_uuid())
+        .bind(next.revocation_epoch)
+        .execute(&f.owner)
+        .await?;
+    let page = f.store.list_sessions(actor, None, 100, deadline()).await?;
+    assert!(page.sessions.iter().any(|s| s.id == session.view().id));
+    assert!(!page.sessions.iter().any(|s| s.id == old.view().id));
     f.close().await;
     Ok(())
 }
@@ -555,6 +564,7 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
     );
     let session = login_department(&f, &federation, &provider).await?;
     let original = facts(&f, &session).await?;
+    let other = login_department(&f, &federation, &provider).await?;
     for bad in [
         serde_json::json!({"version":1,"sourceRevision":"r1","nodes":[{"id":"dept","displayName":"Department","parentId":"missing"}],"memberships":["dept"]}),
         serde_json::json!({"version":2,"sourceRevision":"r1","nodes":[],"memberships":[]}),
@@ -567,6 +577,17 @@ async fn oversized_assertions_withhold_departments_but_corrupt_storage_rejects_i
             .bind(corrupted)
             .execute(&f.owner)
             .await?;
+        let actor = f
+            .store
+            .inspect_session(binding(f.key.tenant), secret(&other), deadline())
+            .await?;
+        let listed = f.store.list_sessions(actor, None, 100, deadline()).await?;
+        assert!(
+            listed
+                .sessions
+                .iter()
+                .any(|item| item.id == session.view().id)
+        );
         assert!(
             f.store
                 .inspect_session(

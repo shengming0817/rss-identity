@@ -23,7 +23,7 @@
  CROSS JOIN LATERAL (SELECT CASE
   WHEN $2::uuid IS NULL OR NOT (a.enabled AND m.active) THEN 'unavailable'
   WHEN ds.principal_id IS NULL THEN 'missing'
-  WHEN NOT COALESCE(dp.enabled AND dp.config_version=ds.config_version::bigint AND dp.revocation_epoch=ds.provider_epoch AND ds.auth_epoch=a.auth_epoch AND ds.membership_epoch=m.epoch,false) THEN 'unavailable'
+  WHEN NOT COALESCE(dp.enabled AND dp.config_version=ds.provider_config_version AND dp.revocation_epoch=ds.provider_epoch AND ds.auth_epoch=a.auth_epoch AND ds.membership_epoch=m.epoch,false) THEN 'unavailable'
   WHEN ds.fact->>'status'<>'available' THEN COALESCE(ds.fact->>'reason','unavailable')
   WHEN (ds.fact->>'observed_at')::bigint>$3 THEN 'not_yet_valid'
   WHEN (ds.fact->>'expires_at')::bigint<=$3 THEN 'expired'

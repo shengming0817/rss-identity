@@ -7,7 +7,7 @@ WITH department_facts AS (
   WHERE e.tenant_id=$1::uuid AND e.provider_id=$2
  ) owners
  CROSS JOIN LATERAL (
-  SELECT s.auth_facts->'department_snapshot' AS fact,s.auth_facts->>'provider_config_version' AS config_version,
+  SELECT s.auth_facts->'department_snapshot' AS fact,s.provider_config_version,
    s.auth_epoch,s.membership_epoch,s.provider_epoch
   FROM identity_authority.sessions s
   WHERE s.tenant_id=owners.tenant_id AND s.principal_id=owners.principal_id AND s.source_provider_id=$2

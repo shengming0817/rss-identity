@@ -28,7 +28,7 @@ bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpO
 
 账户目录接受 `filter/sort/fields/limit/cursor`；字段与操作符由 `identity-core::directory::AccountQuery` 定义。页大小默认 50，允许范围由 [AccountQuery](../../crates/identity-core/src/directory.rs) 持有，排序追加主体 ID。投影行只含所选字段，编辑先读取完整详情。查询姓名、邮箱或资料状态必须显式指定 `source=local` 或确切 IdP UUID；不会混合不同来源。部门 exact/subtree 条件也使用指定 IdP，每个账户在自身完整部门树中匹配。资料与部门的筛选、排序和输出均单独调用宿主管理授权，账户目录权限不隐含资料读取权限。
 
-部门目录取该来源最新成功接受的登录事实，再判定来源、代际和有效期；缺失、无效或过期不回退旧观察。登出不删除仍在期限内的目录观察，明确空成员与未知状态分别表达。这些目录数据不代替当前会话绑定的认证与授权事实。游标是不透明、会话及查询绑定的值，旧账户 UUID 游标已退出；`409 account_cursor_invalidated` 后由用户显式从首页重查。会话列表继续使用自身固定顺序的窗口合同。
+部门目录取该来源最新成功接受的登录事实，再判定来源、代际和有效期；缺失、无效或过期不回退旧观察。登出不删除仍在期限内的目录观察，明确空成员与未知状态分别表达。这些目录数据不代替当前会话绑定的认证与授权事实。游标是不透明、会话及查询绑定的值，旧账户 UUID 游标已退出；`409 account_cursor_invalidated` 后由用户显式从首页重查。会话列表按会话 UUID 扫描；即使本页全部候选失效，客户端也应按返回的游标继续。列表完整认证调用者，候选摘要只复核当前来源、账户代际和有效期。候选未展示的组或部门快照损坏时仍可列出摘要；该会话用于认证时完整解码会拒绝损坏快照。
 
 ## 可选 OIDC Router
 
@@ -66,7 +66,7 @@ HTTP 宿主资源请求统一调用 `authenticate_request`：用户活动选择 
 `GET /api/v1/identity/tenants/{tenant}/profile` 返回本次会话绑定资料，观察被替换或不可用时不回退到其他来源。
 账户资料 GET/PUT 和 operation receipt 入口及期限语义见[嵌入指南](../guides/embedding.md#登录资料与属性)。
 资料请求体单独限制 96 KiB，普通身份请求保持原有边界；成功及失败响应沿用 no-store、Cookie／CSRF 与错误投影。
-资料 CAS 与 operationId 冲突分别为 409 revision_conflict / operation_conflict；未知提交仍为既有不可判定结果，须查询回执。
+资料写入使用 UUIDv7。CAS、操作内容冲突和活动回执满额各有 409 错误码。未知提交查询原回执；410 profile_operation_expired 表示恢复窗口已关闭。
 
 ## WebAuthn 与操作证明
 

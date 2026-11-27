@@ -75,19 +75,9 @@ pub(crate) struct Origin {
     pub facts: crate::auth_facts::AuthenticationFacts,
     pub facts_sequence: i64,
 }
-pub(crate) async fn origin(
-    c: &mut PgConnection,
-    tenant: TenantId,
-    session: rss_identity_core::SessionId,
+pub(crate) fn decode_origin(
+    r: &sqlx::postgres::PgRow,
 ) -> Result<Option<Origin>, rss_transactional_messaging_postgres::PgError> {
-    let r = sqlx::query(concat!(
-        "SELECT external_identity_id,provider_epoch,auth_facts,facts_sequence FROM identity_authority.se",
-        "ssions WHERE tenant_id=$1::uuid AND session_id=$2::uuid"
-    ))
-    .bind(tenant.to_string())
-    .bind(session.to_string())
-    .fetch_one(c)
-    .await?;
     let id: Option<Uuid> = r.try_get("external_identity_id")?;
     match id {
         Some(identity) => Ok(Some(Origin {

@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};
 use std::time::Instant;
 use uuid::Uuid;
+mod operation_id;
+mod receipts;
+pub use operation_id::ProfileOperationId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -81,7 +84,7 @@ pub struct LocalProfileView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProfileChange {
-    pub operation_id: Uuid,
+    pub operation_id: ProfileOperationId,
     pub expected_revision: i64,
     #[serde(deserialize_with = "Option::deserialize")]
     pub value: Option<LocalProfile>,
@@ -89,7 +92,7 @@ pub struct ProfileChange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProfileReceipt {
-    pub operation_id: Uuid,
+    pub operation_id: ProfileOperationId,
     pub revision: i64,
 }
 #[derive(Serialize)]
@@ -323,15 +326,21 @@ impl Reader {
             return Err(reject().into());
         }
         crate::transaction::check_binding(c, self.binding).await?;
-        let loaded = crate::session_storage::lookup(
+        lock_guard(c, self.key.tenant).await?;
+        let mut loaded = crate::session_storage::lookup_locked(
             c,
             self.key.tenant,
             &self.digest,
             self.kind,
+            self.instance,
             &self.checks,
         )
         .await?;
-        if loaded.view.id != self.session || loaded.state.key() != self.key {
+        loaded.expires = loaded.expires.min(self.expires);
+        if Instant::now() >= loaded.expires
+            || loaded.view.id != self.session
+            || loaded.state.key() != self.key
+        {
             return Err(reject().into());
         }
         Ok(loaded)
@@ -379,7 +388,7 @@ impl Authority {
         self.read_sql(actor.binding,deadline,move|c|Box::pin(async move {
             let loaded=reader.recheck(c).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadLatestProfile,Some(target),c).await?;
-            if !load(c,target).await?.state.active(){return Err(reject().into());}
+            if !account_state_locked(c,target).await?.active(){return Err(reject().into());}
             let rows:Vec<String>=sqlx::query_scalar("SELECT source FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND principal_id=$2 AND ($3::text IS NULL OR source>$3) ORDER BY source LIMIT $4")
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(after.map(ProfileSource::key)).bind(i64::from(limit) + 1).fetch_all(c).await?;
             let more=rows.len()>usize::from(limit);
@@ -419,7 +428,7 @@ impl Authority {
                     (reader.key,source,Some(snapshot))
                 }
             };
-            if !load(c,target).await?.state.active(){return Err(reject().into());}
+            if !account_state_locked(c,target).await?.active(){return Err(reject().into());}
             let mut view=ProfileView {instance_id:instance.to_string(),tenant_id:target.tenant.to_string(),principal_id:target.principal.as_uuid().to_string(),source:Some(source),status:ProfileStatus::Unavailable,snapshot_id:None,provider_config_version:None,source_revision:None,observed_at:None,collected_at_micros:None,expires_at:None,profile:None};
             if bound==Some(None){view.source=None;return Ok(TrustedProfile{view,expires});}
             let row=sqlx::query("SELECT * FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND principal_id=$2 AND source=$3")
@@ -475,111 +484,45 @@ impl Authority {
                     c,
                 )
                 .await?;
-                if !load(c, target).await?.state.active() {
+                if !account_state_locked(c, target).await?.active() {
                     return Err(reject().into());
                 }
-                local_view(c, target).await
+                load_local_profile(c, target).await.map(|(view, _)| view)
             })
         })
         .await
     }
-    pub async fn update_local_profile(
-        &self,
-        actor: AuthenticatedSession,
-        target: AccountKey,
-        change: ProfileChange,
-        deadline: OperationDeadline,
-    ) -> Result<ProfileReceipt, AuthorityError> {
-        self.require_runtime()?;
-        if target.tenant != actor.key.tenant
-            || change.operation_id.is_nil()
-            || change.expected_revision < 0
-            || change
-                .value
-                .as_ref()
-                .is_some_and(|v| v.observation().is_err())
-        {
-            return Err(AuthorityError::InvalidInput);
-        }
-        let policy = self.policy.clone();
-        let receipt_capacity = i64::from(self.profile_receipt_capacity.get());
-        let instance = self.instance;
-        let digest = rss_identity_core::federation::digest(
-            &serde_json::to_string(&change).map_err(|_| AuthorityError::InvalidInput)?,
-        );
-        self.conditional_write_sql(actor.binding,deadline,move|c|Box::pin(async move{
-            let loaded=crate::session_storage::recheck(c,&actor).await?;
-            crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::UpdateLocalProfile,Some(target),c).await?;
-            if !load(c,target).await?.state.active(){return Err(reject().into());}
-            if let Some(row)=sqlx::query("SELECT principal_id,actor,digest,revision FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND operation_id=$2")
-                .bind(target.tenant.to_string()).bind(change.operation_id).fetch_optional(&mut *c).await? {
-                if row.try_get::<Uuid,_>("principal_id")?!=target.principal.as_uuid() || row.try_get::<Uuid,_>("actor")?!=actor.key.principal.as_uuid() || row.try_get::<Vec<u8>,_>("digest")?!=digest {return Err(transaction::MutationError::OperationConflict);}
-                return Ok((ProfileReceipt{operation_id:change.operation_id,revision:row.try_get("revision")?},vec![]));
-            }
-            // The tenant guard serializes admission with insertion; replay above remains available.
-            let operations:i64=sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND principal_id=$2 LIMIT $3) AS bounded")
-                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(receipt_capacity).fetch_one(&mut *c).await?;
-            if operations>=receipt_capacity{return Err(transaction::MutationError::ProfileReceiptCapacityReached);}
-            let old=local_view(c,target).await?;
-            if old.revision!=change.expected_revision{return Err(transaction::MutationError::RevisionConflict);}
-            let revision=old.revision.checked_add(1).ok_or_else(corrupt)?;
-            let before=old.value.as_ref().map(LocalProfile::observation).transpose().map_err(|_|corrupt())?;
-            let after=change.value.as_ref().map(LocalProfile::observation).transpose().map_err(|_|corrupt())?.unwrap_or_else(Profile::missing);
-            let mut changed_fields=changes(before.as_ref(),&after);
-            if old.value.as_ref().map(|v|v.max_age_seconds)!=change.value.as_ref().map(|v|v.max_age_seconds){changed_fields.push("maxAgeSeconds");}
-            let value=change.value.map(serde_json::to_value).transpose().map_err(|_|corrupt())?;
-            sqlx::query("INSERT INTO identity_authority.local_profiles(tenant_id,principal_id,revision,value) VALUES($1::uuid,$2,$3,$4) ON CONFLICT(tenant_id,principal_id) DO UPDATE SET revision=excluded.revision,value=excluded.value")
-                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(revision).bind(value).execute(&mut *c).await?;
-            sqlx::query("INSERT INTO identity_authority.profile_operations(tenant_id,operation_id,principal_id,actor,digest,revision) VALUES($1::uuid,$2,$3,$4,$5,$6)")
-                .bind(target.tenant.to_string()).bind(change.operation_id).bind(target.principal.as_uuid()).bind(actor.key.principal.as_uuid()).bind(digest.as_slice()).bind(revision).execute(c).await?;
-            Ok((ProfileReceipt{operation_id:change.operation_id,revision},vec![event(target,Some(actor.key),"local_updated",ProfileSource::IdentityLocal,None,Some(revision),changed_fields)]))
-        })).await
-    }
-    pub async fn local_profile_receipt(
-        &self,
-        actor: &AuthenticatedSession,
-        target: AccountKey,
-        operation: Uuid,
-        deadline: OperationDeadline,
-    ) -> Result<Option<ProfileReceipt>, AuthorityError> {
-        self.require_runtime()?;
-        let reader = Reader::new(actor)?;
-        let policy = self.policy.clone();
-        let instance = self.instance;
-        if target.tenant != reader.key.tenant {
-            return Err(AuthorityError::Rejected);
-        }
-        self.read_sql(actor.binding,deadline,move|c|Box::pin(async move{
-            let loaded=reader.recheck(c).await?;
-            crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::UpdateLocalProfile,Some(target),c).await?;
-            let revision:Option<i64>=sqlx::query_scalar("SELECT revision FROM identity_authority.profile_operations WHERE tenant_id=$1::uuid AND principal_id=$2 AND actor=$3 AND operation_id=$4")
-                .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(reader.key.principal.as_uuid()).bind(operation).fetch_optional(c).await?;
-            Ok(revision.map(|revision|ProfileReceipt{operation_id:operation,revision}))
-        })).await
-    }
 }
-async fn local_view(
+async fn load_local_profile(
     c: &mut PgConnection,
     key: AccountKey,
-) -> Result<LocalProfileView, transaction::MutationError> {
-    let row=sqlx::query("SELECT revision,value FROM identity_authority.local_profiles WHERE tenant_id=$1::uuid AND principal_id=$2")
-        .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_optional(c).await?;
-    match row {
-        None => Ok(LocalProfileView {
-            revision: 0,
-            value: None,
-        }),
-        Some(row) => {
-            let value: Option<serde_json::Value> = row.try_get("value")?;
-            Ok(LocalProfileView {
-                revision: row.try_get("revision")?,
-                value: value
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|_| corrupt())?,
-            })
-        }
-    }
+) -> Result<(LocalProfileView, i64), transaction::MutationError> {
+    let row = sqlx::query(
+        "SELECT revision,value,reclaimed_through FROM identity_authority.local_profiles
+                           WHERE tenant_id=$1::uuid AND principal_id=$2",
+    )
+    .bind(key.tenant.to_string())
+    .bind(key.principal.as_uuid())
+    .fetch_optional(c)
+    .await?;
+    let Some(row) = row else {
+        return Ok((
+            LocalProfileView {
+                revision: 0,
+                value: None,
+            },
+            0,
+        ));
+    };
+    let value: Option<serde_json::Value> = row.try_get("value")?;
+    let view = LocalProfileView {
+        revision: row.try_get("revision")?,
+        value: value
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| corrupt())?,
+    };
+    Ok((view, row.try_get("reclaimed_through")?))
 }
 
 #[derive(Clone, Serialize)]

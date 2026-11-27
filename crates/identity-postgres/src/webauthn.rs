@@ -510,11 +510,13 @@ impl WebauthnAuthority {
                     if storage::authority_id(c).await? != authority {
                         return Err(reject().into());
                     }
-                    let loaded = session_storage::lookup(
+                    storage::lock_guard(c, key.tenant).await?;
+                    let loaded = session_storage::lookup_locked(
                         c,
                         key.tenant,
                         &expected,
                         rss_identity_core::session::CredentialKind::Cookie,
+                        authority,
                         &checks,
                     )
                     .await?;

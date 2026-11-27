@@ -3,7 +3,7 @@ use crate::{
     AccountKey, AuthenticatedSession, Authority, AuthorityError, SessionIdentity, SessionView,
     VerifiedDepartmentSnapshot, VerifiedGroups, session_storage as db,
     sessions::checked_expiry,
-    storage::{authority_id, lock_guard},
+    storage::lock_guard,
     transaction::{connection, reject},
     types::Budget,
 };
@@ -129,13 +129,15 @@ impl Authority {
                 connection(tx, move |c| {
                     Box::pin(async move {
                         lock_guard(c, tenant).await?;
-                        if authority_id(c).await? != reference.instance {
-                            return Err(reject());
-                        }
-                        let loaded = db::by_id(c, key, session, &session_checks).await?;
-                        if loaded.view.credential_kind != reference.credential_kind {
-                            return Err(reject());
-                        }
+                        let loaded = db::by_id_locked(
+                            c,
+                            key,
+                            session,
+                            reference.credential_kind,
+                            reference.instance,
+                            &session_checks,
+                        )
+                        .await?;
                         let expires = checked_expiry(&loaded, budget.0.instant())?;
                         Ok(RevalidatedSession {
                             reference,
