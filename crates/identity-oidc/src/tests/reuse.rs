@@ -39,7 +39,7 @@ fn setup(peer: &Peer, policy: ReusePolicy) -> (HttpOidc, ProviderSettings, Provi
         ProviderCredentials::new("fixture-secret".into(), Some(peer.ca.clone())).unwrap(),
     )
 }
-async fn prepare(p: &HttpOidc, bound: BoundProvider<'_>) -> Result<(), FederationError> {
+async fn prepare(p: &HttpOidc, bound: BoundProvider) -> Result<(), FederationError> {
     let material = ProtocolMaterial::new("state".into())?;
     p.prepare(
         bound,
@@ -52,7 +52,7 @@ async fn prepare(p: &HttpOidc, bound: BoundProvider<'_>) -> Result<(), Federatio
 }
 async fn exchange(
     p: &HttpOidc,
-    bound: BoundProvider<'_>,
+    bound: BoundProvider,
     peer: &Peer,
     kid: &str,
     b: bool,
@@ -138,7 +138,6 @@ async fn lazy_keys_rotation_and_per_token_verification() -> anyhow::Result<()> {
             .is_err()
     );
     assert_eq!(peer.counts.jwks.load(SeqCst), 2);
-    p.resources.advance(policy.refresh_cooldown);
     peer.key_b.store(true, SeqCst);
     exchange(&p, bound.clone(), &peer, "entra-b", true, None).await?;
     for kid in ["missing-1", "missing-2"] {
@@ -238,13 +237,15 @@ async fn bounded_waiters_eviction_and_generation_fences() -> anyhow::Result<()> 
     };
     let (p, c, creds) = setup(&peer, policy);
     let bound = fixture_provider(&p, tenant(), &c, &creds);
-    let other = p
-        .revisions()
-        .install(ProviderRevision {
+    let other = crate::test_support::fixture_install(
+        &p,
+        ProviderRevision {
             provider: ProviderId::generate(),
-            ..bound.installed.revision()
-        })?
-        .bind(&c, &creds);
+            ..bound.revision()
+        },
+        &c,
+        &creds,
+    )?;
     peer.hold.store(true, SeqCst);
     let mut leader = Box::pin(p.discover(bound.clone(), upstream_deadline()));
     tokio::select! { _ = &mut leader => panic!("held response"), _ = peer.entered.notified() => () }
@@ -268,19 +269,35 @@ async fn bounded_waiters_eviction_and_generation_fences() -> anyhow::Result<()> 
     peer.release.add_permits(1);
     prepare(&p, other.clone()).await?;
     let (_, _, old) = p.discover(bound.clone(), upstream_deadline()).await?;
-    for version in [2, 3] {
-        let revision = ProviderRevision {
-            version,
-            ..bound.installed.revision()
-        };
-        p.revisions().observe(revision);
-        let bound = p.revisions().install(revision)?.bind(&c, &creds);
-        assert!(matches!(
-            get(&old, &peer.issuer).await,
-            Err(FederationError::StaleConfiguration)
-        ));
-        prepare(&p, bound.clone()).await?;
-    }
+    let old_revision = bound.revision();
+    let v2 = ProviderRevision {
+        version: 2,
+        ..old_revision
+    };
+    p.revisions().observe(v2);
+    assert!(matches!(
+        get(&old, &peer.issuer).await,
+        Err(FederationError::StaleConfiguration)
+    ));
+    let next = crate::test_support::fixture_install(&p, v2, &c, &creds)?;
+    assert!(matches!(
+        prepare(&p, next.clone()).await,
+        Err(FederationError::Provider(ProviderFailure {
+            stage: ProviderStage::Binding,
+            reason: ProviderReason::Unavailable
+        }))
+    ));
+    drop(old);
+    prepare(&p, next).await?;
+    let v3 = ProviderRevision {
+        version: 3,
+        ..old_revision
+    };
+    prepare(
+        &p,
+        crate::test_support::fixture_install(&p, v3, &c, &creds)?,
+    )
+    .await?;
     assert!(matches!(
         p.discover(bound.clone(), upstream_deadline()).await,
         Err(FederationError::StaleConfiguration)
@@ -311,13 +328,15 @@ async fn bindings_and_independent_refresh_waiters() -> anyhow::Result<()> {
         },
     );
     let bound = fixture_provider(&p, tenant(), &c, &creds);
-    let other = p
-        .revisions()
-        .install(ProviderRevision {
+    let other = crate::test_support::fixture_install(
+        &p,
+        ProviderRevision {
             tenant: TenantId::parse("33333333-3333-4333-8333-333333333333")?,
-            ..bound.installed.revision()
-        })?
-        .bind(&c, &creds);
+            ..bound.revision()
+        },
+        &c,
+        &creds,
+    )?;
     peer.hold.store(true, SeqCst);
     let mut first = Box::pin(p.discover(bound.clone(), upstream_deadline()));
     tokio::select! { _ = &mut first => panic!("held GET"), _ = peer.entered.notified() => () }
@@ -339,23 +358,27 @@ async fn bindings_and_independent_refresh_waiters() -> anyhow::Result<()> {
     let mut input = c.input();
     input.client_id = "other-client".into();
     let settings = ProviderSettings::try_from(input)?;
-    let second = p
-        .revisions()
-        .install(ProviderRevision {
+    let second = crate::test_support::fixture_install(
+        &p,
+        ProviderRevision {
             provider: ProviderId::generate(),
-            ..bound.installed.revision()
-        })?
-        .bind(&settings, &creds);
+            ..bound.revision()
+        },
+        &settings,
+        &creds,
+    )?;
     prepare(&p, second).await?;
     assert_eq!(peer.counts.snapshot(), [3, 3, 3, 0, 0]);
     let no_ca = ProviderCredentials::new("fixture".into(), None)?;
-    let rotated = p
-        .revisions()
-        .install(ProviderRevision {
+    let rotated = crate::test_support::fixture_install(
+        &p,
+        ProviderRevision {
             version: 2,
-            ..bound.installed.revision()
-        })?
-        .bind(&c, &no_ca);
+            ..bound.revision()
+        },
+        &c,
+        &no_ca,
+    )?;
     assert!(matches!(
         p.discover(rotated, upstream_deadline()).await,
         Err(FederationError::Provider(ProviderFailure {
@@ -383,22 +406,24 @@ async fn version_notification_survives_absent_and_evicted_pools() -> anyhow::Res
     let delayed = fixture_provider(&p, tenant(), &c, &creds);
     let v2 = ProviderRevision {
         version: 2,
-        ..delayed.installed.revision()
+        ..delayed.revision()
     };
     p.revisions().observe(v2);
     assert!(matches!(
         prepare(&p, delayed).await,
         Err(FederationError::StaleConfiguration)
     ));
-    let held = p.revisions().install(v2)?.bind(&c, &creds);
+    let held = crate::test_support::fixture_install(&p, v2, &c, &creds)?;
     prepare(&p, held.clone()).await?;
-    let other = p
-        .revisions()
-        .install(ProviderRevision {
+    let other = crate::test_support::fixture_install(
+        &p,
+        ProviderRevision {
             provider: ProviderId::generate(),
             ..v2
-        })?
-        .bind(&c, &creds);
+        },
+        &c,
+        &creds,
+    )?;
     p.test(other.clone(), upstream_deadline()).await?;
     prepare(&p, held.clone()).await?;
     assert_eq!(peer.counts.snapshot(), [2, 2, 2, 1, 0]);
@@ -514,5 +539,132 @@ async fn rotation_shares_inflight_work_with_a_full_byte_budget() -> anyhow::Resu
             .await
             .is_err()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unmatched_304_recovers_and_no_store_retry_charges_the_waiter() -> anyhow::Result<()> {
+    use http::header;
+    let peer = Peer::start().await?;
+    peer.response_headers
+        .lock()
+        .unwrap()
+        .insert(header::CACHE_CONTROL, "no-cache".parse()?);
+    let (p, c, creds) = setup(&peer, reuse_policy());
+    let bound = fixture_provider(&p, tenant(), &c, &creds);
+    prepare(&p, bound.clone()).await?;
+    peer.response_headers
+        .lock()
+        .unwrap()
+        .insert(header::ETAG, "\"different\"".parse()?);
+    prepare(&p, bound.clone()).await?;
+    assert_eq!(
+        peer.headers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, v)| v.clone())
+            .collect::<Vec<_>>(),
+        vec![None, Some("\"d1\"".into()), None]
+    );
+
+    peer.response_headers
+        .lock()
+        .unwrap()
+        .insert(header::CACHE_CONTROL, "no-store".parse()?);
+    peer.hold.store(true, SeqCst);
+    let mut first = Box::pin(prepare(&p, bound.clone()));
+    tokio::select! { _ = &mut first => panic!("held GET"), _ = peer.entered.notified() => () }
+    let t = p.transport(bound, upstream_deadline(), false)?;
+    for _ in 0..3 {
+        t.charge(ProviderStage::Discovery)?;
+    }
+    let mut last = Box::pin(t.slot.as_ref().unwrap().discovery.read(
+        &p.resources,
+        &t,
+        discovery::Kind::Discovery {
+            issuer: peer.issuer.clone(),
+        },
+        None,
+    ));
+    assert!(futures_util::poll!(&mut last).is_pending());
+    peer.hold.store(false, SeqCst);
+    peer.release.add_permits(1);
+    first.await?;
+    assert!(last.await.is_err());
+    assert_eq!(peer.counts.discovery.load(SeqCst), 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn changing_keys_uri_releases_old_key_document_before_replacing_discovery()
+-> anyhow::Result<()> {
+    let peer = Peer::start().await?;
+    peer.keys_padding.store(1024, SeqCst);
+    let (measure, c, creds) = setup(&peer, reuse_policy());
+    exchange(
+        &measure,
+        fixture_provider(&measure, tenant(), &c, &creds),
+        &peer,
+        "entra-a",
+        false,
+        None,
+    )
+    .await?;
+    let policy = ReusePolicy {
+        max_resident_bytes: measure.resources.resident_bytes(),
+        ..reuse_policy()
+    };
+    let (p, c, creds) = setup(&peer, policy);
+    let bound = fixture_provider(&p, tenant(), &c, &creds);
+    exchange(&p, bound.clone(), &peer, "entra-a", false, None).await?;
+    p.resources.advance(policy.discovery_ttl);
+    peer.alternate_uri.store(true, SeqCst);
+    peer.keys_padding.store(0, SeqCst);
+    exchange(&p, bound, &peer, "entra-a", false, None).await?;
+    assert!(p.resources.resident_bytes() < policy.max_resident_bytes);
+    Ok(())
+}
+
+#[tokio::test]
+async fn retirement_interrupts_pending_connection_before_post() -> anyhow::Result<()> {
+    use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+    struct HeldDns {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl Resolve for HeldDns {
+        fn resolve(&self, _: Name) -> Resolving {
+            let entered = self.entered.clone();
+            let release = self.release.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(Box::new(std::iter::once("127.0.0.1:0".parse().unwrap())) as Addrs)
+            })
+        }
+    }
+    let peer = Peer::start().await?;
+    let (mut p, _, creds) = setup(&peer, reuse_policy());
+    let issuer = peer.issuer.replace("127.0.0.1", "localhost");
+    let c = config(&issuer);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    p.lookup = Some(Arc::new(HeldDns {
+        entered: entered.clone(),
+        release: release.clone(),
+    }));
+    let bound = fixture_provider(&p, tenant(), &c, &creds);
+    let t = p.transport(bound.clone(), upstream_deadline(), false)?;
+    let req = http::Request::post(format!("{issuer}/token")).body(Vec::new())?;
+    let mut dispatch = Box::pin(t.call(ProviderStage::Exchange, req));
+    tokio::select! { _=&mut dispatch=>panic!("DNS was held"), _=entered.notified()=>() }
+    p.revisions().retire(bound.revision());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), dispatch).await?,
+        Err(FederationError::StaleConfiguration)
+    ));
+    release.notify_one();
+    assert_eq!(peer.counts.post.load(SeqCst), 0);
     Ok(())
 }

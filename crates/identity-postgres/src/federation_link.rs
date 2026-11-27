@@ -169,14 +169,14 @@ impl Federation {
         let locator = self.signer.verify(self.authority.instance(), &state)?;
         let material = ProtocolMaterial::new(state)?;
         self.check_assurance_profile(tenant, &provider)?;
-        let (installed, credentials) = self
-            .provider_credentials(binding, &provider, budget.remaining())
+        let installed = self
+            .installed_provider(binding, &provider, budget.remaining())
             .await?;
         let url = self
             .upstream(
                 &budget,
                 self.oidc.prepare(
-                    installed.bind(&provider.settings, &credentials),
+                    installed,
                     &material,
                     if purpose == Purpose::Reauthenticate {
                         AuthenticationMode::Reauthenticate
@@ -284,18 +284,14 @@ impl Federation {
         let new_locator = self.signer.verify(self.authority.instance(), &new_state)?;
         let material = ProtocolMaterial::new(new_state)?;
         self.check_assurance_profile(tenant, &target)?;
-        let (installed, credentials) = self
-            .provider_credentials(binding, &target, budget.remaining())
+        let installed = self
+            .installed_provider(binding, &target, budget.remaining())
             .await?;
         let url = self
             .upstream(
                 budget,
-                self.oidc.prepare(
-                    installed.bind(&target.settings, &credentials),
-                    &material,
-                    AuthenticationMode::Login,
-                    budget.0,
-                ),
+                self.oidc
+                    .prepare(installed, &material, AuthenticationMode::Login, budget.0),
             )
             .await?;
         let group_policy = self.group_policy;

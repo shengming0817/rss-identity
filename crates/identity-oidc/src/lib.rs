@@ -9,7 +9,7 @@ use discovery::Metadata;
 mod egress;
 mod resources;
 pub use resources::ReusePolicy;
-use resources::{ProviderResources, Resources};
+use resources::{ClientPool, ProviderResources, Resources};
 use std::{collections::HashMap, sync::Arc};
 #[cfg(test)]
 mod private_provider_tests;
@@ -254,14 +254,14 @@ impl HttpOidc {
     }
     fn transport(
         &self,
-        provider: BoundProvider<'_>,
+        provider: BoundProvider,
         deadline: rss_request_context::Deadline,
         probe: bool,
     ) -> Result<Transport, FederationError> {
         left(deadline, ProviderStage::Binding)?;
-        let c = provider.settings;
+        let c = provider.settings();
         let cidrs = self.private_for(
-            provider.installed.revision().tenant,
+            provider.revision().tenant,
             c.issuer().as_str(),
             c.client_id().as_str(),
         );
@@ -269,18 +269,25 @@ impl HttpOidc {
             .origin()
             .ascii_serialization();
         parse_url(c.redirect_uri(), self.loopback, &[])?;
-        self.revisions.check(&provider.installed)?;
+        self.revisions.check(&provider)?;
         let slot = if probe {
             None
         } else {
             Some(self.resources.bind(&provider)?)
         };
         let http = if probe {
-            self.build_client(provider.credentials, cidrs)?
+            Arc::new(ClientPool {
+                http: self.build_client(provider.credentials(), cidrs)?,
+                _permit: None,
+            })
         } else {
             let mut pooled = slot.as_ref().unwrap().client.lock().unwrap();
             if pooled.is_none() {
-                *pooled = Some(self.build_client(provider.credentials, cidrs)?);
+                let permit = self.resources.client_permit()?;
+                *pooled = Some(Arc::new(ClientPool {
+                    http: self.build_client(provider.credentials(), cidrs)?,
+                    _permit: Some(permit),
+                }));
             }
             pooled.as_ref().unwrap().clone()
         };
@@ -289,7 +296,7 @@ impl HttpOidc {
                 policy: self.policy,
                 http,
                 origin,
-                installed: provider.installed.clone(),
+                installed: provider.installed().clone(),
             },
             slot,
             deadline,
@@ -298,12 +305,12 @@ impl HttpOidc {
     }
     async fn discover(
         &self,
-        provider: BoundProvider<'_>,
+        provider: BoundProvider,
         deadline: rss_request_context::Deadline,
     ) -> Result<(Metadata, Arc<discovery::Representation>, Transport), FederationError> {
         let t = self.transport(provider.clone(), deadline, false)?;
         let kind = discovery::Kind::Discovery {
-            issuer: provider.settings.issuer().as_str().into(),
+            issuer: provider.settings().issuer().as_str().into(),
         };
         let (doc, _) = t
             .slot
@@ -420,7 +427,7 @@ impl Transport {
 #[derive(Clone)]
 struct Channel {
     policy: TransportPolicy,
-    http: reqwest::Client,
+    http: Arc<ClientPool>,
     origin: String,
     installed: InstalledRevision,
 }
@@ -460,6 +467,18 @@ impl Channel {
         deadline: rss_request_context::Deadline,
         request: http::Request<Vec<u8>>,
     ) -> Result<http::Response<Vec<u8>>, FederationError> {
+        tokio::select! {
+            biased;
+            _ = self.installed.retired() => Err(FederationError::StaleConfiguration),
+            result = self.execute(stage, deadline, request) => result,
+        }
+    }
+    async fn execute(
+        &self,
+        stage: ProviderStage,
+        deadline: rss_request_context::Deadline,
+        request: http::Request<Vec<u8>>,
+    ) -> Result<http::Response<Vec<u8>>, FederationError> {
         self.check()?;
         let u = Url::parse(&request.uri().to_string())
             .map_err(|_| failure(stage, ProviderReason::InvalidResponse))?;
@@ -474,6 +493,7 @@ impl Channel {
             .map_err(|_| failure(stage, ProviderReason::InvalidResponse))?;
         *request.timeout_mut() = Some(left(deadline, stage)?.min(self.policy.request_timeout));
         let mut response = self
+            .http
             .http
             .execute(request)
             .await
@@ -537,13 +557,13 @@ impl UpstreamOidc for HttpOidc {
     }
     fn prepare<'a>(
         &'a self,
-        provider: BoundProvider<'a>,
+        provider: BoundProvider,
         m: &'a ProtocolMaterial,
         mode: AuthenticationMode,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String> {
         Box::pin(async move {
-            let (tenant, c) = (provider.installed.revision().tenant, provider.settings);
+            let (tenant, c) = (provider.revision().tenant, provider.settings());
             if !code::valid_verifier(m.verifier.as_str()) {
                 return Err(FederationError::Rejected);
             }
@@ -552,7 +572,7 @@ impl UpstreamOidc for HttpOidc {
             {
                 return Err(FederationError::Configuration);
             }
-            let (metadata, _, transport) = self.discover(provider, deadline).await?;
+            let (metadata, _, transport) = self.discover(provider.clone(), deadline).await?;
 
             let scope = std::iter::once("openid")
                 .chain(
@@ -594,22 +614,22 @@ impl UpstreamOidc for HttpOidc {
 
     fn exchange<'a>(
         &'a self,
-        provider: BoundProvider<'a>,
+        provider: BoundProvider,
         m: ProtocolMaterial,
         code: Zeroizing<String>,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
             let (tenant, c, credentials) = (
-                provider.installed.revision().tenant,
-                provider.settings,
-                provider.credentials,
+                provider.revision().tenant,
+                provider.settings(),
+                provider.credentials(),
             );
             if code.is_empty() || code.len() > 4096 || !code::valid_verifier(m.verifier.as_str()) {
                 return Err(FederationError::Rejected);
             }
 
-            let (metadata, doc, transport) = self.discover(provider, deadline).await?;
+            let (metadata, doc, transport) = self.discover(provider.clone(), deadline).await?;
 
             let endpoint = metadata
                 .token_endpoint
@@ -673,12 +693,12 @@ impl UpstreamOidc for HttpOidc {
 
     fn test<'a>(
         &'a self,
-        provider: BoundProvider<'a>,
+        provider: BoundProvider,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
-            let c = provider.settings;
-            let t = self.transport(provider, deadline, true)?;
+            let c = provider.settings();
+            let t = self.transport(provider.clone(), deadline, true)?;
             let bytes = discovery::Kind::Discovery {
                 issuer: c.issuer().as_str().into(),
             }

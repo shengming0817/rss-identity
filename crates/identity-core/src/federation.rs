@@ -1,7 +1,7 @@
 mod credentials;
 mod revisions;
 pub use credentials::ProviderCredentials;
-pub use revisions::{InstalledRevision, ProviderRevisions};
+pub use revisions::{BoundProvider, InstalledRevision, ProviderRevisions};
 /// Maximum admitted providers in one tenant directory.
 pub const MAX_PROVIDERS: u16 = 1024;
 // Federation values and narrow upstream port. Values are not authentication proofs.
@@ -241,14 +241,6 @@ pub struct ProviderRevision {
     pub version: i64,
 }
 
-/// One installed configuration and its matching credentials, borrowed for one operation.
-#[derive(Clone)]
-pub struct BoundProvider<'a> {
-    pub installed: InstalledRevision,
-    pub settings: &'a ProviderSettings,
-    pub credentials: &'a ProviderCredentials,
-}
-
 impl ProviderView {
     pub fn revision(&self, instance: crate::InstanceId, tenant: TenantId) -> ProviderRevision {
         ProviderRevision {
@@ -344,21 +336,21 @@ pub trait UpstreamOidc: Send + Sync {
     fn revisions(&self) -> &ProviderRevisions;
     fn prepare<'a>(
         &'a self,
-        provider: BoundProvider<'a>,
+        provider: BoundProvider,
         material: &'a ProtocolMaterial,
         mode: crate::assurance::AuthenticationMode,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, String>;
     fn exchange<'a>(
         &'a self,
-        provider: BoundProvider<'a>,
+        provider: BoundProvider,
         material: ProtocolMaterial,
         code: Zeroizing<String>,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims>;
     fn test<'a>(
         &'a self,
-        provider: BoundProvider<'a>,
+        provider: BoundProvider,
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport>;
 }

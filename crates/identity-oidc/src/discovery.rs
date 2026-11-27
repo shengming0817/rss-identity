@@ -155,7 +155,7 @@ struct Fetched {
     // A no-store response may only satisfy one of the coalesced requests.
     consumed: Option<AtomicBool>,
 }
-type Flight = BoxFuture<'static, Result<Arc<Fetched>, FederationError>>;
+type Flight = BoxFuture<'static, Result<Option<Arc<Fetched>>, FederationError>>;
 
 #[derive(Default)]
 struct State {
@@ -212,6 +212,20 @@ impl Document {
         kind: Kind,
         unknown_in: Option<&Arc<()>>,
     ) -> Result<(Arc<Representation>, bool), FederationError> {
+        for _ in 0..2 {
+            if let Some(read) = self.read_once(resources, t, &kind, unknown_in).await? {
+                return Ok(read);
+            }
+        }
+        Err(invalid(kind.stage()))
+    }
+    async fn read_once(
+        self: &Arc<Self>,
+        resources: &Arc<Resources>,
+        t: &Transport,
+        kind: &Kind,
+        unknown_in: Option<&Arc<()>>,
+    ) -> Result<Option<(Arc<Representation>, bool)>, FederationError> {
         let stage = kind.stage();
         self.check()?;
         t.channel.check()?;
@@ -232,7 +246,7 @@ impl Document {
                     }
                 };
                 if reuse {
-                    return Ok((hit.value.clone(), true));
+                    return Ok(Some((hit.value.clone(), true)));
                 }
             }
             t.charge(stage)?;
@@ -247,7 +261,9 @@ impl Document {
                 let owner = self.clone();
                 let resources = resources.clone();
                 let channel = t.channel.clone();
-                state.next_unknown = now.checked_add(resources.policy.refresh_cooldown);
+                if unknown_in.is_some() {
+                    state.next_unknown = now.checked_add(resources.policy.refresh_cooldown);
+                }
                 let request_kind = kind.clone();
                 let work = async move {
                     let _permit = permit;
@@ -267,11 +283,15 @@ impl Document {
         self.check()?;
         t.channel.check()?;
         super::left(t.deadline, stage)?;
+        let Some(result) = result else {
+            return Ok(None);
+        };
         if result
             .consumed
             .as_ref()
             .is_some_and(|used| used.swap(true, Ordering::AcqRel))
         {
+            t.charge(stage)?;
             let private = Document::default();
             let _permit = resources
                 .refreshes
@@ -280,15 +300,15 @@ impl Document {
                 .map_err(|_| failure(stage, ProviderReason::Unavailable))?;
             let own = tokio::time::timeout_at(
                 t.deadline.instant().into(),
-                private.fetch(resources, &t.channel, &kind),
+                private.fetch(resources, &t.channel, kind),
             )
             .await
             .map_err(|_| failure(stage, ProviderReason::Timeout))??;
             self.check()?;
             t.channel.check()?;
-            return Ok((own.value.clone(), false));
+            return Ok(own.map(|r| (r.value.clone(), false)));
         }
-        Ok((result.value.clone(), false))
+        Ok(Some((result.value.clone(), false)))
     }
 
     async fn fetch(
@@ -296,7 +316,7 @@ impl Document {
         resources: &Resources,
         channel: &Channel,
         kind: &Kind,
-    ) -> Result<Arc<Fetched>, FederationError> {
+    ) -> Result<Option<Arc<Fetched>>, FederationError> {
         let stage = kind.stage();
         let previous = self
             .state
@@ -339,13 +359,20 @@ impl Document {
         let value = if parts.status == http::StatusCode::NOT_MODIFIED {
             let (old, prior) = previous.as_ref().ok_or_else(|| invalid(stage))?;
             freshness = *prior;
-            if old.etag.is_none() && old.modified.is_none()
-                || parts
-                    .headers
-                    .get(header::ETAG)
-                    .is_some_and(|v| Some(v) != old.etag.as_ref())
-            {
+            if old.etag.is_none() && old.modified.is_none() {
                 return Err(invalid(stage));
+            }
+            if parts
+                .headers
+                .get(header::ETAG)
+                .is_some_and(|tag| Some(tag) != old.etag.as_ref())
+            {
+                // No stored representation matches this validator. Discard the obsolete
+                // conditions and let each waiter charge a bounded unconditional GET.
+                if let Some(old) = state.cached.take() {
+                    retire_changed_keys(&old.value, None);
+                }
+                return Ok(None);
             }
             old.clone()
         } else {
@@ -368,6 +395,9 @@ impl Document {
             let overhead = etag.as_ref().map_or(0, |v| v.as_bytes().len())
                 + modified.as_ref().map_or(0, |v| v.as_bytes().len())
                 + keys.as_ref().map_or(0, |(u, _)| u.as_str().len());
+            if let Some((old, _)) = &previous {
+                retire_changed_keys(old, keys.as_ref());
+            }
             drop(previous);
             let replaced = state
                 .cached
@@ -414,10 +444,10 @@ impl Document {
         } else {
             None
         };
-        Ok(Arc::new(Fetched {
+        Ok(Some(Arc::new(Fetched {
             value,
             consumed: (!freshness.storable()).then(|| AtomicBool::new(false)),
-        }))
+        })))
     }
 }
 fn retire_changed_keys(old: &Representation, next: Option<&(Url, Arc<Document>)>) {
@@ -425,6 +455,7 @@ fn retire_changed_keys(old: &Representation, next: Option<&(Url, Arc<Document>)>
         && next.is_none_or(|(_, new_keys)| !Arc::ptr_eq(old_keys, new_keys))
     {
         old_keys.retired.store(true, Ordering::Release);
+        old_keys.state.lock().unwrap().cached.take();
     }
 }
 fn valid_media(headers: &HeaderMap, stage: ProviderStage) -> bool {

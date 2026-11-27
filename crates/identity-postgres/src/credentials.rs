@@ -268,21 +268,16 @@ impl crate::Federation {
             })).await?;
         Ok(())
     }
-    pub(crate) async fn provider_credentials(
+    pub(crate) async fn installed_provider(
         &self,
         binding: ExecutionBinding,
         view: &rss_identity_core::federation::ProviderView,
         deadline: OperationDeadline,
-    ) -> Result<
-        (
-            rss_identity_core::federation::InstalledRevision,
-            ProviderCredentials,
-        ),
-        AuthorityError,
-    > {
+    ) -> Result<rss_identity_core::federation::BoundProvider, AuthorityError> {
         let tenant = binding.tenant();
         let revision = view.revision(self.authority.instance(), tenant);
         let credential_version = view.credential_version;
+        let settings = view.settings.clone();
         let keys = self.credential_keys.clone();
         let oidc = self.oidc.clone();
         self.authority.read_sql(binding,deadline,move |c| Box::pin(async move {
@@ -296,7 +291,7 @@ impl crate::Federation {
             if version != revision.version || current != credential_version { return Err(FederationError::StaleConfiguration.into()); }
             let sealed: Sealed = serde_json::from_value(sealed).map_err(|_| corrupt())?;
             let credentials = keys.open(authority, tenant, revision.provider, current, &sealed).map_err(|_| MutationError::Storage(corrupt()))?;
-            Ok((oidc.revisions().install(revision)?, credentials))
+            Ok(oidc.revisions().install(revision,settings,credentials)?)
         })).await
     }
 }

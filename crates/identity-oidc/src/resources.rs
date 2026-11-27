@@ -44,6 +44,7 @@ impl ReusePolicy {
         ]
         .contains(&0)
             || self.max_refreshes > Semaphore::MAX_PERMITS
+            || self.max_providers > Semaphore::MAX_PERMITS
             || [
                 self.idle_timeout,
                 self.discovery_ttl,
@@ -74,10 +75,14 @@ struct Trust {
     client: String,
     ca: Option<[u8; 32]>,
 }
+pub(super) struct ClientPool {
+    pub http: reqwest::Client,
+    pub _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
 pub(super) struct ProviderResources {
     pub discovery: Arc<Document>,
 
-    pub client: Mutex<Option<reqwest::Client>>,
+    pub client: Mutex<Option<Arc<ClientPool>>>,
     trust: Trust,
 }
 struct Entry {
@@ -96,6 +101,7 @@ pub(super) struct Resources {
     entries: Mutex<HashMap<ProviderKey, Entry>>,
     bytes: Arc<AtomicUsize>,
     pub refreshes: Arc<Semaphore>,
+    clients: Arc<Semaphore>,
     pub policy: ReusePolicy,
     #[cfg(test)]
     offset: Mutex<Duration>,
@@ -107,6 +113,7 @@ impl Resources {
             entries: Mutex::default(),
             bytes: Arc::default(),
             refreshes: Arc::new(Semaphore::new(policy.max_refreshes)),
+            clients: Arc::new(Semaphore::new(policy.max_providers)),
             policy,
             #[cfg(test)]
             offset: Mutex::default(),
@@ -129,9 +136,9 @@ impl Resources {
     }
     pub fn bind(
         &self,
-        provider: &BoundProvider<'_>,
+        provider: &BoundProvider,
     ) -> Result<Arc<ProviderResources>, FederationError> {
-        let revision = provider.installed.revision();
+        let revision = provider.revision();
         if revision.version <= 0 {
             return Err(FederationError::Configuration);
         }
@@ -160,10 +167,10 @@ impl Resources {
         }
         entry.last_used = now;
         // The adapter owns the immutable CIDR policy indexed by (tenant, exact issuer, client).
-        let issuer = provider.settings.issuer().as_str();
-        let client = provider.settings.client_id().as_str();
+        let issuer = provider.settings().issuer().as_str();
+        let client = provider.settings().client_id().as_str();
         let ca = provider
-            .credentials
+            .credentials()
             .ca_pem()
             .map(rss_identity_core::federation::digest);
         if let Some(resources) = &entry.resources {
@@ -189,6 +196,20 @@ impl Resources {
         Ok(resources)
     }
 
+    pub fn client_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, FederationError> {
+        let mut entries = self.entries.lock().unwrap();
+        loop {
+            if let Ok(permit) = self.clients.clone().try_acquire_owned() {
+                return Ok(permit);
+            }
+            if !evict_idle(&mut entries) {
+                return Err(crate::failure(
+                    crate::ProviderStage::Binding,
+                    crate::ProviderReason::Unavailable,
+                ));
+            }
+        }
+    }
     pub fn reserve(
         &self,
         bytes: usize,

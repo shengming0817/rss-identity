@@ -126,18 +126,23 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
     );
     let untrusted = ProviderCredentials::new("fixture-secret".into(), None)?;
     let template = fixture_provider(&adapter, tenant, &config, &credentials);
-    let revision = template.installed.revision();
-    let next = |version| {
-        adapter.revisions().install(ProviderRevision {
-            version,
-            ..revision
-        })
+    let revision = template.revision();
+    let next = |version, credentials: &ProviderCredentials| {
+        crate::test_support::fixture_install(
+            &adapter,
+            ProviderRevision {
+                version,
+                ..revision
+            },
+            &config,
+            credentials,
+        )
     };
     assert!(
-        matches!(adapter.test(next(2)?.bind(&config, &untrusted), upstream_deadline()).await,
+        matches!(adapter.test(next(2,&untrusted)?, upstream_deadline()).await,
         Err(FederationError::Provider(ref failure)) if failure.reason == ProviderReason::TlsRejected)
     );
-    let bound = next(3)?.bind(&config, &credentials);
+    let bound = next(3, &credentials)?;
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let authorize = adapter
         .prepare(
@@ -191,7 +196,7 @@ async fn real_private_provider_transport() -> anyhow::Result<()> {
         callback.query_pairs().into_owned().collect();
     assert_eq!(query["state"], material.state.as_str());
     // Force the next operation onto a new pool and a new DNS resolution.
-    let bound = next(4)?.bind(&config, &credentials);
+    let bound = next(4, &credentials)?;
     let before_exchange = calls.load(Ordering::SeqCst);
     let claims = adapter
         .exchange(

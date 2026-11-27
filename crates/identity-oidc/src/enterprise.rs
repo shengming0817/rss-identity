@@ -69,7 +69,7 @@ struct AccessClaims {
 /// Fixed backend exchange inputs. No field is taken from an untrusted browser request.
 pub struct EnterpriseExchange<'a> {
     /// Host-bound provider identity, settings and credentials.
-    pub provider: rss_identity_core::federation::BoundProvider<'a>,
+    pub provider: rss_identity_core::federation::BoundProvider,
     /// Fixed registered RP target.
     pub target: &'a rss_identity_core::enterprise::EnterpriseTarget,
     /// Authority-issued, one-use JWT assertion.
@@ -97,7 +97,7 @@ impl crate::HttpOidc {
             expected_subject,
         } = input;
         use rss_identity_core::federation::FederationError;
-        let (provider, credentials) = (bound.settings, bound.credentials);
+        let (provider, credentials) = (bound.settings(), bound.credentials());
         target
             .validate()
             .map_err(|_| FederationError::Configuration)?;
@@ -109,7 +109,7 @@ impl crate::HttpOidc {
         {
             return Err(FederationError::Configuration);
         }
-        let (metadata, doc, transport) = self.discover(bound, deadline).await?;
+        let (metadata, doc, transport) = self.discover(bound.clone(), deadline).await?;
         let endpoint = metadata.bound_token_endpoint(&target.token_endpoint)?;
         let form = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")

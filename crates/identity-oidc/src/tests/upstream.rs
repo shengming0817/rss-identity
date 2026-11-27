@@ -78,6 +78,7 @@ pub(super) struct Peer {
     pub key_b: AtomicBool,
     pub alternate_uri: AtomicBool,
     pub keys_down: AtomicBool,
+    pub keys_padding: AtomicUsize,
     pub hold: AtomicBool,
     pub entered: Notify,
     pub release: Semaphore,
@@ -102,6 +103,7 @@ impl Peer {
         cert.set_not_after(Asn1Time::days_from_now(1)?.as_ref())?;
         let san = SubjectAlternativeName::new()
             .ip("127.0.0.1")
+            .dns("localhost")
             .build(&cert.x509v3_context(None, None))?;
         cert.append_extension(san)?;
         cert.sign(&key, MessageDigest::sha256())?;
@@ -125,6 +127,7 @@ impl Peer {
             key_b: false.into(),
             alternate_uri: false.into(),
             keys_down: false.into(),
+            keys_padding: 0.into(),
             hold: false.into(),
             entered: Notify::new(),
             release: Semaphore::new(0),
@@ -184,10 +187,13 @@ impl Peer {
 async fn discovery(State(peer): State<Arc<Peer>>, headers: HeaderMap) -> Response {
     peer.counts.discovery.fetch_add(1, SeqCst);
     let moved = peer.alternate_uri.load(SeqCst);
-    let json = json!({"issuer":peer.issuer,"authorization_endpoint":format!("{}/auth",peer.issuer),
+    let mut json = json!({"issuer":peer.issuer,"authorization_endpoint":format!("{}/auth",peer.issuer),
       "token_endpoint":format!("{}/token",peer.issuer), "jwks_uri": format!("{}/{}",peer.issuer,if moved {"next"} else {"keys"}),
       "response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256","HS256"],
       "authorization_response_iss_parameter_supported":true});
+    if moved {
+        json["fixture_extension"] = json!("new metadata after the signing endpoint moved");
+    }
     peer.document(
         "discovery",
         headers,
@@ -216,7 +222,7 @@ async fn keys(
         uri.path(),
         headers,
         if b { "\"b\"" } else { "\"a\"" },
-        json!({"keys":[key]}),
+        json!({"keys":[key],"padding":"x".repeat(peer.keys_padding.load(SeqCst))}),
     )
     .await
 }

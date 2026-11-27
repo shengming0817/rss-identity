@@ -77,7 +77,7 @@ impl UpstreamOidc for ScriptedOidc {
     }
     fn prepare<'a>(
         &'a self,
-        _: BoundProvider<'a>,
+        _: BoundProvider,
         m: &'a ProtocolMaterial,
         _: rss_identity_core::assurance::AuthenticationMode,
         _deadline: rss_request_context::Deadline,
@@ -91,13 +91,13 @@ impl UpstreamOidc for ScriptedOidc {
     }
     fn exchange<'a>(
         &'a self,
-        provider: BoundProvider<'a>,
+        provider: BoundProvider,
         _: ProtocolMaterial,
         code: Zeroizing<String>,
         _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, UpstreamClaims> {
         Box::pin(async move {
-            let c = provider.settings;
+            let c = provider.settings();
             self.calls.fetch_add(1, Ordering::SeqCst);
             let gate = self.gate.lock().unwrap().clone();
             if let Some(gate) = gate {
@@ -163,7 +163,7 @@ impl UpstreamOidc for ScriptedOidc {
     }
     fn test<'a>(
         &'a self,
-        _: BoundProvider<'a>,
+        _: BoundProvider,
         _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
