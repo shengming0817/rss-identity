@@ -207,9 +207,16 @@ fn event(
         epoch: state.epoch(),
     })
 }
+pub(crate) struct NewOidcFacts {
+    pub identity: Uuid,
+    pub epoch: i64,
+    pub sequence: i64,
+    pub facts: crate::auth_facts::AuthenticationFacts,
+}
 pub(crate) enum SessionAuthentication {
     LocalPassword(i64, CredentialKind),
-    Oidc(crate::federation_storage::Origin),
+    Oidc(NewOidcFacts),
+    LinkedOidc { intent: uuid::Uuid },
     Platform(crate::platform::PlatformAuthentication),
 }
 pub(crate) async fn insert(
@@ -222,17 +229,31 @@ pub(crate) async fn insert(
     max_auth_facts_bytes: std::num::NonZeroU32,
 ) -> Result<(IssuedSession, SecurityEvent), transaction::MutationError> {
     let key = state.key();
-    let (source, local_authenticated_at, origin, platform, kind) = match authentication {
+    let (source, local_authenticated_at, origin, intent, platform, kind) = match authentication {
         SessionAuthentication::LocalPassword(time, kind) if time > 0 && time <= now => {
-            ("local_password", Some(time), None, None, kind)
+            ("local_password", Some(time), None, None, None, kind)
         }
-        SessionAuthentication::Oidc(origin) => {
-            ("oidc", None, Some(origin), None, CredentialKind::Cookie)
-        }
+        SessionAuthentication::Oidc(origin) => (
+            "oidc",
+            None,
+            Some(origin),
+            None,
+            None,
+            CredentialKind::Cookie,
+        ),
+        SessionAuthentication::LinkedOidc { intent } => (
+            "oidc",
+            None,
+            None,
+            Some(intent),
+            None,
+            CredentialKind::Cookie,
+        ),
         SessionAuthentication::Platform(platform) => {
             platform.assurance()?;
             (
                 "platform",
+                None,
                 None,
                 None,
                 Some(serde_json::to_value(platform).map_err(|_| corrupt())?),
@@ -247,20 +268,31 @@ pub(crate) async fn insert(
         db::close(c, key, id, now).await?;
     }
     let id = SessionId::generate();
-    let facts = match &origin {
-        Some(o) => Some(o.facts.encode(c, max_auth_facts_bytes).await?),
-        None => None,
-    };
-    sqlx::query(concat!(
-        "INSERT INTO identity_authority.sessions(tenant_id,principal_id,session_id,token_",
-        "hash,auth_epoch,membership_epoch,issued_at,idle_expires_at,absolute_expires_at,e",
-        "xternal_identity_id,provider_epoch,auth_facts,idle_timeout,absolute_timeout,credential_kind,authentication_source,local_authenticated_at,platform_authentication,facts_sequence,source_provider_id) VALUES($1::uuid,$2::uuid,$3::uuid",
-        ",$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,",
-        "(SELECT provider_id FROM identity_authority.external_identities WHERE tenant_id=$1::uuid AND principal_id=$2::uuid AND identity_id=$10))"
+    let result = sqlx::query(concat!(
+        "WITH candidate(identity, epoch, sequence, facts, budget) AS (
+            SELECT $10::uuid, $11::bigint, $19::bigint, $12::jsonb, $21::bigint
+            WHERE $20::uuid IS NULL
+            UNION ALL
+            SELECT source_identity, source_epoch, source_facts_sequence, source_facts, $21
+            FROM identity_authority.link_intents
+            WHERE tenant_id=$1::uuid AND principal_id=$2 AND session_id=$22 AND intent_id=$20
+              AND source_identity IS NOT NULL AND stage=2
+        )",
+        include_str!("admit-auth-facts.sql"),
+        "INSERT INTO identity_authority.sessions (
+            tenant_id, principal_id, session_id, token_hash, auth_epoch, membership_epoch,
+            issued_at, idle_expires_at, absolute_expires_at, external_identity_id, provider_epoch,
+            auth_facts, idle_timeout, absolute_timeout, credential_kind, authentication_source,
+            local_authenticated_at, platform_authentication, facts_sequence, source_provider_id)
+         SELECT $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, identity, epoch, accepted_facts,
+                $13, $14, $15, $16, $17, $18, sequence,
+                (SELECT provider_id FROM identity_authority.external_identities
+                 WHERE tenant_id=$1::uuid AND principal_id=$2 AND identity_id=admitted.identity)
+         FROM admitted"
     ))
     .bind(key.tenant.to_string())
-    .bind(key.principal.as_uuid().to_string())
-    .bind(id.to_string())
+    .bind(key.principal.as_uuid())
+    .bind(id.as_uuid())
     .bind(secret.digest().as_slice())
     .bind(state.epoch())
     .bind(state.membership_epoch())
@@ -269,16 +301,22 @@ pub(crate) async fn insert(
     .bind(lifetime.absolute_expires_at())
     .bind(origin.as_ref().map(|o| o.identity))
     .bind(origin.as_ref().map(|o| o.epoch))
-    .bind(facts)
+    .bind(origin.as_ref().map(|o| sqlx::types::Json(&o.facts)))
     .bind(policy.idle_seconds())
     .bind(policy.absolute_seconds())
     .bind(kind.as_str())
     .bind(source)
     .bind(local_authenticated_at)
     .bind(platform)
-    .bind(origin.as_ref().map(|o| o.facts_sequence))
+    .bind(origin.as_ref().map(|o| o.sequence))
+    .bind(intent)
+    .bind(i64::from(max_auth_facts_bytes.get()))
+    .bind(replaced.map(SessionId::as_uuid))
     .execute(c)
     .await?;
+    if result.rows_affected() != 1 {
+        return Err(reject().into());
+    }
     Ok((
         IssuedSession::new(secret, SessionView::new(id, lifetime, kind), now, state),
         event(

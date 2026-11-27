@@ -217,7 +217,7 @@ impl Federation {
                     let view = db::provider(c, tenant, attempt.provider).await?;
                     db::exact(&view, attempt.version)?;
                     if view.settings.issuer().as_str()!=claimed_issuer{return Err(FederationError::Claims.into())}
-                    let actor = check_actor(c, tenant, instance, &attempt, session).await?;
+                    let (actor, _) = check_actor(c, tenant, instance, &attempt, session).await?;
                     if attempt.mode == AuthenticationMode::StepUp {
                         crate::federation::check_step_up(c, actor.as_ref().ok_or_else(reject)?.state.key(), &view, claim_oidc.as_ref()).await?;
                     }
@@ -288,7 +288,7 @@ impl Federation {
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
                     let view = db::provider(c, tenant, attempt.provider).await?;
                     db::exact(&view, attempt.version)?;
-                    let actor = check_actor(c, tenant, instance, &attempt, session).await?;
+                    let (actor, intent) = check_actor(c, tenant, instance, &attempt, session).await?;
                     if attempt.mode == AuthenticationMode::StepUp {
                         crate::federation::check_step_up(c, actor.as_ref().ok_or_else(reject)?.state.key(), &view, commit_oidc.as_ref()).await?;
                     }
@@ -350,9 +350,9 @@ impl Federation {
                         db::consume(c,&locator).await?;
                         return Ok((FederatedOutcome::StepUp{grant,return_url:attempt.return_url},vec![crate::step_up::event(key,crate::step_up::AuthenticationAction::Verified)]));
                     }
+                    let observation = (!linked).then(|| crate::profiles::oidc_observation(&claims,&view,attempt.profile_sequence));
                     let (origin, replaced) = if linked {
-                        let intent =
-                            crate::federation_link::intent(c, tenant, attempt.link.ok_or_else(reject)?).await?;
+                        let intent = intent.ok_or_else(reject)?;
                         if intent.stage != crate::federation_link::LinkStage::TargetReady || intent.target != view.id || intent.version != view.version {
                             return Err(reject().into());
                         }
@@ -371,7 +371,7 @@ impl Federation {
                             db::check_origin(c, key, origin).await?;
                         }
                         (match intent.origin {
-                            Some(origin) => sessions::SessionAuthentication::Oidc(origin),
+                            Some(_) => sessions::SessionAuthentication::LinkedOidc { intent: intent.id },
                             None => sessions::SessionAuthentication::LocalPassword(intent.local_authenticated_at.ok_or_else(reject)?, rss_identity_core::session::CredentialKind::Cookie),
                         }, Some(intent.session))
                     } else {
@@ -381,16 +381,15 @@ impl Federation {
                             return Err(reject().into());
                         }
                         (
-                            sessions::SessionAuthentication::Oidc(db::Origin {
+                            sessions::SessionAuthentication::Oidc(sessions::NewOidcFacts {
                                 identity: identity_id,
                                 epoch: view.revocation_epoch,
-                                facts_sequence: crate::profiles::sequence(c, tenant).await?,
-                                facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, view.settings.claims().department_snapshot.as_ref(), now, future_skew_seconds)?,
+                                sequence: crate::profiles::sequence(c, tenant).await?,
+                                facts: crate::auth_facts::AuthenticationFacts::collect(claims, view.version, group_policy, view.settings.claims().department_snapshot.as_ref(), now, future_skew_seconds)?,
                             }),
                             attempt.replacement,
                         )
                     };
-                    let observation = (!linked).then(|| crate::profiles::oidc_observation(&claims,&view,attempt.profile_sequence));
                     let (issued, session_event) = sessions::insert(c, state, replaced, origin, now, session_policy, max_auth_facts_bytes).await?;
                     if linked {crate::profiles::retain_binding(c,key,replaced.ok_or_else(reject)?,issued.view().id).await?;}
                     if session_storage::now(c).await? >= attempt.expiry {
@@ -446,7 +445,13 @@ pub(crate) async fn check_actor(
     instance: uuid::Uuid,
     attempt: &db::Attempt,
     session: Option<[u8; 32]>,
-) -> Result<Option<session_storage::Loaded>, rss_transactional_messaging_postgres::PgError> {
+) -> Result<
+    (
+        Option<session_storage::Loaded>,
+        Option<crate::federation_link::Intent>,
+    ),
+    rss_transactional_messaging_postgres::PgError,
+> {
     if let Some(id) = attempt.link {
         let intent = crate::federation_link::intent(c, tenant, id).await?;
         let now = session_storage::now(c).await?;
@@ -478,7 +483,7 @@ pub(crate) async fn check_actor(
         {
             return Err(reject());
         }
-        Ok(Some(actor))
+        Ok((Some(actor), Some(intent)))
     } else if let Some(expected) = attempt.replacement {
         let actor = session_storage::lookup_locked(
             c,
@@ -492,8 +497,8 @@ pub(crate) async fn check_actor(
         if actor.view.id != expected {
             return Err(reject());
         }
-        Ok(Some(actor))
+        Ok((Some(actor), None))
     } else {
-        Ok(None)
+        Ok((None, None))
     }
 }
