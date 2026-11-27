@@ -79,6 +79,7 @@ pub(super) struct Peer {
     pub alternate_uri: AtomicBool,
     pub keys_down: AtomicBool,
     pub keys_padding: AtomicUsize,
+    pub metadata_padding: AtomicUsize,
     pub hold: AtomicBool,
     pub entered: Notify,
     pub release: Semaphore,
@@ -128,6 +129,7 @@ impl Peer {
             alternate_uri: false.into(),
             keys_down: false.into(),
             keys_padding: 0.into(),
+            metadata_padding: 0.into(),
             hold: false.into(),
             entered: Notify::new(),
             release: Semaphore::new(0),
@@ -192,6 +194,7 @@ async fn discovery(State(peer): State<Arc<Peer>>, headers: HeaderMap) -> Respons
       "response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256","HS256"],
       "authorization_response_iss_parameter_supported":true});
     if moved {
+        json["padding"] = json!("x".repeat(peer.metadata_padding.load(SeqCst)));
         json["fixture_extension"] = json!("new metadata after the signing endpoint moved");
     }
     peer.document(

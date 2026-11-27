@@ -668,3 +668,58 @@ async fn retirement_interrupts_pending_connection_before_post() -> anyhow::Resul
     assert_eq!(peer.counts.post.load(SeqCst), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn reinstalled_version_cannot_join_a_retired_key_refresh() -> anyhow::Result<()> {
+    let peer = Peer::start().await?;
+    let (p, c, creds) = setup(&peer, reuse_policy());
+    let old = fixture_provider(&p, tenant(), &c, &creds);
+    let (_, doc, t) = p.discover(old.clone(), upstream_deadline()).await?;
+    peer.hold.store(true, SeqCst);
+    let mut refresh = Box::pin(p.signing_keys(&doc, &t, Some("entra-a")));
+    tokio::select! { _=&mut refresh=>panic!("expected held JWKS response"), _=peer.entered.notified()=>() }
+    // The mutation was staged and rolled back. The fresh authority read returns version 1.
+    p.revisions().retire(old.revision());
+    let current = fixture_provider(&p, tenant(), &c, &creds);
+    peer.hold.store(false, SeqCst);
+    peer.release.add_permits(1);
+    // Leave the retired future pending while the callback obtains its keys.
+    exchange(&p, current, &peer, "entra-a", false, None).await?;
+    assert!(matches!(
+        refresh.await,
+        Err(FederationError::StaleConfiguration)
+    ));
+    assert_eq!(peer.counts.jwks.load(SeqCst), 2);
+    assert_eq!(peer.counts.post.load(SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_discovery_replacement_recovers_at_the_original_uri() -> anyhow::Result<()> {
+    let peer = Peer::start().await?;
+    let policy = ReusePolicy {
+        max_resident_bytes: 2048,
+        ..reuse_policy()
+    };
+    let (p, c, creds) = setup(&peer, policy);
+    let bound = fixture_provider(&p, tenant(), &c, &creds);
+    exchange(&p, bound.clone(), &peer, "entra-a", false, None).await?;
+    p.resources.advance(policy.discovery_ttl);
+    peer.alternate_uri.store(true, SeqCst);
+    peer.metadata_padding.store(4096, SeqCst);
+    assert!(matches!(
+        prepare(&p, bound.clone()).await,
+        Err(FederationError::Provider(ProviderFailure {
+            stage: ProviderStage::Discovery,
+            reason: ProviderReason::Unavailable
+        }))
+    ));
+    peer.alternate_uri.store(false, SeqCst);
+    exchange(&p, bound, &peer, "entra-a", false, None).await?;
+    let headers = peer.headers.lock().unwrap();
+    assert_eq!(
+        &headers[headers.len() - 2..],
+        &[("discovery".into(), None), ("/realm/keys".into(), None)]
+    );
+    Ok(())
+}

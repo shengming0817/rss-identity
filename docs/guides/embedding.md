@@ -101,7 +101,7 @@ let routes = rss_identity_http_axum::router(authority, http.clone())?
 
 OIDC 使用 Code/PKCE、state/nonce 和浏览器绑定，登录事务原子单次消费；邮箱不是自动关联依据。显式关联与 step-up 绑定当前主体，provider 配置变化使旧流程失效。唯一 callback 是宿主 origin 下的 `/api/v1/identity/oidc/callback`，回跳只接受宿主白名单键。
 
-通用 OIDC 宿主在构造 `HttpOidc` 时显式提供 `TransportPolicy` 和 `ReusePolicy`。运行入口使用 `BoundProvider` 绑定实例、租户、Provider ID、单调配置版本与本次凭据。宿主在权威配置读取锁内或串行安装配置时以 `oidc.revisions().install(revision, settings, credentials)` 一次安装版本、设置与凭据。运行入口接收该不可重绑的快照；共享公开数据的缓存仅保留非秘密代际标记。配置变更提交后向使用该配置的每个活跃适配器调用 `revisions().observe(new_revision)`。适配器按活跃快照跟踪代际，缓存淘汰不会恢复旧快照。操作结束或宿主卸载配置后释放快照及其 clone；长期持有会占用版本登记容量（每实例上限为 maxProviders 加 maxRefreshes），即使连接池可被淘汰。参考宿主的 `oidc.reuse` 必填，例如：
+通用 OIDC 宿主在构造 `HttpOidc` 时显式提供 `TransportPolicy` 和 `ReusePolicy`。运行入口使用 `BoundProvider` 绑定实例、租户、Provider ID、单调配置版本与本次凭据。宿主在权威配置读取锁内或串行安装配置时以 `oidc.revisions().install(revision, settings, credentials)` 一次安装版本、设置与凭据。运行入口接收该不可重绑的快照；共享公开数据的缓存仅保留非秘密代际标记。配置变更提交后向使用该配置的每个活跃适配器调用 `revisions().observe(new_revision)`。适配器按活跃快照跟踪代际，缓存淘汰不会恢复旧快照。池条目持有非秘密退役信号，直到条目被淘汰。操作结束或宿主卸载配置后释放快照及其 clone；长期持有会占用版本登记容量（每实例上限为 maxProviders 加 maxRefreshes），即使连接池可被淘汰。参考宿主的 `oidc.reuse` 必填，例如：
 
 ```json
 {"maxProviders":128,"maxResidentBytes":8388608,"maxRefreshes":8,"maxIdlePerHost":2,"idleSeconds":30,"discoverySeconds":300,"jwksSeconds":60,"refreshCooldownSeconds":10}

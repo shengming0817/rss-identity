@@ -395,8 +395,12 @@ impl Document {
             let overhead = etag.as_ref().map_or(0, |v| v.as_bytes().len())
                 + modified.as_ref().map_or(0, |v| v.as_bytes().len())
                 + keys.as_ref().map_or(0, |(u, _)| u.as_str().len());
-            if let Some((old, _)) = &previous {
-                retire_changed_keys(old, keys.as_ref());
+            // Parent and child leave the cache together even if admission of the new
+            // representation fails. A later request then starts without obsolete validators.
+            if let Some((old, _)) = &previous
+                && retire_changed_keys(old, keys.as_ref())
+            {
+                state.cached = None;
             }
             drop(previous);
             let replaced = state
@@ -450,13 +454,15 @@ impl Document {
         })))
     }
 }
-fn retire_changed_keys(old: &Representation, next: Option<&(Url, Arc<Document>)>) {
+fn retire_changed_keys(old: &Representation, next: Option<&(Url, Arc<Document>)>) -> bool {
     if let Some((_, old_keys)) = &old.keys
         && next.is_none_or(|(_, new_keys)| !Arc::ptr_eq(old_keys, new_keys))
     {
         old_keys.retired.store(true, Ordering::Release);
         old_keys.state.lock().unwrap().cached.take();
+        return true;
     }
+    false
 }
 fn valid_media(headers: &HeaderMap, stage: ProviderStage) -> bool {
     headers.get(header::CONTENT_TYPE).is_none_or(|value| {

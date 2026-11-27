@@ -80,6 +80,7 @@ pub(super) struct ClientPool {
     pub _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 pub(super) struct ProviderResources {
+    installed: rss_identity_core::federation::InstalledRevision,
     pub discovery: Arc<Document>,
 
     pub client: Mutex<Option<Arc<ClientPool>>>,
@@ -162,7 +163,14 @@ impl Resources {
         if revision.version < entry.version {
             return Err(FederationError::StaleConfiguration);
         }
-        if revision.version > entry.version {
+        // A staged mutation can roll back. The new authoritative installation then
+        // has the same numeric version, but must not join the retired generation's GET.
+        if revision.version > entry.version
+            || entry
+                .resources
+                .as_ref()
+                .is_some_and(|r| r.installed.check().is_err())
+        {
             entry.retire(revision.version);
         }
         entry.last_used = now;
@@ -183,6 +191,7 @@ impl Resources {
             return Ok(resources.clone());
         }
         let resources = Arc::new(ProviderResources {
+            installed: provider.installed().clone(),
             trust: Trust {
                 issuer: issuer.into(),
                 client: client.into(),
