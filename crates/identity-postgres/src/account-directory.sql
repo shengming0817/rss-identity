@@ -11,7 +11,7 @@ WITH account_rows AS (
  LEFT JOIN identity_authority.profile_observations o ON o.tenant_id=a.tenant_id AND o.principal_id=a.principal_id AND o.source=$2
  LEFT JOIN identity_authority.providers p ON p.tenant_id=o.tenant_id AND p.provider_id=o.provider_id
  LEFT JOIN LATERAL (
-  SELECT s.auth_facts,s.auth_epoch,s.membership_epoch,s.provider_epoch,s.external_identity_id
+  SELECT s.auth_facts,s.provider_config_version,s.auth_epoch,s.membership_epoch,s.provider_epoch,s.external_identity_id
   FROM identity_authority.sessions s
   JOIN identity_authority.external_identities e ON e.tenant_id=s.tenant_id AND e.identity_id=s.external_identity_id
   WHERE s.tenant_id=a.tenant_id AND s.principal_id=a.principal_id AND e.provider_id::text=$2
@@ -30,7 +30,7 @@ WITH account_rows AS (
  CROSS JOIN LATERAL (SELECT CASE
   WHEN NOT $5 OR NOT (a.enabled AND m.active) THEN 'unavailable'
   WHEN ds.auth_facts IS NULL THEN 'missing'
-  WHEN NOT COALESCE(dp.enabled AND dp.config_version=(ds.auth_facts->>'provider_config_version')::bigint AND dp.revocation_epoch=ds.provider_epoch AND ds.auth_epoch=a.auth_epoch AND ds.membership_epoch=m.epoch,false) THEN 'unavailable'
+  WHEN NOT COALESCE(dp.enabled AND dp.config_version=ds.provider_config_version AND dp.revocation_epoch=ds.provider_epoch AND ds.auth_epoch=a.auth_epoch AND ds.membership_epoch=m.epoch,false) THEN 'unavailable'
   WHEN ds.auth_facts->'department_snapshot'->>'status'<>'available' THEN COALESCE(ds.auth_facts->'department_snapshot'->>'reason','unavailable')
   WHEN (ds.auth_facts->'department_snapshot'->>'observed_at')::bigint>$3 THEN 'not_yet_valid'
   WHEN (ds.auth_facts->'department_snapshot'->>'expires_at')::bigint<=$3 THEN 'expired'

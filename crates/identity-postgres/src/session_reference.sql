@@ -17,7 +17,7 @@ identity_session_references AS NOT MATERIALIZED (
   (s.authentication_source='oidc' AND EXISTS (
    SELECT FROM identity_authority.external_identities e JOIN identity_authority.providers p USING(tenant_id,provider_id)
    WHERE e.tenant_id=s.tenant_id AND e.principal_id=s.principal_id AND e.identity_id=s.external_identity_id
-   AND p.enabled AND p.revocation_epoch=s.provider_epoch AND p.config_version=(s.auth_facts->>'provider_config_version')::bigint
+   AND p.enabled AND p.revocation_epoch=s.provider_epoch AND p.config_version=s.provider_config_version
   )) OR (s.authentication_source='platform' AND {platform_enabled}
    AND s.platform_authentication->>'audience'='{platform_audience}'
    AND s.platform_authentication->'binding'->>'instance'='{instance}'

@@ -98,7 +98,7 @@ impl Federation {
         let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
         let (actor,account,origin,login)=self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
                     let loaded = session_storage::recheck(c, &actor).await?;
-                    let origin = db::origin(c, tenant, actor.view.id).await?;
+                    let origin = loaded.origin.map(|origin| *origin);
                     let login: Option<String> = sqlx::query_scalar(concat!(
                         "SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::u",
                         "uid AND principal_id=$2::uuid"
@@ -315,6 +315,7 @@ impl Federation {
         let group_policy = self.group_policy;
         let future_skew_seconds = self.authority.future_skew_seconds;
         let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
+        let instance = self.authority.instance.as_uuid();
         self.authority
             .write_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
@@ -322,7 +323,7 @@ impl Federation {
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
                     let current_source = db::provider(c, tenant, source.id).await?;
                     db::exact(&current_source, source.version)?;
-                    check_actor(c, tenant, &attempt, session).await?;
+                    check_actor(c, tenant, instance, &attempt, session).await?;
                     let i = intent(c, tenant, intent_id).await?;
                     let origin = i.origin.as_ref().ok_or_else(reject)?;
                     db::check_origin(

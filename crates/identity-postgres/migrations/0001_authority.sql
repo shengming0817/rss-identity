@@ -1,7 +1,7 @@
--- Fresh schema v20 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v21 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=20));
-INSERT INTO identity_authority.schema_version VALUES(20);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=21));
+INSERT INTO identity_authority.schema_version VALUES(21);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),
@@ -101,11 +101,15 @@ CREATE TABLE identity_authority.sessions (
  CHECK ((external_identity_id IS NULL) = (source_provider_id IS NULL)),
  provider_epoch bigint,
  auth_facts jsonb,
+ provider_config_version bigint GENERATED ALWAYS AS (
+   CASE WHEN jsonb_typeof(auth_facts->'provider_config_version')='number'
+     THEN (auth_facts->>'provider_config_version')::bigint END
+ ) STORED,
  CONSTRAINT session_presentation CHECK(credential_kind='cookie' OR authentication_source='local_password'),
  CONSTRAINT authentication_kind CHECK (((authentication_source='local_password' AND local_authenticated_at>0 AND local_authenticated_at<=issued_at AND platform_authentication IS NULL AND external_identity_id IS NULL)
  OR (authentication_source='oidc' AND local_authenticated_at IS NULL AND platform_authentication IS NULL AND external_identity_id IS NOT NULL)
  OR (authentication_source='platform' AND local_authenticated_at IS NULL AND external_identity_id IS NULL AND jsonb_typeof(platform_authentication)='object' AND octet_length(platform_authentication::text)<=4096)) IS TRUE),
- CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL AND facts_sequence IS NULL) OR (external_identity_id IS NOT NULL AND facts_sequence IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND (auth_facts->'format_version'='3'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
+ CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL AND facts_sequence IS NULL) OR (external_identity_id IS NOT NULL AND provider_config_version IS NOT NULL AND provider_config_version>0 AND facts_sequence IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND (auth_facts->'format_version'='3'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
  FOREIGN KEY(tenant_id,principal_id,source_provider_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,principal_id,provider_id,identity_id),
  PRIMARY KEY(tenant_id,session_id),
  UNIQUE(tenant_id,token_hash), UNIQUE(tenant_id,principal_id,session_id),
@@ -332,9 +336,7 @@ CREATE FUNCTION identity_authority.personnel_facts(
     AND o.principal_id=subject.id AND o.source=source_key
   LEFT JOIN LATERAL (
    SELECT ses.auth_facts,ses.facts_sequence,ses.auth_epoch,ses.membership_epoch,ses.provider_epoch,
-    CASE WHEN jsonb_typeof(ses.auth_facts->'provider_config_version')='number'
-      AND pg_input_is_valid(ses.auth_facts->>'provider_config_version','bigint')
-     THEN (ses.auth_facts->>'provider_config_version')::bigint END AS fact_version
+    ses.provider_config_version AS fact_version
    FROM identity_authority.sessions ses
    WHERE family<>'profile' AND ses.tenant_id=tenant AND ses.principal_id=subject.id AND ses.source_provider_id=p.provider_id
    ORDER BY ses.facts_sequence DESC,ses.auth_epoch DESC,ses.membership_epoch DESC,ses.session_id LIMIT 1

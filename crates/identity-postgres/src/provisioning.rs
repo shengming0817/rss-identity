@@ -3,7 +3,7 @@
 use crate::{
     AuthenticatedSession, Authority, AuthorityConfig, AuthorityError, AuthorityProfile, Budget,
     ExecutionBinding, ManagementOperation, ManagementPolicy,
-    storage::{authority_id, insert_account, load_for_maintenance},
+    storage::{account_state_locked, authority_id, insert_account},
     transaction::{self, MutationError, SecurityEvent},
 };
 use rss_identity_core::{
@@ -155,7 +155,7 @@ impl AccountProvisioner {
                 .bind(target.to_string()).execute(&mut *c).await?;
             crate::storage::lock_guard(c, target).await?;
             insert_account(c, key, prepared.login.as_str(), prepared.hash.as_str()).await?;
-            Ok::<_, ProvisioningError>(load_for_maintenance(c, key).await?.state)
+            Ok::<_, ProvisioningError>(account_state_locked(c, key).await?)
         })).await?;
         let bundle = self.authority.runtime.clone();
         crate::audit::append_events(

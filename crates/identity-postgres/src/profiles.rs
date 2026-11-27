@@ -326,11 +326,13 @@ impl Reader {
             return Err(reject().into());
         }
         crate::transaction::check_binding(c, self.binding).await?;
-        let mut loaded = crate::session_storage::lookup(
+        lock_guard(c, self.key.tenant).await?;
+        let mut loaded = crate::session_storage::lookup_locked(
             c,
             self.key.tenant,
             &self.digest,
             self.kind,
+            self.instance,
             &self.checks,
         )
         .await?;
@@ -386,7 +388,7 @@ impl Authority {
         self.read_sql(actor.binding,deadline,move|c|Box::pin(async move {
             let loaded=reader.recheck(c).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadLatestProfile,Some(target),c).await?;
-            if !load(c,target).await?.state.active(){return Err(reject().into());}
+            if !account_state_locked(c,target).await?.active(){return Err(reject().into());}
             let rows:Vec<String>=sqlx::query_scalar("SELECT source FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND principal_id=$2 AND ($3::text IS NULL OR source>$3) ORDER BY source LIMIT $4")
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(after.map(ProfileSource::key)).bind(i64::from(limit) + 1).fetch_all(c).await?;
             let more=rows.len()>usize::from(limit);
@@ -426,7 +428,7 @@ impl Authority {
                     (reader.key,source,Some(snapshot))
                 }
             };
-            if !load(c,target).await?.state.active(){return Err(reject().into());}
+            if !account_state_locked(c,target).await?.active(){return Err(reject().into());}
             let mut view=ProfileView {instance_id:instance.to_string(),tenant_id:target.tenant.to_string(),principal_id:target.principal.as_uuid().to_string(),source:Some(source),status:ProfileStatus::Unavailable,snapshot_id:None,provider_config_version:None,source_revision:None,observed_at:None,collected_at_micros:None,expires_at:None,profile:None};
             if bound==Some(None){view.source=None;return Ok(TrustedProfile{view,expires});}
             let row=sqlx::query("SELECT * FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND principal_id=$2 AND source=$3")
@@ -482,7 +484,7 @@ impl Authority {
                     c,
                 )
                 .await?;
-                if !load(c, target).await?.state.active() {
+                if !account_state_locked(c, target).await?.active() {
                     return Err(reject().into());
                 }
                 load_local_profile(c, target).await.map(|(view, _)| view)

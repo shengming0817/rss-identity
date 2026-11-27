@@ -96,7 +96,7 @@ impl Authority {
             let loaded = crate::session_storage::recheck(c, &actor).await?;
             crate::management::authorize(policy.as_ref(), instance, &loaded,
                 ManagementOperation::UpdateLocalProfile, Some(target), c).await?;
-            if !load(c, target).await?.state.active() {
+            if !account_state_locked(c, target).await?.active() {
                 return Err(reject().into());
             }
             let clock = ReceiptClock::load(c, target.tenant).await?;

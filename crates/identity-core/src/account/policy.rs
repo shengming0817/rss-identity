@@ -2,7 +2,7 @@
 use super::Password;
 use crate::PrincipalId;
 use rss_request_context::TenantId;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AccountKey {
     pub tenant: TenantId,
     pub principal: PrincipalId,
