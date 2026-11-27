@@ -141,7 +141,6 @@ pub(crate) enum SessionAccess {
     Host,
     Account(AccountKey),
     Provider(rss_identity_core::federation::ProviderId),
-    ProfileRead(AccountKey),
     ProfileWrite(AccountKey),
 }
 
@@ -164,7 +163,6 @@ pub(crate) async fn lock_session(
             "provider",
             Some(uuid::Uuid::parse_str(&id.to_string()).map_err(|_| corrupt())?),
         ),
-        SessionAccess::ProfileRead(key) => ("profile_read", Some(key.principal.as_uuid())),
         SessionAccess::ProfileWrite(key) => ("profile_write", Some(key.principal.as_uuid())),
     };
     let found: bool = sqlx::query_scalar("SELECT identity_authority.lock_session($1,$2,$3,$4,$5)")

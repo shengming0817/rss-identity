@@ -33,5 +33,5 @@ GRANT SELECT,INSERT ON identity_authority.webauthn_rp TO {role};
 GRANT USAGE ON SCHEMA rss_audit TO {role};
 GRANT SELECT ON rss_audit.records TO {role};
 GRANT EXECUTE ON FUNCTION rss_audit.append_batch(uuid,text[],text[],bigint[],bytea[],bigint[]) TO {role};
-GRANT EXECUTE ON FUNCTION identity_authority.share_subject(uuid), identity_authority.share_provider(uuid) TO {role};
+GRANT EXECUTE ON FUNCTION identity_authority.share_host_tenant(),identity_authority.share_subject(uuid), identity_authority.share_provider(uuid) TO {role};
 GRANT EXECUTE ON FUNCTION identity_authority.lock_session(bytea,uuid,text,text,uuid) TO {role};

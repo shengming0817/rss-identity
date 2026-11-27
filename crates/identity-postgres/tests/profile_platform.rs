@@ -1331,6 +1331,28 @@ async fn source_admission_borrows_transaction_with_no_credential_privileges() ->
     .execute(&mut *owner)
     .await?;
 
+    for drift in [
+        format!(
+            "GRANT EXECUTE ON FUNCTION identity_authority.share_provider(uuid) TO {role} WITH GRANT OPTION"
+        ),
+        "GRANT EXECUTE ON FUNCTION identity_authority.share_provider(uuid) TO PUBLIC".to_owned(),
+    ] {
+        let mut tx = owner.begin().await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(drift))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('role',$1,true)")
+            .bind(&role)
+            .execute(&mut *tx)
+            .await?;
+        assert!(
+            verify_profile_source_admission(&mut tx, f.instance)
+                .await
+                .is_err()
+        );
+        tx.rollback().await?;
+    }
+
     let mut tx = owner.begin().await?;
     sqlx::query("SELECT set_config('role',$1,true)")
         .bind(&role)

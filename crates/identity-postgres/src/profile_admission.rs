@@ -48,13 +48,10 @@ pub async fn admit_profile_source_on(
     if id != instance.as_uuid() {
         return Err(Error::Rejected);
     }
-    let guard: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR SHARE",
-    )
-    .bind(tenant.to_string())
-    .fetch_optional(&mut *c)
-    .await?;
-    if guard.is_none() {
+    let admitted: bool = sqlx::query_scalar("SELECT identity_authority.share_host_tenant()")
+        .fetch_one(&mut *c)
+        .await?;
+    if !admitted {
         return Err(Error::Rejected);
     }
     let (version, settings) = match source {

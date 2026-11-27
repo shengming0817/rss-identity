@@ -266,6 +266,11 @@ REVOKE ALL ON ALL TABLES IN SCHEMA identity_authority FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA identity_authority FROM PUBLIC;
 
 -- Narrow lock-only ports for the host admission roles. Tenant comes from the fenced transaction.
+CREATE FUNCTION identity_authority.share_host_tenant() RETURNS boolean
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+ SELECT EXISTS(SELECT FROM identity_authority.tenants
+  WHERE tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid FOR SHARE)
+$$;
 CREATE FUNCTION identity_authority.share_provider(id uuid) RETURNS boolean
 LANGUAGE sql VOLATILE STRICT SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
  SELECT EXISTS(SELECT FROM identity_authority.providers
@@ -280,7 +285,7 @@ BEGIN
  PERFORM FROM identity_authority.memberships WHERE tenant_id=tenant AND principal_id=id FOR SHARE;
  RETURN FOUND;
 END $$;
-REVOKE ALL ON FUNCTION identity_authority.share_provider(uuid),identity_authority.share_subject(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION identity_authority.share_host_tenant(),identity_authority.share_provider(uuid),identity_authority.share_subject(uuid) FROM PUBLIC;
 
 -- REF: PostgreSQL REL_17_6 src/backend/access/heap/heapam.c, tupleLockExtraInfo.
 -- Credentials only locate rows. After waiting, lock the exact original credential/source
@@ -298,7 +303,7 @@ DECLARE
  id uuid;
 BEGIN
  IF num_nonnulls(digest,reference_id)<>1 OR intent NOT IN
-  ('inspect','activity','rotate','revoke','all','host','account','provider','profile_read','profile_write') THEN
+  ('inspect','activity','rotate','revoke','all','host','account','provider','profile_write') THEN
   RETURN false;
  END IF;
  SELECT s.session_id,s.principal_id,s.source_provider_id,s.authentication_source,s.platform_authentication
@@ -326,10 +331,10 @@ BEGIN
   ELSE
    PERFORM FROM identity_authority.providers WHERE tenant_id=tenant AND provider_id=id FOR SHARE;
   END IF;
-  IF NOT FOUND THEN RETURN false; END IF;
+  IF NOT FOUND AND id=source_id THEN RETURN false; END IF;
  END LOOP;
 
- IF intent IN ('account','profile_write','profile_read') THEN other_account:=target; END IF;
+ IF intent IN ('account','profile_write') THEN other_account:=target; END IF;
  IF intent='account' THEN write_account:=target;
  ELSIF intent='all' THEN write_account:=candidate.principal_id; END IF;
  FOR id IN SELECT DISTINCT k FROM unnest(ARRAY[candidate.principal_id,other_account]) k WHERE k IS NOT NULL ORDER BY k LOOP
@@ -338,14 +343,17 @@ BEGIN
   ELSE
    PERFORM FROM identity_authority.accounts WHERE tenant_id=tenant AND principal_id=id FOR SHARE;
   END IF;
-  IF NOT FOUND THEN RETURN false; END IF;
+  IF NOT FOUND THEN
+   IF id=candidate.principal_id THEN RETURN false; END IF;
+   CONTINUE; -- Host policy determines visibility of a missing management target.
+  END IF;
   -- All component membership mutations acquire the account first.
   IF intent='account' AND id=target THEN
    PERFORM FROM identity_authority.memberships WHERE tenant_id=tenant AND principal_id=id FOR UPDATE;
   ELSE
    PERFORM FROM identity_authority.memberships WHERE tenant_id=tenant AND principal_id=id FOR SHARE;
   END IF;
-  IF NOT FOUND THEN RETURN false; END IF;
+  IF NOT FOUND AND id=candidate.principal_id THEN RETURN false; END IF;
  END LOOP;
 
  IF intent='rotate' THEN

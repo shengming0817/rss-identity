@@ -64,6 +64,19 @@ pub async fn verify_profile(
     )
 }
 
+// These lock ports must remain callable only by the roles explicitly granted each port.
+// A SET-reachable role with delegation rights could otherwise bypass the embedded role profile.
+async fn lock_grants_are_private(c: &mut PgConnection) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT NOT EXISTS(
+        SELECT FROM pg_proc p WHERE p.oid IN ('identity_authority.share_host_tenant()'::regprocedure,'identity_authority.share_provider(uuid)'::regprocedure,
+        'identity_authority.share_subject(uuid)'::regprocedure,'identity_authority.lock_session(bytea,uuid,text,text,uuid)'::regprocedure)
+        AND (EXISTS(SELECT FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+            WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE')
+            OR EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET')
+            AND has_function_privilege(r.oid,p.oid,'EXECUTE WITH GRANT OPTION'))))")
+        .fetch_one(c).await
+}
+
 pub(crate) async fn probe(
     connection: &mut PgConnection,
     profile: AuthorityProfile,
@@ -128,6 +141,9 @@ pub(crate) async fn probe(
         })
         .fetch_one(&mut *connection)
         .await?;
+    if !lock_grants_are_private(connection).await? {
+        return Ok(Some("privileges".into()));
+    }
     if result != "ok" {
         return Ok(Some(result));
     }
@@ -149,7 +165,7 @@ pub async fn grant_profile_source_admission(
         return Err(sqlx::Error::Protocol("invalid role identifier".into()));
     }
     let role = format!("\"{}\"", role.replace('"', "\"\""));
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("GRANT USAGE ON SCHEMA identity_authority TO {role}; GRANT SELECT ON identity_authority.schema_version TO {role}; GRANT SELECT(singleton,authority_id) ON identity_authority.deployment TO {role}; GRANT SELECT(tenant_id),UPDATE(tenant_id) ON identity_authority.tenants TO {role}; GRANT SELECT(tenant_id,provider_id,enabled,config_version,settings) ON identity_authority.providers TO {role}; GRANT EXECUTE ON FUNCTION identity_authority.share_provider(uuid) TO {role};"))).execute(c).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("GRANT USAGE ON SCHEMA identity_authority TO {role}; GRANT SELECT ON identity_authority.schema_version TO {role}; GRANT SELECT(singleton,authority_id) ON identity_authority.deployment TO {role}; GRANT EXECUTE ON FUNCTION identity_authority.share_host_tenant() TO {role}; GRANT SELECT(tenant_id,provider_id,enabled,config_version,settings) ON identity_authority.providers TO {role}; GRANT EXECUTE ON FUNCTION identity_authority.share_provider(uuid) TO {role};"))).execute(c).await?;
     Ok(())
 }
 /// Verify only this narrow Identity profile; unrelated host schema privileges are unaffected.
@@ -184,13 +200,13 @@ async fn verify_host_admission(
 ) -> Result<(), AuthorityError> {
     let result=async {
         // SET reachability includes NOINHERIT membership; effective privileges alone are insufficient.
-        let reachable_safe:bool=sqlx::query_scalar("WITH reachable AS (SELECT oid,rolsuper,rolbypassrls,rolcreaterole FROM pg_roles WHERE pg_has_role(current_user,oid,'SET')) SELECT NOT EXISTS(SELECT FROM reachable r WHERE r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR has_schema_privilege(r.oid,'identity_authority','CREATE')) AND NOT EXISTS(SELECT FROM reachable r CROSS JOIN pg_attribute a JOIN pg_class cl ON cl.oid=a.attrelid JOIN pg_namespace n ON n.oid=cl.relnamespace WHERE n.nspname='identity_authority' AND cl.relkind='r' AND a.attnum>0 AND NOT a.attisdropped AND ((has_column_privilege(r.oid,a.attrelid,a.attnum,'SELECT') AND NOT ((cl.relname='schema_version' OR (cl.relname='deployment' AND a.attname IN ('singleton','authority_id'))) OR (cl.relname='tenants' AND a.attname='tenant_id') OR (cl.relname='providers' AND a.attname IN ('tenant_id','provider_id','enabled','config_version','settings')) OR ($1 AND ((cl.relname='accounts' AND a.attname IN ('tenant_id','principal_id','enabled','auth_epoch')) OR (cl.relname='memberships' AND a.attname IN ('tenant_id','principal_id','active','epoch')) OR (cl.relname='external_identities' AND a.attname IN ('tenant_id','principal_id','identity_id','provider_id')) OR (cl.relname='providers' AND a.attname='revocation_epoch'))))) OR (has_column_privilege(r.oid,a.attrelid,a.attnum,'UPDATE') AND NOT (cl.relname='tenants' AND a.attname='tenant_id')) OR has_column_privilege(r.oid,a.attrelid,a.attnum,'INSERT,REFERENCES') OR has_table_privilege(r.oid,a.attrelid,'DELETE,TRUNCATE,TRIGGER')))").bind(platform).fetch_one(&mut *c).await?;
+        let reachable_safe:bool=sqlx::query_scalar("WITH reachable AS (SELECT oid,rolsuper,rolbypassrls,rolcreaterole FROM pg_roles WHERE pg_has_role(current_user,oid,'SET')) SELECT NOT EXISTS(SELECT FROM reachable r WHERE r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR has_schema_privilege(r.oid,'identity_authority','CREATE')) AND NOT EXISTS(SELECT FROM reachable r CROSS JOIN pg_attribute a JOIN pg_class cl ON cl.oid=a.attrelid JOIN pg_namespace n ON n.oid=cl.relnamespace WHERE n.nspname='identity_authority' AND cl.relkind='r' AND a.attnum>0 AND NOT a.attisdropped AND ((has_column_privilege(r.oid,a.attrelid,a.attnum,'SELECT') AND NOT ((cl.relname='schema_version' OR (cl.relname='deployment' AND a.attname IN ('singleton','authority_id'))) OR (cl.relname='providers' AND a.attname IN ('tenant_id','provider_id','enabled','config_version','settings')) OR ($1 AND ((cl.relname='accounts' AND a.attname IN ('tenant_id','principal_id','enabled','auth_epoch')) OR (cl.relname='memberships' AND a.attname IN ('tenant_id','principal_id','active','epoch')) OR (cl.relname='external_identities' AND a.attname IN ('tenant_id','principal_id','identity_id','provider_id')) OR (cl.relname='providers' AND a.attname='revocation_epoch'))))) OR has_column_privilege(r.oid,a.attrelid,a.attnum,'UPDATE') OR has_column_privilege(r.oid,a.attrelid,a.attnum,'INSERT,REFERENCES') OR has_table_privilege(r.oid,a.attrelid,'DELETE,TRUNCATE,TRIGGER')))").bind(platform).fetch_one(&mut *c).await?;
         if !reachable_safe {return Ok::<_,sqlx::Error>(false);}
-        let functions_ok:bool=sqlx::query_scalar("SELECT has_function_privilege(current_user,'identity_authority.share_provider(uuid)','EXECUTE') AND has_function_privilege(current_user,'identity_authority.share_subject(uuid)','EXECUTE')=$1 AND NOT EXISTS(SELECT FROM pg_roles r CROSS JOIN pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE pg_has_role(current_user,r.oid,'SET') AND n.nspname='identity_authority' AND has_function_privilege(r.oid,p.oid,'EXECUTE') AND NOT (p.oid='identity_authority.share_provider(uuid)'::regprocedure OR ($1 AND p.oid='identity_authority.share_subject(uuid)'::regprocedure)))").bind(platform).fetch_one(&mut *c).await?;
-        if !functions_ok {return Ok(false);}
+        let functions_ok:bool=sqlx::query_scalar("SELECT has_function_privilege(current_user,'identity_authority.share_host_tenant()','EXECUTE') AND has_function_privilege(current_user,'identity_authority.share_provider(uuid)','EXECUTE') AND has_function_privilege(current_user,'identity_authority.share_subject(uuid)','EXECUTE')=$1 AND NOT EXISTS(SELECT FROM pg_roles r CROSS JOIN pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE pg_has_role(current_user,r.oid,'SET') AND n.nspname='identity_authority' AND has_function_privilege(r.oid,p.oid,'EXECUTE') AND NOT (p.oid IN ('identity_authority.share_provider(uuid)'::regprocedure,'identity_authority.share_host_tenant()'::regprocedure) OR ($1 AND p.oid='identity_authority.share_subject(uuid)'::regprocedure)))").bind(platform).fetch_one(&mut *c).await?;
+        if !functions_ok || !lock_grants_are_private(c).await? {return Ok(false);}
         let valid:bool=sqlx::query_scalar("SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT has_schema_privilege(current_user,'identity_authority','CREATE') AND has_schema_privilege(current_user,'identity_authority','USAGE') FROM pg_roles WHERE rolname=current_user").fetch_one(&mut *c).await?;
         if !valid {return Ok::<_,sqlx::Error>(false);}
-        let valid:bool=sqlx::query_scalar("SELECT bool_and(has_column_privilege(current_user,a.attrelid,a.attnum,'SELECT') = ((cl.relname='schema_version' OR (cl.relname='deployment' AND a.attname IN ('singleton','authority_id'))) OR (cl.relname='tenants' AND a.attname='tenant_id') OR (cl.relname='providers' AND a.attname IN ('tenant_id','provider_id','enabled','config_version','settings')) OR ($1 AND ((cl.relname='accounts' AND a.attname IN ('tenant_id','principal_id','enabled','auth_epoch')) OR (cl.relname='memberships' AND a.attname IN ('tenant_id','principal_id','active','epoch')) OR (cl.relname='external_identities' AND a.attname IN ('tenant_id','principal_id','identity_id','provider_id')) OR (cl.relname='providers' AND a.attname='revocation_epoch')))) AND has_column_privilege(current_user,a.attrelid,a.attnum,'UPDATE') = (cl.relname='tenants' AND a.attname='tenant_id') AND NOT has_column_privilege(current_user,a.attrelid,a.attnum,'INSERT') AND NOT has_column_privilege(current_user,a.attrelid,a.attnum,'REFERENCES') AND NOT has_table_privilege(current_user,a.attrelid,'DELETE,TRUNCATE,TRIGGER')) FROM pg_attribute a JOIN pg_class cl ON cl.oid=a.attrelid JOIN pg_namespace n ON n.oid=cl.relnamespace WHERE n.nspname='identity_authority' AND cl.relkind='r' AND a.attnum>0 AND NOT a.attisdropped").bind(platform).fetch_one(&mut *c).await?;
+        let valid:bool=sqlx::query_scalar("SELECT bool_and(has_column_privilege(current_user,a.attrelid,a.attnum,'SELECT') = ((cl.relname='schema_version' OR (cl.relname='deployment' AND a.attname IN ('singleton','authority_id'))) OR (cl.relname='providers' AND a.attname IN ('tenant_id','provider_id','enabled','config_version','settings')) OR ($1 AND ((cl.relname='accounts' AND a.attname IN ('tenant_id','principal_id','enabled','auth_epoch')) OR (cl.relname='memberships' AND a.attname IN ('tenant_id','principal_id','active','epoch')) OR (cl.relname='external_identities' AND a.attname IN ('tenant_id','principal_id','identity_id','provider_id')) OR (cl.relname='providers' AND a.attname='revocation_epoch')))) AND NOT has_column_privilege(current_user,a.attrelid,a.attnum,'UPDATE') AND NOT has_column_privilege(current_user,a.attrelid,a.attnum,'INSERT') AND NOT has_column_privilege(current_user,a.attrelid,a.attnum,'REFERENCES') AND NOT has_table_privilege(current_user,a.attrelid,'DELETE,TRUNCATE,TRIGGER')) FROM pg_attribute a JOIN pg_class cl ON cl.oid=a.attrelid JOIN pg_namespace n ON n.oid=cl.relnamespace WHERE n.nspname='identity_authority' AND cl.relkind='r' AND a.attnum>0 AND NOT a.attisdropped").bind(platform).fetch_one(&mut *c).await?;
         if !valid {return Ok(false);}
         let actual:uuid::Uuid=sqlx::query_scalar("SELECT authority_id FROM identity_authority.deployment").fetch_one(&mut *c).await?;
         let versions:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *c).await?;

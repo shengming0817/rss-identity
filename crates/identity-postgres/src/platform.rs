@@ -376,7 +376,11 @@ impl Authority {
             let sequence=row.try_get("profile_sequence")?;
             let observation=match verified.profile {
                 PlatformProfile::Unavailable=>None,
-                PlatformProfile::IdentityLocal=>Some(crate::profiles::local_observation(c,key,now).await?),
+                PlatformProfile::IdentityLocal=>{
+                    let local_sequence=crate::profiles::sequence(c,tenant).await?;
+                    let observed=crate::session_storage::now(c).await?;
+                    Some(crate::profiles::local_observation(c,key,observed,local_sequence).await?)
+                },
                 PlatformProfile::Idp{provider,claims}=>{
                     let binding=actual.external_identity.as_ref().ok_or_else(reject)?;
                     if provider!=binding.provider || claims.issued_at<context.created_at.saturating_sub(i64::from(future_skew_seconds)){return Err(reject().into());}

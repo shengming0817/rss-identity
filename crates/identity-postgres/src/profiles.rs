@@ -174,8 +174,8 @@ pub(crate) async fn local_observation(
     c: &mut PgConnection,
     key: AccountKey,
     now: i64,
+    observation_sequence: i64,
 ) -> Result<Observation, transaction::MutationError> {
-    let observation_sequence = sequence(c, key.tenant).await?;
     let row=sqlx::query("SELECT revision,value FROM identity_authority.local_profiles WHERE tenant_id=$1::uuid AND principal_id=$2")
         .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_optional(&mut *c).await?;
     let (profile, max_age, revision) = match row {
@@ -323,24 +323,24 @@ impl Reader {
         &self,
         c: &mut PgConnection,
     ) -> Result<crate::session_storage::Loaded, transaction::MutationError> {
-        self.recheck_with(c, None).await
+        self.recheck_with(c, false).await
     }
     async fn recheck_with(
         &self,
         c: &mut PgConnection,
-        target: Option<AccountKey>,
+        single_session: bool,
     ) -> Result<crate::session_storage::Loaded, transaction::MutationError> {
         if Instant::now() >= self.expires || authority_id(c).await? != self.instance {
             return Err(reject().into());
         }
         crate::transaction::check_binding(c, self.binding).await?;
-        if let Some(target) = target {
+        if single_session {
             crate::session_storage::lock_session(
                 c,
                 Some(&self.digest),
                 None,
                 self.kind,
-                crate::session_storage::SessionAccess::ProfileRead(target),
+                crate::session_storage::SessionAccess::Inspect,
             )
             .await?;
         } else {

@@ -341,12 +341,14 @@ impl Authority {
                             None => None,
                         };
                         let state = current(c, &candidate).await?;
+                        let sequence = crate::profiles::sequence(c, key.tenant).await?;
                         let now = db::now(c).await?;
                         // current() checks before waiting on account locks; recheck its original deadline.
                         if Instant::now() >= candidate.expires {
                             return Err(reject().into());
                         }
-                        let observation = crate::profiles::local_observation(c, key, now).await?;
+                        let observation =
+                            crate::profiles::local_observation(c, key, now, sequence).await?;
                         let (issued, fact) = insert(
                             c,
                             state,

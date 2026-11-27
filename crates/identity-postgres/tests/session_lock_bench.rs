@@ -126,8 +126,21 @@ async fn session_lock_measurements() -> anyhow::Result<()> {
     let window = AttemptWindow::new(1_000_000, 3600)?;
     let policy =
         AuthenticationPolicy::new(window, window, window, 10_000, 128, Duration::from_secs(30))?;
+    let runtime = rss_transactional_messaging_postgres::PgRuntime::connect_producer(
+        rss_transactional_messaging_postgres::PgConfig::new_for_test_plaintext(
+            "127.0.0.1",
+            f.port,
+            &f.database,
+            "identity_runtime",
+            rss_transactional_messaging_postgres::PgPassword::new("fixture-only"),
+        )
+        .with_pool_limits(16, 16),
+        support::Timer,
+        rss_transactional_messaging::fence::StorageIdentity::new([1; 16], [2; 16])?,
+    )
+    .await?;
     let store = Authority::connect_runtime(
-        f.runtime.clone(),
+        Arc::new(runtime),
         Arc::new(rss_identity_core::account::PasswordKdf::new(
             16usize.try_into()?,
             (1024u64 * 1024 * 1024).try_into()?,
@@ -202,7 +215,8 @@ async fn session_lock_measurements() -> anyhow::Result<()> {
             });
         }
     }
-    for round in 1..=3 {
+    let trace = std::env::var_os("IDENTITY_BENCH_TRACE").is_some();
+    for round in 1..=if trace { 1 } else { 3 } {
         for work in [Work::Host, Work::Touch, Work::Issue] {
             for shape in ["one_account", "one_tenant", "many_tenants"] {
                 let subjects = match shape {
@@ -211,7 +225,7 @@ async fn session_lock_measurements() -> anyhow::Result<()> {
                     _ => &multiple[..],
                 };
                 for concurrency in [1, 8, 16] {
-                    let requests = if matches!(work, Work::Issue) { 48 } else { 160 };
+                    let requests = if trace { 32 } else { 160 };
                     let run = |count: usize| {
                         stream::iter(0..count)
                             .map(|i| measure(work, &store, &host, &subjects[i % subjects.len()]))
@@ -226,7 +240,7 @@ async fn session_lock_measurements() -> anyhow::Result<()> {
                     let end = server_time(&f.owner).await?;
                     let accepted: Vec<_> = samples.iter().filter(|s| !s.failed).collect();
                     let latencies: Vec<_> = accepted.iter().map(|s| s.total).collect();
-                    let row = serde_json::json!({"db":f.database,"begin_us":begin,"end_us":end,"work":work.name(),"shape":shape,"concurrency":concurrency,"round":round,
+                    let row = serde_json::json!({"db":f.database,"begin_us":begin,"end_us":end,"work":work.name(),"shape":shape,"concurrency":concurrency,"round":round,"pool_max":16,"trace":trace,
                         "ok":accepted.len(),"busy":requests-accepted.len(),"ops_s":accepted.len() as f64/duration.as_secs_f64(),
                         "p95_us":percentile(latencies.clone(),95),"p99_us":percentile(latencies,99),
                         "pool_p95_us":percentile(accepted.iter().filter_map(|s|s.pool).collect(),95),

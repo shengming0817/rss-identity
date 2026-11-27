@@ -26,7 +26,7 @@ WITH required_privileges AS (
       OR EXISTS(SELECT FROM required_columns r WHERE r.profile=$1 AND r.tab=t.relname AND r.col=a.attname AND r.privilege=p.privilege))
      OR has_column_privilege(current_user,t.oid,a.attnum,p.privilege||' WITH GRANT OPTION')
  )
- AND NOT EXISTS(SELECT FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='identity_authority' AND has_function_privilege(current_user,p.oid,'EXECUTE') IS DISTINCT FROM ($1='runtime' AND p.oid IN ('identity_authority.lock_session(bytea,uuid,text,text,uuid)'::regprocedure,'identity_authority.share_subject(uuid)'::regprocedure,'identity_authority.share_provider(uuid)'::regprocedure)))
+ AND NOT EXISTS(SELECT FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='identity_authority' AND has_function_privilege(current_user,p.oid,'EXECUTE') IS DISTINCT FROM ($1='runtime' AND p.oid IN ('identity_authority.share_host_tenant()'::regprocedure,'identity_authority.lock_session(bytea,uuid,text,text,uuid)'::regprocedure,'identity_authority.share_subject(uuid)'::regprocedure,'identity_authority.share_provider(uuid)'::regprocedure)))
 ) AS privileges_ok
 )
 SELECT CASE

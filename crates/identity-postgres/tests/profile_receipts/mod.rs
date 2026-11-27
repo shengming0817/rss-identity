@@ -504,3 +504,51 @@ async fn concurrent_accounts_share_one_operation_id_namespace() -> anyhow::Resul
     f.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn receipt_write_deadline_covers_trigger_wait() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let session = f.login().await?;
+    let short = f
+        .store
+        .inspect_session(
+            binding(f.key.tenant),
+            rss_identity_core::session::SessionSecret::parse(session.secret().expose().into())?,
+            OperationDeadline::from_remaining(std::time::Duration::from_secs(2)),
+        )
+        .await?;
+    let id = operation(now(&f).await?);
+    let before = f.events().await?;
+    let mut blocker = f.owner.begin().await?;
+    let pid:i32=sqlx::query_scalar("SELECT pg_backend_pid() FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='personnel_revision' FOR UPDATE")
+        .bind(A).fetch_one(&mut *blocker).await?;
+    let key = f.key;
+    let store = f.store.clone();
+    let writer = tokio::spawn(async move {
+        store
+            .update_local_profile(short, key, change(id, 0), deadline())
+            .await
+    });
+    wait_for_blocked_backend(&f, pid).await?;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+            .await??
+            .is_err()
+    );
+    blocker.rollback().await?;
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity_authority.profile_operations WHERE operation_id=$1",
+    )
+    .bind(id.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(rows, 0);
+    let profiles:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.local_profiles WHERE tenant_id=$1::uuid AND principal_id=$2")
+        .bind(A).bind(f.key.principal.as_uuid()).fetch_one(&f.owner).await?;
+    assert_eq!(profiles, 0);
+    assert_eq!(f.events().await?, before);
+    f.close().await;
+    Ok(())
+}

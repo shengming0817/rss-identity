@@ -564,10 +564,20 @@ async fn cancelled_session_wait_releases_transaction_locks() -> anyhow::Result<(
     cancelled?;
     assert!(res.is_err());
     tx.rollback().await?;
+    let mut observer = f.owner.begin().await?;
+    sqlx::query("SELECT principal_id FROM identity_authority.accounts WHERE tenant_id=$1::uuid AND principal_id=$2 FOR UPDATE NOWAIT")
+        .bind(A).bind(f.key.principal.as_uuid()).fetch_one(&mut *observer).await?;
+    observer.rollback().await?;
     blocker.rollback().await?;
     let mut next = transaction(&mut c, A).await?;
     recheck_authenticated_session_on(&mut next, &proof).await?;
     next.commit().await?;
+    tokio::time::timeout(
+        Duration::from_secs(4),
+        f.maintenance
+            .recover_local_password(binding(f.key.tenant), f.key, password(), deadline()),
+    )
+    .await??;
     drop(c);
     f.close().await;
     Ok(())

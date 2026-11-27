@@ -94,7 +94,9 @@ impl Authority {
         let capacity = i64::from(self.profile_receipt_capacity.get());
         let policy = self.policy.clone();
         let instance = self.instance;
-        self.conditional_write_sql(actor.binding, deadline, move |c| Box::pin(async move {
+        let mut budget = Budget::new(deadline)?;
+        budget.0 = budget.0.shortened_to(actor.expires);
+        self.conditional_write_sql(actor.binding, budget.remaining(), move |c| Box::pin(async move {
             let loaded = crate::session_storage::recheck_for(c, &actor, crate::session_storage::SessionAccess::ProfileWrite(target)).await?;
             crate::management::authorize(policy.as_ref(), instance, &loaded,
                 ManagementOperation::UpdateLocalProfile, Some(target), c).await?;
@@ -145,6 +147,7 @@ impl Authority {
                          VALUES($1::uuid,$2,$3,$4,$5,$6,$7)")
                 .bind(target.tenant.to_string()).bind(id.as_uuid()).bind(target.principal.as_uuid())
                 .bind(actor.key.principal.as_uuid()).bind(digest.as_slice()).bind(revision).bind(clock.0).execute(c).await?;
+            if Instant::now() >= loaded.expires {return Err(reject().into());}
             Ok((Ok(ProfileReceipt { operation_id: id, revision }), vec![event(target, Some(actor.key),
                 "local_updated", ProfileSource::IdentityLocal, None, Some(revision), changed_fields)]))
         })).await?
@@ -165,7 +168,7 @@ impl Authority {
             return Err(AuthorityError::Rejected);
         }
         self.read_sql(actor.binding, deadline, move |c| Box::pin(async move {
-            let loaded = reader.recheck_with(c,Some(target)).await?;
+            let loaded = reader.recheck_with(c,true).await?;
             crate::management::authorize(policy.as_ref(), instance, &loaded,
                 ManagementOperation::UpdateLocalProfile, Some(target), c).await?;
             let clock = ReceiptClock::load(c, target.tenant).await?;
