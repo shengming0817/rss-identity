@@ -660,7 +660,7 @@ async fn federation_jit_isolated_subjects_and_membership() -> anyhow::Result<()>
         .await?;
     assert_ne!(a.account(), distinct.account());
     // Seed tenant B as deployment provisioning; the product has no self-service tenant creation.
-    sqlx::query("INSERT INTO identity_authority.guard(tenant_id) VALUES($1::uuid)")
+    sqlx::query("INSERT INTO identity_authority.tenants(tenant_id) VALUES($1::uuid)")
         .bind(B)
         .execute(&f.owner)
         .await?;
@@ -1463,14 +1463,14 @@ async fn federation_concurrent_jit_rls_and_schema_drift() -> anyhow::Result<()> 
     .await?;
     let mut guard = f.owner.begin().await?;
     sqlx::query(
-        "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+        "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR UPDATE",
     )
     .bind(A)
     .execute(&mut *guard)
     .await?;
     gate.wait().await;
     tokio::time::timeout(std::time::Duration::from_secs(10),async{loop{
-        let waiting:i64=sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND usename='identity_runtime' AND wait_event_type='Lock' AND query LIKE '%identity_authority.guard%'").fetch_one(&f.owner).await?;
+        let waiting:i64=sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND usename='identity_runtime' AND wait_event_type='Lock' AND query LIKE '%identity_authority.tenants%'").fetch_one(&f.owner).await?;
         if waiting==2{break Ok::<_,sqlx::Error>(())}tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }}).await??;
     guard.commit().await?;
@@ -1533,7 +1533,7 @@ async fn federation_concurrent_jit_rls_and_schema_drift() -> anyhow::Result<()> 
         .await
         .is_err()
     );
-    let guards: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.guard")
+    let guards: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_authority.tenants")
         .fetch_one(&f.owner)
         .await?;
     assert_eq!(guards, 2);

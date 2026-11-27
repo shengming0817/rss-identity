@@ -20,9 +20,8 @@ impl From<sqlx::Error> for ProfileSourceAdmissionError {
     }
 }
 /// Call after Audit/Ledger locks and before host authorization/business locks.
-/// Requires an explicit READ COMMITTED, tenant-scoped transaction on this instance's database. The Identity
-/// guard remains locked until the caller commits/rolls back, serializing source configuration
-/// changes. No pool, credentials, sessions, profile observations or host permissions are read.
+/// Requires an explicit READ COMMITTED, tenant-scoped transaction on this instance's database. Shared tenant admission and the
+/// selected IdP's Provider lock remain held until the caller commits or rolls back. No pool, credentials, sessions, profile observations or host permissions are read.
 pub async fn admit_profile_source_on(
     c: &mut PgConnection,
     instance: InstanceId,
@@ -48,13 +47,10 @@ pub async fn admit_profile_source_on(
     if id != instance.as_uuid() {
         return Err(Error::Rejected);
     }
-    let guard: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
-    )
-    .bind(tenant.to_string())
-    .fetch_optional(&mut *c)
-    .await?;
-    if guard.is_none() {
+    let admitted: bool = sqlx::query_scalar("SELECT identity_authority.share_host_tenant()")
+        .fetch_one(&mut *c)
+        .await?;
+    if !admitted {
         return Err(Error::Rejected);
     }
     let (version, settings) = match source {
@@ -66,6 +62,14 @@ pub async fn admit_profile_source_on(
             },
         ),
         ProfileSource::Idp { provider } => {
+            let locked: bool =
+                sqlx::query_scalar("SELECT identity_authority.share_provider($1::uuid)")
+                    .bind(provider.to_string())
+                    .fetch_one(&mut *c)
+                    .await?;
+            if !locked {
+                return Err(Error::Rejected);
+            }
             let row=sqlx::query("SELECT config_version,settings FROM identity_authority.providers WHERE tenant_id=$1::uuid AND provider_id=$2::uuid AND enabled")
                 .bind(tenant.to_string()).bind(provider.to_string()).fetch_optional(c).await?.ok_or(Error::Rejected)?;
             let settings: rss_identity_core::federation::ProviderSettings =

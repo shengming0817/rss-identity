@@ -1,6 +1,10 @@
 //! Password failures are independent of source/resource admission.
 //! ref: kanidm server/lib/src/idm/server.rs@50bc4f988b139e2d767429c554348fd66423054e.
-use crate::{attempts::*, storage::lock_guard, *};
+use crate::{
+    attempts::*,
+    storage::{lock_attempt_capacity, lock_tenant_scope},
+    *,
+};
 use rss_identity_core::account::LoginKey;
 use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, Row};
@@ -27,7 +31,8 @@ impl Authority {
         let seconds = policy.claim_ttl.as_secs_f64();
         self.read(binding, deadline, move |tx| Box::pin(async move {
             crate::transaction::connection(tx, move |c| Box::pin(async move {
-                lock_guard(c, tenant).await?;
+                lock_tenant_scope(c, tenant).await?;
+                lock_attempt_capacity(c, tenant).await?;
                 cleanup(c, tenant, policy.cleanup_batch).await?;
                 let source = attempt(c, tenant, source, policy.source).await?;
                 let row = sqlx::query("SELECT CASE WHEN failures>=$3 AND window_until>clock_timestamp() THEN greatest(1,ceil(extract(epoch FROM window_until-clock_timestamp())))::bigint ELSE 0 END AS retry,claim_until>clock_timestamp() AS busy FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid AND login_digest=$2")
@@ -59,13 +64,14 @@ impl Authority {
         let policy = self.authentication;
         self.read(claim.binding, deadline, move |tx| Box::pin(async move {
             crate::transaction::connection(tx, move |c| Box::pin(async move {
-                lock_guard(c, claim.binding.tenant()).await?;
+                lock_tenant_scope(c, claim.binding.tenant()).await?;
+                if let Ok(candidate) = &outcome { storage::current(c, candidate).await?; }
+                lock_attempt_capacity(c, claim.binding.tenant()).await?;
                 let owned:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid AND login_digest=$2 AND claim_token=$3 AND claim_until>clock_timestamp())")
                     .bind(claim.binding.tenant().to_string()).bind(&claim.login).bind(claim.token).fetch_one(&mut *c).await?;
                 if !owned {return Ok(Err(AuthorityError::Rejected));}
                 match outcome {
                     Ok(candidate) => {
-                        storage::current(c, &candidate).await?;
                         sqlx::query("DELETE FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid AND login_digest=$2 AND claim_token=$3")
                             .bind(claim.binding.tenant().to_string()).bind(claim.login).bind(claim.token).execute(c).await?;
                         Ok(Ok(candidate))

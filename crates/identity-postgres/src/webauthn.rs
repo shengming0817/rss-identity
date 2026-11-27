@@ -123,7 +123,7 @@ impl WebauthnAuthority {
     ) -> Result<i64, MutationError> {
         // Serialize first use with deployment-owner activation. An unknown tenant cannot
         // create a guard or RP as a side effect of an unauthenticated request.
-        storage::lock_guard(c, tenant).await?;
+        storage::lock_tenant_collection(c, tenant).await?;
         sqlx::query("INSERT INTO identity_authority.webauthn_rp(tenant_id,rp,fingerprint,generation) VALUES($1::uuid,$2,$3,$4) ON CONFLICT DO NOTHING")
             .bind(tenant.to_string()).bind(&self.rp).bind(self.config.as_slice()).bind(expected.0)
             .execute(&mut *c).await?;
@@ -168,7 +168,7 @@ impl WebauthnAuthority {
         let rp = self.rp.clone();
         let config = self.config;
         self.authority.read_sql(actor.binding,deadline,move|c|Box::pin(async move{
-            session_storage::recheck(c,&actor).await?;
+            session_storage::recheck_collection(c,&actor).await?;
             this.check_configuration(c,actor.key.tenant,generation).await?;
             let rows=sqlx::query("SELECT id,label FROM identity_authority.webauthn_credentials WHERE tenant_id=$1::uuid AND principal_id=$2 AND rp=$3 AND rp_config=$4 AND NOT revoked ORDER BY id LIMIT 32").bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(rp).bind(config.as_slice()).fetch_all(c).await?;
             rows.into_iter().map(|r|Ok(WebauthnCredentialView{id:r.try_get("id")?,label:r.try_get("label")?})).collect()
@@ -195,7 +195,7 @@ impl WebauthnAuthority {
         self.authority
             .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
-                    let loaded = session_storage::recheck(c, &actor).await?;
+                    let loaded = session_storage::recheck_collection(c, &actor).await?;
                     this.check_configuration(c, actor.key.tenant, generation)
                         .await?;
                     let (handle, enrolled, epoch) = account(c, actor.key).await?;
@@ -323,7 +323,7 @@ impl WebauthnAuthority {
             .await?;
         let this = self.clone();
         self.authority.write_sql(actor.binding,budget.remaining(),move|c|Box::pin(async move{
-            let loaded=session_storage::recheck(c,&actor).await?;
+            let loaded=session_storage::recheck_collection(c,&actor).await?;
             this.check_configuration(c,actor.key.tenant,generation).await?;
             let current=read(c,&actor,id,this.config).await?;
             if current.epoch!=snapshot.epoch || !matches!(current.ceremony,Ceremony::Register{..}) {return Err(reject().into());}
@@ -351,7 +351,7 @@ impl WebauthnAuthority {
         self.authority
             .read_sql(actor.binding, deadline, move |c| {
                 Box::pin(async move {
-                    let loaded = session_storage::recheck(c, &actor).await?;
+                    let loaded = session_storage::recheck_collection(c, &actor).await?;
                     this.check_configuration(c, actor.key.tenant, generation)
                         .await?;
                     let (_, _, epoch) = account(c, actor.key).await?;
@@ -433,7 +433,7 @@ impl WebauthnAuthority {
             .ok_or(AuthorityError::Rejected)?;
         let this = self.clone();
         self.authority.write_sql(actor.binding,budget.remaining(),move|c|Box::pin(async move{
-            let loaded=session_storage::recheck(c,&actor).await?;
+            let loaded=session_storage::recheck_collection(c,&actor).await?;
             this.check_configuration(c,actor.key.tenant,generation).await?;
             let current=read(c,&actor,id,this.config).await?;
             if current.epoch!=snapshot.epoch || !matches!(current.ceremony,Ceremony::Authenticate{..}) {return Err(reject().into());}
@@ -458,7 +458,7 @@ impl WebauthnAuthority {
         let this = self.clone();
         let context = webauthn_management_context(actor.key, "remove", Some(id))?;
         self.authority.write_sql(actor.binding,deadline,move|c|Box::pin(async move{
-            let loaded=session_storage::recheck(c,&actor).await?;
+            let loaded=session_storage::recheck_collection(c,&actor).await?;
             this.check_configuration(c,actor.key.tenant,generation).await?;
             management::authorize(this.authority.policy.as_ref(),this.authority.instance,&loaded,ManagementOperation::RemoveWebauthn,Some(actor.key),c).await?;
             crate::consume_step_up_on(c,&actor,&context,&grant).await?;
@@ -510,7 +510,7 @@ impl WebauthnAuthority {
                     if storage::authority_id(c).await? != authority {
                         return Err(reject().into());
                     }
-                    storage::lock_guard(c, key.tenant).await?;
+                    storage::lock_tenant_collection(c, key.tenant).await?;
                     let loaded = session_storage::lookup_locked(
                         c,
                         key.tenant,
@@ -592,7 +592,7 @@ async fn read(
     id: Uuid,
     config: [u8; 32],
 ) -> Result<Snapshot, MutationError> {
-    let loaded = session_storage::recheck(c, actor).await?;
+    let loaded = session_storage::recheck_collection(c, actor).await?;
     read_loaded(c, &loaded, id, config).await
 }
 async fn read_loaded(
@@ -678,7 +678,7 @@ pub async fn activate_webauthn_rp_on(
         return Err(reject());
     }
     let (_, fingerprint) = rp_configuration(rp, origin)?;
-    storage::lock_guard(c, tenant).await?;
+    storage::lock_tenant_collection(c, tenant).await?;
     let previous: Vec<u8> = sqlx::query_scalar(
         "SELECT fingerprint FROM identity_authority.webauthn_rp WHERE tenant_id=$1::uuid AND rp=$2",
     )

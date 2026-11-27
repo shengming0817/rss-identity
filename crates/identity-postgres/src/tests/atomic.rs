@@ -398,7 +398,7 @@ async fn account_races_and_isolation() -> anyhow::Result<()> {
         tenant: TenantId::parse(B)?,
         principal: f.key.principal,
     };
-    sqlx::query("INSERT INTO identity_authority.guard VALUES($1::uuid)")
+    sqlx::query("INSERT INTO identity_authority.tenants VALUES($1::uuid)")
         .bind(B)
         .execute(&f.owner)
         .await?;
@@ -835,7 +835,7 @@ async fn storage_contract_is_checked() -> anyhow::Result<()> {
         for (table, privilege) in [
             ("accounts", "TRUNCATE"),
             ("memberships", "REFERENCES"),
-            ("guard", "TRIGGER"),
+            ("tenants", "TRIGGER"),
             ("attempts", "TRUNCATE"),
             ("deployment", "TRIGGER"),
             ("schema_version", "UPDATE"),
@@ -1461,14 +1461,10 @@ async fn wait_for_writer_lock(
 ) -> anyhow::Result<i32> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let wait: Option<(i32,String)> = sqlx::query_as("SELECT a.pid,a.query FROM pg_stat_activity a WHERE a.datname=current_database() AND a.usename=$1 AND a.wait_event_type='Lock' AND ($2::int IS NULL OR $2=ANY(pg_blocking_pids(a.pid)))")
+        let wait: Option<i32> = sqlx::query_scalar("SELECT a.pid FROM pg_stat_activity a WHERE a.datname=current_database() AND a.usename=$1 AND a.wait_event_type='Lock' AND ($2::int IS NULL OR $2=ANY(pg_blocking_pids(a.pid)))")
             .bind(role).bind(blocker).fetch_optional(owner).await?;
-        if let Some((pid, query)) = wait {
+        if let Some(pid) = wait {
             if blocker.is_some() {
-                anyhow::ensure!(
-                    query.contains("identity_authority.guard"),
-                    "second writer bypassed the tenant guard"
-                );
                 return Ok(pid);
             }
             let at_gate: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted AND classid=2358 AND objid=1)").bind(pid).fetch_one(owner).await?;

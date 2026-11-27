@@ -51,11 +51,23 @@ HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` �
 
 异步业务可在认证原请求后，通过 `AuthenticatedSession::reference()` 将非凭据会话引用存入宿主可信数据。后续用 `Authority::recheck_session_reference` 复核原会话、账户和来源，取得本次有界的 `RevalidatedSession` 身份/组/部门事实。被撤销、失效或过期的会话不能通过；检查不延长 idle 或快照期限。引用不是登录凭据，不能从 HTTP 请求接收它替代认证，返回事实也不能用于管理操作；宿主仍负责资源授权和原请求归属。
 
-宿主业务写入需要与会话撤销串行化时，在自己已有的、绑定 actor 租户的 READ COMMITTED 事务内调用 `recheck_authenticated_session_on(connection, &actor)`。它复用当前凭据与会话来源复核，Identity guard 保持至宿主提交或回滚；不消费 step-up、不续期、不产生新身份事实。调用顺序为已有 Audit/Ledger 锁 → Identity guard → 平台 verifier 权威锁及宿主授权/业务锁。平台 binding/source 写入必须遵守 verifier 使用同一连接取得的权威锁，不能仅依赖 Identity guard。不要在已持有这些锁时调用自开事务的引用复核接口。
+宿主业务写入需要与会话撤销串行化时，在自己已有的、绑定 actor 租户的 READ COMMITTED 事务内调用 `recheck_authenticated_session_on(connection, &actor)`。它复用当前凭据与会话来源复核，Identity 在本连接锁定当前来源、账户、成员和会话，保持至宿主提交或回滚；不消费 step-up、不续期、不产生新身份事实。调用顺序为已有 Audit/Ledger 锁 → Identity 来源、账户及会话锁 → 平台 verifier 权威锁及宿主授权/业务锁。平台 binding/source 写入必须遵守 verifier 使用同一连接取得的权威锁，不能仅依赖 Identity 资格锁。不要在已持有这些锁时调用自开事务的引用复核接口。
+
+单会话先定位，再按 Provider、账户与成员、会话的顺序取锁。同层对象按 UUID 排序，同一对象直接取本次操作所需的最强模式。锁后重新读取凭据、代际、来源和期限。
+
+| 协调对象 | 要保护的操作及持锁范围 |
+|---|---|
+| 实例 | 复用宿主事务的 storage、lineage、tenant epoch fence，并核对不可变的部署 ID。启用 Ledger 时先取得 Audit head。 |
+| 租户 | 已知主体的普通操作取 `KEY SHARE`。宿主借用和平台 verifier 取 `SHARE`，允许多个独立准入并行。会持有资格写锁并调用宿主策略的管理事务先取 `NO KEY UPDATE`。全租户集合窗口、跨来源链接及批量维护从入口取 `UPDATE`。 |
+| Provider、账户与成员 | 复核取共享锁。Provider 撤权和账户禁用、改密、成员变更锁相应写目标。维护改密先锁租户登记行，再锁目标账户与尝试容量行，更新账户时触发人员版本行锁；相关锁持到事务结算。 |
+| 会话 | 被动检查和借用准入持共享锁，续期及当前会话撤销取非键更新锁，轮换凭据取更新锁。全部会话撤销通过账户代际与该账户的所有准入协调。 |
+| 租户事务状态 | 资料序号、人员版本、回执时钟分别持有一行。涉及序号或回执时钟时，先取得相应行再触发人员版本更新。回执 GET、PUT 均在取得时钟锁后采样。来源限流与密码 claim 共同使用第四行协调容量。 |
+
+宿主在业务锁之前完成会话准入和 step-up。已准入的组合在同连接内复用保护，平台 binding/source 写入遵循 verifier 的权威锁。宿主提交或回滚释放全部锁。纯续期和凭据轮换保留原人员版本。
 
 通过 `PgRuntime::local_tx` 组合时，`with_connection` 回调的外层错误类型是 SQLx；使用 `tx.with_connection(|c| Box::pin(async move { Ok(recheck_authenticated_session_on(c, &actor).await) })).await??` 将内部 `PgError` 原样传播到宿主事务，不能吞掉内层错误后继续提交。
 
-任何复核错误都要求宿主回滚；宿主继续负责 fencing、操作预算、资源授权和最终结算。复核成功不等于业务已提交，`CommitUnknown` 与回滚失败必须保留原结算语义。guard 串行化状态变更，不冻结自然时间或延长 actor 的原期限，不得跨事务缓存成功结果。该接口只接受当前请求的 `AuthenticatedSession`；异步保存的 `SessionReference` 不含当前凭据摘要，其独立复核用途不变。
+任何复核错误都要求宿主回滚；宿主继续负责 fencing、操作预算、资源授权和最终结算。复核成功不等于业务已提交，`CommitUnknown` 与回滚失败必须保留原结算语义。资格行锁串行化相应状态变更，不冻结自然时间或延长 actor 的原期限，不得跨事务缓存成功结果。该接口只接受当前请求的 `AuthenticatedSession`；异步保存的 `SessionReference` 不含当前凭据摘要，其独立复核用途不变。
 
 参考宿主为每个初始化目标指定唯一 bootstrap 账户，并阻止其自我禁用；这是示范宿主策略，不成为其它产品的默认授权。密码恢复与 IdP 故障都不能自动提升权限或复活禁用状态。
 
@@ -211,7 +223,7 @@ HTTP 本地资料位于 `/api/v1/identity/tenants/{tenant}/accounts/{principal}/
 宿主持有的原生平台协议在签发或接受令牌前，调用 `platform::admit_platform_subject_on`，借用同实例、同租户的显式 READ COMMITTED 事务。
 该接口只复核账户、成员资格、外部身份关联和 provider 当前代际，不签发 Cookie，也不读取密码。
 首次受控注册保存返回的 `PlatformSubjectVersion`，后续使用必须传回该版本；禁用再启用不能恢复旧注册。
-锁顺序为 Audit/可选 Ledger → Identity tenant guard → 宿主设备、绑定与业务锁，保持同一事务直到原生操作提交或回滚。
+锁顺序为 Audit/可选 Ledger → Identity 主体与来源准入 → 宿主设备、绑定与业务锁，保持同一事务直到原生操作提交或回滚。
 宿主仍须校验平台签名、用途、挑战、设备、绑定和业务授权；返回版本不是认证凭据或 assurance。
 部署使用 `grant_platform_subject_admission` 并在启动时调用 `verify_platform_subject_admission`。
 此组合权限包含来源发布元数据准入，替代该角色原来的 profile-source-only 权限校验；不授予完整 Runtime 权限。
@@ -241,7 +253,7 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 宿主将字段定义写入与来源准入组合时，使用 `admit_profile_source_on` 借用已打开 READ COMMITTED 事务、已设置租户 fence 的 PG 连接。
 部署使用 `grant_profile_source_admission` 为该业务角色授权，并在启动时用 `verify_profile_source_admission` 验证；
 不授予完整 Runtime 或 Provisioning 权限。该接口只读取来源发布元数据，不授予用户资料或管理权限。
-锁顺序为 Audit/可选 Ledger → Identity tenant guard → 宿主授权锁 → 业务定义/回执；
+锁顺序为 Audit/可选 Ledger → Identity 资料来源准入 → 宿主授权锁 → 业务定义/回执；
 调用方保持同一事务直至提交或回滚，不能在已持有宿主授权锁后调用该接口。
 
 
@@ -256,7 +268,7 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 
 `identity_session_references` 提供同租户、账户/成员 epoch、会话期限及来源当前性已筛选的定位关系，供产品按完整 SessionReference 坐标集合关联；它不是 AuthenticatedSession。平台来源的 `requires_platform_check` 为 true，产品必须再 JOIN 自己持有的当前平台绑定/来源资格关系，核对返回的绑定 ID/epoch 和来源 ID/version，不能仅凭该关系宣称平台资格有效。原请求 actor 的平台检查仍由既有 verifier 执行。
 
-没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(binding, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用宿主提供的明确 binding、实例和执行 fencing，锁定现有租户 guard 后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，期限只受会话当前性和原调用预算限制。
+没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(binding, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用宿主提供的明确 binding、实例和执行 fencing，取得覆盖全租户集合的锁后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，期限只受会话当前性和原调用预算限制。
 
 会话关系通过完整定位坐标关联当前会话。列 `session_valid_until` 是读取当时该会话空闲期限与绝对期限的较早者，续期会更新该值。宿主用它限制投影的有效期。分页按稳定定位坐标排序，cursor 沿用签发时的保守期限，到期后重新查询。人员回调也受资料和会话最早到期时间限制。
 
@@ -270,4 +282,4 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 
 新候选直接替换旧 step-up 签名与会话升级行为，仅接受当前全新 schema。旧 revision 的消费者继续使用其固定闭包；升级时同步适配新请求、结果和消费接口，不使用 alias、旧 DTO 或运行时降级。
 
-`WebauthnAuthority::new` 只构造 RP verifier，不枚举或预装租户。宿主为每次操作明确提供 `RpGeneration`；首次合法使用在既有 tenant guard 下登记该代际，后续精确核对持久化指纹与代际。改变 origin 或 RP 策略时，部署 owner 在租户 READ COMMITTED 事务调用 `activate_webauthn_rp_on`，以预期旧代际推进配置；随后宿主明确选择新配置与新代际。runtime 只有 SELECT/INSERT 权限，不自动推进、回退或刷新代际。配置切换继续撤销凭据、挑战及旧操作证明。HTTP 宿主注入 `RpGeneration` extension，不从浏览器字段构造它。
+`WebauthnAuthority::new` 只构造 RP verifier，不枚举或预装租户。宿主为每次操作明确提供 `RpGeneration`；首次合法使用在既有租户集合锁下登记该代际，后续精确核对持久化指纹与代际。改变 origin 或 RP 策略时，部署 owner 在租户 READ COMMITTED 事务调用 `activate_webauthn_rp_on`，以预期旧代际推进配置；随后宿主明确选择新配置与新代际。runtime 只有 SELECT/INSERT 权限，不自动推进、回退或刷新代际。配置切换继续撤销凭据、挑战及旧操作证明。HTTP 宿主注入 `RpGeneration` extension，不从浏览器字段构造它。

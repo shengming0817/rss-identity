@@ -54,7 +54,7 @@ async fn maintenance_file_and_settlement() -> anyhow::Result<()> {
             assert!(!format!("{result:?}").contains("synthetic private marker"));
             assert_eq!(f.events().await?, if initialize { 0 } else { 1 });
             let initialized: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.guard)")
+                sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.tenants)")
                     .fetch_one(&f.owner)
                     .await?;
             assert_eq!(initialized, !initialize);

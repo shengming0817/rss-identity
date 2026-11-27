@@ -387,6 +387,12 @@ impl PlatformVerifier for Verifier {
             if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(PlatformError::Unavailable);
             }
+            admit_platform_subject_on(c, binding.instance, binding, None)
+                .await
+                .map_err(|e| match e {
+                    PlatformSubjectAdmissionError::Rejected => PlatformError::Rejected,
+                    PlatformSubjectAdmissionError::Storage(_) => PlatformError::Unavailable,
+                })?;
             let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
                 .fetch_one(&mut *c)
                 .await
@@ -1272,6 +1278,19 @@ async fn source_admission_borrows_transaction_with_no_credential_privileges() ->
         .execute(&mut *owner)
         .await?;
     grant_profile_source_admission(&mut owner, &role).await?;
+    let mut drift = owner.begin().await?;
+    let other = format!("lock_owner_{}", Uuid::new_v4().simple());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {other} NOLOGIN; ALTER FUNCTION identity_authority.share_provider(uuid) OWNER TO {other}"))).execute(&mut *drift).await?;
+    sqlx::query("SELECT set_config('role',$1,true)")
+        .bind(&role)
+        .execute(&mut *drift)
+        .await?;
+    assert!(
+        verify_profile_source_admission(&mut drift, f.instance)
+            .await
+            .is_err()
+    );
+    drift.rollback().await?;
     assert!(
         admit_profile_source_on(
             &mut owner,
@@ -1324,6 +1343,28 @@ async fn source_admission_borrows_transaction_with_no_credential_privileges() ->
     )))
     .execute(&mut *owner)
     .await?;
+
+    for drift in [
+        format!(
+            "GRANT EXECUTE ON FUNCTION identity_authority.share_provider(uuid) TO {role} WITH GRANT OPTION"
+        ),
+        "GRANT EXECUTE ON FUNCTION identity_authority.share_provider(uuid) TO PUBLIC".to_owned(),
+    ] {
+        let mut tx = owner.begin().await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(drift))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('role',$1,true)")
+            .bind(&role)
+            .execute(&mut *tx)
+            .await?;
+        assert!(
+            verify_profile_source_admission(&mut tx, f.instance)
+                .await
+                .is_err()
+        );
+        tx.rollback().await?;
+    }
 
     let mut tx = owner.begin().await?;
     sqlx::query("SELECT set_config('role',$1,true)")
@@ -1700,7 +1741,7 @@ async fn personnel_query_is_scoped_readonly_and_revision_bound() -> anyhow::Resu
     })).await?;
     let _ = other;
     // A side-effecting SELECT is rejected by PostgreSQL READ ONLY, even though host code installed it.
-    sqlx::raw_sql("CREATE FUNCTION public.personnel_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.guard SET personnel_revision=personnel_revision+1 RETURNING personnel_revision'").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.personnel_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.tenant_state SET value=value+1 WHERE kind=''personnel_revision'' RETURNING value'").execute(&f.owner).await?;
     assert!(
         f.store
             .with_personnel_read(&actor, deadline(), |mut read| Box::pin(async move {
@@ -1845,7 +1886,7 @@ async fn trusted_reference_join_preserves_host_only_scope_and_expiry() -> anyhow
             .await
             .is_err()
     );
-    sqlx::raw_sql("CREATE FUNCTION public.reference_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.guard SET personnel_revision=personnel_revision+1 RETURNING personnel_revision'").execute(&f.owner).await?;
+    sqlx::raw_sql("CREATE FUNCTION public.reference_write() RETURNS bigint LANGUAGE sql AS 'UPDATE identity_authority.tenant_state SET value=value+1 WHERE kind=''personnel_revision'' RETURNING value'").execute(&f.owner).await?;
     assert!(
         f.store
             .with_session_references_read(
@@ -2014,25 +2055,24 @@ async fn platform_subject_admission_fences_native_settlement() -> anyhow::Result
             .await
             .is_err()
     );
-    // A real account writer must wait until the host has committed its native issuance.
-    let mut writer = f.owner.begin().await?;
-    let mut guard = Box::pin(
-        sqlx::query(
-            "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
-        )
-        .bind(f.key.tenant.to_string())
-        .execute(&mut *writer),
-    );
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), &mut guard)
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await?;
+    let maintenance = f.maintenance.clone();
+    let key = f.key;
+    let writer = tokio::spawn(async move {
+        maintenance
+            .recover_local_password(
+                crate::support::binding(key.tenant),
+                key,
+                password(),
+                deadline(),
+            )
             .await
-            .is_err()
-    );
+    });
+    wait_for_blocked_backend(&f, pid).await?;
     tx.commit().await?;
-    guard.await?;
-    sqlx::query("UPDATE identity_authority.accounts SET enabled=false,auth_epoch=auth_epoch+1 WHERE tenant_id=$1::uuid AND principal_id=$2")
-        .bind(f.key.tenant.to_string()).bind(f.key.principal.as_uuid()).execute(&mut *writer).await?;
-    writer.commit().await?;
+    writer.await??;
     let mut tx = subject_transaction(&mut owner, &role, f.key.tenant).await?;
     assert!(
         admit_platform_subject_on(&mut tx, f.instance, &binding, Some(version))

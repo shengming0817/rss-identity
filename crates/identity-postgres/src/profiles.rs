@@ -167,13 +167,14 @@ pub(crate) async fn sequence(
     c: &mut PgConnection,
     tenant: TenantId,
 ) -> Result<i64, transaction::MutationError> {
-    Ok(sqlx::query_scalar("UPDATE identity_authority.guard SET profile_sequence=profile_sequence+1 WHERE tenant_id=$1::uuid RETURNING profile_sequence")
+    Ok(sqlx::query_scalar("UPDATE identity_authority.tenant_state SET value=value+1 WHERE tenant_id=$1::uuid AND kind='profile_sequence' RETURNING value")
         .bind(tenant.to_string()).fetch_one(c).await?)
 }
 pub(crate) async fn local_observation(
     c: &mut PgConnection,
     key: AccountKey,
     now: i64,
+    observation_sequence: i64,
 ) -> Result<Observation, transaction::MutationError> {
     let row=sqlx::query("SELECT revision,value FROM identity_authority.local_profiles WHERE tenant_id=$1::uuid AND principal_id=$2")
         .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_optional(&mut *c).await?;
@@ -202,7 +203,7 @@ pub(crate) async fn local_observation(
         source_time: now,
         source_expiry: i64::MAX,
         max_age,
-        sequence: sequence(c, key.tenant).await?,
+        sequence: observation_sequence,
         config_version: None,
         source_epoch: None,
         revision,
@@ -322,11 +323,23 @@ impl Reader {
         &self,
         c: &mut PgConnection,
     ) -> Result<crate::session_storage::Loaded, transaction::MutationError> {
+        self.recheck_with(c, None).await
+    }
+    async fn recheck_with(
+        &self,
+        c: &mut PgConnection,
+        access: Option<crate::session_storage::SessionAccess>,
+    ) -> Result<crate::session_storage::Loaded, transaction::MutationError> {
         if Instant::now() >= self.expires || authority_id(c).await? != self.instance {
             return Err(reject().into());
         }
         crate::transaction::check_binding(c, self.binding).await?;
-        lock_guard(c, self.key.tenant).await?;
+        if let Some(access) = access {
+            crate::session_storage::lock_session(c, Some(&self.digest), None, self.kind, access)
+                .await?;
+        } else {
+            lock_tenant_collection(c, self.key.tenant).await?;
+        }
         let mut loaded = crate::session_storage::lookup_locked(
             c,
             self.key.tenant,
@@ -413,7 +426,8 @@ impl Authority {
             return Err(AuthorityError::Rejected);
         }
         self.read_sql(reader.binding,budget.remaining(),move|c|Box::pin(async move {
-            let loaded=reader.recheck(c).await?;
+            let access=latest.is_none().then_some(crate::session_storage::SessionAccess::Host);
+            let loaded=reader.recheck_with(c,access).await?;
             let mut expires=crate::sessions::checked_expiry(&loaded,budget.0.instant().min(reader.expires)).map_err(transaction::MutationError::from)?;
             let (target,source,bound)=match latest {
                 Some((target,source))=>{
@@ -437,10 +451,11 @@ impl Authority {
             let snapshot:Uuid=row.try_get("snapshot_id")?;
             if bound.flatten().is_some_and(|id|id!=snapshot){return Ok(TrustedProfile{view,expires});}
             if let ProfileSource::Idp{provider}=source {
-                let provider=crate::federation_storage::provider(c,target.tenant,provider).await?;
-                let linked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.external_identities WHERE tenant_id=$1::uuid AND principal_id=$2 AND provider_id=$3::uuid)")
-                    .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(provider.id.to_string()).fetch_one(&mut *c).await?;
-                if !linked || !provider.enabled || Some(provider.version)!=row.try_get("config_version")? || Some(provider.revocation_epoch)!=row.try_get("source_epoch")? {return Ok(TrustedProfile{view,expires});}
+                let current:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.providers p JOIN identity_authority.external_identities e USING(tenant_id,provider_id)
+                    WHERE p.tenant_id=$1::uuid AND e.principal_id=$2 AND p.provider_id=$3::uuid AND p.enabled AND p.config_version=$4 AND p.revocation_epoch=$5)")
+                    .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(provider.to_string())
+                    .bind(row.try_get::<Option<i64>,_>("config_version")?).bind(row.try_get::<Option<i64>,_>("source_epoch")?).fetch_one(&mut *c).await?;
+                if !current {return Ok(TrustedProfile{view,expires});}
             }
             let end:i64=row.try_get("expires_at")?;let end=end.min(loaded.view.absolute_expires_at).min(row.try_get::<i64,_>("observed_at")?.saturating_add(i64::from(limits.max_age_seconds())));
             let sampled=Instant::now();

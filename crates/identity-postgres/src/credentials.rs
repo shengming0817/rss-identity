@@ -130,7 +130,7 @@ impl CredentialKeys {
             .await
             .map_err(|_| AuthorityError::Unavailable)?;
         sqlx::query(
-            "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+            "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR UPDATE",
         )
         .bind(tenant.to_string())
         .fetch_optional(&mut **tx)

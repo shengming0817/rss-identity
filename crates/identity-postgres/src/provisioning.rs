@@ -119,7 +119,7 @@ impl AccountProvisioner {
                     if authority_id(c).await? != instance.as_uuid() {
                         return Err(ProvisioningError::Rejected);
                     }
-                    let loaded = crate::session_storage::recheck(c, &actor).await?;
+                    let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
                     crate::management::authorize(
                         policy.as_ref(),
                         instance,
@@ -151,9 +151,9 @@ impl AccountProvisioner {
             principal: PrincipalId::generate(),
         };
         let state = transaction::connection(tx, move |c| Box::pin(async move {
-            sqlx::query("INSERT INTO identity_authority.guard(tenant_id) VALUES($1::uuid) ON CONFLICT DO NOTHING")
+            sqlx::query("INSERT INTO identity_authority.tenants(tenant_id) VALUES($1::uuid) ON CONFLICT DO NOTHING")
                 .bind(target.to_string()).execute(&mut *c).await?;
-            crate::storage::lock_guard(c, target).await?;
+            crate::storage::lock_tenant_collection(c, target).await?;
             insert_account(c, key, prepared.login.as_str(), prepared.hash.as_str()).await?;
             Ok::<_, ProvisioningError>(account_state_locked(c, key).await?)
         })).await?;

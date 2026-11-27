@@ -459,13 +459,13 @@ pub async fn fence(c: &mut sqlx::PgConnection, binding: ExecutionBinding) -> any
 }
 
 // Observe a real backend waiting on the exact owner, rather than infer a lock from elapsed time.
-pub async fn wait_for_guard(f: &Fixture, blocker: i32) -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(10), async {
+pub async fn wait_for_blocked_backend(f: &Fixture, blocker: i32) -> anyhow::Result<i32> {
+    tokio::time::timeout(Duration::from_secs(10),async {
         loop {
-            let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%identity_authority.guard%')").bind(blocker).fetch_one(&f.owner).await?;
-            if blocked { return Ok::<_, anyhow::Error>(()); }
+            let pid:Option<i32>=sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))")
+                .bind(blocker).fetch_optional(&f.owner).await?;
+            if let Some(pid)=pid {return Ok::<_,anyhow::Error>(pid);}
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await??;
-    Ok(())
+    }).await?
 }

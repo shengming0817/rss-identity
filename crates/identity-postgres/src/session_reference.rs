@@ -3,7 +3,7 @@ use crate::{
     AccountKey, AuthenticatedSession, Authority, AuthorityError, SessionIdentity, SessionView,
     VerifiedDepartmentSnapshot, VerifiedGroups, session_storage as db,
     sessions::checked_expiry,
-    storage::lock_guard,
+    storage::lock_tenant_collection,
     transaction::{connection, reject},
     types::Budget,
 };
@@ -128,7 +128,14 @@ impl Authority {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
-                        lock_guard(c, tenant).await?;
+                        db::lock_session(
+                            c,
+                            None,
+                            Some(session),
+                            reference.credential_kind,
+                            db::SessionAccess::Inspect,
+                        )
+                        .await?;
                         let loaded = db::by_id_locked(
                             c,
                             key,
@@ -191,7 +198,7 @@ impl Authority {
         let result = self
             .read_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
-                    lock_guard(c, tenant).await?;
+                    lock_tenant_collection(c, tenant).await?;
                     let window = crate::personnel::read_window(
                         c,
                         tenant,

@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Recheck the current credential in the host's tenant-bound READ COMMITTED transaction.
-/// Call after Audit/Ledger locks and before host authorization/business locks. Identity's
-/// guard and any platform verifier locks remain held until the host settles this transaction.
+/// Call after Audit/Ledger locks and before host authorization/business locks. Tenant admission,
+/// source, account/membership, session and platform verifier locks last until host settlement.
 /// Platform source writers must honor the verifier's authoritative locks on this same connection.
 /// On any error the host MUST roll back. The host owns fencing, budgets, resource authorization
 /// and commit/rollback outcomes; successful admission is not a successful business commit.
@@ -370,17 +370,24 @@ impl Authority {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
-                        lock_guard(c, key.tenant).await?;
-                        let state = current(c, &candidate).await?;
                         let replaced = match replacement {
-                            Some(proof) => Some(db::recheck(c, &proof).await?.view.id),
+                            Some(proof) => Some(
+                                db::recheck_for(c, &proof, db::SessionAccess::Revoke)
+                                    .await?
+                                    .view
+                                    .id,
+                            ),
                             None => None,
                         };
+                        let state = current(c, &candidate).await?;
+                        let sequence = crate::profiles::sequence(c, key.tenant).await?;
                         let now = db::now(c).await?;
                         // current() checks before waiting on account locks; recheck its original deadline.
                         if Instant::now() >= candidate.expires {
                             return Err(reject().into());
                         }
+                        let observation =
+                            crate::profiles::local_observation(c, key, now, sequence).await?;
                         let (issued, fact) = insert(
                             c,
                             state,
@@ -391,7 +398,6 @@ impl Authority {
                             max_auth_facts_bytes,
                         )
                         .await?;
-                        let observation = crate::profiles::local_observation(c, key, now).await?;
                         let profile_event = crate::profiles::accept(
                             c,
                             key,
@@ -401,6 +407,9 @@ impl Authority {
                             limits,
                         )
                         .await?;
+                        if Instant::now() >= candidate.expires {
+                            return Err(reject().into());
+                        }
                         let mut events = vec![fact];
                         events.extend(profile_event);
                         Ok((issued, events))
@@ -462,7 +471,12 @@ impl Authority {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
-                        lock_guard(c, tenant).await?;
+                        let access = if touch {
+                            db::SessionAccess::Activity
+                        } else {
+                            db::SessionAccess::Inspect
+                        };
+                        db::lock_session(c, Some(&digest), None, kind, access).await?;
                         let mut loaded =
                             db::lookup_locked(c, tenant, &digest, kind, authority, &session_checks)
                                 .await?;
@@ -507,7 +521,7 @@ impl Authority {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
-                        lock_guard(c, tenant).await?;
+                        db::lock_session(c, Some(&old.digest()), None, CredentialKind::Cookie, db::SessionAccess::Rotate).await?;
                         let mut loaded = db::lookup_locked(
                             c,
                             tenant,
@@ -566,7 +580,8 @@ impl Authority {
         budget.0 = budget.0.shortened_to(actor.expires);
         self.mutate(actor.binding,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
-                let loaded = db::recheck(c,&actor).await?;
+                let access = if all { db::SessionAccess::RevokeAll } else { db::SessionAccess::Revoke };
+                let loaded = db::recheck_for(c,&actor,access).await?;
                 let state = if all {
                     let next = loaded.state.revoke_sessions()?;
                     sqlx::query(concat!("UPDATE identity_authority.accounts SET auth_epoch=$3 WHERE tenant_id=$1::uuid AN","D principal_id=$2::uuid"))
@@ -599,7 +614,7 @@ impl Authority {
         self.read_sql(actor.binding, budget.remaining(), move |c| {
             Box::pin(async move {
                 // read_sql has just verified this instance and entered the actor's exact fenced binding.
-                lock_guard(c, actor.key.tenant).await?;
+                lock_tenant_collection(c, actor.key.tenant).await?;
                 let loaded = db::recheck_locked(c, &actor).await?;
                 let page = crate::session_page::read(c, &actor, &loaded, cursor, limit).await?;
                 checked_expiry(&loaded, budget.0.instant())?;

@@ -29,6 +29,7 @@ async fn consume(
     sqlx::query("SET LOCAL ROLE identity_runtime")
         .execute(&mut *tx)
         .await?;
+    recheck_authenticated_session_on(&mut tx, &proof).await?;
     let accepted = consume_step_up_on(&mut tx, &proof, context, grant)
         .await
         .is_ok();
@@ -124,7 +125,36 @@ async fn webauthn_self_service_and_atomic_operation_proofs() -> anyhow::Result<(
         consume(&f, &s, &context, grant.expose(), false).await?,
         "rollback preserves proof"
     );
-    assert!(consume(&f, &s, &context, grant.expose(), true).await?);
+    let target = f
+        .store
+        .create_local_account(f.actor().await?, login("managed"), password(), deadline())
+        .await?
+        .key();
+    let proof = actor(&f, &s).await?;
+    let subject = rss_identity_postgres::platform::PlatformBinding {
+        instance: f.instance,
+        account: target,
+        binding_id: uuid::Uuid::new_v4(),
+        binding_epoch: 1,
+        source_id: uuid::Uuid::new_v4(),
+        source_version: 1,
+        external_identity: None,
+    };
+    let mut host = f.owner.begin().await?;
+    support::fence(&mut host, binding(f.key.tenant)).await?;
+    sqlx::query("SET LOCAL ROLE identity_runtime")
+        .execute(&mut *host)
+        .await?;
+    recheck_authenticated_session_on(&mut host, &proof).await?;
+    consume_step_up_on(&mut host, &proof, &context, grant.expose()).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(3331,2)")
+        .execute(&mut *host)
+        .await?;
+    rss_identity_postgres::platform::admit_platform_subject_on(
+        &mut host, f.instance, &subject, None,
+    )
+    .await?;
+    host.commit().await?;
     assert!(!consume(&f, &s, &context, grant.expose(), true).await?);
     let remove = webauthn_management_context(f.key, "remove", Some(credential.id))?;
     let a = w

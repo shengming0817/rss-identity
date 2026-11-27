@@ -557,7 +557,7 @@ async fn dynamic_tenant_scope_reuses_authority_and_fences_proofs() -> anyhow::Re
         Err(AuthorityError::Fenced)
     ));
     let guards: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM identity_authority.guard WHERE tenant_id=$1::uuid",
+        "SELECT count(*) FROM identity_authority.tenants WHERE tenant_id=$1::uuid",
     )
     .bind(tenant.to_string())
     .fetch_one(&f.owner)

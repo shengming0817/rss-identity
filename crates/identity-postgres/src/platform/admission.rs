@@ -27,8 +27,8 @@ impl From<sqlx::Error> for PlatformSubjectAdmissionError {
 
 /// Check Identity-owned subject state without issuing a session or reading credentials.
 /// Requires an explicit READ COMMITTED transaction scoped to the binding's tenant and instance.
-/// Call after Audit/Ledger locks and before host device/authorization/business locks. The Identity
-/// guard remains held until the caller settles its transaction. The host must check its binding,
+/// Call after Audit/Ledger locks and before host device/authorization/business locks. Shared tenant, source Provider,
+/// account and membership locks last until the caller settles its transaction. The host must check its binding,
 /// source, platform proof and authorization in that same transaction before issuing native tokens.
 /// Persist the returned version with the source; subsequent use must supply it as `expected` so
 /// disabling/re-enabling an account or membership cannot resurrect an old native registration.
@@ -54,13 +54,26 @@ pub async fn admit_platform_subject_on(
     {
         return Err(Rejected);
     }
-    let guard: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
-    )
-    .bind(binding.account.tenant.to_string())
-    .fetch_optional(&mut *c)
-    .await?;
-    if guard.is_none() {
+    let admitted: bool = sqlx::query_scalar("SELECT identity_authority.share_host_tenant()")
+        .fetch_one(&mut *c)
+        .await?;
+    if !admitted {
+        return Err(Rejected);
+    }
+    if let Some(source) = &binding.external_identity {
+        let locked: bool = sqlx::query_scalar("SELECT identity_authority.share_provider($1::uuid)")
+            .bind(source.provider.to_string())
+            .fetch_one(&mut *c)
+            .await?;
+        if !locked {
+            return Err(Rejected);
+        }
+    }
+    let locked: bool = sqlx::query_scalar("SELECT identity_authority.share_subject($1)")
+        .bind(binding.account.principal.as_uuid())
+        .fetch_one(&mut *c)
+        .await?;
+    if !locked {
         return Err(Rejected);
     }
     let epochs: Option<(i64, i64)> = sqlx::query_as(

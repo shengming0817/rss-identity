@@ -261,7 +261,7 @@ impl Authority {
         };
         let instance = self.instance;
         self.read_sql(execution,budget.remaining(),move|c|Box::pin(async move{
-            lock_guard(c,tenant).await?;
+            lock_tenant_collection(c,tenant).await?;
             let resolved=verifier.resolve(instance,tenant,binding,c).await.map_err(failure)?;
             if !resolved.valid() || resolved.instance!=instance || resolved.account.tenant!=tenant || resolved.binding_id!=binding || !account_state_locked(c,resolved.account).await?.active(){return Err(reject().into());}
             external(c,&resolved).await?;
@@ -307,7 +307,7 @@ impl Authority {
         let context = self
             .read_sql(execution, budget.remaining(), move |c| {
                 Box::pin(async move {
-                    lock_guard(c, tenant).await?;
+                    lock_tenant_collection(c, tenant).await?;
                     let row = challenge(c, tenant, id, &expected_nonce, &expected_browser).await?;
                     Ok(PlatformChallengeContext {
                         purpose: serde_json::from_value(row.try_get("purpose")?)
@@ -355,7 +355,7 @@ impl Authority {
         let future_skew_seconds = self.future_skew_seconds;
         let limits = self.profile_limits;
         self.write_sql(execution,budget.remaining(),move|c|Box::pin(async move{
-            lock_guard(c,tenant).await?;
+            lock_tenant_collection(c,tenant).await?;
             let row=challenge(c,tenant,id,&expected_nonce,&expected_browser).await?;
             let actual:PlatformBinding=serde_json::from_value(row.try_get("binding")?).map_err(|_|corrupt())?;
             if actual!=stored.binding || row.try_get::<String,_>("audience")?!=stored.audience {return Err(reject().into());}
@@ -376,7 +376,11 @@ impl Authority {
             let sequence=row.try_get("profile_sequence")?;
             let observation=match verified.profile {
                 PlatformProfile::Unavailable=>None,
-                PlatformProfile::IdentityLocal=>Some(crate::profiles::local_observation(c,key,now).await?),
+                PlatformProfile::IdentityLocal=>{
+                    let local_sequence=crate::profiles::sequence(c,tenant).await?;
+                    let observed=crate::session_storage::now(c).await?;
+                    Some(crate::profiles::local_observation(c,key,observed,local_sequence).await?)
+                },
                 PlatformProfile::Idp{provider,claims}=>{
                     let binding=actual.external_identity.as_ref().ok_or_else(reject)?;
                     if provider!=binding.provider || claims.issued_at<context.created_at.saturating_sub(i64::from(future_skew_seconds)){return Err(reject().into());}

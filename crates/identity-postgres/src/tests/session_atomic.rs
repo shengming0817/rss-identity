@@ -136,8 +136,8 @@ async fn session_updates_match_activity_and_rotation() -> anyhow::Result<()> {
         let state = || {
             sqlx::query_as::<_, (i64, i64, i64)>(
                 "SELECT (SELECT count(*) FROM public.session_updates WHERE session_id=$1),
-                    g.personnel_revision, s.idle_expires_at
-             FROM identity_authority.sessions s JOIN identity_authority.guard g USING (tenant_id)
+                    g.value, s.idle_expires_at
+             FROM identity_authority.sessions s JOIN identity_authority.tenant_state g ON g.tenant_id=s.tenant_id AND g.kind='personnel_revision'
              WHERE s.session_id=$1 AND s.tenant_id=$2::uuid",
             )
             .bind(view.id.as_uuid())
@@ -610,7 +610,7 @@ async fn session_expiry_deadline_permissions_and_overflow() -> anyhow::Result<()
     assert!(proof(&f, &live).await.is_ok());
     let mut lock = f.owner.begin().await?;
     sqlx::query(
-        "SELECT tenant_id FROM identity_authority.guard WHERE tenant_id=$1::uuid FOR UPDATE",
+        "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR UPDATE",
     )
     .bind(A)
     .fetch_one(&mut *lock)

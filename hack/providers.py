@@ -132,17 +132,21 @@ SUITES[("rss-identity-oidc", "entra")] = {"signed_entra_resource_tokens", "jwks_
 SUITES[('rss-identity-postgres', 'provisioning')] = {'provisioned_account_and_event_share_host_commit_and_revalidate_source'}
 
 SUITES[("rss-identity-http-axum","federated_http")].add("profile_lifecycle::real_profile_login_updates_and_removes_values")
-SUITES[("rss-identity-postgres","profile_platform")] = {"personnel_facts::bounded_source_observations_under_reader_role","trusted_reference_join_preserves_host_only_scope_and_expiry","personnel_query_is_scoped_readonly_and_revision_bound","local_profile_observation_receipts_and_revocation","platform_challenges_are_one_use_and_all_session_paths_recheck","older_oidc_completion_cannot_replace_a_newer_observation","platform_binding_errors_and_uncertain_commit_never_issue_a_secret","platform_external_identity_and_fresh_profile_are_bound_and_revocable","source_admission_borrows_transaction_with_no_credential_privileges","platform_subject_admission_fences_native_settlement","platform_subject_admission_requires_current_external_identity","malformed_extension_replaces_old_values_without_rejecting_login","latest_source_discovery_is_target_bound_and_policy_checked","platform_evidence_admission_preserves_authentication_time","profile_receipts::admission_after_quota_changes_and_concurrent_reclamation","profile_receipts::receipt_visibility_expiry_and_uncertain_writes","profile_receipts::receipt_lookup_keeps_original_proof_deadline_while_waiting"}
+SUITES[("rss-identity-postgres","profile_platform")] = {"personnel_facts::bounded_source_observations_under_reader_role","trusted_reference_join_preserves_host_only_scope_and_expiry","personnel_query_is_scoped_readonly_and_revision_bound","local_profile_observation_receipts_and_revocation","platform_challenges_are_one_use_and_all_session_paths_recheck","older_oidc_completion_cannot_replace_a_newer_observation","platform_binding_errors_and_uncertain_commit_never_issue_a_secret","platform_external_identity_and_fresh_profile_are_bound_and_revocable","source_admission_borrows_transaction_with_no_credential_privileges","platform_subject_admission_fences_native_settlement","platform_subject_admission_requires_current_external_identity","malformed_extension_replaces_old_values_without_rejecting_login","latest_source_discovery_is_target_bound_and_policy_checked","platform_evidence_admission_preserves_authentication_time","profile_receipts::receipt_write_deadline_covers_trigger_wait","profile_receipts::concurrent_accounts_share_one_operation_id_namespace","profile_receipts::admission_after_quota_changes_and_concurrent_reclamation","profile_receipts::receipt_visibility_expiry_and_uncertain_writes","profile_receipts::receipt_lookup_keeps_original_proof_deadline_while_waiting"}
 
 SUITES[("rss-identity-http-axum","session_http")].add("profile_http_requires_policy_csrf_and_exact_receipts")
 
 SUITES[("rss-identity-postgres", "live_session")] = {
+    "independent_subject_completes_while_host_admission_is_open",
+    "cancelled_session_wait_releases_transaction_locks",
+    "host_deadlock_victim_rolls_back_and_releases_admission",
+    "host_settlement_orders_account_eligibility_changes",
     "host_admission_is_passive_and_transaction_scoped",
     "host_admission_serializes_commit_rollback_and_revocation",
     "host_admission_rejects_stale_credentials_and_subjects",
     "host_admission_preserves_unknown_and_failed_settlement",
     "host_admission_rechecks_federated_source",
-    "host_admission_checks_expiry_after_guard_wait",
+    "host_admission_checks_expiry_after_session_wait",
 }
 
 SUITES[("rss-identity-postgres", "profile_platform")].add("live_session_admission_retains_platform_source_locks")

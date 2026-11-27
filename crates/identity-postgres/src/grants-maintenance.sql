@@ -1,7 +1,8 @@
 GRANT USAGE ON SCHEMA identity_authority TO {role};
 GRANT SELECT ON identity_authority.schema_version TO {role};
 GRANT SELECT ON identity_authority.deployment TO {role};
-GRANT SELECT,INSERT,UPDATE ON identity_authority.guard TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.tenants TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.tenant_state TO {role};
 GRANT SELECT,INSERT ON identity_authority.accounts TO {role};
 GRANT SELECT,INSERT ON identity_authority.memberships TO {role};
 GRANT SELECT,INSERT ON identity_authority.local_credentials TO {role};

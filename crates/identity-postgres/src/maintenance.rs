@@ -28,7 +28,7 @@ impl Authority {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {
-                        let inserted = sqlx::query("INSERT INTO identity_authority.guard(tenant_id) VALUES($1::uuid) ON CONFLICT DO NOTHING")
+                        let inserted = sqlx::query("INSERT INTO identity_authority.tenants(tenant_id) VALUES($1::uuid) ON CONFLICT DO NOTHING")
                             .bind(key.tenant.to_string()).execute(&mut *c).await?.rows_affected();
                         if inserted != 1 { return Err(reject().into()); }
                         insert_account(c, key, login.as_str(), hash.as_str()).await?;
@@ -61,7 +61,9 @@ impl Authority {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {
-                        lock_guard(c, key.tenant).await?;
+                        lock_tenant_scope(c, key.tenant).await?;
+                        lock_account(c,key,true).await?;
+                        lock_attempt_capacity(c,key.tenant).await?;
                         let old = account_state_locked(c, key).await?;
                         let (next, action) = old.recover()?;
                         sqlx::query(
