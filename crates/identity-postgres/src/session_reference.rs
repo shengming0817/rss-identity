@@ -199,20 +199,17 @@ impl Authority {
             .read_sql(binding, budget.remaining(), move |c| {
                 Box::pin(async move {
                     lock_tenant_collection(c, tenant).await?;
-                    let window = crate::personnel::read_window(
-                        c,
-                        tenant,
-                        None,
-                        None,
-                        budget.0.instant(),
-                        None,
+                    let window = crate::directory_window::ReadDependencies::references(
+                        instance,
+                        platform.as_deref(),
                     )
+                    .window(c, tenant, budget.0.instant(), None)
                     .await?;
                     let expires = window.expires;
                     let relation = crate::personnel::session_relation(
                         instance,
                         tenant,
-                        window.now,
+                        window.clock.seconds(),
                         platform.as_deref(),
                     );
                     sqlx::query("SET TRANSACTION READ ONLY")

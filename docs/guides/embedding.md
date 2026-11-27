@@ -19,7 +19,7 @@
 
 宿主为后台计算角色调用 `grant_personnel_fact_read`，启动时用该角色直接登录数据库并执行 `verify_personnel_fact_read`。在宿主已设置租户的数据库事务中，`read_personnel_facts_on` 接受实例、租户、至多 64 个不同主体及一个来源字段。支持已发布资料字段的标量、指定 IdP 的组标识列表和部门快照。资料路径使用解码后的 JSON Pointer 段。资料结构预算在采集时生效，读取方可进一步收紧标量的有效期。宿主负责字段可见性、敏感性和业务权限检查。
 
-每页返回同一数据库快照中的租户人员版本、采样时间和各主体的结果。空主体页可用于轮询版本。组列表为空表示来源明确声明零个组。缺失、过期及不可用状态均无值。后台任务应在版本变化或页的 `next_transition_at()` 到达时重算。这个时间覆盖未来观察开始生效和已有观察过期。每条观察携带采集时的来源配置版本及观察序号。宿主应跟踪时间边界，并在使用结果前检查有效期。
+每页返回同一数据库快照中汇总的租户人员事实修订、采样时间和各主体的结果。空主体页可用于轮询版本。组列表为空表示来源明确声明零个组。缺失、过期及不可用状态均无值。后台任务应在版本变化或页的 `next_transition_at()` 到达时重算。这个时间覆盖未来观察开始生效和已有观察过期。每条观察携带采集时的来源配置版本及观察序号。宿主应跟踪时间边界，并在使用结果前检查有效期。
 
 ## 密码防护与资源预算
 
@@ -66,9 +66,9 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 |---|---|
 | 实例 | 复用宿主事务的 storage、lineage、tenant epoch fence，并核对不可变的部署 ID。启用 Ledger 时先取得 Audit head。 |
 | 租户 | 已知主体的普通操作取 `KEY SHARE`。宿主借用和平台 verifier 取 `SHARE`，允许多个独立准入并行。会持有资格写锁并调用宿主策略的管理事务先取 `NO KEY UPDATE`。全租户集合窗口、跨来源链接及批量维护从入口取 `UPDATE`。 |
-| Provider、账户与成员 | 复核取共享锁。Provider 撤权和账户禁用、改密、成员变更锁相应写目标。维护改密先锁租户登记行，再锁目标账户与尝试容量行，更新账户时触发人员版本行锁；相关锁持到事务结算。 |
+| Provider、账户与成员 | 复核取共享锁。Provider 撤权和账户禁用、改密、成员变更锁相应写目标。维护改密先锁租户登记行，再锁目标账户与尝试容量行，更新账户时推进相应资格修订；相关锁持到事务结算。 |
 | 会话 | 被动检查和借用准入持共享锁，续期及当前会话撤销取非键更新锁，轮换凭据取更新锁。全部会话撤销通过账户代际与该账户的所有准入协调。 |
-| 租户事务状态 | 资料序号、人员版本、回执时钟分别持有一行。涉及序号或回执时钟时，先取得相应行再触发人员版本更新。回执 GET、PUT 均在取得时钟锁后采样。来源限流与密码 claim 共同使用第四行协调容量。 |
+| 租户事务状态 | 资料序号、回执时钟与尝试容量分别协调。先取得所需序号或时钟，再由业务写入推进相关类别与来源的目录修订；同一行涉及多个修订键时按固定顺序更新。回执 GET、PUT 均在取得时钟锁后采样。 |
 
 宿主在业务锁之前完成会话准入和 step-up。已准入的组合在同连接内复用保护，平台 binding/source 写入遵循 verifier 的权威锁。宿主提交或回滚释放全部锁。纯续期和凭据轮换保留原人员版本。
 
@@ -259,9 +259,9 @@ Idp 仅允许本次经过验证且绑定该挑战、provider 和 external identi
 
 `identity_session_references` 提供同租户、账户/成员 epoch、会话期限及来源当前性已筛选的定位关系，供产品按完整 SessionReference 坐标集合关联；它不是 AuthenticatedSession。平台来源的 `requires_platform_check` 为 true，产品必须再 JOIN 自己持有的当前平台绑定/来源资格关系，核对返回的绑定 ID/epoch 和来源 ID/version，不能仅凭该关系宣称平台资格有效。原请求 actor 的平台检查仍由既有 verifier 执行。
 
-没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(binding, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用宿主提供的明确 binding、实例和执行 fencing，取得覆盖全租户集合的锁后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，期限只受会话当前性和原调用预算限制。
+没有自然人会话的产品入口（例如产品自己认证的 API key）使用 `Authority::with_session_references_read(binding, deadline, query)`，仅在可信宿主保存的 SessionReference 与业务关系之间进行集合关联。该入口复用宿主提供的明确 binding、实例和执行 fencing，取得覆盖全租户集合的锁后进入只读事务；它不调用人员管理策略，不安装 `identity_personnel`，不提供 login/profile、组、部门或认证证明。宿主必须在同一个 SELECT 中应用调用者的资源授权，并匹配 reference 的 instance、tenant、principal、session、credentialKind 全部坐标；不得把客户端提交的 locator 当作身份。平台资格仍须由宿主验证。返回的 revision 固定 `logins=false`、`profiles=None`，修订有效期受会话集合的有界到期探针与 60 秒一致性上限约束，回调还受原调用预算约束。
 
-会话关系通过完整定位坐标关联当前会话。列 `session_valid_until` 是读取当时该会话空闲期限与绝对期限的较早者，续期会更新该值。宿主用它限制投影的有效期。分页按稳定定位坐标排序，cursor 沿用签发时的保守期限，到期后重新查询。人员回调也受资料和会话最早到期时间限制。
+会话关系通过完整定位坐标关联当前会话。列 `session_valid_until` 是读取当时该会话空闲期限与绝对期限的较早者，续期会更新该值。宿主用它限制投影的有效期。分页按稳定定位坐标排序，cursor 沿用签发时的保守期限，到期后重新查询。人员回调受可见资料的下次生效或到期、会话引用到期及单次 60 秒一致性窗口限制。引用期限探针按到期顺序最多复核 32 条候选会话。达到上限时，窗口最晚到最后一条已检查候选的到期时刻，集中撤权后可能提前重查。返回给宿主的每条引用仍完整复核资格。
 
 ## 企业 RP 与 WebAuthn 操作证明
 

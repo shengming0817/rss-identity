@@ -213,7 +213,8 @@ impl AccountQuery {
     pub fn limit(&self) -> u16 {
         self.limit
     }
-    fn used_fields(&self) -> Vec<Field> {
+    /// Fields affecting membership, ordering or the requested projection.
+    pub fn used_fields(&self) -> Vec<Field> {
         let mut used = self.fields.clone();
         used.extend(self.sort.iter().map(|s| s.field));
         if let Some(filter) = &self.filter {

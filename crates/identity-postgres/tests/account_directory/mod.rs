@@ -288,9 +288,29 @@ async fn account_directory_filters_before_stable_pagination_and_invalidates_chan
     f.store
         .set_account_enabled(f.actor().await?, target, false, deadline())
         .await?;
+    let continued = f
+        .store
+        .list_accounts(f.actor().await?, q.clone(), page.next_cursor, deadline())
+        .await?;
+    assert_eq!(continued.accounts[0].login.as_deref(), Some("beta"));
+    // The row-set revision is tenant-wide. Inserting a nonmatching login still changes it.
+    let prior = f
+        .store
+        .list_accounts(f.actor().await?, q.clone(), None, deadline())
+        .await?
+        .next_cursor
+        .unwrap();
+    f.store
+        .create_local_account(
+            f.actor().await?,
+            login("outside-filter"),
+            password(),
+            deadline(),
+        )
+        .await?;
     assert!(matches!(
         f.store
-            .list_accounts(f.actor().await?, q, page.next_cursor, deadline())
+            .list_accounts(f.actor().await?, q, Some(prior), deadline())
             .await,
         Err(AuthorityError::CursorInvalidated)
     ));
@@ -358,7 +378,7 @@ async fn account_directory_filters_before_stable_pagination_and_invalidates_chan
     payload["expires"] = serde_json::json!(i64::MAX);
     payload["position"] = serde_json::json!([target.principal.as_uuid().to_string()]);
     let plain = serde_json::to_vec(&payload)?;
-    let mut signed = b"identity.accounts.cursor.v1\0".to_vec();
+    let mut signed = b"identity.accounts.cursor.v2\0".to_vec();
     signed.extend(&plain);
     let tag = ring::hmac::sign(
         &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &secret(&session).digest()),
@@ -784,6 +804,257 @@ async fn selected_account_page_capacity_round_trips_long_names() -> anyhow::Resu
             .count(),
         1024
     );
+    f.close().await;
+    Ok(())
+}
+
+mod replay;
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn cursor_dependencies_under_writes() -> anyhow::Result<()> {
+    assert_eq!(
+        replay::replay_writes().await?,
+        [
+            [false, false, false, false, false, false],
+            [false, false, false, false, false, false],
+            [false, false, true, false, false, false],
+            [false, false, false, true, true, true],
+            [false, true, true, true, true, true],
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn cursor_source_clock_and_actor_boundaries() -> anyhow::Result<()> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let second = f
+        .store
+        .create_local_account(f.actor().await?, login("second"), password(), deadline())
+        .await?
+        .key();
+    let local = f
+        .store
+        .login_local(
+            binding(second.tenant),
+            login("second"),
+            password(),
+            source(),
+            None,
+            deadline(),
+        )
+        .await?;
+    let simple = AccountQuery::parse(None, None, Some("principalId"), Some("local"), 1)?;
+    let profiled =
+        AccountQuery::parse(None, Some("login"), Some("profileStatus"), Some("local"), 1)?;
+    let profile_start:i64=sqlx::query_scalar("UPDATE identity_authority.profile_observations SET observed_at=floor(extract(epoch FROM clock_timestamp()))::bigint+5,expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+120 WHERE principal_id=$1 RETURNING observed_at").bind(second.principal.as_uuid()).fetch_one(&f.owner).await?;
+    let reference_end = profile_start - 1;
+    sqlx::query("UPDATE identity_authority.sessions SET idle_expires_at=$2 WHERE session_id=$1")
+        .bind(local.view().id.as_uuid())
+        .bind(reference_end)
+        .execute(&f.owner)
+        .await?;
+    let first = |q: AccountQuery| async {
+        f.store
+            .list_accounts(f.actor().await?, q, None, deadline())
+            .await?
+            .next_cursor
+            .ok_or_else(|| anyhow::anyhow!("expected continuation"))
+    };
+    let base = first(simple.clone()).await?;
+    let prof = first(profiled.clone()).await?;
+    let signed_expiry = |cursor: &str| -> anyhow::Result<i64> {
+        let raw = URL_SAFE_NO_PAD.decode(cursor)?;
+        let body: serde_json::Value = serde_json::from_slice(&raw[32..])?;
+        Ok(body["expires"].as_i64().unwrap())
+    };
+    assert_eq!(signed_expiry(&prof)?, profile_start);
+    assert!(signed_expiry(&base)? > profile_start);
+    assert!(reference_end < profile_start);
+    continued_page_crosses(
+        &f,
+        second,
+        f.actor().await?,
+        profiled,
+        prof,
+        reference_end,
+        profile_start,
+    )
+    .await?;
+    assert_eq!(
+        f.store
+            .list_accounts(
+                f.actor().await?,
+                simple.clone(),
+                Some(base.clone()),
+                deadline()
+            )
+            .await?
+            .accounts
+            .len(),
+        1
+    );
+    // Give each caller genuine management authority; rejection must survive fresh authentication.
+    f.policy.allow(second);
+    for (tenant, name) in [
+        (second.tenant, "second"),
+        (f.system_key.tenant, "platform"),
+        (f.key.tenant, "admin"),
+    ] {
+        let who = f
+            .store
+            .login_local(
+                binding(tenant),
+                login(name),
+                password(),
+                source(),
+                None,
+                deadline(),
+            )
+            .await?;
+        let actor = f
+            .store
+            .inspect_session(binding(tenant), secret(&who), deadline())
+            .await?;
+        assert!(matches!(
+            f.store
+                .list_accounts(actor, simple.clone(), Some(base.clone()), deadline())
+                .await,
+            Err(AuthorityError::CursorInvalidated)
+        ));
+    }
+    f.policy.revoke(f.key);
+    assert!(matches!(
+        f.store
+            .list_accounts(f.actor().await?, simple, Some(base), deadline())
+            .await,
+        Err(AuthorityError::RuleRejected(
+            AccountRuleError::InsufficientPrivilege
+        ))
+    ));
+    f.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn disjoint_sources_commit_while_a_revision_write_rolls_back() -> anyhow::Result<()> {
+    use federation_support::{ScriptedOidc, enabled_department, service};
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let federation = service(&f, ScriptedOidc::new());
+    let a = enabled_department(&f, &federation, 300).await?;
+    let b = enabled_department(&f, &federation, 300).await?;
+    let counter = "SELECT value FROM identity_authority.directory_revisions WHERE tenant_id=$1::uuid AND kind='origin' AND source=$2";
+    let before: i64 = sqlx::query_scalar(counter)
+        .bind(A)
+        .bind(a.id.to_string())
+        .fetch_one(&f.owner)
+        .await?;
+    let mut held = f.owner.begin().await?;
+    sqlx::query("UPDATE identity_authority.providers SET enabled=false WHERE tenant_id=$1::uuid AND provider_id=$2::uuid")
+        .bind(A).bind(a.id.to_string()).execute(&mut *held).await?;
+    let uncommitted: i64 = sqlx::query_scalar(counter)
+        .bind(A)
+        .bind(a.id.to_string())
+        .fetch_one(&mut *held)
+        .await?;
+    assert!(uncommitted > before);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        federation.enable_provider(f.actor().await?, b.id, b.version, false, deadline()),
+    )
+    .await??;
+    let visible: i64 = sqlx::query_scalar(counter)
+        .bind(A)
+        .bind(a.id.to_string())
+        .fetch_one(&f.owner)
+        .await?;
+    assert_eq!(visible, before);
+    held.rollback().await?;
+    let restored:(bool,i64)=sqlx::query_as("SELECT p.enabled,r.value FROM identity_authority.providers p JOIN identity_authority.directory_revisions r ON r.tenant_id=p.tenant_id AND r.source=p.provider_id::text AND r.kind='origin' WHERE p.provider_id=$1::uuid").bind(a.id.to_string()).fetch_one(&f.owner).await?;
+    assert_eq!(restored, (true, before));
+    f.close().await;
+    Ok(())
+}
+
+async fn continued_page_crosses(
+    f: &Fixture,
+    target: AccountKey,
+    actor: AuthenticatedSession,
+    query: AccountQuery,
+    cursor: String,
+    first_boundary: i64,
+    finish_at: i64,
+) -> anyhow::Result<()> {
+    let mut gate = f.owner.begin().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(3337)")
+        .fetch_one(&mut *gate)
+        .await?;
+    // Only the second directory row waits. Actor authentication and cursor validation run first.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION public.wait_directory_page() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared(3337); RETURN true; END $$; CREATE POLICY wait_directory_page ON identity_authority.local_credentials AS RESTRICTIVE FOR SELECT USING (CASE WHEN principal_id='{}'::uuid THEN public.wait_directory_page() ELSE true END)",target.principal.as_uuid()))).execute(&f.owner).await?;
+    let store = f.store.clone();
+    let continued = tokio::spawn(async move {
+        store
+            .list_accounts(actor, query, Some(cursor), deadline())
+            .await
+    });
+    let blocked = wait_for_blocked_backend(f, pid).await?;
+    let query: String = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE pid=$1")
+        .bind(blocked)
+        .fetch_one(&f.owner)
+        .await?;
+    assert!(
+        query.contains("department_facts"),
+        "expected directory page read"
+    );
+    let before: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&f.owner)
+            .await?;
+    assert!(before < first_boundary);
+    sqlx::query("SELECT pg_sleep(greatest(0,$1::bigint-extract(epoch FROM clock_timestamp()))::double precision)").bind(finish_at).execute(&f.owner).await?;
+    gate.commit().await?;
+    assert!(matches!(
+        continued.await?,
+        Err(AuthorityError::CursorInvalidated)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires make test-pg"]
+async fn original_cursor_expiry_bounds_a_renewed_session_read() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.bootstrap().await?;
+    let target = f
+        .store
+        .create_local_account(f.actor().await?, login("second"), password(), deadline())
+        .await?
+        .key();
+    let session = f.login().await?;
+    let until:i64=sqlx::query_scalar("UPDATE identity_authority.sessions SET idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+5 WHERE session_id=$1 RETURNING idle_expires_at")
+        .bind(session.view().id.as_uuid()).fetch_one(&f.owner).await?;
+    let query = AccountQuery::parse(None, Some("login"), Some("principalId"), None, 1)?;
+    let actor = f
+        .store
+        .inspect_session(binding(f.key.tenant), secret(&session), deadline())
+        .await?;
+    let cursor = f
+        .store
+        .list_accounts(actor, query.clone(), None, deadline())
+        .await?
+        .next_cursor
+        .unwrap();
+    let renewed = f
+        .store
+        .authenticate_session(binding(f.key.tenant), secret(&session), deadline())
+        .await?;
+    assert!(renewed.view().idle_expires_at > until);
+    continued_page_crosses(&f, target, renewed, query, cursor, until, until).await?;
     f.close().await;
     Ok(())
 }

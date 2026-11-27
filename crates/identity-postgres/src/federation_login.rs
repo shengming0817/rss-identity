@@ -303,7 +303,7 @@ impl Federation {
                     .fetch_optional(&mut *c)
                     .await?;
                     let linked = attempt.purpose == Purpose::Link;
-                    // JIT account/link inserts advance the personnel generation via triggers.
+                    // JIT account/link inserts acquire directory revision keys via triggers.
                     // Reserve issuance order before the first such write in this transaction.
                     let facts_sequence = if !linked && attempt.mode != AuthenticationMode::StepUp {
                         Some(crate::profiles::sequence(c, tenant).await?)
