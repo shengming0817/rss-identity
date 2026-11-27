@@ -194,8 +194,11 @@ http {
                     ("GET", path + "?state=" + "a"*17000, {}, 414),
                     ("GET", path, {"X-Fixture-Padding": "a"*17000}, 400),
                     ("HEAD", path, {"X-Fixture-Padding": "a"*17000}, 400),
+                    ("GET", path, {"Content-Length": str(97 * 1024)}, 413),
+                    ("HEAD", path, {"Content-Length": str(97 * 1024)}, 413),
                 ]:
-                    client.request(method, target, headers=headers)
+                    payload = b"x" * int(headers["Content-Length"]) if "Content-Length" in headers else None
+                    client.request(method, target, body=payload, headers=headers)
                     rejected = client.getresponse()
                     body = rejected.read()
                     project = native_listener and method == "GET" and path.endswith("/oidc/callback")

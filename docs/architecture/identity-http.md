@@ -20,7 +20,18 @@
 
 请求/响应 DTO 以 [HTTP adapter](../../crates/identity-service-http/src/lib.rs) 的类型与路由为准；[会话接入测试](../../crates/identity-service-http/tests/session_http.rs) 提供实际请求示例。
 
-bearer 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=...` 传递。响应 no-store。写请求检查精确 Origin；登录、重新认证和管理写入要求 `x-identity-request: 1`，已认证修改须 `x-csrf-token`。拒绝重复/畸形凭据头。日志不得记录 Cookie、Set-Cookie、密码、CSRF 或回调参数。
+浏览器会话 Cookie 仅通过 `Set-Cookie: __Host-identity-session=...; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=...` 传递。响应 no-store。写请求检查精确 Origin；登录、重新认证和管理写入要求 `x-identity-request: 1`，已认证修改须 `x-csrf-token`。拒绝重复/畸形凭据头。日志不得记录 Cookie、Set-Cookie、密码、CSRF 或回调参数。
+
+## 程序化 Bearer 接口
+
+独立服务 HTTP 包在宿主显式启用 `ServiceEndpoints::programmatic_bearer` 并实施网络来源准入时提供以下接口；默认参考宿主只启用浏览器端点。
+
+| 方法 / 租户相对路径 | 请求和响应 |
+|---|---|
+| POST `/bearer/login` | 接收 JSON `{login,password}`。成功时返回 `accessToken`、`tokenType: "Bearer"`、`sessionId`、`principalId`、`idleExpiresAt`、`absoluteExpiresAt`。 |
+| POST `/bearer/logout` | 接收单一 `Authorization: Bearer <token>`。撤销本次 Bearer 会话并返回 204。 |
+
+完整前缀为 `/api/v1/identity/tenants/{tenant}`。响应使用 `Cache-Control: no-store`，401 附带 `WWW-Authenticate: Bearer`。程序化入口拒绝查询参数和混合呈现；凭据通过 JSON 或 Authorization 头传递。[路由实现](../../crates/identity-service-http/src/bearer.rs) · [产品契约测试](../../crates/identity-service-http/tests/session_http.rs)
 
 ## 账户管理
 

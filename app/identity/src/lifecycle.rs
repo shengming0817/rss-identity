@@ -169,6 +169,31 @@ async fn ready(State(h): State<Arc<Health>>) -> StatusCode {
         StatusCode::SERVICE_UNAVAILABLE
     }
 }
+/// Bind product routes to the accepted peer, local admission, tenant execution and one request deadline.
+/// Health probes are mounted separately by the reference host.
+pub fn protected_routes(
+    routes: Router,
+    config: Arc<RuntimeConfig>,
+    gate: Arc<OnceLock<AdmissionGate>>,
+) -> Router {
+    let app = routes
+        .layer(middleware::from_fn_with_state(
+            config.clone(),
+            crate::execution::scope,
+        ))
+        .layer(middleware::from_fn_with_state(gate.clone(), admit))
+        .layer(middleware::from_fn_with_state(
+            transport::Ingress {
+                public: config.public_gateway,
+            },
+            transport::trusted,
+        ));
+    app.layer(middleware::from_fn_with_state(
+        (config.oidc.is_some(), config.budgets.request_seconds),
+        finish_response,
+    ))
+}
+
 pub async fn serve(
     config: RuntimeConfig,
     stop: impl std::future::Future<Output = Result<(), std::io::Error>>,
@@ -225,7 +250,6 @@ pub async fn serve(
                         rp,
                         origin,
                     )?;
-                    let enable_oidc = federation.is_some();
                     let app = routes(
                         authority,
                         http,
@@ -251,22 +275,7 @@ pub async fn serve(
                             )
                         }),
                     );
-                    let app = app
-                        .layer(middleware::from_fn_with_state(
-                            config.clone(),
-                            crate::execution::scope,
-                        ))
-                        .layer(middleware::from_fn_with_state(gate.clone(), admit))
-                        .layer(middleware::from_fn_with_state(
-                            transport::Ingress {
-                                public: config.public_gateway,
-                            },
-                            transport::trusted,
-                        ));
-                    let app = app.layer(middleware::from_fn_with_state(
-                        (enable_oidc, config.budgets.request_seconds),
-                        finish_response,
-                    ));
+                    let app = protected_routes(app, config.clone(), gate.clone());
                     let health = Arc::new(Health {
                         config: config.clone(),
                         pool,

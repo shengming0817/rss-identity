@@ -108,17 +108,18 @@ def stage(data,out,images,final):
     if c['oidc'] is not None:
         # nginx retains the original request line for early parser errors, before selected locations.
         early_pages = []
-        for status, fallback in [(400, 400), (414, 414), (494, 400), (431, 431)]:
+        for status, fallback in [(400, 400), (413, 413), (414, 414), (494, 400), (431, 431)]:
             endpoint = f"/_identity_gateway_error_{status}"
             early_pages.append(f"""error_page {status} = {endpoint};
   location = {endpoint} {{
-   internal; absolute_redirect off;
+   internal; absolute_redirect off; client_max_body_size 0;
    if ($canonical_oidc_get) {{ return 303 /auth/error?reason=failed; }}
    return {fallback};
   }}""")
         callback_server = "\n  ".join(early_pages) + f"""
   location = /api/v1/identity/oidc/callback {{
    proxy_intercept_errors on;
+   error_page 413 = /_identity_gateway_error_413;
    error_page 431 = /_identity_gateway_error_431;
    if ($canonical_oidc_get) {{
     error_page 400 403 408 413 414 429 431 = /_identity_gateway_error_431;

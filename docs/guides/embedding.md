@@ -84,7 +84,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 
 凭据处理拒绝身份 Cookie、API Key 和重复 Authorization 混用。宿主负责 TLS、可信 peer、操作时限、资源授权及响应 `no-store`；凭据只通过凭据通道交付。密码登录的 assurance 仅表示密码认证。
 
-独立服务可选的固定路径、JSON 字段和 HTTP 状态归 `rss-identity-service-http`。[产品 HTTP 契约](../architecture/identity-http.md) 描述其行为。参考宿主默认关闭程序化端点。
+独立服务可选的固定路径、JSON 字段和 HTTP 状态归 `rss-identity-service-http`。[程序化 Bearer 接口](../architecture/identity-http.md#程序化-bearer-接口) 描述其路径、响应和启用条件。参考宿主默认关闭程序化端点。
 
 ## 组与可选可信部门树快照
 

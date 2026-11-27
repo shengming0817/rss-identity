@@ -217,7 +217,14 @@ async fn installation_and_reference_host_seams_are_verified() -> anyhow::Result<
             config.budgets.request(),
         )?;
         if *key == keys[0] {
-            active::verify(&authority, &config, &issued, key.tenant, &mut owner).await?;
+            active::verify(
+                &authority,
+                Arc::new(runtime_config()),
+                &issued,
+                key.tenant,
+                &mut owner,
+            )
+            .await?;
         }
         let context = rss_identity_app::context::router(authority.clone(), &config, http)?;
         for (suffix, expected) in [
