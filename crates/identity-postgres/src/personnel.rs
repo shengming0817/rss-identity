@@ -291,12 +291,15 @@ pub(crate) async fn read_window(
     };
     let now = micros / 1_000_000;
     if let Some(source) = department_source {
-        let until: Option<i64> = sqlx::query_scalar(concat!(include_str!("department-facts.sql"), include_str!("department-expiry.sql")))
-            .bind(tenant.to_string())
-            .bind(source)
-            .bind(now)
-            .fetch_one(&mut *c)
-            .await?;
+        let until: Option<i64> = sqlx::query_scalar(concat!(
+            include_str!("department-facts.sql"),
+            include_str!("department-expiry.sql")
+        ))
+        .bind(tenant.to_string())
+        .bind(source)
+        .bind(now)
+        .fetch_one(&mut *c)
+        .await?;
         next = match (next, until) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
