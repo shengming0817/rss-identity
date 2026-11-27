@@ -51,9 +51,17 @@ HTTP 接受可表示的有限正预算。上游 `prepare/exchange/test/verify` �
 
 宿主业务写入需要与会话撤销串行化时，在自己已有的、绑定 actor 租户的 READ COMMITTED 事务内调用 `recheck_authenticated_session_on(connection, &actor)`。它复用当前凭据与会话来源复核，Identity 在本连接锁定当前来源、账户、成员和会话，保持至宿主提交或回滚；不消费 step-up、不续期、不产生新身份事实。调用顺序为已有 Audit/Ledger 锁 → Identity 来源、账户及会话锁 → 平台 verifier 权威锁及宿主授权/业务锁。平台 binding/source 写入必须遵守 verifier 使用同一连接取得的权威锁，不能仅依赖 Identity guard。不要在已持有这些锁时调用自开事务的引用复核接口。
 
-单会话先定位，再按 Provider、账户与成员、会话的顺序取锁；管理多个同类对象按 UUID 排序。被动复核持共享锁，续期、轮换和撤销在入口选择写锁，锁后重新检查凭据和有效期。借用准入与平台回调共享租户准入锁，可能持有主体写锁调用宿主策略的变更在入口与其互斥。跨主体的宿主组合应先完成准入与 step-up，再取得业务锁。人员及会话引用的全租户读窗口持集合锁直到回调结束。
+单会话先定位，再按 Provider、账户与成员、会话的顺序取锁。同层对象按 UUID 排序，同一对象直接取本次操作所需的最强模式。锁后重新读取凭据、代际、来源和期限。
 
-资料序号、人员版本和回执时钟各占一个事务状态行；来源限流和密码 claim 共用单独的容量锁。回执 GET、PUT 都在取得时钟锁后采样。人员版本由原业务事务的触发器推进，纯续期和凭据轮换保留原人员版本。
+| 协调对象 | 要保护的操作及持锁范围 |
+|---|---|
+| 实例 | 复用宿主事务的 storage、lineage、tenant epoch fence，并核对不可变的部署 ID。启用 Ledger 时先取得 Audit head。 |
+| 租户 | 已知主体的普通操作取  `KEY SHARE`。宿主借用和平台 verifier 取  `SHARE`，允许多个独立准入并行。会持有资格写锁并调用宿主策略的管理事务先取  `NO KEY UPDATE`。全租户集合窗口、跨来源链接及批量维护从入口取  `UPDATE`。 |
+| Provider、账户与成员 | 复核取共享锁。Provider 撤权和账户禁用、改密、成员变更锁相应写目标。维护改密只等待目标账户及尝试容量。 |
+| 会话 | 被动检查和借用准入持共享锁，续期及当前会话撤销取非键更新锁，轮换凭据取更新锁。全部会话撤销通过账户代际与该账户的所有准入协调。 |
+| 租户事务状态 | 资料序号、人员版本、回执时钟分别持有一行。涉及序号或回执时钟时，先取得相应行再触发人员版本更新。回执 GET、PUT 均在取得时钟锁后采样。来源限流与密码 claim 共同使用第四行协调容量。 |
+
+宿主在业务锁之前完成会话准入和 step-up。已准入的组合在同连接内复用保护，平台 binding/source 写入遵循 verifier 的权威锁。宿主提交或回滚释放全部锁。纯续期和凭据轮换保留原人员版本。
 
 通过 `PgRuntime::local_tx` 组合时，`with_connection` 回调的外层错误类型是 SQLx；使用 `tx.with_connection(|c| Box::pin(async move { Ok(recheck_authenticated_session_on(c, &actor).await) })).await??` 将内部 `PgError` 原样传播到宿主事务，不能吞掉内层错误后继续提交。
 

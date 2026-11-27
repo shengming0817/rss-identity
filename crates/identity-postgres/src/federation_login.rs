@@ -303,6 +303,13 @@ impl Federation {
                     .fetch_optional(&mut *c)
                     .await?;
                     let linked = attempt.purpose == Purpose::Link;
+                    // JIT account/link inserts advance the personnel generation via triggers.
+                    // Reserve issuance order before the first such write in this transaction.
+                    let facts_sequence = if !linked && attempt.mode != AuthenticationMode::StepUp {
+                        Some(crate::profiles::sequence(c, tenant).await?)
+                    } else {
+                        None
+                    };
                     let (key, new_account) = if linked {
                         (actor.as_ref().ok_or_else(reject)?.state.key(), false)
                     } else if let Some(row) = &existing {
@@ -384,7 +391,7 @@ impl Federation {
                             sessions::SessionAuthentication::Oidc(db::Origin {
                                 identity: identity_id,
                                 epoch: view.revocation_epoch,
-                                facts_sequence: crate::profiles::sequence(c, tenant).await?,
+                                facts_sequence: facts_sequence.ok_or_else(corrupt)?,
                                 facts: crate::auth_facts::AuthenticationFacts::collect(&claims, view.version, group_policy, view.settings.claims().department_snapshot.as_ref(), now, future_skew_seconds)?,
                             }),
                             attempt.replacement,
