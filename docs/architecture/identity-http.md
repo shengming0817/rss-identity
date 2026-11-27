@@ -37,7 +37,7 @@
 
 同一 tenant 前缀：GET/POST `/accounts`（目录查询 / `{login,password}`），GET `/accounts/{principal}` 读取完整账户；POST `/accounts/{principal}/enabled`、`/membership`（`{enabled}`）；POST `/accounts/{principal}/password`（`{password}`）；POST `/account/password`（`{currentPassword,password}`）。管理角色与防锁死由宿主 ManagementPolicy 提供，每次事务重查；没有 administrator 字段/路由。
 
-账户目录接受 `filter/sort/fields/limit/cursor`；字段与操作符由 `identity-core::directory::AccountQuery` 定义。页大小默认 50，允许范围由 [AccountQuery](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/directory.rs&version=GC023deeac41dd2c02a764b95c1fe8a44bb2faa86f) 持有，排序追加主体 ID。投影行只含所选字段，编辑先读取完整详情。查询姓名、邮箱或资料状态必须显式指定 `source=local` 或确切 IdP UUID；不会混合不同来源。部门 exact/subtree 条件也使用指定 IdP，每个账户在自身完整部门树中匹配。资料与部门的筛选、排序和输出均单独调用宿主管理授权，账户目录权限不隐含资料读取权限。
+账户目录接受 `filter/sort/fields/limit/cursor`；字段与操作符由 `identity-core::directory::AccountQuery` 定义。页大小默认 50，允许范围由 [AccountQuery](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/directory.rs&version=GC8f50018ade8b32f797698b7b0290d11ea90502bf) 持有，排序追加主体 ID。投影行只含所选字段，编辑先读取完整详情。查询姓名、邮箱或资料状态必须显式指定 `source=local` 或确切 IdP UUID；不会混合不同来源。部门 exact/subtree 条件也使用指定 IdP，每个账户在自身完整部门树中匹配。资料与部门的筛选、排序和输出均单独调用宿主管理授权，账户目录权限不隐含资料读取权限。
 
 部门目录取该来源最新成功接受的登录事实，再判定来源、代际和有效期；缺失、无效或过期不回退旧观察。登出不删除仍在期限内的目录观察，明确空成员与未知状态分别表达。这些目录数据不代替当前会话绑定的认证与授权事实。游标绑定本次查询、调用者会话和涉及字段及来源的修订。只查询基础账户字段时，其他会话到期仍可续页。读取资料或部门时，所选来源在页外的观察生效或到期也会限制续页。账户集合的修订对租户内的筛选共用，新增或移除账户即使未命中当前筛选也可能要求重新翻页。每个游标从签发起最多有效 60 秒，每页重新鉴权；`409 account_cursor_invalidated` 后由用户显式从首页重查。会话列表按会话 UUID 扫描；即使本页全部候选失效，客户端也应按返回的游标继续。列表完整认证调用者，候选摘要只复核当前来源、账户代际和有效期。候选未展示的组或部门快照损坏时仍可列出摘要；该会话用于认证时完整解码会拒绝损坏快照。
 

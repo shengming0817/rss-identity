@@ -18,7 +18,7 @@ python3 hack/operate.py --deployment /private/rendered --project identity-main o
 
 `initialize <tenant> <login> <password-file>` 的 principal 取自该租户唯一 bootstrapAccounts。组件一次性 guard 拒绝重复、并发输家及重启后重做。新 tenant 的登记与预期 epoch 必须显式交由宿主持有，不提供平台租户 API。维护恢复命令为 `recover <tenant> <principal> <password-file>`，仅更新既有本地密码和 epoch，保持 enabled/member 与管理策略不变。
 
-`verify` 是只读安装核验，检查 schema、instance、目标角色及有效权限、storage identity 和完整 tenant fence；不补建、不修授权、不初始化。`close` 先停网关再排空 Identity，并核对容器身份、终态、退出码与 OOM 状态；重启中/暂停/未知状态不视为关闭。`open` 先核验、再等待 Identity 内部健康检查、最后开放网关。非零退出或中断均不确认成功，先检查实际状态；不自动重发写命令。
+`verify` 是只读安装核验，检查 Identity schema、instance、目标角色及有效权限、storage identity 和完整 tenant fence。对 Audit 检查 owner 和写入角色授权；完整索引、约束及追加函数的结构准入由服务启动和 readiness 在实际业务连接上执行；不补建、不修授权、不初始化。`close` 先停网关再排空 Identity，并核对容器身份、终态、退出码与 OOM 状态；重启中/暂停/未知状态不视为关闭。`open` 先核验、再等待 Identity 内部健康检查、最后开放网关。非零退出或中断均不确认成功，先检查实际状态；不自动重发写命令。
 
 网关固定提供 `/api/v1/identity-host/config.json`（canonicalOrigin/oidcEnabled）；UI 缺失或畸形时拒绝启动。宿主资源 `/api/v1/identity-host/tenants/{tenant}/context` 读取权威会话，展示与宿主策略一致的管理提示；管理请求仍由组件事务内授权。网关覆盖来源头、保留原 API 路径且关闭代理重试，PG 不向宿主发布端口。日常容器不挂载 owner/maintenance 秘密。
 

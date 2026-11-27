@@ -696,6 +696,7 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
     assert_eq!(v["passed"], false);
     assert_eq!(v["diagnostic"]["stage"], "jwks");
     // An unavailable probe without an observed protocol stage gets the product availability error.
+    let before = f.events().await?;
     *upstream.hook.lock().unwrap() = Some(Box::new(|| {
         Box::pin(async { Err(rss_identity_core::federation::FederationError::Unavailable) })
     }));
@@ -714,6 +715,17 @@ async fn management_provider_operations_safe_and_scoped() -> anyhow::Result<()> 
         json_body(response).await?,
         json!({"code": "identity_unavailable"})
     );
+    assert_eq!(f.events().await?, before + 1);
+    let canonical: Vec<u8> = sqlx::query_scalar(
+        "SELECT canonical FROM rss_audit.records WHERE tenant_id=$1::uuid ORDER BY position DESC LIMIT 1"
+    ).bind(f.key.tenant.to_string()).fetch_one(&f.owner).await?;
+    let audit = rss_audit_core::decode_untrusted(&canonical)?;
+    assert_eq!(
+        audit.event().facts().action().as_str(),
+        "identity.federation.provider_test_failed"
+    );
+    let payload: Value = serde_json::from_slice(audit.event().context().payload().as_bytes())?;
+    assert!(payload.get("diagnostic").is_none());
     let r = app
         .clone()
         .oneshot(crate::request_support::scoped(req(

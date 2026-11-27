@@ -450,7 +450,9 @@ async fn real_step_up_proves_only_the_bound_operation() -> anyhow::Result<()> {
     let context = webauthn_management_context(current.account(), "register", None)?;
     let mut tx = f.owner.begin().await?;
     crate::support::fence(&mut tx, crate::support::binding(f.key.tenant)).await?;
-    consume_step_up_on(&mut tx, &current, &context, handle).await?;
+    f.store
+        .consume_step_up_on(&mut tx, &current, &context, handle)
+        .await?;
     tx.rollback().await?;
     let replay = callback(&app, &cb, &browser).await?;
     assert!(!replay.headers().contains_key("set-cookie"));

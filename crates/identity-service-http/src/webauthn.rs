@@ -150,9 +150,11 @@ async fn register_begin(
     let actor = actor(&s, binding, request.headers(), b, true).await?;
     let token = read_operation_cookie(request.headers())?;
     let input: Register = body(request, b).await?;
-    let authorization = token
-        .map(RegistrationAuthorization::StepUp)
-        .unwrap_or(RegistrationAuthorization::First);
+    let authorization = match token {
+        Some(token) => RegistrationAuthorization::StepUp(token),
+        None if input.recover => return Err(UNAUTH),
+        None => RegistrationAuthorization::First,
+    };
     Ok(clear(
         Json(
             s.webauthn

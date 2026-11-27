@@ -9,7 +9,7 @@
 `connect_runtime/connect_maintenance` 以宿主提供的一次性 probe binding 验证 schema、数据库角色、Audit 与 instance，之后丢弃 probe，不将其作为服务租户名单。宿主登记新 tenant fence 后，已有 Authority 和 router 可立即接收该租户的明确 scope。普通 HTTP 请求必须由可信宿主注入 RSS `ExecutionBinding` extension；组件核对路径 tenant，登录后生成的不可构造证明保存完整原 scope。借用连接的证明复核同样比较 storage、lineage、tenant 和 epoch。
 
 `StateSigner` 由 `rss_identity_postgres` 导出。OIDC state v2 签名绑定 instance 和完整执行坐标；callback 从验签结果继续原 scope，旧 epoch/lineage 不能用新配置重认。state 不是当前用户或资源授权证明。
-2. 在全新 PostgreSQL 17 数据库中，数据库 owner 先安装所选 RSS 版本的完整消息 migration，再以独立受限 owner 安装 Audit schema，安装 Identity schema 并授予 runtime/maintenance profile。仅接受当前全新安装；在提交安装事务前，以实际目标角色验证有效权限和结构。入口见 [schema owner](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-postgres/src/schema.rs&version=GC023deeac41dd2c02a764b95c1fe8a44bb2faa86f)；生产迁移执行属于宿主。
+2. 在全新 PostgreSQL 17 数据库中，数据库 owner 先安装所选 RSS 版本的完整消息 migration，再以独立受限 owner 安装 Audit schema，安装 Identity schema 并授予 runtime/maintenance profile。仅接受当前全新安装；在提交安装事务前，以实际目标角色验证有效权限和结构。入口见 [schema owner](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-postgres/src/schema.rs&version=GC8f50018ade8b32f797698b7b0290d11ea90502bf)；生产迁移执行属于宿主。
 3. 维护身份只用于初始化和本地密码恢复，凭据不注入日常服务。恢复推进失效代际，保留账户/成员启停状态，不授予宿主角色。
 4. runtime Authority 必须接收宿主 ManagementPolicy。密码校验和凭据签发经单一登录入口完成；浏览器 JSON、普通账户快照或上游结构值不能构造可信会话。
 
@@ -58,7 +58,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 
 异步业务可在认证原请求后，通过 `AuthenticatedSession::reference()` 将非凭据会话引用存入宿主可信数据。后续用 `Authority::recheck_session_reference` 复核原会话、账户和来源，取得本次有界的 `RevalidatedSession` 身份/组/部门事实。被撤销、失效或过期的会话不能通过；检查不延长 idle 或快照期限。引用不是登录凭据，不能从 HTTP 请求接收它替代认证，返回事实也不能用于管理操作；宿主仍负责资源授权和原请求归属。
 
-宿主业务写入需要与会话撤销串行化时，在自己已有的、绑定 actor 租户的 READ COMMITTED 事务内调用 `recheck_authenticated_session_on(connection, &actor)`。它复用当前凭据与会话来源复核，Identity 在本连接锁定当前来源、账户、成员和会话，保持至宿主提交或回滚；不消费 step-up、不续期、不产生新身份事实。调用顺序为已有 Audit/Ledger 锁 → Identity 来源、账户及会话锁 → 平台 verifier 权威锁及宿主授权/业务锁。平台 binding/source 写入必须遵守 verifier 使用同一连接取得的权威锁，不能仅依赖 Identity 资格锁。不要在已持有这些锁时调用自开事务的引用复核接口。
+宿主业务写入需要与会话撤销串行化时，在自己已有的、绑定 actor 租户的 READ COMMITTED 事务内调用 `authority.recheck_authenticated_session_on(connection, &actor)`。它复用当前凭据与会话来源复核，Identity 在本连接锁定当前来源、账户、成员和会话，保持至宿主提交或回滚；不消费 step-up、不续期、不产生新身份事实。调用顺序为已有 Audit/Ledger 锁 → Identity 来源、账户及会话锁 → 平台 verifier 权威锁及宿主授权/业务锁。平台 binding/source 写入必须遵守 verifier 使用同一连接取得的权威锁，不能仅依赖 Identity 资格锁。不要在已持有这些锁时调用自开事务的引用复核接口。
 
 单会话先定位，再按 Provider、账户与成员、会话的顺序取锁。同层对象按 UUID 排序，同一对象直接取本次操作所需的最强模式。锁后重新读取凭据、代际、来源和期限。
 
@@ -72,7 +72,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 
 宿主在业务锁之前完成会话准入和 step-up。已准入的组合在同连接内复用保护，平台 binding/source 写入遵循 verifier 的权威锁。宿主提交或回滚释放全部锁。纯续期和凭据轮换保留原人员版本。
 
-通过 `PgRuntime::local_tx_until(binding, deadline, ...)` 组合时，`with_connection` 回调的外层错误类型是 SQLx；使用 `tx.with_connection(|c| Box::pin(async move { Ok(recheck_authenticated_session_on(c, &actor).await) })).await??` 将内部 `PgError` 原样传播到宿主事务，不能吞掉内层错误后继续提交。
+通过 `PgRuntime::local_tx_until(binding, deadline, ...)` 组合时，`with_connection` 回调的外层错误类型是 SQLx；使用 `tx.with_connection(|c| Box::pin(async move { Ok(authority.recheck_authenticated_session_on(c, &actor).await) })).await??` 将内部 `PgError` 原样传播到宿主事务，不能吞掉内层错误后继续提交。
 
 任何复核错误都要求宿主回滚；宿主继续负责 fencing、操作预算、资源授权和最终结算。复核成功不等于业务已提交，`CommitUnknown` 与回滚失败必须保留原结算语义。资格行锁串行化相应状态变更，不冻结自然时间或延长 actor 的原期限，不得跨事务缓存成功结果。该接口只接受当前请求的 `AuthenticatedSession`；异步保存的 `SessionReference` 不含当前凭据摘要，其独立复核用途不变。
 
@@ -88,7 +88,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 
 ## 组与可选可信部门树快照
 
-组与部门是带来源和固定期限的认证事实，不是资源权限。缺失、空值、非法断言与过期不同；宿主应显式处理不可用状态。当前模型、受控构造和边界见 [组](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/groups.rs&version=GC023deeac41dd2c02a764b95c1fe8a44bb2faa86f) 与 [部门](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/department.rs&version=GC023deeac41dd2c02a764b95c1fe8a44bb2faa86f)。
+组与部门是带来源和固定期限的认证事实，不是资源权限。缺失、空值、非法断言与过期不同；宿主应显式处理不可用状态。当前模型、受控构造和边界见 [组](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/groups.rs&version=GC8f50018ade8b32f797698b7b0290d11ea90502bf) 与 [部门](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-core/src/department.rs&version=GC8f50018ade8b32f797698b7b0290d11ea90502bf)。
 
 组 Available 视图只能借自本次可信认证结果，每次读取 `values()` 都检查请求证明和快照截止；部门通过 `snapshot()` 做同样检查。请求证明到期使读取失败，事实独立到期不自动否定基础身份。未来观察在下次权威请求前保持不可用。已经复制的值、借出的引用和已经产生的业务效果由宿主负责。宿主需维持可信数据库时钟；请求内单调期限不能修正数据库墙钟偏差。
 
@@ -101,7 +101,7 @@ let (proof, _) = rss_identity_web_credentials::authenticate_request(
 ],"memberships":["engineering"]}
 ```
 
-树必须完整、单根、有界；稳定标识精确匹配，显示名不提供身份。空成员表示未分配，缺失不是未分配声明。配置与输入结构由 [OIDC 适配器](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-oidc/src/lib.rs&version=GC023deeac41dd2c02a764b95c1fe8a44bb2faa86f) 和 core 模型持有。
+树必须完整、单根、有界；稳定标识精确匹配，显示名不提供身份。空成员表示未分配，缺失不是未分配声明。配置与输入结构由 [OIDC 适配器](https://dev.azure.com/shengming0923/rss/_git/rss?path=/crates/identity-oidc/src/lib.rs&version=GC8f50018ade8b32f797698b7b0290d11ea90502bf) 和 core 模型持有。
 
 instance、tenant、principal、provider 和配置版本由权威会话绑定；观察来自 signed iat，期限为 signed iat 加显式配置的有界 TTL，且不超过 token exp。refresh、活动请求和组件重建不延长快照。provider 更新/禁用及主体/session 撤销作用于旧会话和在途流程；link target 不覆盖当前 source 快照。sourceRevision 是上游不透明版本，不表示 Identity 全局最新目录。
 
