@@ -83,6 +83,7 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 }
 
 pub(crate) struct Loaded {
+    pub origin: Option<Box<crate::federation_storage::Origin>>,
     pub source: rss_identity_core::session::AuthenticationSource,
     pub assurance: Assurance,
     pub groups: GroupFacts,
@@ -105,65 +106,52 @@ impl Loaded {
         })
     }
 }
-pub(crate) async fn lookup(
-    c: &mut PgConnection,
-    tenant: TenantId,
-    digest: &[u8; 32],
-    kind: CredentialKind,
-    session_checks: &crate::session_checks::SessionChecks,
-) -> Result<Loaded, PgError> {
-    lock_guard(c, tenant).await?;
-    let locator = sqlx::query(concat!(
-        "SELECT principal_id::text,session_id::text FROM identity_authority.sessions WHER",
-        "E tenant_id=$1::uuid AND token_hash=$2"
-    ))
-    .bind(tenant.to_string())
-    .bind(digest.as_slice())
-    .fetch_optional(&mut *c)
-    .await?
-    .ok_or_else(reject)?;
-    let key = AccountKey {
-        tenant,
-        principal: principal(&locator.try_get::<String, _>("principal_id")?)?,
+// Each entry point acquires the tenant guard before this statement starts its READ COMMITTED snapshot.
+macro_rules! session_row {
+    ($predicate:literal) => {
+        sqlx::query(concat!(
+            "SELECT session_id,credential_kind,principal_id,auth_epoch,membership_epoch,issued_at,
+             idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at,authentication_source,
+             local_authenticated_at,platform_authentication,revoked_at,external_identity_id,
+             provider_epoch,auth_facts,facts_sequence FROM identity_authority.sessions
+             WHERE tenant_id=$1::uuid AND ", $predicate))
     };
-    let id: String = locator.try_get("session_id")?;
-    let loaded = by_id(c, key, session_id(&id)?, session_checks).await?;
-    let stored: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid AND session_id=$2::uuid")
-        .bind(tenant.to_string()).bind(&id).fetch_one(c).await?;
-    if stored != digest.as_slice() || loaded.view.credential_kind != kind {
-        return Err(reject());
-    }
-    Ok(loaded)
 }
-/// Private shared authority check, only called after cookie or grant ownership was established.
-pub(crate) async fn by_id(
-    c: &mut PgConnection,
-    key: AccountKey,
-    sid: SessionId,
-    session_checks: &crate::session_checks::SessionChecks,
+
+pub(crate) async fn lookup_locked(
+    c: &mut PgConnection, tenant: TenantId, digest: &[u8; 32], kind: CredentialKind,
+    instance: uuid::Uuid, session_checks: &crate::session_checks::SessionChecks,
 ) -> Result<Loaded, PgError> {
-    let tenant = key.tenant;
-    let id = sid.to_string();
-    let state = load(c, key).await?.state;
-    let row = sqlx::query(concat!(
-        "SELECT credential_kind,principal_id,auth_epoch,membership_epoch,issued_at,idle_timeout,absolute_timeout,idle_expires_at,absolute_expires_at",
-        ",authentication_source,local_authenticated_at,platform_authentication,revoked_at,token_hash FROM identity_authority.sessions WHERE tenant_id=$1::uuid",
-        " AND session_id=$2::uuid"
-    ))
-    .bind(tenant.to_string())
-    .bind(&id)
-    .fetch_optional(&mut *c)
-    .await?
-    .ok_or_else(reject)?;
-    if row.try_get::<uuid::Uuid, _>("principal_id")? != key.principal.as_uuid()
-        || !state.active()
-        || row.try_get::<i64, _>("auth_epoch")? != state.epoch()
+    let row = session_row!("token_hash=$2 AND credential_kind=$3")
+        .bind(tenant.to_string()).bind(digest.as_slice()).bind(kind.as_str())
+        .fetch_optional(&mut *c).await?.ok_or_else(reject)?;
+    restore(c, tenant, &row, instance, session_checks).await
+}
+
+pub(crate) async fn by_id_locked(
+    c: &mut PgConnection, key: AccountKey, sid: SessionId, kind: CredentialKind,
+    instance: uuid::Uuid, session_checks: &crate::session_checks::SessionChecks,
+) -> Result<Loaded, PgError> {
+    let row = session_row!("session_id=$2 AND principal_id=$3 AND credential_kind=$4")
+        .bind(key.tenant.to_string()).bind(sid.as_uuid()).bind(key.principal.as_uuid()).bind(kind.as_str())
+        .fetch_optional(&mut *c).await?.ok_or_else(reject)?;
+    restore(c, key.tenant, &row, instance, session_checks).await
+}
+
+async fn restore(
+    c: &mut PgConnection, tenant: TenantId, row: &sqlx::postgres::PgRow,
+    instance: uuid::Uuid, session_checks: &crate::session_checks::SessionChecks,
+) -> Result<Loaded, PgError> {
+    let id = session_id(&row.try_get::<uuid::Uuid,_>("session_id")?.to_string())?;
+    let key = AccountKey {tenant, principal: principal(&row.try_get::<uuid::Uuid,_>("principal_id")?.to_string())?};
+    let state = account_state_locked(c,key).await?;
+    if !state.active() || row.try_get::<i64, _>("auth_epoch")? != state.epoch()
         || row.try_get::<i64, _>("membership_epoch")? != state.membership_epoch()
         || row.try_get::<Option<i64>, _>("revoked_at")?.is_some()
     {
         return Err(reject());
     }
-    let origin = crate::federation_storage::origin(c, tenant, session_id(&id)?).await?;
+    let origin = crate::federation_storage::decode_origin(row)?;
     let source = match &origin {
         Some(origin) => Some(crate::federation_storage::check_origin(c, key, origin).await?),
         None => None,
@@ -172,7 +160,7 @@ pub(crate) async fn by_id(
         row.try_get("issued_at")?,
         row.try_get("idle_expires_at")?,
         row.try_get("absolute_expires_at")?,
-        lifetime_policy(&row)?,
+        lifetime_policy(row)?,
     )
     .map_err(|_| corrupt())?;
     let sample = TimeSample::read(c).await?;
@@ -198,7 +186,7 @@ pub(crate) async fn by_id(
         }
         _ => return Err(corrupt()),
     };
-    let (assurance, groups) = match (source_kind.as_str(), origin, source) {
+    let (assurance, groups) = match (source_kind.as_str(), &origin, source) {
         ("oidc", Some(origin), Some(source)) => (
             origin.facts.assurance.clone(),
             origin.facts.project(source, fact_sample.seconds())?,
@@ -213,7 +201,7 @@ pub(crate) async fn by_id(
             let platform: crate::platform::PlatformAuthentication =
                 serde_json::from_value(row.try_get("platform_authentication")?)
                     .map_err(|_| corrupt())?;
-            crate::platform::recheck(c, key, &platform, session_checks).await?;
+            crate::platform::recheck(c, key, instance, &platform, session_checks).await?;
             (
                 platform.assurance()?,
                 rss_identity_core::groups::Groups::unavailable(
@@ -232,6 +220,7 @@ pub(crate) async fn by_id(
     // Signed-time skew was checked at issuance. Restoration retains frozen expiry
     // instead of applying a new deployment policy to an already accepted fact.
     Ok(Loaded {
+        origin: origin.map(Box::new),
         source,
         assurance,
         groups: GroupFacts::new(groups, &fact_sample)?,
@@ -239,7 +228,7 @@ pub(crate) async fn by_id(
         expires: sample.deadline(lifetime.idle_expires_at())?,
         sample,
         state,
-        view: SessionView::new(session_id(&id)?, lifetime, credential_kind(&row)?),
+        view: SessionView::new(id, lifetime, credential_kind(row)?),
         lifetime,
         now,
     })
@@ -264,8 +253,6 @@ pub(crate) async fn recheck_on(
     {
         return Err(reject());
     }
-    crate::transaction::check_binding(c, actor.binding).await?;
-    lock_guard(c, actor.key.tenant).await?;
     recheck(c, actor).await
 }
 
@@ -277,11 +264,18 @@ pub(crate) async fn recheck(
         return Err(reject());
     }
     crate::transaction::check_binding(c, proof.binding).await?;
-    let mut loaded = lookup(
+    lock_guard(c, proof.key.tenant).await?;
+    recheck_locked(c, proof).await
+}
+
+/// The caller has established the proof's exact deployment and execution binding in this transaction.
+pub(crate) async fn recheck_locked(c: &mut PgConnection, proof: &AuthenticatedSession) -> Result<Loaded, PgError> {
+    let mut loaded = lookup_locked(
         c,
         proof.key.tenant,
         &proof.digest,
         proof.view.credential_kind,
+        proof.authority,
         &proof.session_checks,
     )
     .await?;

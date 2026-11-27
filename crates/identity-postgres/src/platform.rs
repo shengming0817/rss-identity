@@ -177,13 +177,14 @@ fn failure(error: PlatformError) -> rss_transactional_messaging_postgres::PgErro
 pub(crate) async fn recheck(
     c: &mut PgConnection,
     key: AccountKey,
+    instance: Uuid,
     stored: &PlatformAuthentication,
     checks: &crate::session_checks::SessionChecks,
 ) -> Result<(), rss_transactional_messaging_postgres::PgError> {
     let verifier = checks.platform.as_ref().ok_or_else(reject)?;
     if !stored.binding.valid()
         || stored.binding.account != key
-        || stored.binding.instance.as_uuid() != authority_id(c).await?
+        || stored.binding.instance.as_uuid() != instance
         || verifier.audience() != stored.audience
     {
         return Err(reject());
@@ -258,10 +259,10 @@ impl Authority {
         self.read_sql(execution,budget.remaining(),move|c|Box::pin(async move{
             lock_guard(c,tenant).await?;
             let resolved=verifier.resolve(instance,tenant,binding,c).await.map_err(failure)?;
-            if !resolved.valid() || resolved.instance!=instance || resolved.account.tenant!=tenant || resolved.binding_id!=binding || !load(c,resolved.account).await?.state.active(){return Err(reject().into());}
+            if !resolved.valid() || resolved.instance!=instance || resolved.account.tenant!=tenant || resolved.binding_id!=binding || !account_state_locked(c,resolved.account).await?.active(){return Err(reject().into());}
             external(c,&resolved).await?;
             verifier.authorize_purpose(&resolved,&purpose,c).await.map_err(failure)?;
-            let state=load(c,resolved.account).await?.state;
+            let state=account_state_locked(c,resolved.account).await?;
             let now=crate::session_storage::now(c).await?;
             sqlx::query("DELETE FROM identity_authority.platform_challenges WHERE tenant_id=$1::uuid AND challenge_id IN (SELECT challenge_id FROM identity_authority.platform_challenges WHERE tenant_id=$1::uuid AND expires_at<=$2 LIMIT 128)")
                 .bind(tenant.to_string()).bind(now).execute(&mut *c).await?;
@@ -344,6 +345,7 @@ impl Authority {
         };
         let enterprise = self.enterprise.clone();
         let checks = self.session_checks.clone();
+        let instance = self.instance.as_uuid();
         let policy = self.session_policy;
         let max_auth_facts_bytes = self.max_auth_facts_bytes;
         let future_skew_seconds = self.future_skew_seconds;
@@ -353,9 +355,9 @@ impl Authority {
             let row=challenge(c,tenant,id,&expected_nonce,&expected_browser).await?;
             let actual:PlatformBinding=serde_json::from_value(row.try_get("binding")?).map_err(|_|corrupt())?;
             if actual!=stored.binding || row.try_get::<String,_>("audience")?!=stored.audience {return Err(reject().into());}
-            let key=actual.account;let state=load(c,key).await?.state;
+            let key=actual.account;let state=account_state_locked(c,key).await?;
             if !state.active() || state.epoch()!=row.try_get::<i64,_>("auth_epoch")? || state.membership_epoch()!=row.try_get::<i64,_>("membership_epoch")? {return Err(reject().into());}
-            recheck(c,key,&stored,&checks).await?;
+            recheck(c,key,instance,&stored,&checks).await?;
             let purpose:PlatformPurpose=serde_json::from_value(row.try_get("purpose")?).map_err(|_|corrupt())?;
             if purpose != context.purpose {return Err(reject().into());}
             verifier.authorize_purpose(&actual,&purpose,c).await.map_err(failure)?;

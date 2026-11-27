@@ -417,16 +417,16 @@ impl Authority {
         self.require_runtime()?;
         let budget = Budget::new(deadline)?;
         let session_checks = self.session_checks.clone();
+        let authority = self.instance.as_uuid();
         self.read(binding, budget.remaining(), move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
-                        let mut loaded =
-                            db::lookup(c, tenant, &digest, kind, &session_checks).await?;
+                        lock_guard(c,tenant).await?;
+                        let mut loaded = db::lookup_locked(c, tenant, &digest, kind, authority, &session_checks).await?;
                         if touch {
                             db::touch(c, &mut loaded).await?;
                         }
-                        let authority = authority_id(c).await?;
                         let expires = checked_expiry(&loaded, budget.0.instant())?;
                         Ok(AuthenticatedSession {
                             binding,
@@ -460,9 +460,11 @@ impl Authority {
         let budget = Budget::new(deadline)?;
         let secret = SessionSecret::generate().map_err(|_| AuthorityError::Unavailable)?;
         let session_checks = self.session_checks.clone();
+        let instance = self.instance.as_uuid();
         self.mutate(binding,budget.remaining(),move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
-                let mut loaded = db::lookup(c,tenant,&old.digest(), CredentialKind::Cookie, &session_checks).await?;
+                lock_guard(c,tenant).await?;
+                let mut loaded = db::lookup_locked(c,tenant,&old.digest(), CredentialKind::Cookie, instance, &session_checks).await?;
                 db::touch(c,&mut loaded).await?;
                 sqlx::query(concat!("UPDATE identity_authority.sessions SET token_hash=$3 WHERE tenant_id=$1::uuid AN","D session_id=$2::uuid"))
                     .bind(tenant.to_string()).bind(loaded.view.id.to_string()).bind(secret.digest().as_slice()).execute(c).await?;

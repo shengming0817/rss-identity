@@ -499,10 +499,9 @@ impl Federation {
     ) -> Result<SessionSecurity, AuthorityError> {
         let oidc = self.oidc.clone();
         self.authority.read_sql(actor.binding, deadline, move |c| Box::pin(async move {
-            lock_guard(c, actor.key.tenant).await?;
             let loaded = crate::session_storage::recheck(c, &actor).await?;
             // A persisted authentication fact must still match this process's approved interpretation.
-            if let Some(origin) = db::origin(c, actor.key.tenant, loaded.view.id).await? {
+            if let Some(origin) = loaded.origin.as_deref() {
                 let (provider, _, _) = db::identity(c, actor.key.tenant, origin.identity).await?;
                 let view = db::provider(c, actor.key.tenant, provider).await?;
                 if oidc.assurance_profile(actor.key.tenant, &view.settings).fingerprint != view.assurance_profile {

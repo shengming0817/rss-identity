@@ -19,67 +19,21 @@ pub(crate) async fn lock_guard(c: &mut PgConnection, tenant: TenantId) -> Result
     .ok_or_else(reject)?;
     Ok(())
 }
-pub(crate) struct Stored {
-    pub state: AccountState,
-    pub hash: Option<rss_identity_core::account::PasswordEncoding>,
-}
-pub(crate) async fn load(c: &mut PgConnection, key: AccountKey) -> Result<Stored, PgError> {
-    // Serialize the account/membership/local-credential snapshot with every credential writer.
-    lock_guard(c, key.tenant).await?;
-    let r = sqlx::query(concat!(
-        "SELECT a.enabled,a.auth_epoch,(l.principal_id IS NOT",
-        " NULL) AS has_local_password,l.password_hash,m.active,m.epoch FROM identity_auth",
-        "ority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal",
-        "_id) LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_",
-        "id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid"
-    ))
-    .bind(key.tenant.to_string())
-    .bind(key.principal.as_uuid().to_string())
-    .fetch_optional(c)
-    .await?
-    .ok_or_else(reject)?;
-    decode(key, &r)
+/// Read current account/membership state while the caller holds the tenant guard.
+pub(crate) async fn account_state_locked(c: &mut PgConnection, key: AccountKey) -> Result<AccountState, PgError> {
+    let row = sqlx::query(
+        "SELECT a.enabled, a.auth_epoch, m.active, m.epoch, l.principal_id IS NOT NULL AS has_local_password
+         FROM identity_authority.accounts a
+         JOIN identity_authority.memberships m USING (tenant_id,principal_id)
+         LEFT JOIN identity_authority.local_credentials l USING (tenant_id,principal_id)
+         WHERE a.tenant_id=$1::uuid AND a.principal_id=$2")
+        .bind(key.tenant.to_string())
+        .bind(key.principal.as_uuid())
+        .fetch_optional(c).await?.ok_or_else(reject)?;
+    AccountState::restore(key, row.try_get("enabled")?, row.try_get("active")?, row.try_get("auth_epoch")?,
+        row.try_get("has_local_password")?, row.try_get("epoch")?).map_err(|_| corrupt())
 }
 
-/// Caller must hold the tenant guard. All business writers serialize on that guard;
-/// maintenance does not need UPDATE privileges on membership rows merely to read them.
-pub(crate) async fn load_for_maintenance(
-    c: &mut PgConnection,
-    key: AccountKey,
-) -> Result<Stored, PgError> {
-    let row = sqlx::query(concat!(
-        "SELECT a.enabled,a.auth_epoch,(l.principal_id IS NOT",
-        " NULL) AS has_local_password,l.password_hash,m.active,m.epoch FROM identity_auth",
-        "ority.accounts a JOIN identity_authority.memberships m USING(tenant_id,principal",
-        "_id) LEFT JOIN identity_authority.local_credentials l USING(tenant_id,principal_",
-        "id) WHERE a.tenant_id=$1::uuid AND a.principal_id=$2::uuid"
-    ))
-    .bind(key.tenant.to_string())
-    .bind(key.principal.as_uuid().to_string())
-    .fetch_optional(c)
-    .await?
-    .ok_or_else(reject)?;
-    decode(key, &row)
-}
-
-fn decode(key: AccountKey, r: &sqlx::postgres::PgRow) -> Result<Stored, PgError> {
-    Ok(Stored {
-        state: AccountState::restore(
-            key,
-            r.try_get("enabled")?,
-            r.try_get("active")?,
-            r.try_get("auth_epoch")?,
-            r.try_get("has_local_password")?,
-            r.try_get("epoch")?,
-        )
-        .map_err(|_| corrupt())?,
-        hash: r
-            .try_get::<Option<String>, _>("password_hash")?
-            .map(rss_identity_core::account::PasswordEncoding::from_storage)
-            .transpose()
-            .map_err(|_| corrupt())?,
-    })
-}
 pub(crate) async fn authority_id(c: &mut PgConnection) -> Result<Uuid, PgError> {
     let id: String =
         sqlx::query_scalar("SELECT authority_id::text FROM identity_authority.deployment")
@@ -96,7 +50,8 @@ pub(crate) async fn current(
     {
         return Err(reject());
     }
-    let now = load(c, candidate.state.key()).await?.state;
+    lock_guard(c, candidate.state.key().tenant).await?;
+    let now = account_state_locked(c, candidate.state.key()).await?;
     if !now.matches_verification(candidate.state) {
         return Err(reject());
     }

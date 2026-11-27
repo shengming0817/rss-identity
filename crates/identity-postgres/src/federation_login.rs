@@ -182,6 +182,7 @@ impl Federation {
         let binding = locator.binding();
         let tenant = binding.tenant();
         let session = session.map(|s| s.digest());
+        let instance = self.authority.instance.as_uuid();
         self.authority
             .read_sql(binding, deadline, move |c| {
                 Box::pin(async move {
@@ -192,7 +193,7 @@ impl Federation {
                     if view.settings.issuer().as_str() != response_issuer {
                         return Err(FederationError::Claims.into());
                     }
-                    check_actor(c, tenant, &attempt, session).await?;
+                    check_actor(c, tenant, instance, &attempt, session).await?;
                     db::consume(c, &locator).await?;
                     Ok(())
                 })
@@ -221,13 +222,14 @@ impl Federation {
         let claim_browser = browser.clone();
         let claimed_issuer = response_issuer;
         let claim_oidc = self.oidc.clone();
+        let instance = self.authority.instance.as_uuid();
         let (attempt,view,material)=self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, secrets) = db::attempt(c, &locator, &claim_state, &claim_browser, false).await?;
                     let view = db::provider(c, tenant, attempt.provider).await?;
                     db::exact(&view, attempt.version)?;
                     if view.settings.issuer().as_str()!=claimed_issuer{return Err(FederationError::Claims.into())}
-                    let actor = check_actor(c, tenant, &attempt, session).await?;
+                    let actor = check_actor(c, tenant, instance, &attempt, session).await?;
                     if attempt.mode == AuthenticationMode::StepUp {
                         crate::federation::check_step_up(c, actor.as_ref().ok_or_else(reject)?.state.key(), &view, claim_oidc.as_ref()).await?;
                     }
@@ -292,12 +294,13 @@ impl Federation {
         let operation_proof_seconds = self.authority.operation_proof_seconds;
         let session_policy = self.authority.session_policy;
         let limits = self.authority.profile_limits;
+        let instance = self.authority.instance.as_uuid();
         self.authority.write_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
                     lock_guard(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
                     let view = db::provider(c, tenant, attempt.provider).await?;
                     db::exact(&view, attempt.version)?;
-                    let actor = check_actor(c, tenant, &attempt, session).await?;
+                    let actor = check_actor(c, tenant, instance, &attempt, session).await?;
                     if attempt.mode == AuthenticationMode::StepUp {
                         crate::federation::check_step_up(c, actor.as_ref().ok_or_else(reject)?.state.key(), &view, commit_oidc.as_ref()).await?;
                     }
@@ -342,7 +345,7 @@ impl Federation {
                         sqlx::query("INSERT INTO identity_authority.external_identities(tenant_id,identity_id,principal_id,provider_id,issuer,subject) VALUES($1::uuid,$2,$3,$4::uuid,$5,$6)").bind(tenant.to_string()).bind(id).bind(key.principal.as_uuid()).bind(view.id.to_string()).bind(&claims.issuer).bind(claims.subject.storage_key()).execute(&mut *c).await?;
                         id
                     };
-                    let mut state = load(c, key).await?.state;
+                    let mut state = account_state_locked(c, key).await?;
                     if !state.active() {
                         return Err(reject().into());
                     }
@@ -452,6 +455,7 @@ fn hex_digest(browser: &str) -> String {
 pub(crate) async fn check_actor(
     c: &mut sqlx::PgConnection,
     tenant: TenantId,
+    instance: uuid::Uuid,
     attempt: &db::Attempt,
     session: Option<[u8; 32]>,
 ) -> Result<Option<session_storage::Loaded>, rss_transactional_messaging_postgres::PgError> {
@@ -470,11 +474,12 @@ pub(crate) async fn check_actor(
         {
             return Err(reject());
         }
-        let actor = session_storage::lookup(
+        let actor = session_storage::lookup_locked(
             c,
             tenant,
             &session.ok_or_else(reject)?,
             rss_identity_core::session::CredentialKind::Cookie,
+            instance,
             &Default::default(),
         )
         .await?;
@@ -487,11 +492,12 @@ pub(crate) async fn check_actor(
         }
         Ok(Some(actor))
     } else if let Some(expected) = attempt.replacement {
-        let actor = session_storage::lookup(
+        let actor = session_storage::lookup_locked(
             c,
             tenant,
             &session.ok_or_else(reject)?,
             rss_identity_core::session::CredentialKind::Cookie,
+            instance,
             &Default::default(),
         )
         .await?;

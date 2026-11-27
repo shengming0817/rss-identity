@@ -205,7 +205,7 @@ impl EntraAuthority {
                 events.push(event(tenant, Action::JitCreated, &view, Some(principal)));
                 (identity, principal)
             };
-            let state = storage::load(c, AccountKey { tenant, principal }).await?.state;
+            let state = storage::account_state_locked(c, AccountKey { tenant, principal }).await?;
             if !state.active() { return Err(reject().into()); }
             subject.check_live().map_err(|_| reject())?;
             Ok((RevalidatedAccount { subject, state, identity }, events))
@@ -229,7 +229,7 @@ impl EntraAuthority {
             check_current(&proof.subject, &view)?;
             let linked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM identity_authority.external_identities WHERE tenant_id=$1::uuid AND identity_id=$2 AND principal_id=$3 AND provider_id=$4::uuid AND issuer=$5 AND subject=$6)")
                 .bind(tenant.to_string()).bind(proof.identity).bind(proof.state.key().principal.as_uuid()).bind(proof.subject.provider.to_string()).bind(view.settings.issuer().as_str()).bind(proof.subject.claims.subject().storage_key()).fetch_one(&mut *c).await?;
-            let current = storage::load(c, proof.state.key()).await?.state;
+            let current = storage::account_state_locked(c, proof.state.key()).await?;
             if !linked || !current.active() || !current.matches_verification(proof.state) { return Err(reject().into()); }
             proof.check_live().map_err(|_| reject())?; Ok(proof)
         })).await?;
