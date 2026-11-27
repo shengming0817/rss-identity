@@ -98,8 +98,7 @@ impl Authority {
             let clock = ReceiptClock::load(c, target.tenant).await?;
             let id = change.operation_id;
             if let Some(row) = sqlx::query(
-                "SELECT principal_id,actor,digest,revision FROM identity_authority.profile_operations
-                 WHERE tenant_id=$1::uuid AND operation_id=$2 AND accepted_at_ms>$3",
+                include_str!("replay_receipt.sql"),
             ).bind(target.tenant.to_string()).bind(id.as_uuid()).bind(clock.cutoff()).fetch_optional(&mut *c).await? {
                 if row.try_get::<Uuid,_>("principal_id")? != target.principal.as_uuid()
                     || row.try_get::<Uuid,_>("actor")? != actor.key.principal.as_uuid()
@@ -174,5 +173,47 @@ impl Authority {
             clock.persist(c, target.tenant).await?;
             Ok(Err(AuthorityError::ProfileOperationExpired))
         })).await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_use_boundaries_and_uuid_variant_are_exact() {
+        let ms = 1_800_000_000_000;
+        let uuid = Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, ms / 1000, 0));
+        let id = ProfileOperationId::try_from(uuid).unwrap();
+        let ms = ms as i64;
+        assert!(
+            ReceiptClock(ms - FUTURE_SKEW_MS)
+                .permits_first_use(id)
+                .unwrap()
+        );
+        assert!(
+            ReceiptClock(ms - FUTURE_SKEW_MS - 1)
+                .permits_first_use(id)
+                .is_err()
+        );
+        assert!(
+            ReceiptClock(ms + FIRST_USE_MS - 1)
+                .permits_first_use(id)
+                .unwrap()
+        );
+        assert!(
+            !ReceiptClock(ms + FIRST_USE_MS)
+                .permits_first_use(id)
+                .unwrap()
+        );
+        for invalid in [
+            Uuid::nil(),
+            Uuid::new_v4(),
+            Uuid::from_u128(uuid.as_u128() & !(3 << 62)),
+        ] {
+            assert!(
+                serde_json::from_value::<ProfileOperationId>(serde_json::json!(invalid)).is_err()
+            );
+        }
     }
 }

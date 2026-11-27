@@ -189,10 +189,10 @@ refresh、idle 和 GET 不重新采集。组与部门的独立短期合同不变
 本地资料管理使用 `ReadLocalProfile/UpdateLocalProfile`，来源目录使用 `ReadProfileSources`，
 必须由宿主明确授权，不能默认把字段配置写权限映射为这些权限。
 HTTP 本地资料位于 `/api/v1/identity/tenants/{tenant}/accounts/{principal}/profile`，
-PUT 使用 operationId、expectedRevision、value（必须出现，显式 null 删除），GET 返回 revision 与 value。
-响应丢失时查询其 `/operations/{operationId}`；409 后重新读取，不自动重放写。
-每账户回执容量由 `AuthorityConfig::with_profile_receipt_capacity` 选择，默认 4096。达到容量返回 `ProfileReceiptCapacityReached`（HTTP 409，`profile_receipt_capacity_reached`）；降低容量保留旧回放，提高容量恢复新操作。
-回执不按时间删除，不重用 operationId；账户删除时随账户清理。
+提交时用 UUIDv7 生成一次 operationId；Rust 使用 `ProfileOperationId::now()`。保存原 ID、expectedRevision 和 value（显式 null 表示删除）。首次提交须在 ID 时间起 5 分钟内到达事务接纳点，客户端时钟最多可快 30 秒。其它 UUID 版本或过大的未来偏差返回 HTTP 400。
+成功事务以 PostgreSQL 记录的接纳时间为起点保留回执 24 小时。期间经当前授权原样重提交返回原 revision；用同 ID 更换目标账户、actor、expectedRevision 或 value 返回 409 `operation_conflict`。新操作的 CAS 失败返回 409 `revision_conflict`。
+响应丢失时，原 actor 用 `GET /operations/{operationId}`（相对账户资料路径）查询。返回回执即已提交；首次提交窗口内没有可见回执返回 200 null。窗口关闭且没有可见有效回执时，查询或原请求重试返回 410 `profile_operation_expired`。此时历史结果可能未知，重新读取资料，确认仍需变更后再生成新 ID。查询和重放均须当前会话与宿主授权。
+宿主用 `AuthorityConfig::with_profile_receipt_capacity` 设置每账户活动回执容量，默认 4096。达到容量时新操作返回 409 `profile_receipt_capacity_reached`；已有有效回执仍可查询和重放。提高或降低容量立即影响新操作。过期名额立即释放；过期行在后续成功写入时分批删除。
 本地修改只更新本地 authority，下次成功登录才产生新观察；首期没有本地邮箱验证声明。
 
 ## 平台会话接缝

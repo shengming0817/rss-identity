@@ -1484,6 +1484,33 @@ async fn profile_http_requires_policy_csrf_and_exact_receipts() -> anyhow::Resul
         body(result).await?,
         json!({"operationId":operation,"revision":1})
     );
+    let stale = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, 1, 0));
+    for (id, status) in [
+        (uuid::Uuid::new_v4(), StatusCode::BAD_REQUEST),
+        (stale, StatusCode::GONE),
+    ] {
+        let mut changed = input.clone();
+        changed["operationId"] = json!(id);
+        for (method, uri, data) in [
+            ("GET", format!("{path}/operations/{id}"), json!(null)),
+            ("PUT", path.clone(), changed),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(crate::request_support::scoped(request(
+                    method,
+                    &uri,
+                    Some(&cookie),
+                    Some(&csrf),
+                    data,
+                )))
+                .await?;
+            assert_eq!(response.status(), status);
+            if status == StatusCode::GONE {
+                assert_eq!(body(response).await?["code"], "profile_operation_expired");
+            }
+        }
+    }
     let saved = app
         .clone()
         .oneshot(crate::request_support::scoped(request(
